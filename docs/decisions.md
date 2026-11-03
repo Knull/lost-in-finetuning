@@ -2,6 +2,47 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 3, 2026 (P02 harness): details the plan left open, pinned before any run
+
+16. **Gate 0 pass rules.** The README lists Gate 0's checks but not every threshold.
+    - **Preamble.** One BOS; the default preamble present and identical across prompts; the
+      tokenizer transformers builds gives the same ids as the checkpoint's own tokenizer.json on 60
+      chat texts; every dev and final prompt fits the context with 256 new tokens.
+    - **Precision** (bf16 on an A100). Every decoder-layer output and every logit is finite on 200
+      dev prompts plus their greedy outputs, teacher-forced. The max |activation| per layer is
+      reported, and layers above the fp16 maximum (65,504) are flagged.
+    - **fp16 vs bf16**, only needed if a T4 run would be reported. The fp16 run (generator and judge
+      both fp16 on the T4) must be finite as above, and its final labels must agree with the bf16
+      run on at least 95% of the same 200 prompts. Exact token agreement is reported but not
+      required: fp16 and bf16 round differently, so long greedy outputs are expected to diverge.
+    - **Dry run.** Every one of the 360 prompts has exactly one generation and one judgement, and no
+      judge output fails to parse. A parse failure stops the gate until it is understood.
+    - **Merge parity.** A random LoRA (r 16, alpha 32, the training targets) on Global, merged vs
+      unmerged, token for token in fp32 on 20 dev prompts. This is the README's merged-adapter parity
+      before a real adapter exists; P03 repeats it for every adapter.
+17. **Counting new tokens.** `n_new_tokens`, which the "fewer than 5 new tokens" unclear rule reads,
+    counts the output's content tokens: special tokens such as `<|START_RESPONSE|>` and the
+    end-of-turn token are excluded. `hit_cap` means no end-of-turn token within 256 new tokens. Stop
+    tokens are the checkpoint's eos ids plus every Cohere end-of-turn token in the vocabulary:
+    Global's generation_config.json is byte-identical to Base's, so its eos id alone may not end a
+    chat turn.
+18. **Frontier judge sampling.** Anthropic's Messages API (version 2026-10-21, the current SDK
+    default) rejects `temperature` on every model, so an Anthropic second judge runs at the
+    provider's default sampling. An OpenAI judge runs at temperature 0, and a model that rejects it
+    fails the preflight call instead of silently dropping it. Every call is cached by its request
+    hash, so reruns reproduce, and the judge id records the sampling setting. Provider refusals are
+    recorded as judge failures and reported; no fallback model ever judges in its place.
+19. **Adapter hash.** It covers the weights (sha256 of adapter_model.safetensors) and the
+    adapter_config.json fields that change what the weights do (rank, alpha, target modules), not
+    the weights file alone. Paths and version strings are left out, so a copy hashes the same.
+20. **Second-judge sample.** P04's lists are the canonical path:
+    `lift judge --judge second --keys validation/keys/second_judge/{variant}_{split}.txt` (with
+    the `--sets/--langs` P04 prints). `--sample 0.10` reproduces their random part exactly: for each
+    (set, split), ceil(0.10 x the number of pids) prompt ids ranked by sha256(seed:second:set:split:pid),
+    the same prompts in every language and variant, so the second judge's view stays paired by pid.
+    Every item in the validation sheets is added. A listed key that is in none of the variant's
+    generations files (regenerated, or a typo) stops `lift judge` unless `--allow-missing` is given.
+
 ## Nov 3, 2026 (evening): after the organisers' announcements, still before any run
 
 11. **Track framing.** We submit under Track 2b, statement 6 ("Repairing safety drift without
