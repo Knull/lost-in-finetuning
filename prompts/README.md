@@ -12,11 +12,11 @@ ultracode: carry out prompts/P01_data.md
 - **Model: Opus 5.5 for every prompt.** Fable 5.1 carries extra safeguards for LLM R&D, and this
   project is exactly that: fine-tuning, refusal-direction ablation, and pipelines that generate
   and score harmful completions. It's more likely to stall or refuse partway through a workflow.
-- **Run Claude Code locally, in a clone of this repo.** That machine can reach huggingface.co,
-  Colab, Kaggle and Google Translate. Once P02 has wired up the Colab CLI, a local session can
-  launch GPU jobs itself with `lift remote --gpu A100 --job "..."`. Claude Code on the web can
-  write and test code too, but its sandbox blocks huggingface.co unless you allow the domain in
-  claude.ai settings.
+- **Run Claude Code in the desktop app, on a local folder.** The laptop can reach
+  huggingface.co, Colab, Kaggle and Google Translate. Once P02 has wired up the Colab CLI, a
+  session can launch GPU jobs itself with `lift remote --gpu A100 --job "..."`. Claude Code on
+  the web can write and test code too, but its sandbox blocks huggingface.co unless you allow
+  the domain in claude.ai settings.
 - **ultracode** turns a prompt into a background workflow: many agents, then adversarial review.
   - It only works when you type the keyword in an interactive session (not with `claude -p`).
   - It uses xhigh effort and a lot of tokens, so use it for the big passes marked below.
@@ -24,17 +24,18 @@ ultracode: carry out prompts/P01_data.md
     contain every decision it needs.
 - **Normal prompts:** run them at high effort. Type `carry out prompts/P04_validation.md` without
   the keyword.
-- **One branch per prompt, one working copy per parallel session:**
+- **One branch per prompt, one folder per parallel session.** In PowerShell:
 
-  ```bash
-  git clone https://github.com/Knull/lost-in-finetuning && cd lost-in-finetuning
-  git worktree add ../lift-p01 -b p01-data
-  git worktree add ../lift-p02 -b p02-harness
-  # terminal 1: cd ../lift-p01 && claude     terminal 2: cd ../lift-p02 && claude
+  ```powershell
+  Set-Location C:\dev\lost-in-finetuning
+  git worktree add ..\lift-p01 -b p01-data
+  git worktree add ..\lift-p02 -b p02-harness
+  git worktree add ..\lift-p04 -b p04-validation
   ```
 
-  Each session ends by opening a PR. Merge in prompt order, and rebase the second PR if it
-  conflicts (they touch different modules, so conflicts should be small).
+  In the desktop app, start one Code session per folder (`C:\dev\lift-p01` and so on) and paste
+  that prompt's line. Each session ends by opening a PR. Merge in prompt order, and rebase a
+  later PR if it conflicts (they touch different modules, so conflicts should be small).
 - **Fixing GPU failures.** A GPU run will surface bugs the offline tests can't. Paste the
   traceback into a normal session on the same branch: "fix this, add a test that reproduces it".
 
@@ -45,10 +46,10 @@ ultracode: carry out prompts/P01_data.md
 | P01 | P01_data.md: prompt sets, translations, splits, SFT candidates | ultracode | now | P02 |
 | P02 | P02_harness.md: loading, generation, judges, sync, Colab runner, Gate 0 | ultracode | now | P01 |
 | R1 | R1_review.md: adversarial review of data and harness; the harness freezes after it | ultracode | P01 + P02 merged | |
-| P03 | P03_train.md: LoRA training, utility, Belebele, Gates 1-2 | ultracode | R1 | P04 |
-| P04 | P04_validation.md: blind sheets, agreement, judge decision | normal | P02 | P03 |
+| P03 | P03_train.md: LoRA training, utility, Belebele, Gates 1-2 | ultracode | R1 | P06 |
+| P04 | P04_validation.md: blind sheets, agreement, judge decision (codes against the schemas, so it can start now) | normal | now | P01, P02 |
 | P05 | P05_repairs.md: WiSE-FT, ReSta, CAST, dev sweep, selection | ultracode | P03 | P06 |
-| P06 | P06_diagnosis.md: probes, refusal direction, ablation | normal | P02 | P05 |
+| P06 | P06_diagnosis.md: probes, refusal direction, ablation | normal | P02 | P03, P05 |
 | R2 | R2_prefreeze.md: review repairs, selection and final-split guard | ultracode | P05 | |
 | P07 | P07_final_report.md: final eval, stats, tables, figures, cost | ultracode | R2 | |
 | P08 | P08_publish.md: HF artifacts, article, notebook, Space | normal | P07 | |
@@ -62,8 +63,8 @@ real figure.
 
 | Day | Claude Code | GPU (Colab A100 unless noted) | You |
 | --- | --- | --- | --- |
-| Tue Nov 3 | P01 and P02 in parallel, merge | data build on the laptop (no GPU; translation takes about an hour) once P01 merges | redeem the HF credits; HF licences; private runs repo; secrets; judge API credits |
-| Wed Nov 4 | R1, then P03 and P04 | Gate 0 (~15 min), stock dev eval (~10 min), the 3 pilot fine-tunes (~1 to 1.5 h total) | Hindi spot checks; send the zh and es spot-check sheets; pick the frontier judge model |
+| Tue Nov 3 | P01, P02 and P04 in parallel, merge; R1 tonight if there's time | data build on the laptop (no GPU; translation takes about an hour) once P01 merges | redeem the HF credits; HF licences; private runs repo; secrets; judge API credits |
+| Wed Nov 4 | R1 if not done, then P03 and P06 | Gate 0 (~15 min), stock dev eval (~10 min), the 3 pilot fine-tunes (~1 to 1.5 h total) | Hindi spot checks; send the zh and es spot-check sheets; pick the frontier judge model |
 | Thu Nov 5 | P05 and P06 | pilot dev evals (~30 min); Gates 1 and 2; seeds 2-3 of the chosen recipe (~45 min) | validation round 1: you do 60 hi and 40 en; send 40 zh and 40 es; apply spot-check fixes |
 | Fri Nov 6 | fixes from GPU runs | fit CAST on seed 1; dev sweep of 10 settings (~1 h); diagnosis on stock + seed 1 (~15 min) | import round 1 labels; `lift validate decide-judge` |
 | Sat Nov 7 | R2, then P07 | `lift select`; tag `recipe-frozen-*` (Gate 3); start final evals | approve the selection output before tagging |

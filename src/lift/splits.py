@@ -56,7 +56,8 @@ def save_split(name: str, mapping: Mapping[str, str], *, seed: int, sizes: Mappi
         "n": len(mapping),
         "assignments": dict(sorted(mapping.items())),
     }
-    path.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8",
+                    newline="\n")
 
 
 def load_split(name: str) -> dict[str, str]:

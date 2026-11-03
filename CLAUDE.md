@@ -108,9 +108,14 @@ six languages, so pairing, splitting and clustering all go by pid.
 - **One precision for every reported number.** Every reported generation uses bf16. A T4 fp16
   run can count only if Gate 0's fp16-vs-bf16 check passes. Paired comparisons never mix
   precisions; the cache key includes the dtype and the stats refuse mixed pairs.
-- **Claude Code sessions** usually have no GPU and may not reach huggingface.co. That's
-  expected. Write the code and offline tests, then either launch the job yourself with the Colab
-  CLI (when it is installed and logged in) or end with the exact commands for the human.
+- **Claude Code sessions** run in the Claude desktop app on a Windows laptop (PowerShell). They
+  have no usable GPU for this project.
+  - Write cross-platform Python: `pathlib` everywhere, and files written with `newline="\n"`
+    (`lift.io` already does this).
+  - Only the Linux GPU runtimes get shell scripts, never local steps.
+  - Write the code and offline tests, then either launch the job yourself with the Colab CLI
+    (when it is installed and logged in) or end with the exact commands for the human, in
+    PowerShell syntax for local steps.
 - **Sessions are wiped.** Colab and Kaggle sessions lose their disk when they end (Kaggle after
   12 h). Every job pulls from and pushes to the runs repo (`lift sync`), and resumes by cache
   key.
