@@ -7,7 +7,7 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 Everything here was decided from the source data, dataset cards, and GlotLID run on text of
 known language. No model output existed yet.
 
-16. **GlotLID labels.** The model is pinned to revision `baa20d1`.
+17. **GlotLID labels.** The model is pinned to revision `baa20d1`.
     - Its 2,102 labels have no macrolanguage codes: `zho_Hans` and `zho_Hani` do not exist.
     - It also spreads genuine text across neighbouring varieties:
       - 14% of Belebele's Modern Standard Arabic passages are not labelled `arb_Arab`.
@@ -25,9 +25,9 @@ known language. No model output existed yet.
     - Not changed here, flagged for R1: the "garbled" rule in `lift.judge.labels` uses the top
       label's probability alone. Clean Hindi, Arabic or Chinese split across varieties can
       therefore read as garbled.
-17. **Every source is pinned to a commit** in `configs/project.yaml`: PolyRefuse `985169d`, the
+18. **Every source is pinned to a commit** in `configs/project.yaml`: PolyRefuse `985169d`, the
     HF datasets, GlotLID and NLLB-200. A rebuild then reproduces the prompt files and splits.
-18. **PolyRefuse facts that change the build.**
+19. **PolyRefuse facts that change the build.**
     - zh harmless train and val do not line up with any English file. They are a different,
       unstored 200-row draw: their length correlation with the English rows is about 0.0, against
       0.75 to 0.97 for every aligned file.
@@ -40,12 +40,12 @@ known language. No model output existed yet.
       - Sizes stay at 172 dev and 400 final.
     - A train or val prompt identical to a test prompt is excluded from train or val
       (`prh-train-0226` is `prh-test-0008`).
-19. **Belebele's `hin_Deva` file is not row-parallel.** Its rows 460 to 899 are permuted. Pids
+20. **Belebele's `hin_Deva` file is not row-parallel.** Its rows 460 to 899 are permuted. Pids
     therefore follow the `eng_Latn` row index, and every language is aligned to it by
     `(link, question_number)`.
-20. **Aya Red-teaming.** Hindi is a split, not a config. Two exact-duplicate prompts are dropped
+21. **Aya Red-teaming.** Hindi is a split, not a config. Two exact-duplicate prompts are dropped
     (rows 32 and 465), leaving 913 prompts.
-21. **IndicAlign subset: `Dolly_T`.**
+22. **IndicAlign subset: `Dolly_T`.**
     - What it is: Databricks Dolly, written by people and translated with IndicTrans2.
       Single-turn, general instructions.
     - Licence: the card says CC-BY-4.0, but the upstream data is CC-BY-SA-3.0. Any Hindi Dolly rows
@@ -61,13 +61,13 @@ known language. No model output existed yet.
       - WikiHow (CC-BY-NC-SA, and very long);
       - IndoWordNet (lexical templates, not general instructions);
       - the safety subsets HHRLHF_T and Toxic_Matrix.
-22. **Aya has 1,153 Hindi rows, all in train.**
+23. **Aya has 1,153 Hindi rows, all in train.**
     - After language ID, the 150 held-out rows and CuratorKIT, about 700 remain.
     - The pre-registered equal-size rule applies: both candidates train on the same number of rows,
       well under 3,000.
     - The build records the exact count in `data/sft/report.json`; it is copied here after the
       first build.
-23. **SFT cleaning details.**
+24. **SFT cleaning details.**
     - CuratorKIT's format is `messages` (`sft_messages` exports nothing).
     - Dedup: `minhash` (0.85 on character 3-grams), or `none` for the raw sample.
     - The schema gate keeps its default of 10 to 2,048 tokens.
@@ -79,17 +79,29 @@ known language. No model output existed yet.
       if either:
       - its instruction's character 3-gram Jaccard similarity is at least 0.7, or
       - its answer's is at least 0.85.
-24. **Spot-check scope.** For each of hi, zh and es:
+25. **Spot-check scope.** For each of hi, zh and es:
     - 50 random dev and final items from each machine-translated set, covering our Google
       translations and PolyRefuse's;
     - plus a separate sheet listing every translation the automatic checks rejected, which the
       reader accepts, fixes or rejects.
-25. **fasttext on Windows.**
+26. **fasttext on Windows.**
     - `fasttext` 0.9.3 does not build there, so the data extra installs `fasttext-wheel` 0.9.2
       instead.
     - `lift.lang` calls the low-level predict with the trailing newline that fastText needs.
 
 ## Nov 3, 2026 (evening): after the organisers' announcements, still before any run
+
+16. **Frontier judge: Claude Sonnet 5.5** (`claude-sonnet-5-5`), for both the second safety judge
+    and the utility judge. It is paid from the team's Anthropic organisation credits (about
+    $176).
+    - Budget at list prices: about 26M input tokens for the plan (the 10% safety sample, the
+      validation items, and every utility pair in both orders). That is roughly $25-30 through
+      the Message Batches API with the rubric prompt-cached.
+    - If the decision rule makes the frontier judge primary, it judges every final output,
+      about 90M more input tokens, or roughly $90. That still fits.
+    - Opus 5.5 would not fit that case, so it isn't used. Haiku 5.5 is cheaper, but a weaker
+      judge in Hindi, Arabic and Thai would weaken the comparison against Qwen3Guard.
+    - The run-time spend cap is `LIFT_JUDGE_MAX_USD=150`.
 
 11. **Track framing.** We submit under Track 2b, statement 6 ("Repairing safety drift without
     retraining": weight-space repair that keeps task performance). CAST covers statement 8
