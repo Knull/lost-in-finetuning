@@ -159,8 +159,10 @@ six languages, so pairing, splitting and clustering all go by pid.
     ReStaTrainer or RefusalDirectionTrainer.
   - On Kaggle/Colab, `pip uninstall -y torchao` if SafeTune imports fail.
 - **CuratorKIT 0.1.22.** The no-API path is `Curator(CuratorConfig(dataset=..., dedup="minhash",
-  clean=True, export_formats=["sft_messages"], output_dir=...)).run()`. Keep its manifest.json,
-  rejected.jsonl and lexsi_provenance.json, and don't run its English toxicity gate on Hindi.
+  clean=True, export_formats=["messages"], output_dir=...)).run()`. The format is `messages`
+  (it writes `sft_messages.jsonl`); an unknown format only warns and exports nothing. Keep its
+  manifest.json, rejected.jsonl and lexsi_provenance.json, and don't run its English toxicity
+  gate on Hindi.
 - **AuditKIT 1.1.3.** `auditkit.evaluate(model=<callable list[str]->list[str]>, prompts=...,
   metrics=...)`; pairwise metrics cover the win rate. Never use its `paired_bootstrap`: it
   resamples uncentred differences and returns no intervals. `lift.stats` replaces it.

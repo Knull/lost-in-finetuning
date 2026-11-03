@@ -2,6 +2,93 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 3, 2026 (night): P01 data pipeline, before any experimental run
+
+Everything here was decided from the source data, dataset cards, and GlotLID run on text of
+known language. No model output existed yet.
+
+16. **GlotLID labels.** The model is pinned to revision `baa20d1`.
+    - Its 2,102 labels have no macrolanguage codes: `zho_Hans` and `zho_Hani` do not exist.
+    - It also spreads genuine text across neighbouring varieties:
+      - 14% of Belebele's Modern Standard Arabic passages are not labelled `arb_Arab`.
+      - Long, formal Hindi often comes back as Angika (`anp_Deva`), with `hin_Deva` second. That
+        happens for 116 of Aya's Hindi answers, and would reject 10 to 27% of genuine Hindi SFT
+        rows.
+    - So `accept_labels` now lists the varieties GlotLID has:
+      - zh: the six Chinese varieties GlotLID labels in Han script. This matches the old `zho_*`
+        intent.
+      - ar: the eleven Arabic varieties.
+      - hi: Hindi plus the six Hindi-belt Devanagari labels it confuses with formal Hindi (anp,
+        awa, bho, hne, mag, mai).
+    - `LangID.is_lang` now requires two things: the top label is accepted, and the accepted labels
+      in the top 5 sum to at least 0.5.
+    - Not changed here, flagged for R1: the "garbled" rule in `lift.judge.labels` uses the top
+      label's probability alone. Clean Hindi, Arabic or Chinese split across varieties can
+      therefore read as garbled.
+17. **Every source is pinned to a commit** in `configs/project.yaml`: PolyRefuse `985169d`, the
+    HF datasets, GlotLID and NLLB-200. A rebuild then reproduces the prompt files and splits.
+18. **PolyRefuse facts that change the build.**
+    - zh harmless train and val do not line up with any English file. They are a different,
+      unstored 200-row draw: their length correlation with the English rows is about 0.0, against
+      0.75 to 0.97 for every aligned file.
+      - So zh easy-benign train is translated from English, like hi. That adds 200 Google calls,
+        for 4,271 in all.
+      - Harmless val is not used in any language.
+    - The harmful test repeats 10 English prompts. `assign_splits` gained an optional `groups`
+      argument, and duplicates now share a split.
+      - The plain assignment would have put 7 of the 10 pairs across dev and final.
+      - Sizes stay at 172 dev and 400 final.
+    - A train or val prompt identical to a test prompt is excluded from train or val
+      (`prh-train-0226` is `prh-test-0008`).
+19. **Belebele's `hin_Deva` file is not row-parallel.** Its rows 460 to 899 are permuted. Pids
+    therefore follow the `eng_Latn` row index, and every language is aligned to it by
+    `(link, question_number)`.
+20. **Aya Red-teaming.** Hindi is a split, not a config. Two exact-duplicate prompts are dropped
+    (rows 32 and 465), leaving 913 prompts.
+21. **IndicAlign subset: `Dolly_T`.**
+    - What it is: Databricks Dolly, written by people and translated with IndicTrans2.
+      Single-turn, general instructions.
+    - Licence: the card says CC-BY-4.0, but the upstream data is CC-BY-SA-3.0. Any Hindi Dolly rows
+      we publish carry BY-SA with attribution. Whether adapter weights trained on it are bound by
+      share-alike is legally unsettled; we treat them as not bound.
+    - Rows: 15,011 in total, 10,526 kept. IndicAlign dropped Dolly's context passages, so the
+      closed QA, extraction and summarisation rows are unusable. Which rows had a context is read
+      from the original `databricks-dolly-15k` file, pinned.
+    - Runner-up: `OpenAssistant_T` (Apache-2.0). It is multi-turn, with only 3,426 unique prompts.
+    - Excluded:
+      - the subsets built from Llama-2 output (Indic_ShareLlama, Anudesh, Wiki_Conv, Wiki_Chat),
+        because Llama 2 licence clause 1.b.v forbids using outputs to improve another LLM;
+      - WikiHow (CC-BY-NC-SA, and very long);
+      - IndoWordNet (lexical templates, not general instructions);
+      - the safety subsets HHRLHF_T and Toxic_Matrix.
+22. **Aya has 1,153 Hindi rows, all in train.**
+    - After language ID, the 150 held-out rows and CuratorKIT, about 700 remain.
+    - The pre-registered equal-size rule applies: both candidates train on the same number of rows,
+      well under 3,000.
+    - The build records the exact count in `data/sft/report.json`; it is copied here after the
+      first build.
+23. **SFT cleaning details.**
+    - CuratorKIT's format is `messages` (`sft_messages` exports nothing).
+    - Dedup: `minhash` (0.85 on character 3-grams), or `none` for the raw sample.
+    - The schema gate keeps its default of 10 to 2,048 tokens.
+    - `clean=True`, with `strip_html` and `collapse_whitespace` off: they delete text between `<`
+      and `>` and flatten code.
+    - Answers whose character 10-gram repetition exceeds 0.5 are dropped. That is the project's own
+      "repetitive" rule.
+    - A training row counts as a near-duplicate of a held-out row, and is removed from both pools,
+      if either:
+      - its instruction's character 3-gram Jaccard similarity is at least 0.7, or
+      - its answer's is at least 0.85.
+24. **Spot-check scope.** For each of hi, zh and es:
+    - 50 random dev and final items from each machine-translated set, covering our Google
+      translations and PolyRefuse's;
+    - plus a separate sheet listing every translation the automatic checks rejected, which the
+      reader accepts, fixes or rejects.
+25. **fasttext on Windows.**
+    - `fasttext` 0.9.3 does not build there, so the data extra installs `fasttext-wheel` 0.9.2
+      instead.
+    - `lift.lang` calls the low-level predict with the trailing newline that fastText needs.
+
 ## Nov 3, 2026 (evening): after the organisers' announcements, still before any run
 
 11. **Track framing.** We submit under Track 2b, statement 6 ("Repairing safety drift without

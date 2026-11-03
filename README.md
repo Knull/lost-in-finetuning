@@ -133,6 +133,15 @@ lift info
 - **Code:** MIT (`LICENSE`).
 - **Tiny Aya and anything derived from it** (adapters, repaired models): CC-BY-NC-4.0 plus Cohere
   Labs' acceptable-use policy, so non-commercial only.
-- **Datasets** keep their own licences: PolyRefuse Apache-2.0, OR-Bench CC-BY-4.0, Aya
-  Red-teaming and Aya Dataset Apache-2.0, Belebele CC-BY-SA-4.0. P01 checks each one against its
-  dataset card, and records the IndicAlign subset's licence in `docs/decisions.md`.
+- **Datasets** keep their own licences. Each one below was checked against its card or licence
+  file at the pinned revision (Nov 3):
+  - PolyRefuse: Apache-2.0. Its harmless prompts come from Alpaca.
+  - OR-Bench: CC-BY-4.0.
+  - Aya Red-teaming and Aya Dataset: Apache-2.0.
+  - Belebele: CC-BY-SA-4.0.
+  - IndicAlign `Dolly_T`: the card says CC-BY-4.0, but the data is a translation of
+    databricks-dolly-15k, which is CC-BY-SA-3.0, so the share-alike terms apply. We also use the
+    original Dolly file, only to drop rows whose context passage IndicAlign lost.
+  - Details are in `docs/decisions.md`.
+- **Language tools used to build the data**: GlotLID (Apache-2.0 plus notices, per its card);
+  NLLB-200-distilled-600M (CC-BY-NC-4.0), used only for the ar/th back-translation check.
