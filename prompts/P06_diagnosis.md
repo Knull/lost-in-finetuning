@@ -59,5 +59,5 @@ on dev.
 
 ## Hand back
 
-The Kaggle job for `lift diagnose all` on stock and adapter seed 1 (about 1 GPU-hour), and the
+The GPU job (`lift remote --gpu A100`) for `lift diagnose all` on stock and adapter seed 1, and the
 seeds 2-3 job to run if time allows. Seeds 2-3 come first in the plan's cut order.

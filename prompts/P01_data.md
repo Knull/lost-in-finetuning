@@ -5,8 +5,9 @@ Branch `p01-data` · ultracode · Opus 5.5 · starts now · runs alongside P02
 ## Goal
 
 `lift data build` produces every prompt set, every translation and every frozen split, plus the
-two adapter training candidates and the shared utility held-out set. One Kaggle CPU session with
-Internet on (no GPU quota) or a laptop should be able to rebuild all of `data/` from scratch,
+two adapter training candidates and the shared utility held-out set. A laptop, a Colab CPU
+runtime or a Kaggle CPU session with Internet on (no GPU needed) should be able to rebuild all of
+`data/` from scratch,
 with the same splits every time.
 
 ## Read first
@@ -111,9 +112,9 @@ Mark anything that needs the network `@pytest.mark.net`.
 ## Hand back
 
 End your final message with:
-1. The Kaggle job for a CPU notebook with Internet on, in the runner-cell format from
-   kaggle/README.md. Use `lift sync push` if P02 has merged. Otherwise write to
-   `/kaggle/working/data` and say how to carry it to the GPU notebooks.
+1. The data-build job, as commands to run on the laptop (simplest: it has Internet and no GPU is
+   needed), plus the runner-cell version for a CPU notebook. Use `lift sync push` if P02 has
+   merged. Otherwise say how to carry `data/` to the GPU runtimes.
 2. The expected runtime.
 3. The human steps: send the spot-check sheets to the Hindi, Chinese and Spanish readers, then
    run `lift data apply-spotchecks` on the filled files.

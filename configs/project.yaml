@@ -53,7 +53,7 @@ generation:
   template: default              # Tiny Aya's chat template, default preamble kept
   do_sample: false
   max_new_tokens: 256
-  dtype: fp16                    # fp32 (or an L4) if the Gate 0 fp16 check fails
+  dtype: bf16                    # Colab A100/L4. T4 fp16 counts only if Gate 0's fp16-vs-bf16 check passes
   padding_side: left
 
 unclear:

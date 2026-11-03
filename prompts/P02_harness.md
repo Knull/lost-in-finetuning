@@ -4,8 +4,9 @@ Branch `p02-harness` · ultracode · Opus 5.5 · starts now · runs alongside P0
 
 ## Goal
 
-Turn a variant plus a prompt set into judged, resumable, cache-keyed records on a Kaggle T4 x2,
-and run the Gate 0 checks. After this merges and R1's fixes land, the generation harness is
+Turn a variant plus a prompt set into judged, resumable, cache-keyed records on a Colab A100
+(bf16, launched with the Colab CLI) or a Kaggle T4 x2 (fp16, the backup), and run the Gate 0
+checks. After this merges and R1's fixes land, the generation harness is
 frozen: from then on it only takes bug fixes, and each fix means re-running whatever it touched.
 
 ## Read first
@@ -43,8 +44,10 @@ frozen: from then on it only takes bug fixes, and each fix means re-running what
      explicitly.
    - Stop on the model's end-of-turn tokens.
    - Batch by sorted length. On OOM, halve the batch and retry. Resume by key.
-   - Record per-prompt seconds and `hit_cap`, and write a manifest with prompts/sec and
-     tokens/sec.
+   - Record per-prompt seconds and `hit_cap`, and put the dtype and GPU name in each record's
+     `meta`. Write a manifest with prompts/sec and tokens/sec.
+   - The dtype is part of `gen_cfg`, so it reaches the cache key: bf16 and fp16 outputs never
+     mix.
    - If a prompt plus 256 new tokens exceeds the context, raise. Never truncate silently.
 6. **`judge/qwen3guard.py`.**
    - Load on `cuda:1` and batch the calls.
@@ -75,9 +78,12 @@ frozen: from then on it only takes bug fixes, and each fix means re-running what
 11. **`lift/commands/run.py`.**
     - `lift smoke`, Gate 0, GPU only. It writes `outputs/metrics/gate0.json` plus a markdown
       summary and prints PASS/FAIL per check with the README's decision rule. It runs:
-      - (a) fp16 vs fp32 on 200 dev prompts, mixed across languages and sets: any non-finite
-        hidden state or logit in fp16, the max absolute activation per layer, greedy output
-        agreement, and agreement of the primary judge's labels between the two runs;
+      - (a) precision, on 200 dev prompts mixed across languages and sets: any non-finite
+        hidden state or logit in the configured dtype (bf16), and the max absolute activation
+        per layer. With `--compare-dtype fp16`, run on a T4, it also compares the fp16 outputs
+        and primary-judge labels with the bf16 run of the same 200 prompts from the runs repo.
+        Report greedy output agreement and label agreement; this decides whether T4 runs can
+        be reported;
       - (b) a throughput benchmark at real prompt lengths, batch sizes 8, 16 and 32: prompts/sec,
         tokens/sec and peak memory;
       - (c) an end-to-end dry run of 20 prompts x 6 languages x 3 sets through generate and
@@ -88,10 +94,26 @@ frozen: from then on it only takes bug fixes, and each fix means re-running what
       `--keys` judges exactly the generation keys listed in a file. P04 uses it so the second
       judge covers every validated item.
     - `lift run-dev --variant NAME`: generate, then judge, every dev safety set in all 6
-      languages, with the generator on cuda:0 and the judge on cuda:1 working at the same time,
-      so a T4 x2 session uses both GPUs.
-12. **Kaggle.** Check `kaggle/bootstrap.sh` as far as you can offline, and add
-    `kaggle/runner.ipynb` implementing the two cells in kaggle/README.md.
+      languages.
+      - With two GPUs (Kaggle T4 x2), the generator is on cuda:0 and the judge on cuda:1,
+        working at the same time.
+      - With one GPU (Colab A100), both share cuda:0, so check the memory budget: about 7 GB
+        for the generator and 9 GB for the judge in bf16.
+12. **Colab, the primary runner.**
+    - Install and inspect the Colab CLI (`uv tool install google-colab-cli`, then
+      `colab --help`; read the repo's `COLAB_SKILL.md`).
+    - Write `colab/job.py`. On the runtime it clones this repo with `GITHUB_TOKEN`, installs
+      `.[gpu,data,eval]`, runs the given `lift` lines in order, and always runs `lift sync push`
+      at the end, even after a failure.
+    - Add `lift remote --gpu A100|L4|T4 --job "<lift lines>"`, which launches that job through
+      the CLI and streams or fetches its log.
+    - Find out how the CLI passes environment variables or secrets. Never write a secret into
+      the repo or a log.
+    - Fix colab/README.md to match the real commands.
+    - If the CLI can't do this cleanly, say so and fall back to the notebook path in
+      colab/README.md.
+13. **Kaggle, the backup runner.** Check `kaggle/bootstrap.sh` as far as you can offline, and
+    add `kaggle/runner.ipynb` implementing the two cells in kaggle/README.md.
 
 ## Tests (offline, CPU, fp32, on `tiny_cohere2`)
 
@@ -116,10 +138,11 @@ frozen: from then on it only takes bug fixes, and each fix means re-running what
 ## Hand back
 
 End your final message with:
-1. The Gate 0 Kaggle job and the stock dev-eval job (T4 x2, Internet on) as runner-cell command
-   lists. Data must already be built by P01 and synced.
-2. How to read gate0.json, and what each failure means (fall back to fp32, or move generation to
-   an L4).
+1. The Gate 0 job and the stock dev-eval job, as `lift remote` commands for a Colab A100, with
+   the Kaggle runner-cell version as a fallback. Data must already be built by P01 and synced.
+   If the Colab CLI is installed and logged in on this machine, offer to launch Gate 0 yourself.
+2. How to read gate0.json, and what each failure means. If fp16 fails, T4 runs are never
+   reported and everything runs in bf16 on Colab.
 3. Anything in the spec that turned out wrong.
 
 ## Don't
