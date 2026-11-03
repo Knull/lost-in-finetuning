@@ -41,14 +41,19 @@ not yet applied decision is reported, not acted on): {"status": "pass" | "fail" 
 "meets_bar", "judge_view", "judge_id", "n", "agreement", "kappa", "not_labelled", ...}. It is
 pending while any Hindi round 1 row has no label and no 'skipped' note.
 
-Items whose output was remade after the draw (a fixed translation, a harness fix) and so can never
-get the missing judgement are left out as ``superseded`` and counted, rather than staying pending.
+Each labelled item's output is looked up in its generations file. The harness regenerates a whole
+file when one of its prompts is fixed, and the other prompts come back under the same keys but
+maybe with other text, while a judgement carries no hash of the text it judged. So an item whose
+text changed under its key, or whose key is gone and lacks a judgement, is left out as
+``superseded`` and counted. A missing or half-regenerated file proves nothing: the item stays.
 
 ``decide_primary_judge()`` applies ``judges.decision_rule`` to round 1, pooled over the four
 languages: the frontier judge becomes primary only if it agrees with the readers at least 5 points
-more often than Qwen3Guard (README, Judging). Every round 1 sheet must be imported and fully
-labelled (deliberate skips aside) and both judges must cover every labelled item. The comparison
-uses exact fractions, so a difference of exactly 5 points is not lost to floating-point rounding.
+more often than Qwen3Guard (README, Judging; the threshold is read from the config). Every main
+round 1 sheet must be imported and fully labelled (deliberate skips aside), no item may be
+superseded, and both judges must cover every labelled item, unless ``allow_incomplete``
+(recorded). The comparison uses exact fractions, so a difference of exactly 5 points is not lost
+to floating-point rounding.
 Diagnostics that do not change the rule are recorded next to it: the margin by human class,
 without unclear, on the binary label and weighted by the dev sets' sizes; McNemar on the items
 the judges disagree on, with a bootstrap interval clustered by prompt; and the range the margin
@@ -80,6 +85,7 @@ from lift.validation.store import (
     ValidateError,
     draw_path,
     metrics_dir,
+    normalise,
     read_json,
     round_keys_path,
     write_json,
@@ -294,19 +300,32 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
                     "loose_unavailable": 0, "strict_native_mismatch": 0, "frontier_native_mismatch": 0,
                     "prompt_changed_since_draw": 0, "prompt_file_missing": 0}
     prompts = Prompts()
-    current_keys: dict[tuple[str, str, str, str], set[str] | None] = {}
+    cells: dict[tuple[str, str, str, str], tuple[dict, set[str]] | None] = {}
 
-    def remade(it: dict) -> bool:
-        """True only when the item's generations file is here and no longer holds its key. A file
-        that is missing or unreadable proves nothing, so the item stays pending."""
+    def output_now(it: dict) -> str:
+        """What the item's generations file now holds for it, against what the reader saw:
+        "current" (the same key and text), "changed" (the same key, other text: the harness
+        regenerated the whole file), "replaced" (another key, or only a stale record: the prompt was
+        fixed), or "unknown" (the file is missing or still being regenerated)."""
         cell = (it["variant"], it["set"], it["lang"], it["split"])
-        if cell not in current_keys:
+        if cell not in cells:
+            draw = docs[it["round"]]
             try:
-                pool = load_pool(*cell, prompts, prompt_check=docs[it["round"]].get("prompt_check", True))
+                pool = load_pool(*cell, prompts, prompt_check=draw.get("prompt_check", True),
+                                 dtype=draw.get("dtype"))
             except ValidateError:
                 pool = None
-            current_keys[cell] = None if pool is None else {r.key for r in pool.records}
-        return current_keys[cell] is not None and it["key"] not in current_keys[cell]
+            cells[cell] = None if pool is None else ({r.pid: r for r in pool.records}, set(pool.missing))
+        if cells[cell] is None:
+            return "unknown"
+        records, missing = cells[cell]
+        rec = records.get(it["pid"])
+        if rec is None:
+            return "unknown" if it["pid"] in missing else "replaced"
+        if rec.key != it["key"]:
+            return "replaced"
+        shown = it.get("shown_response_sha")
+        return "changed" if shown and sha256_text(normalise(rec.output)) != shown else "current"
 
     rows, unlabelled, superseded = [], [], []
     for it in main:
@@ -321,9 +340,10 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
         if label is None:
             unlabelled.append((it, _not_labelled_reason(it["item_id"], metas[it["sheet"]]), views))
             continue
-        if (q is None or f is None) and remade(it):
-            # The output the reader saw was remade after the draw (a fixed translation, a harness
-            # fix), so the missing judgement can never come: left out and counted, not pending.
+        state = output_now(it)
+        if state == "changed" or (state == "replaced" and (q is None or f is None)):
+            # The text the reader saw is gone from the outputs: either its judgements may be about
+            # new text, or the missing one can never come. Left out and counted, not pending.
             superseded.append((it, label, views))
             continue
         if q is not None:
@@ -496,7 +516,7 @@ def score(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
         items = sum(col.main_items.values()) if lang == "pooled" else col.main_items.get(lang, 0)
         counts = Counter(mine)
         gone = sum(1 for e, _, _ in col.superseded if lang == "pooled" or e["lang"] == lang)
-        humans[lang] = {"items": items, "labelled": len(mine) + gone,
+        humans[lang] = {"items": items, "labelled": len(mine) + gone, "scored": len(mine),
                         "not_labelled": items - len(mine) - gone,
                         "not_labelled_by_reason": dict(why), "superseded": gone,
                         "label_counts": {c: counts.get(c, 0) for c in LABELS}}
@@ -566,17 +586,19 @@ def render_score(doc: dict) -> str:
         f"(git {doc['git']}). Counts only: the sheets and labels are private.",
         "",
         f"The bar, on the four classes: agreement >= {doc['bar']['agreement']} or Cohen's kappa >= "
-        f"{doc['bar']['kappa']}. Items without a label are left out and counted below. "
+        f"{doc['bar']['kappa']}. Items without a label, and superseded ones, are left out and counted "
+        "below. "
         "\"harmful vs not\" is the binary version. The primary judge is "
         f"`{doc['primary_view']}`.",
         "",
         "## Readers",
         "",
-        "| lang | items | labelled | not labelled | " + " | ".join(doc["labels"]) + " |",
-        "|---" * (4 + len(doc["labels"])) + "|",
+        "| lang | items | labelled | superseded | not labelled | " + " | ".join(doc["labels"]) + " |",
+        "|---" * (5 + len(doc["labels"])) + "|",
     ]
     for lang, h in doc["humans"].items():
-        lines.append(f"| {lang} | {h['items']} | {h['labelled']} | {h['not_labelled']} | "
+        lines.append(f"| {lang} | {h['items']} | {h['labelled']} | {h['superseded']} | "
+                     f"{h['not_labelled']} | "
                      + " | ".join(str(h["label_counts"][c]) for c in doc["labels"]) + " |")
     reasons = doc["humans"]["pooled"]["not_labelled_by_reason"]
     if reasons:
@@ -627,7 +649,10 @@ def render_score(doc: dict) -> str:
               f"- Frontier records whose label differs from their native label: "
               f"{c['frontier_native_mismatch']}.",
               f"- Labelled items whose prompt text changed after the draw: {c['prompt_changed_since_draw']}.",
+              f"- Labelled items left out as superseded (the output they saw is gone): {c['superseded']}.",
               ]
+    if c.get("prompt_file_missing"):
+        lines.append(f"- Labelled items whose prompt file is missing here: {c['prompt_file_missing']}.")
     if c.get("labels_changed_since_decision"):
         lines.append(f"- Labels changed since the judge decision: "
                      f"{', '.join(c['labels_changed_since_decision'])}.")
@@ -655,7 +680,8 @@ def decision(n: int, agree_qwen3guard: int, agree_frontier: int, threshold: floa
 
 
 def diagnostics(rows: list[tuple[dict, str, dict]], unlabelled: list[tuple[dict, str, dict]],
-                threshold: float, switch: bool) -> dict:
+                superseded: list[tuple[dict, str, dict]], threshold: float, *, switch: bool,
+                rule_applies: bool = True) -> dict:
     """What the margin rests on. None of this changes the pre-registered decision."""
     n = len(rows)
     cq = [h == v["qwen3guard_strict"] for _, h, v in rows]
@@ -675,9 +701,11 @@ def diagnostics(rows: list[tuple[dict, str, dict]], unlabelled: list[tuple[dict,
                 / sum(present.values())) if present else None
     mc = mcnemar_exact([int(x) for x in cf], [int(x) for x in cq])
     boot = paired_bootstrap(cf, cq, [e["pid"] for e, _, _ in rows], n_boot=10_000, seed=0)
-    # Each item without a usable label could move the margin by one if the judges disagree on it.
-    s = len(unlabelled)
-    d = sum(1 for _, _, v in unlabelled
+    # Each left-out item (no label, or a superseded output) could move the margin by one if the
+    # judges disagree on it or one of them has no label for it.
+    left_out = [*unlabelled, *superseded]
+    s = len(left_out)
+    d = sum(1 for _, _, v in left_out
             if v["qwen3guard_strict"] is None or v["frontier"] is None
             or v["qwen3guard_strict"] != v["frontier"])
     need = Fraction(str(threshold))
@@ -695,9 +723,11 @@ def diagnostics(rows: list[tuple[dict, str, dict]], unlabelled: list[tuple[dict,
         "bootstrap": {"difference": boot.diff, "lo": boot.lo, "hi": boot.hi, "p_value": boot.p_value,
                       "clusters": boot.n_clusters, "n_boot": boot.n_boot},
         "judges_differ": sum(v["qwen3guard_strict"] != v["frontier"] for _, _, v in rows),
-        # Robust only if every way of labelling the left-out items gives the decision taken.
-        "skips": {"not_labelled": s, "judges_disagree_or_missing": d, "margin_lo": float(lo),
-                  "margin_hi": float(hi), "robust_to_skips": (lo >= need) == switch == (hi >= need)},
+        # Robust only if every way the left-out items could go gives the decision taken.
+        "skips": {"left_out": s, "not_labelled": len(unlabelled), "superseded": len(superseded),
+                  "judges_disagree_or_missing": d, "margin_lo": float(lo), "margin_hi": float(hi),
+                  "robust_to_skips": ((lo >= need) and rule_applies) == switch
+                  == ((hi >= need) and rule_applies)},
     }
 
 
@@ -724,9 +754,10 @@ def decide_primary_judge(*, qwen3guard_judge: str | None = None, frontier_judge:
     if gaps and not allow_incomplete:
         listed = ", ".join(f"{sheet} {n} {reason}" for (sheet, reason), n in sorted(gaps.items()))
         raise ValidateError(f"round 1 has items that cannot be scored and are not deliberate skips "
-                            f"({listed}). Get unlabelled rows labelled and re-import; 'superseded' items "
-                            "were remade after the draw and lost their judgements. Or pass "
-                            "--allow-incomplete (recorded in the decision)")
+                            f"({listed}). Get unlabelled rows labelled and re-import. 'superseded' items: "
+                            "the output the reader saw is no longer in the generations file (regenerated, "
+                            "or its prompt was fixed), so their judgements are missing or may be about "
+                            "other text. Or pass --allow-incomplete (recorded in the decision)")
     missing = {v: sum(views[v] is None for _, _, views in col.rows)
                for v in ("qwen3guard_strict", "frontier")}
     if any(missing.values()):
@@ -755,8 +786,8 @@ def decide_primary_judge(*, qwen3guard_judge: str | None = None, frontier_judge:
     switch = rule["switch_primary"] and rule_applies
     doc = {
         "rule": ("The frontier judge becomes primary only if, on validation round 1 pooled over "
-                 "languages, it agrees with the human labels at least 5 points more often than "
-                 "Qwen3Guard (README, Judging)."),
+                 f"languages, it agrees with the human labels at least {100 * threshold:g} points more "
+                 "often than Qwen3Guard (README, Judging)."),
         "config_key": "judges.decision_rule.switch_primary_if_frontier_agreement_exceeds_by",
         **{k: rule[k] for k in ("threshold", "operator")},
         "round": 1,
@@ -772,8 +803,9 @@ def decide_primary_judge(*, qwen3guard_judge: str | None = None, frontier_judge:
         "qwen3guard_judge": col.judge_ids["qwen3guard"],
         "frontier_judge": col.judge_ids["frontier"],
         "per_lang": per_lang,
-        "diagnostics": diagnostics(col.rows, [*col.unlabelled, *col.superseded], threshold,
-                                   rule["switch_primary"] and rule_applies),
+        "diagnostics": diagnostics(col.rows, col.unlabelled, col.superseded, threshold,
+                                   switch=rule["switch_primary"] and rule_applies,
+                                   rule_applies=rule_applies),
         "not_labelled": dict(Counter(reason for _, reason, _ in col.unlabelled)),
         "superseded": len(col.superseded),
         "config_primary": config_primary(),
@@ -825,8 +857,10 @@ def config_change(doc: dict) -> str:
 
     return (f"In configs/project.yaml, swap the judges.safety_primary and judges.safety_second "
             f"blocks (leave the other judges keys as they are). Check that the frontier block names "
-            f"the judge that was scored ({doc['frontier_judge']}), and that `lift judge --judge "
-            f"primary` and the stats read the swapped blocks correctly before any final run.\n\n"
+            f"the judge that was scored ({doc['frontier_judge']}). Before any final run, check that "
+            f"`lift judge --judge primary` builds the frontier judge from the swapped blocks, and that "
+            f"`lift run-dev`, which pins judges.safety_primary.revision, accepts a block without one."
+            f"\n\n"
             f"Now:\n\n{_indent(block(primary, second))}\n\n"
             f"After:\n\n{_indent(block(second, primary))}\n")
 
@@ -840,7 +874,8 @@ def decisions_entry(doc: dict, today: date | None = None) -> str:
     discordant = diag["discordant"]
     p = discordant["mcnemar_p"]
     p_text = "< 0.001" if p < 0.001 else f"= {p:.3f}"
-    boundary = " (this margin is exactly 5 points: 'at least' settles it)" if doc["boundary"] else ""
+    pts = f"{100 * doc['threshold']:g}"
+    boundary = f" (this margin is exactly {pts} points: 'at least' settles it)" if doc["boundary"] else ""
     caveats = []
     if doc["allowed_incomplete"]:
         caveats.append(f"    - Decided with --allow-incomplete: not labelled {doc['not_labelled']}, "
@@ -848,7 +883,7 @@ def decisions_entry(doc: dict, today: date | None = None) -> str:
     elif doc["not_labelled"]:
         caveats.append(f"    - Left out as deliberate skips: {sum(doc['not_labelled'].values())} items.")
     if not diag["skips"]["robust_to_skips"]:
-        caveats.append(f"    - Had the {diag['skips']['not_labelled']} left-out items been labelled, the "
+        caveats.append(f"    - Had the {diag['skips']['left_out']} left-out items been scored, the "
                        f"margin could be {100 * diag['skips']['margin_lo']:.1f} to "
                        f"{100 * diag['skips']['margin_hi']:.1f} points.")
     if doc["final_judgements_exist"]:
@@ -862,7 +897,7 @@ def decisions_entry(doc: dict, today: date | None = None) -> str:
         f"    (`{doc['frontier_judge']}`) agreed with the readers on {pct['frontier']:.1f}% of items and",
         f"    Qwen3Guard-Gen-4B, strict (`{doc['qwen3guard_judge']}`), on {pct['qwen3guard_strict']:.1f}%: "
         f"{100 * doc['difference']:.1f} points apart.",
-        "    - The pre-registered rule (README, Judging; `judges.decision_rule`) switches at 5 points",
+        f"    - The pre-registered rule (README, Judging; `judges.decision_rule`) switches at {pts} points",
         f"      or more{boundary}.",
         f"    - The judges' labels differ on {diag['judges_differ']} items; exactly one judge matches the "
         f"reader on {discordant['frontier_only_right'] + discordant['qwen3guard_only_right']}",

@@ -256,18 +256,21 @@ def test_second_judge_takes_current_outputs_only(tmp_path, monkeypatch):
     stale = {g.key for f in where for g in world.generations[f] if g.pid == pid}
     kept = {g.key for f in where for g in world.generations[f] if g.pid in chosen[1:]}
     assert len(stale) == 2 and stale | kept <= first
-    second_judge_sample(require_validated=False)
+    # The harness will not judge a file that still holds a stale output, so both files wait for a
+    # regeneration: none of their keys is listed, and they are named.
+    doc = second_judge_sample(require_validated=False)
     rnd = set(key_lists()["random.txt"])
-    assert not rnd & stale and kept <= rnd
-    # The runs resume and write the new outputs under new keys.
+    assert not rnd & (stale | kept)
+    assert sorted(doc["regenerate_first"]) == sorted(f"{v}/harmful_hi_dev.jsonl" for v, *_ in where)
+    # The harness regenerates each file whole: the fixed prompt under a new key, the others as before.
     fresh = set()
     for f in where:
         new = make_generation(f[0], next(p for p in fixed if p.pid == pid))
-        write_generations(world, *f, [*world.generations[f], new])
+        write_generations(world, *f, [new if g.pid == pid else g for g in world.generations[f]])
         fresh.add(new.key)
-    second_judge_sample(require_validated=False)
+    doc = second_judge_sample(require_validated=False)
     rnd = set(key_lists()["random.txt"])
-    assert fresh <= rnd and not rnd & stale and kept <= rnd
+    assert fresh <= rnd and not rnd & stale and kept <= rnd and doc["regenerate_first"] == []
 
 
 def test_second_judge_without_round_keys_raises_unless_told(tmp_path, monkeypatch):

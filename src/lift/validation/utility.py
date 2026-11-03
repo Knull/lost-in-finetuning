@@ -44,7 +44,7 @@ from lift.stats.agreement import cohens_kappa, percent_agreement
 from lift.stats.paired import paired_bootstrap, win_rate
 from lift.validation.labels import parse_filled
 from lift.validation.outputs import Prompts, fields_of, load_pool, read_records, variant_info
-from lift.validation.sample import DEFAULT_SEED, blind_id, rank
+from lift.validation.sample import DEFAULT_SEED, archive, blind_id, rank
 from lift.validation.score import confusion
 from lift.validation.store import (
     ValidateError,
@@ -107,7 +107,7 @@ def header_line() -> str:
 
 
 def build_utility(variant: str, *, split: str = "dev", n: int | None = None, seed: int = DEFAULT_SEED,
-                  prompt_check: bool = True) -> tuple[dict, list[list[str]]]:
+                  prompt_check: bool = True, dtype: str | None = None) -> tuple[dict, list[list[str]]]:
     """The keys document and the rows of the utility sheet, without writing anything. ``n`` is
     ``validation.utility_pairs_checked`` unless a test overrides it."""
     n = int(config.get("validation.utility_pairs_checked")) if n is None else n
@@ -118,7 +118,7 @@ def build_utility(variant: str, *, split: str = "dev", n: int | None = None, see
     prompts = Prompts()
     pools = {}
     for name in ("stock", variant):
-        pool = load_pool(name, "utility", "hi", split, prompts, prompt_check=prompt_check)
+        pool = load_pool(name, "utility", "hi", split, prompts, prompt_check=prompt_check, dtype=dtype)
         if pool is None:
             raise ValidateError(f"no utility_hi_{split} generations for {name}")
         if pool.problem():
@@ -145,9 +145,12 @@ def build_utility(variant: str, *, split: str = "dev", n: int | None = None, see
             "shown": {"prompt": sha256_text(normalise(prompt)),
                       "response_a": sha256_text(normalise(a.output)),
                       "response_b": sha256_text(normalise(b.output))},
+            "shown_non_ascii": {"prompt": not prompt.isascii(), "response_a": not a.output.isascii(),
+                                "response_b": not b.output.isascii()},
         })
         rows.append([item_id, prompt, a.output, b.output, "", ""])
     doc = {"candidate": variant, "split": split, "seed": seed, "n": n, "prompt_check": prompt_check,
+           "dtype": dtype or str(config.get("generation.dtype")),
            "candidate_as_a": sum(1 for v in candidate_is.values() if v == "A"), "items": items}
     return doc, rows
 
@@ -162,12 +165,14 @@ def _has_entries(path: Path) -> bool:
 
 
 def make_utility_sheet(variant: str, *, split: str = "dev", n: int | None = None,
-                       seed: int = DEFAULT_SEED, force: bool = False, prompt_check: bool = True) -> Path:
+                       seed: int = DEFAULT_SEED, force: bool = False, prompt_check: bool = True,
+                       dtype: str | None = None) -> Path:
     """Write validation/sheets/validation_utility_hi.csv and validation/keys/utility.json. The same
     rules as the safety sheets: a re-run with the same inputs changes nothing, and a different
     sample needs ``force``, which refuses while preferences are imported or the sheet has entries
     and archives what it replaces."""
-    doc, rows = build_utility(variant, split=split, n=n, seed=seed, prompt_check=prompt_check)
+    doc, rows = build_utility(variant, split=split, n=n, seed=seed, prompt_check=prompt_check,
+                              dtype=dtype)
     keys_path, sheet = utility_keys_path(), utility_sheet_path()
     old = read_json(keys_path) if keys_path.is_file() else None
     if old is not None and _digest(old) == _digest(doc):
@@ -186,11 +191,10 @@ def make_utility_sheet(variant: str, *, split: str = "dev", n: int | None = None
         raise ValidateError(f"{sheet} already has preferences or notes typed in; move it away first")
     check_writable([sheet, keys_path])
     if old is not None:
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         for path, folder in ((keys_path, keys_dir() / "archive"), (sheet, sheets_dir() / "archive")):
             if path.is_file():
-                folder.mkdir(parents=True, exist_ok=True)
-                path.replace(folder / f"{path.stem}-{stamp}{path.suffix}")
+                archive(path, folder, stamp)
     doc["created"] = date.today().isoformat()
     write_sheet(sheet, header_line(), UTILITY_COLUMNS, rows)
     write_json(keys_path, doc)
@@ -209,10 +213,13 @@ def import_preferences(file: Path, *, annotator: str = "hi-a") -> dict:
     doc = load_utility_keys()
     items = {it["item_id"]: it for it in doc["items"]}
     parsed = parse_filled(Path(file), items, value_column="preference",
-                          allowed={"a": "A", "b": "B", "tie": "tie"}, what="the utility sheet",
-                          non_latin=True)
+                          allowed={"a": "A", "b": "B", "tie": "tie"}, what="the utility sheet")
     records = [HumanPreference(item_id=i, annotator=annotator, preference=v, note=note)
                for i, (v, note) in sorted(parsed["values"].items())]
+    previous = sum(1 for _ in read_records(utility_labels_path())) if utility_labels_path().is_file() else 0
+    if previous and not records:
+        raise ValidateError(f"{file} has no preferences, but {utility_labels_path().name} holds {previous}: "
+                            "importing it would wipe them (the blank sheet as sent out?)")
     check_writable([utility_labels_path(), utility_meta_path()])
     write_jsonl(utility_labels_path(), [r.model_dump() for r in records])
     counts = Counter(r.preference for r in records)
@@ -336,14 +343,30 @@ def score_utility(*, verdict_files: list[Path] | None = None, judge_id: str | No
     for name in ("stock", doc["candidate"]):
         try:
             pool = load_pool(name, "utility", "hi", doc["split"], prompts,
-                             prompt_check=doc.get("prompt_check", True))
+                             prompt_check=doc.get("prompt_check", True), dtype=doc.get("dtype"))
         except ValidateError:
             pool = None
-        current[name] = None if pool is None else {r.key for r in pool.records}
+        current[name] = None if pool is None else ({r.pid: r for r in pool.records}, set(pool.missing))
 
     def remade(it: dict) -> bool:
-        return any(current[name] is not None and key not in current[name]
-                   for name, key in (("stock", it["stock_key"]), (doc["candidate"], it["candidate_key"])))
+        """True when either answer the reader saw is gone from its file (another key, or the same key
+        with other text). A missing or half-regenerated file proves nothing."""
+        shown = it.get("shown", {})
+        cand_col, stock_col = (("response_a", "response_b") if it["candidate_is"] == "A"
+                               else ("response_b", "response_a"))
+        for name, key, digest in ((doc["candidate"], it["candidate_key"], shown.get(cand_col)),
+                                  ("stock", it["stock_key"], shown.get(stock_col))):
+            if current[name] is None:
+                continue
+            records, missing = current[name]
+            rec = records.get(it["pid"])
+            if rec is None:
+                if it["pid"] not in missing:
+                    return True
+                continue
+            if rec.key != key or (digest and sha256_text(normalise(rec.output)) != digest):
+                return True
+        return False
 
     superseded = [it["item_id"] for it, _ in labelled if remade(it)]
     labelled = [(it, p) for it, p in labelled if not remade(it)]

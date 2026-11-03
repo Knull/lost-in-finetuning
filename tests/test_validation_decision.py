@@ -431,7 +431,8 @@ def test_an_item_remade_after_the_draw_is_counted_not_dropped(world):
         scoring.decide_primary_judge()
     doc = scoring.decide_primary_judge(allow_incomplete=True)
     assert (doc["n"], doc["superseded"], doc["allowed_incomplete"]) == (N - 1, 1, True)
-    assert doc["diagnostics"]["skips"]["not_labelled"] == 1        # left out, and in the bounds
+    skips = doc["diagnostics"]["skips"]
+    assert (skips["superseded"], skips["not_labelled"], skips["left_out"]) == (1, 0, 1)   # in the bounds
 
 
 def test_refuses_a_round_with_no_labels(world):
@@ -542,8 +543,9 @@ def test_diagnostics_explain_the_margin(world):
     assert boot["difference"] == pytest.approx(doc["difference"])
     assert boot["lo"] <= boot["difference"] <= boot["hi"]
     assert boot["clusters"] == len({it["pid"] for it in round_items()})    # one cluster per prompt
-    assert d["skips"] == {"not_labelled": 0, "judges_disagree_or_missing": 0, "margin_lo": 0.05,
-                          "margin_hi": 0.05, "robust_to_skips": True}
+    assert d["skips"] == {"left_out": 0, "not_labelled": 0, "superseded": 0,
+                          "judges_disagree_or_missing": 0, "margin_lo": 0.05, "margin_hi": 0.05,
+                          "robust_to_skips": True}
 
 
 # The decision file --------------------------------------------------------------------------------
