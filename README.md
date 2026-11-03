@@ -135,7 +135,8 @@ lift info
   Labs' acceptable-use policy, so non-commercial only.
 - **Datasets** keep their own licences. Each one below was checked against its card or licence
   file at the pinned revision (Nov 3):
-  - PolyRefuse: Apache-2.0. Its harmless prompts come from Alpaca.
+  - PolyRefuse: Apache-2.0. Its harmless prompts (our easy_benign set) come from Stanford
+    Alpaca, whose data is CC-BY-NC-4.0, so easy_benign and its translations are non-commercial.
   - OR-Bench: CC-BY-4.0.
   - Aya Red-teaming and Aya Dataset: Apache-2.0.
   - Belebele: CC-BY-SA-4.0.
@@ -144,4 +145,5 @@ lift info
     original Dolly file, only to drop rows whose context passage IndicAlign lost.
   - Details are in `docs/decisions.md`.
 - **Language tools used to build the data**: GlotLID (Apache-2.0 plus notices, per its card);
-  NLLB-200-distilled-600M (CC-BY-NC-4.0), used only for the ar/th back-translation check.
+  NLLB-200-distilled-600M (CC-BY-NC-4.0), used for the ar/th back-translation check and, only
+  when asked for (`--fallback-engine nllb`), for OR-Bench items Google fails.
