@@ -1,4 +1,4 @@
-"""Blind human validation sheets and their scoring. Implemented in P06.
+"""Blind human validation sheets and their scoring. Implemented in P04.
 
 Sampling: stratified over model group (stock / adapter / repaired) x set (harmful, easy benign,
 hard benign) within each language; 120 Hindi in two rounds of 60, 60 each in zh, es and en.
@@ -20,12 +20,12 @@ from pathlib import Path
 
 
 def make_sheets(round_no: int, *, seed: int = 20261028) -> list[Path]:
-    raise NotImplementedError("P06")
+    raise NotImplementedError("P04")
 
 
 def score(round_no: int | None = None) -> dict:
-    raise NotImplementedError("P06")
+    raise NotImplementedError("P04")
 
 
 def decide_primary_judge() -> dict:
-    raise NotImplementedError("P06")
+    raise NotImplementedError("P04")

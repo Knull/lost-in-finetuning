@@ -1,4 +1,4 @@
-# Hugging Face deliverables (P07)
+# Hugging Face deliverables (P08)
 
 | Artifact | Visibility | Contents |
 | --- | --- | --- |

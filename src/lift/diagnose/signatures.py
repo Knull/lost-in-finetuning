@@ -1,5 +1,5 @@
 """Exploratory diagnostic signatures, on stock and each adapter seed, per eval language.
-Implemented in P05. Never delays CAST; write-up says "consistent with", never "caused by".
+Implemented in P06. Never delays CAST; write-up says "consistent with", never "caused by".
 
 1. Harm probe at the last instruction token, layers 12 and 24: logistic regression, harmful vs
    hard benign. Frozen (trained on stock activations, applied to the adapter's) and refit
@@ -26,12 +26,12 @@ from typing import Any
 
 
 def harm_probes(variant: str, lang: str) -> dict[str, Any]:
-    raise NotImplementedError("P05")
+    raise NotImplementedError("P06")
 
 
 def refusal_direction(variant: str, *, layer: int | None = None, preamble: bool = True) -> dict[str, Any]:
-    raise NotImplementedError("P05")
+    raise NotImplementedError("P06")
 
 
 def ablation_check(variant: str, langs: tuple[str, ...] = ("hi", "en"), n: int = 100) -> dict[str, Any]:
-    raise NotImplementedError("P05")
+    raise NotImplementedError("P06")

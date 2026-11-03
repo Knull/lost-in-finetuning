@@ -1,4 +1,4 @@
-"""Build any variant from its VariantSpec at load time. P02 does stock and adapter; P04 adds the
+"""Build any variant from its VariantSpec at load time. P02 does stock and adapter; P05 adds the
 repairs. Every variant goes through this one function so every number comes from one code path.
 
     stock        Global
@@ -32,7 +32,7 @@ class LoadedVariant:
 
 
 def build_variant(spec: VariantSpec, *, device: str = "cuda:0", dtype: str = "fp16") -> LoadedVariant:
-    raise NotImplementedError("P02 (stock, adapter), P04 (repairs)")
+    raise NotImplementedError("P02 (stock, adapter), P05 (repairs)")
 
 
 def load_registry() -> dict[str, VariantSpec]:

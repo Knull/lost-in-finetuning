@@ -1,4 +1,4 @@
-"""ReSta-A: add alpha * (Global - Base), the full post-training delta. Implemented in P04.
+"""ReSta-A: add alpha * (Global - Base), the full post-training delta. Implemented in P05.
 
 SafeTune 0.1.12: ``apply_resta(finetuned, *, base, aligned, alpha, dare=False, device="cpu")``
 computes ``finetuned + alpha * (aligned - base)`` one tensor at a time and mutates ``finetuned``.
@@ -15,4 +15,4 @@ from typing import Any
 
 
 def make(adapter_model: Any, base_cpu: Any, stock_cpu: Any, alpha: float) -> Any:
-    raise NotImplementedError("P04")
+    raise NotImplementedError("P05")

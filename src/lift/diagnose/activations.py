@@ -1,4 +1,4 @@
-"""Residual-stream activations at fixed token positions. Implemented in P05.
+"""Residual-stream activations at fixed token positions. Implemented in P06.
 
 Positions (on the chat-formatted prompt, preamble on unless stated):
 - ``last_instruction``: the last token of the user's text, before the end-of-turn token.
@@ -21,4 +21,4 @@ def collect(model: Any, tokenizer: Any, prompts: Sequence[str], layers: Sequence
             position: str = "last_instruction", preamble: bool = True,
             batch_size: int = 8) -> dict[int, Any]:
     """{layer: tensor (n_prompts, d_model)} in fp32 on CPU."""
-    raise NotImplementedError("P05")
+    raise NotImplementedError("P06")

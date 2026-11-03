@@ -1,4 +1,4 @@
-"""Adapter attenuation (WiSE-FT), the baseline every repair must beat. Implemented in P04.
+"""Adapter attenuation (WiSE-FT), the baseline every repair must beat. Implemented in P05.
 
 Our parameterisation: model = Global + lambda * (adapter - Global), lambda in {0.25, 0.5, 0.75}.
 SafeTune 0.1.12 ``safetune.interventions.recover.wise_ft.apply_wise_ft(model, aligned, alpha)``
@@ -16,4 +16,4 @@ from typing import Any
 
 
 def make(adapter_model: Any, stock_model: Any, lam: float) -> Any:
-    raise NotImplementedError("P04")
+    raise NotImplementedError("P05")

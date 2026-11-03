@@ -1,4 +1,4 @@
-"""Results tables, figures and the cost section. Implemented in P06.
+"""Results tables, figures and the cost section. Implemented in P07.
 
 Tables (markdown + CSV under outputs/metrics/):
 - Per variant x language x set: harmful rate with the unclear upper bound, refusal rate,
@@ -21,4 +21,4 @@ from __future__ import annotations
 
 
 def build_all() -> None:
-    raise NotImplementedError("P06")
+    raise NotImplementedError("P07")

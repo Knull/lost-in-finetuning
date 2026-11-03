@@ -58,18 +58,18 @@ src/lift/       config io paths schemas cachekey splits selection manifest cli  
   data/         polyrefuse translate sources sft build                            <- P01
   models/       load variants generate loglik                                     <- P02, P03
   judge/        labels (implemented) qwen3guard frontier pipeline                 <- P02
-  train/        lora merge                                                        <- P03
-  repair/       wiseft resta cast                                                 <- P04
-  diagnose/     activations signatures                                            <- P05
+  train/        lora (P03), merge (P02)
+  repair/       wiseft resta cast                                                 <- P05
+  diagnose/     activations signatures                                            <- P06
   stats/        paired agreement (implemented)
-  validation/   sample (blind sheets, agreement, judge decision)                  <- P06
-  report/       tables figures cost                                               <- P06
+  validation/   sample (blind sheets, agreement, judge decision)                  <- P04
+  report/       tables figures cost                                               <- P07
   audit.py      AuditKIT record                                                   <- P02, P03
   sync.py       outputs <-> private HF dataset repo                               <- P02
 kaggle/         bootstrap.sh, runner notebook, how to run on Kaggle
 prompts/        the implementation prompts and the schedule (prompts/README.md)
 validation/     guidelines.md for the human annotators
-hf/             model card, dataset cards, Space, article drafts                  <- P07
+hf/             model card, dataset cards, Space, article drafts                  <- P08
 docs/           decisions.md (dated changes), toolkit-notes.md (verified APIs)
 ```
 
