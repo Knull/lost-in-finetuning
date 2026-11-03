@@ -38,13 +38,19 @@ languages:
   transfer_validated: [zh, es]
   exploratory: [ar, th]
   all: [en, hi, zh, es, ar, th]
-  # GlotLID labels that count as each language. P01 must check these exist in GlotLID's label set.
+  # GlotLID labels that count as each language. Checked against the pinned model's 2,102 labels
+  # on Nov 3 (lift.lang.LangID re-checks at load). GlotLID has no macrolanguage labels (no
+  # zho_Hans or zho_Hani), and it spreads genuine Hindi, Chinese and Arabic across neighbouring
+  # varieties (long formal Hindi often reads as Angika, anp_Deva, with hin_Deva second), so hi,
+  # zh and ar list those varieties (docs/decisions.md, Nov 3, P01).
   accept_labels:
     en: [eng_Latn]
-    hi: [hin_Deva, hin_Latn]     # romanised Hindi counts as Hindi; code-mixing is reported separately
-    zh: [cmn_Hani, zho_Hans, zho_Hani]
+    # romanised Hindi counts as Hindi; code-mixing is reported separately
+    hi: [hin_Deva, hin_Latn, anp_Deva, awa_Deva, bho_Deva, hne_Deva, mag_Deva, mai_Deva]
+    zh: [cmn_Hani, yue_Hani, wuu_Hani, hak_Hani, nan_Hani, lzh_Hani]
     es: [spa_Latn]
-    ar: [arb_Arab]
+    ar: [arb_Arab, ars_Arab, acm_Arab, apc_Arab, ajp_Arab, aeb_Arab, ary_Arab, arz_Arab, arq_Arab,
+         ayp_Arab, shu_Arab]
     th: [tha_Thai]
   belebele: {en: eng_Latn, hi: hin_Deva, zh: zho_Hans, es: spa_Latn, ar: arb_Arab, th: tha_Thai}
   google_translate: {hi: hi, zh: zh-CN, es: es, ar: ar, th: th}
