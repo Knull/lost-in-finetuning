@@ -1,0 +1,66 @@
+"""Prompt records as the harness sees them. Every GPU stage reads prompts through ``load``.
+
+The file format belongs to P01 (``lift.data.build.load_prompts`` reads data/prompts/{set}_{lang}.jsonl);
+this module only checks what it gets back, so a mislabelled or duplicated record fails here instead
+of producing a wrong denominator downstream.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+import numpy as np
+
+from lift.io import sha256_text
+from lift.schemas import LANGS, PromptRecord
+
+SAFETY_SETS: tuple[str, ...] = ("harmful", "easy_benign", "hard_benign")
+
+
+def load(set_name: str, lang: str, split: str | None = None) -> list[PromptRecord]:
+    """PromptRecords of one set and language (optionally one split), sorted by pid."""
+    from lift.data import build
+
+    rows = build.load_prompts(set_name, lang, split)
+    records = [r if isinstance(r, PromptRecord) else PromptRecord.model_validate(r) for r in rows]
+    wrong = [r.pid for r in records
+             if r.set != set_name or r.lang != lang or (split is not None and r.split != split)]
+    if wrong:
+        raise ValueError(f"{set_name}_{lang}: {len(wrong)} records belong elsewhere, e.g. {wrong[:5]}")
+    pids = [r.pid for r in records]
+    if len(set(pids)) != len(pids):
+        dupes = sorted({p for p in pids if pids.count(p) > 1})
+        raise ValueError(f"{set_name}_{lang}: duplicate pids {dupes[:5]}")
+    return sorted(records, key=lambda r: r.pid)
+
+
+def texts_by_pid(set_name: str, lang: str) -> dict[str, str]:
+    """{pid: text} for every split of one set and language (what the judge needs)."""
+    return {r.pid: r.text for r in load(set_name, lang)}
+
+
+def mixed_sample(n: int, *, split: str = "dev", sets: Sequence[str] = SAFETY_SETS,
+                 langs: Sequence[str] = LANGS, seed: int = 0) -> list[PromptRecord]:
+    """``n`` prompts spread as evenly as possible over the set x language cells, seeded.
+
+    Cells are visited in a fixed order; each takes ``n // cells`` prompts and the first
+    ``n % cells`` cells one more. Each cell draws with its own generator, seeded from ``seed`` and
+    the cell's name, so the same call always returns the same prompts and one cell's pool never
+    changes another cell's draw.
+    """
+    cells = [(s, lang) for s in sets for lang in langs]
+    if n < 1 or not cells:
+        raise ValueError("need n >= 1 and at least one set and language")
+    base, extra = divmod(n, len(cells))
+    out: list[PromptRecord] = []
+    for i, (set_name, lang) in enumerate(cells):
+        want = base + (1 if i < extra else 0)
+        if want == 0:
+            continue
+        pool = load(set_name, lang, split)
+        if want > len(pool):
+            raise ValueError(f"{set_name}_{lang}_{split}: asked for {want} prompts, only {len(pool)}")
+        cell_seed = int(sha256_text(f"{seed}:{set_name}:{lang}:{split}")[:16], 16)
+        picks = np.random.default_rng(cell_seed).permutation(len(pool))[:want]
+        out.extend(pool[int(j)] for j in sorted(picks))
+    return out

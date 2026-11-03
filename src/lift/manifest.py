@@ -12,6 +12,7 @@ import subprocess
 import time
 import uuid
 from datetime import UTC, datetime
+from functools import cache
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -19,11 +20,14 @@ from typing import Any
 from lift import config
 from lift.paths import REPO_ROOT, ensure, manifests_dir
 
-_TRACKED = ("torch", "transformers", "peft", "trl", "safetune", "curatorkit", "auditkit",
-            "accelerate", "datasets", "fasttext")
+_TRACKED = ("torch", "transformers", "tokenizers", "peft", "trl", "safetune", "curatorkit", "auditkit",
+            "accelerate", "datasets", "fasttext", "huggingface_hub", "openai", "anthropic")
 
 
+@cache
 def git_sha() -> str:
+    """HEAD (with "-dirty" for uncommitted changes) when the process first asks; a run's code does
+    not change under it, and asking git for every manifest is slow on Windows."""
     try:
         out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True,
                              text=True, check=True)
