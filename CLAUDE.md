@@ -173,13 +173,20 @@ six languages, so pairing, splitting and clustering all go by pid.
   (500 rows) have `instruction` = the ENGLISH source and `instruction_translated` = the target
   text. The en harmful file has only `instruction`. Rows align by index across languages.
 - **Train and val files.** `*_{train,val}_translated_{lang}` have `instruction` = the TRANSLATED
-  text and no English field. Their English sources are in `dataset/splits/`.
+  text and no English field. Their English sources are in `dataset/splits/`, row for row, except
+  zh harmless train and val: they are a different draw that lines up with no English file
+  (`sources.polyrefuse.misaligned`, docs/decisions.md).
 - **Missing sets.** There is no Hindi anywhere and no zh harmless test. The translation job
-  makes both, with Google Translate, the tool PolyRefuse itself used.
+  makes them, and zh harmless train from its English source, with Google Translate, the tool
+  PolyRefuse itself used. Harmless val is unused.
 
 ## Status
 
 - **Implemented and tested.** config, io, paths, schemas, cachekey, splits, selection,
   stats.paired, stats.agreement, judge.labels, manifest, cli and `lift info`.
+- **P01 (data):** lang (GlotLID), data.polyrefuse, data.translate, data.sources, data.sft,
+  data.build, data.text and `lift data build|stats|spotcheck-sheets|apply-spotchecks`.
+  - Read prompts with `lift.data.build.load_prompts(set, lang, split)`.
+  - Each module's docstring holds the verified facts about its source.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.
