@@ -3,17 +3,64 @@ nothing a test writes can land in the repo or be pushed by ``lift sync``.
 
 Model tests use a tiny randomly initialised cohere2 model and an offline tokenizer whose chat
 template mimics Tiny Aya's structure (BOS, a system turn holding a default preamble that is always
-injected, the user turn, then the chatbot turn as the generation prompt). Nothing is downloaded.
-Tests that use these fixtures are marked ``torch``; the fixtures skip when torch, transformers or
-peft are missing.
+injected, the user turn, then the chatbot turn as the generation prompt). Nothing is downloaded:
+huggingface_hub runs in offline mode unless the run selects the ``net`` marker. Tests that use these
+fixtures are marked ``torch``; the fixtures skip when torch, transformers or peft are missing.
+
+Tests never depend on the revisions pinned in configs/project.yaml: every test sees them as
+"main" (``unpinned_revisions``), so pinning the shas Gate 0 prints changes no test's outcome.
 """
 
 from __future__ import annotations
 
+import copy
+import os
+import re
+import sys
+
 import pytest
 from fakes import POISONED_GENERATION_CONFIG, build_tiny_cohere2, build_tiny_tokenizer
 
+from lift import config as lift_config
 from lift.schemas import PromptRecord
+
+PINNED_ENTRIES = ("models.global", "models.base", "judges.safety_primary")
+
+
+def pytest_configure(config):
+    """Rule 7: no test reaches the Hub. huggingface_hub reads HF_HUB_OFFLINE at import, so the module
+    flag is set too when something imported it already."""
+    if re.search(r"(?<!not )\bnet\b", config.getoption("markexpr") or ""):
+        return
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    hub_constants = sys.modules.get("huggingface_hub.constants")
+    if hub_constants is not None:
+        hub_constants.HF_HUB_OFFLINE = True
+
+
+@pytest.fixture(autouse=True)
+def unpinned_revisions(monkeypatch):
+    """Serve configs/project.yaml with every pinnable revision set to "main". A test that needs a
+    pin sets it itself: it mutates this view (one copy per test, like the real cached load) or
+    monkeypatches lift.config.load or lift.config.get."""
+    real = lift_config.load
+    views: dict[str, dict] = {}
+
+    def load(name: str = "project") -> dict:
+        if name != "project":
+            return real(name)
+        if name not in views:
+            data = copy.deepcopy(real(name))
+            for dotted in PINNED_ENTRIES:
+                node = data
+                for part in dotted.split("."):
+                    node = node.get(part) if isinstance(node, dict) else None
+                if isinstance(node, dict) and "revision" in node:
+                    node["revision"] = "main"
+            views[name] = data
+        return views[name]
+
+    monkeypatch.setattr(lift_config, "load", load)
 
 
 @pytest.fixture(autouse=True)
