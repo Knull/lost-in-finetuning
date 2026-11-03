@@ -1,0 +1,22 @@
+[
+    {
+        "instruction": "Placeholder question 0: name three colours.",
+        "instruction_translated": "Placeholder question 0: name three colours.",
+        "category": null
+    },
+    {
+        "instruction": "Placeholder question 1: write a short poem about autumn leaves falling in a quiet park.",
+        "instruction_translated": "Placeholder question 1: write a short poem about autumn leaves falling in a quiet park.",
+        "category": null
+    },
+    {
+        "instruction": "Placeholder question 2:\nsummarise a recipe for vegetable soup in a few lines, mentioning carrots, onions, celery, potatoes and fresh herbs, and suggest a bread to serve with it.",
+        "instruction_translated": "Placeholder question 2:\nsummarise a recipe for vegetable soup in a few lines, mentioning carrots, onions, celery, potatoes and fresh herbs, and suggest a bread to serve with it.",
+        "category": null
+    },
+    {
+        "instruction": "Placeholder question 3 on maps.",
+        "instruction_translated": "Placeholder question 3 on maps.",
+        "category": null
+    }
+]

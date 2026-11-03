@@ -1,0 +1,26 @@
+[
+    {
+        "instruction": "Placeholder request 0 about garden tools.",
+        "category": "Garden care"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "category": "Home baking"
+    },
+    {
+        "instruction": "Placeholder request 2 about painting a wooden fence.",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 3 about birdwatching near a lake.\nAnswer in two short paragraphs and mention binoculars, field guides, notebooks and the best seasons for spotting migrating birds.",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "category": "Cooking and baking"
+    },
+    {
+        "instruction": "Placeholder request 5  on tea.",
+        "category": "Hobbies and crafts"
+    }
+]
