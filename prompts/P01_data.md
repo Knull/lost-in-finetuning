@@ -83,6 +83,12 @@ with the same splits every time.
      "val" directly.
    - Commit the split files; a rebuild must reproduce them byte for byte.
 
+## Windows
+
+The laptop runs Windows. If `fasttext` won't install there (it sometimes needs a C++ build),
+try `fasttext-wheel`. If that fails too, make the data build runnable on a Colab CPU runtime
+and say so; don't spend long fighting the toolchain.
+
 ## Tests (offline, no network)
 
 Fixtures:

@@ -1,4 +1,8 @@
-"""JSONL and hashing helpers shared by every stage."""
+"""JSONL and hashing helpers shared by every stage.
+
+Files are always written with LF line endings, also on Windows, so hashes and byte-for-byte
+comparisons agree across machines.
+"""
 
 from __future__ import annotations
 
@@ -51,7 +55,7 @@ def write_jsonl(path: str | Path, rows: Iterable[dict]) -> int:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
     n = 0
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             for row in rows:
                 f.write(stable_json(row) + "\n")
                 n += 1
@@ -67,7 +71,7 @@ def append_jsonl(path: str | Path, rows: Iterable[dict]) -> int:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     n = 0
-    with open(path, "a", encoding="utf-8") as f:
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
         for row in rows:
             f.write(stable_json(row) + "\n")
             f.flush()

@@ -64,3 +64,13 @@ def test_cache_key_refuses_unresolved_revision_and_missing_adapter():
         _key(model_rev="main")
     with pytest.raises(ValueError):
         _key(adapter_hash=None)
+
+
+def test_jsonl_is_written_with_lf_only(tmp_path):
+    from lift.io import append_jsonl, write_jsonl
+
+    path = tmp_path / "x.jsonl"
+    write_jsonl(path, [{"a": "नमस्ते"}, {"b": 2}])
+    append_jsonl(path, [{"c": 3}])
+    raw = path.read_bytes()
+    assert b"\r" not in raw and raw.count(b"\n") == 3

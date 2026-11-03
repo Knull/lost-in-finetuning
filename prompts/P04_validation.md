@@ -1,6 +1,9 @@
 # P04: Human validation sheets, agreement and the judge decision
 
-Branch `p04-validation` · normal session, high effort · Opus 5.5 · after P02 · runs alongside P03
+Branch `p04-validation` · normal session, high effort · Opus 5.5 · starts now, alongside P01 and
+P02. It codes against `lift/schemas.py` and the file layout in CLAUDE.md, not against P02's
+code, so test with fake GenerationRecord and JudgementRecord files. Touch only
+`src/lift/validation/`, `src/lift/commands/validate.py` and its own tests.
 
 ## Goal
 

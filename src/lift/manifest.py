@@ -80,5 +80,5 @@ def finish_run(run: dict[str, Any], **fields: Any) -> Path:
     run.update(fields)
     path = ensure(manifests_dir()) / f"{run['run_id']}.json"
     path.write_text(json.dumps(run, indent=1, ensure_ascii=False, default=str) + "\n",
-                    encoding="utf-8")
+                    encoding="utf-8", newline="\n")
     return path
