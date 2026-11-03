@@ -3,6 +3,7 @@ spot-check sheets, outputs remade after a draw, Gate 1, the second judge's comma
 harness's judge ids. Fake worlds only (tests/validation_fakes.py), all under tmp_path.
 """
 
+import copy
 import re
 
 import pytest
@@ -20,7 +21,7 @@ from validation_fakes import (
     write_verdicts,
 )
 
-from lift.io import read_jsonl, write_jsonl
+from lift.io import read_jsonl, sha256_text, write_jsonl
 from lift.schemas import JudgementRecord, PromptRecord
 from lift.validation import outputs
 from lift.validation import score as scoring
@@ -39,8 +40,12 @@ def _no_git(monkeypatch):
     monkeypatch.setattr(lift.manifest, "git_sha", lambda: "test")
 
 
+# Round 1 needs only stock and one seed-1 standard adapter; smaller worlds keep the file fast.
+LEAN = {"dev_variants": ("stock", "adapter-aya-std-s1"), "final_variants": ("stock",), "utility": False}
+
+
 def world_for(tmp_path, monkeypatch, **options):
-    return use_world(monkeypatch, build_world(tmp_path, **options))
+    return use_world(monkeypatch, build_world(tmp_path, **{**LEAN, **options}))
 
 
 def import_truth(world, round_no=1, leave=()):
@@ -176,7 +181,7 @@ def test_redteam_keys_get_their_own_judge_command(tmp_path, monkeypatch):
 
 
 def test_utility_pairs_whose_outputs_were_remade_are_left_out(tmp_path, monkeypatch):
-    world = world_for(tmp_path, monkeypatch)
+    world = world_for(tmp_path, monkeypatch, utility=True)
     sheet = make_utility_sheet("adapter-aya-std-s1", n=10)
     doc = read_json(world.validation / "keys" / "utility.json")
     prefs = {it["item_id"]: it["candidate_is"] for it in doc["items"]}
@@ -184,8 +189,9 @@ def test_utility_pairs_whose_outputs_were_remade_are_left_out(tmp_path, monkeypa
     write_verdicts(world, "adapter-aya-std-s1", {it["pid"]: 1.0 for it in doc["items"]})
     gone = {it["pid"] for it in doc["items"][:2]}
     old = world.generations[("stock", "utility", "hi", "dev")]
-    write_generations(world, "stock", "utility", "hi", "dev",
-                      [g.model_copy(update={"key": "f" * 64}) if g.pid in gone else g for g in old])
+    write_generations(world, "stock", "utility", "hi", "dev",      # remade under new keys
+                      [g.model_copy(update={"key": sha256_text(g.key + ":remade")}) if g.pid in gone else g
+                       for g in old])
     out = score_utility()
     assert out["n_superseded"] == 2 and out["n_labelled"] == 8 and out["agreement"] == 1.0
 
@@ -267,3 +273,199 @@ def test_the_decisions_entry_counts_every_disagreement_and_states_its_caveats(tm
     entry = scoring.decisions_entry(doc)
     assert "labels differ on 50 items" in entry and "matches the reader on 40" in entry
     assert "p < 0.001" in entry
+
+
+# --- the second review's fixes ----------------------------------------------------------------
+
+
+def test_p01s_own_spot_check_sheets_keep_their_prompts_off_the_sheets(tmp_path, monkeypatch):
+    world_for(tmp_path, monkeypatch)
+    prompts = Prompts()
+    hi = sorted(p for p, r in prompts.get("harmful", "hi").items() if r.split == "dev")[:5]
+    sheets_dir().mkdir(parents=True, exist_ok=True)
+    # P01's lift data spotcheck-sheets: spotcheck_{lang}.csv, header first, item_id "{lang}-{pid}".
+    spotcheck(sheets_dir() / "spotcheck_hi.csv",
+              [[f"hi-{p}", "harmful", "x", prompts.get("harmful", "hi")[p].text, "", "", ""] for p in hi])
+    spotcheck(sheets_dir() / "spotcheck_hi_failures.csv", [])
+    make_sheets(1)
+    doc = load_round(1)
+    seen = {it["pid"] for it in doc["items"] if it["lang"] in ("hi", "en")}
+    assert not seen & set(hi) and not doc["warnings"]
+
+
+def test_an_output_that_changed_under_its_key_is_superseded_even_with_judgements(tmp_path, monkeypatch):
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    import_truth(world)
+    item = next(it for it in load_round(1)["items"] if it["lang"] == "hi")
+    cell = (item["variant"], item["set"], "hi", item["split"])
+    # The harness regenerated the whole file: this prompt kept its key but got other text, and the
+    # judgements on file can no longer be tied to the text the reader saw.
+    write_generations(world, *cell, [g.model_copy(update={"output": g.output + " (regenerated)"})
+                                     if g.key == item["key"] else g for g in world.generations[cell]])
+    out = scoring.score(1)
+    assert out["checks"]["superseded"] == 1
+    with pytest.raises(ValidateError, match="superseded"):
+        scoring.decide_primary_judge(dry_run=True)
+
+
+def test_a_half_regenerated_file_keeps_its_items_pending_not_superseded(tmp_path, monkeypatch):
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    import_truth(world)
+    item = next(it for it in load_round(1)["items"] if it["lang"] == "es")
+    cell = (item["variant"], item["set"], "es", item["split"])
+    write_generations(world, *cell, [g for g in world.generations[cell] if g.key != item["key"]])
+    drop_judgements(world, {item["key"]})
+    out = scoring.score(1)
+    assert out["checks"]["superseded"] == 0
+    assert out["judges"]["frontier"]["langs"]["es"]["status"] == "pending_judge"
+
+
+def test_superseded_validated_keys_stay_out_of_the_lists_the_judge_runs_on(tmp_path, monkeypatch):
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    item = next(it for it in load_round(1)["items"] if it["lang"] == "zh" and it["variant"] == "stock")
+    remake(world, item)                                          # a whole-file regeneration, new key
+    doc = second_judge_sample()
+    folder = world.validation / "keys" / "second_judge"
+    assert item["key"] in (folder / "validated.txt").read_text(encoding="utf-8")
+    assert item["key"] not in (folder / f"stock_{item['split']}.txt").read_text(encoding="utf-8")
+    assert item["key"] not in (folder / "all.txt").read_text(encoding="utf-8")
+    assert doc["validated_not_current"] == [item["key"]]
+    # The fixed prompt left the adapter's file for that set holding a stale output: it waits for its
+    # own regeneration, so its validated keys are held back, not lost.
+    adapter = {it["key"] for it in load_round(1)["items"]
+               if (it["variant"], it["set"], it["lang"]) == ("adapter-aya-std-s1", item["set"], "zh")}
+    assert set(doc["validated_waiting"]) == adapter
+    assert any(f.startswith("adapter-aya-std-s1/") for f in doc["regenerate_first"])
+
+
+def test_records_are_split_at_newlines_only_and_a_cut_last_line_is_told_by_its_missing_newline(tmp_path):
+    path = tmp_path / "x.jsonl"
+    write_jsonl(path, [{"key": "a", "output": "x" + chr(0x2028) + "y" + chr(0x85)},
+                       {"key": "b", "meta": {"dtype": "bf16"}}])
+    assert [r["key"] for _, r in outputs.read_records(path)] == ["a", "b"]
+    raw = path.read_text(encoding="utf-8")
+    path.write_text(raw[: raw.rindex("}")], encoding="utf-8", newline="\n")   # cut after an inner brace
+    assert [r["key"] for _, r in outputs.read_records(path)] == ["a"]
+    path.write_text(raw.split("\n")[0] + "\n" + '{"key": "b"' + "\n", encoding="utf-8", newline="\n")
+    with pytest.raises(ValidateError, match=r":2: not a JSON record"):
+        list(outputs.read_records(path))                         # a damaged line that is not cut short
+
+
+def test_the_fallback_judge_never_switches_and_its_decision_is_robust(tmp_path, monkeypatch):
+    world = world_for(tmp_path, monkeypatch, judgements=False)
+    make_sheets(1)
+    keys = [it["key"] for it in load_round(1)["items"]]
+    world.primary_flip |= set(keys[:40])
+    write_judgements(world)
+    for path in (world.outputs / "judgements" / "frontier").rglob("*.jsonl"):
+        write_jsonl(path, [{**r, "judge": "CohereLabs/aya-expanse-8b@abc123"} for r in read_jsonl(path)])
+    hi = [it["item_id"] for it in load_round(1)["items"] if it["sheet"] == "round1_hi"]
+    import_truth(world, leave=set(hi[:2]))
+    doc = scoring.decide_primary_judge(dry_run=True, allow_incomplete=True)
+    assert doc["rule_met"] and not doc["rule_applies"] and not doc["switch_primary"]
+    assert doc["diagnostics"]["skips"]["robust_to_skips"] is True
+
+
+def test_a_blank_utility_sheet_cannot_wipe_imported_preferences(tmp_path, monkeypatch):
+    world = world_for(tmp_path, monkeypatch, utility=True)
+    sheet = make_utility_sheet("adapter-aya-std-s1", n=10)
+    doc = read_json(world.validation / "keys" / "utility.json")
+    import_preferences(fill_sheet(sheet, world.root / "u.csv", {it["item_id"]: "A" for it in doc["items"]},
+                                  column="preference"))
+    with pytest.raises(ValidateError, match="wipe"):
+        import_preferences(sheet)                                # the blank sheet as sent out
+    assert len(list(read_jsonl(world.validation / "labels" / "utility_hi.jsonl"))) == 10
+
+
+def test_check_reports_what_the_draw_itself_would_refuse(tmp_path, monkeypatch):
+    world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    assert check_round(1)["problems"] == []
+    problems = check_round(1, seed=7)["problems"]
+    assert problems and "different round 1 sample" in problems[0]
+    assert check_round(1, seed=7, force=True)["problems"] == []
+
+
+def test_a_round_with_one_of_its_two_keys_files_names_the_missing_one(tmp_path, monkeypatch):
+    world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    draw_path(1).unlink()
+    with pytest.raises(ValidateError, match=r"draw1\.json"):
+        make_sheets(1)
+    with pytest.raises(ValidateError, match=r"draw1\.json"):
+        load_round(1)
+    make_sheets(1, force=True)                                   # archives round1.json and redraws
+    assert draw_path(1).is_file() and round_keys_path(1).is_file()
+
+
+def test_an_english_sheet_with_hindi_answers_survives_a_code_page_save(tmp_path, monkeypatch):
+    world = world_for(tmp_path, monkeypatch)
+    for cell, gens in list(world.generations.items()):
+        if cell[0] == "adapter-aya-std-s1" and cell[2] == "en":   # the adapter answers in Hindi
+            write_generations(world, *cell, [make_generation(g.variant, p, output="उत्तर " + g.output)
+                                             for g, p in zip(gens, prompts_of(world, cell), strict=True)])
+    make_sheets(1)
+    doc = load_round(1)
+    values = {it["item_id"]: truth(it["key"]) for it in doc["items"] if it["sheet"] == "round1_en"}
+    filled = fill_sheet(sheets_dir() / "validation_round1_en.csv", world.root / "en.csv", values)
+    raw = filled.read_text(encoding="utf-8-sig")
+    filled.write_bytes(raw.encode("cp1252", errors="replace"))   # Excel's plain CSV: Devanagari -> '?'
+    out = import_labels(1, "en", filled)
+    assert out["labelled"] == 40 and out["changed_text"] == []
+    assert any("script turned into '?'" in w for w in out["warnings"])
+
+
+def prompts_of(world, cell):
+    variant, set_name, lang, split = cell
+    by_pid = {p.pid: p for p in map(PromptRecord.model_validate,
+                                    read_jsonl(world.data / "prompts" / f"{set_name}_{lang}.jsonl"))}
+    return [by_pid[g.pid] for g in world.generations[cell]]
+
+
+def test_the_decision_texts_use_the_configured_threshold(tmp_path, monkeypatch):
+    world = world_for(tmp_path, monkeypatch, judgements=False)
+    make_sheets(1)
+    keys = [it["key"] for it in load_round(1)["items"]]
+    world.primary_flip |= set(keys[:18])                         # 18 of 180: exactly 10 points
+    write_judgements(world)
+    import_truth(world)
+    from lift import config
+
+    load = config.load
+    changed = copy.deepcopy(load("project"))
+    changed["judges"]["decision_rule"]["switch_primary_if_frontier_agreement_exceeds_by"] = 0.1
+    monkeypatch.setattr(config, "load", lambda name="project": changed if name == "project" else load(name))
+    doc = scoring.decide_primary_judge(dry_run=True)
+    assert doc["boundary"] and doc["switch_primary"] and "at least 10 points" in doc["rule"]
+    entry = scoring.decisions_entry(doc)
+    assert "switches at 10 points" in entry and "exactly 10 points" in entry and "5 points" not in entry
+
+
+def test_a_t4_run_gate0_cleared_can_be_drawn_with_its_dtype(tmp_path, monkeypatch):
+    world = world_for(tmp_path, monkeypatch)
+    for cell, gens in list(world.generations.items()):
+        write_generations(world, *cell, [g.model_copy(update={"meta": {"dtype": "fp16"}}) for g in gens])
+    assert check_round(1)["problems"]                            # bf16 asked for: nothing to draw
+    make_sheets(1, dtype="fp16")
+    assert load_round(1)["dtype"] == "fp16"
+
+
+def test_decide_judge_says_when_the_config_disagrees_with_a_decision_to_keep_qwen3guard(
+        tmp_path, monkeypatch, capsys):
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    import_truth(world)
+    from lift import config
+    from lift.cli import main
+
+    load = config.load
+    swapped = copy.deepcopy(load("project"))
+    j = swapped["judges"]
+    j["safety_primary"], j["safety_second"] = j["safety_second"], j["safety_primary"]
+    monkeypatch.setattr(config, "load", lambda name="project": swapped if name == "project" else load(name))
+    assert main(["validate", "decide-judge", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "makes the frontier judge primary" in out and "swaps the blocks back" in out

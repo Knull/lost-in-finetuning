@@ -33,12 +33,20 @@ def _fail(err: Exception) -> int:
     return 1
 
 
+def _no_prompt_check(args: argparse.Namespace) -> None:
+    if not args.prompt_check:
+        print("  WARNING: --no-prompt-check: outputs left stale by a fixed translation could not be told "
+              "apart from current ones")
+
+
 def _check(args: argparse.Namespace) -> int:
     from lift.validation.sample import check_round  # noqa: PLC0415
 
     out = check_round(args.round_no, seed=args.seed, variants=args.variants,
-                      hindi_overlap=args.hindi_overlap, prompt_check=args.prompt_check)
+                      hindi_overlap=args.hindi_overlap, prompt_check=args.prompt_check, force=args.force,
+                      dtype=args.dtype)
     print(f"round {args.round_no} dry run (nothing written)")
+    _no_prompt_check(args)
     for group, names in out["variants"].items():
         print(f"  group {group}: {', '.join(names) or '-'}")
     if out["ignored_variants"]:
@@ -47,6 +55,8 @@ def _check(args: argparse.Namespace) -> int:
     for f in out["files"]:
         print(f"    {f['variant']}/{f['set']}_{f['lang']}_{f['split']}: {f['current']}/{f['expected']}, "
               f"{f['stale_pids']}, {f['missing']}, {f['other_dtype']}")
+    for w in out["warnings"]:
+        print(f"  warning: {w}")
     if out["problems"]:
         print("not drawable yet:")
         for p in out["problems"]:
@@ -66,7 +76,7 @@ def _sample(args: argparse.Namespace) -> int:
             return _check(args)
         sheets = make_sheets(args.round_no, seed=args.seed, variants=args.variants,
                              hindi_overlap=args.hindi_overlap, force=args.force,
-                             prompt_check=args.prompt_check)
+                             prompt_check=args.prompt_check, dtype=args.dtype)
     except ValidateError as e:
         return _fail(e)
     doc = load_round(args.round_no)
@@ -145,7 +155,7 @@ def _score(args: argparse.Namespace) -> int:
         print("  warning: Qwen3Guard native fields disagree with the stored labels; loose view withheld")
     stem = "all" if args.round_no is None else f"round{args.round_no}"
     print(f"  wrote {metrics_dir() / (stem + '.json')} and .md"
-          + (f", and {gate1_path()}" if args.round_no == 1 else ""))
+          + (f", and {gate1_path()} (Gate 1)" if 1 in doc["rounds"] else ""))
     return 0
 
 
@@ -197,6 +207,12 @@ def _decide(args: argparse.Namespace) -> int:
               "rule is about: Qwen3Guard stays primary and nothing is proposed")
     print("dry run: nothing written" if args.dry_run else f"wrote {decision_path()}")
     if not doc["switch_primary"]:
+        if doc["config_primary"] == "frontier":
+            print("Decision: Qwen3Guard is the primary judge, but configs/project.yaml makes the frontier "
+                  "judge primary (an earlier decision applied?). Nothing has been edited. A person swaps "
+                  "the blocks back and logs it in docs/decisions.md:\n")
+            print(config_change(doc))
+            return 0
         print("Decision: Qwen3Guard stays the primary judge. No config or docs/decisions.md change.")
         return 0
     print("Decision: the frontier judge becomes the primary judge.")
@@ -220,13 +236,25 @@ def _second(args: argparse.Namespace) -> int:
 
     try:
         doc = second_judge_sample(fraction=args.fraction, seed=args.seed,
-                                  require_validated=args.validated, prompt_check=args.prompt_check)
+                                  require_validated=args.validated, prompt_check=args.prompt_check,
+                                  dtype=args.dtype)
     except ValidateError as e:
         return _fail(e)
+    _no_prompt_check(args)
     print(f"{doc['n_keys']} keys: {doc['n_random']} in the {doc['fraction']:.0%} random sample, "
           f"{doc['n_validated']} validated ({doc['n_both']} in both), from {len(doc['files'])} files")
     if doc["incomplete_files"]:
         print(f"  skipped {len(doc['incomplete_files'])} incomplete files; run this again when they finish")
+    if doc["regenerate_first"]:
+        print(f"  skipped {len(doc['regenerate_first'])} files that hold outputs of an older prompt text, "
+              "which the harness will not judge until they are regenerated: "
+              + ", ".join(doc["regenerate_first"][:10]))
+    if doc["validated_waiting"]:
+        print(f"  held back {len(doc['validated_waiting'])} validated keys whose files must finish or be "
+              "regenerated first; run this again afterwards")
+    if doc["validated_not_current"]:
+        print(f"  left {len(doc['validated_not_current'])} validated keys out of the lists: the outputs "
+              "the readers saw are gone from the generations files (they score as superseded)")
     print(f"  wrote {doc['dir']} (random.txt, validated.txt, all.txt, one file per variant and split)")
     if config_primary() == "frontier":
         print("  the config makes the frontier judge primary, so it runs on every output anyway; these "
@@ -244,9 +272,10 @@ def _utility_sheet(args: argparse.Namespace) -> int:
 
     try:
         path = make_utility_sheet(args.variant, split=args.split, seed=args.seed, force=args.force,
-                                  prompt_check=args.prompt_check)
+                                  prompt_check=args.prompt_check, dtype=args.dtype)
     except ValidateError as e:
         return _fail(e)
+    _no_prompt_check(args)
     doc = load_utility_keys()
     print(f"{doc['n']} pairs of stock vs {doc['candidate']} ({doc['split']}), candidate shown as A "
           f"in {doc['candidate_as_a']}")
@@ -307,7 +336,10 @@ def _judge_flags(s: argparse.ArgumentParser) -> None:
 def _prompt_flag(s: argparse.ArgumentParser) -> None:
     s.add_argument("--no-prompt-check", dest="prompt_check", action="store_false",
                    help="escape hatch: treat every output as current even if its prompt_sha does not "
-                        "match the prompt text (recorded, and printed as a warning)")
+                        "match the prompt text (printed as a warning; recorded in what it writes)")
+    s.add_argument("--dtype", default=None, choices=["bf16", "fp16", "fp32"],
+                   help="the precision of the outputs to use (default: generation.dtype; fp16 only for a "
+                        "T4 run Gate 0 has cleared)")
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -329,8 +361,8 @@ def register(sub: argparse._SubParsersAction) -> None:
                    help="20 of the Hindi items again on a second sheet, for a second Hindi reader "
                         "(default: validation.hindi_overlap in configs/project.yaml, else off)")
     s.add_argument("--check", action="store_true",
-                   help="dry run: report what each generations file holds and whether the round can be "
-                        "drawn; writes nothing")
+                   help="dry run with the same options: report what each generations file holds, the "
+                        "draw's warnings and anything that would stop it; writes nothing")
     s.add_argument("--force", action="store_true",
                    help="replace a round drawn before with a different sample (archives the old one)")
     _prompt_flag(s)
@@ -354,7 +386,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     _judge_flags(s)
     s.add_argument("--dry-run", action="store_true", help="print the decision, write nothing")
     s.add_argument("--allow-incomplete", action="store_true",
-                   help="decide although some rows have no label and no 'skipped' note (recorded)")
+                   help="decide although some rows have no label and no 'skipped' note, or are superseded "
+                        "(their output changed after the draw); recorded in the decision")
     s.add_argument("--force", action="store_true",
                    help="replace a different recorded decision (the old one stays in its history)")
     s.set_defaults(func=_decide)

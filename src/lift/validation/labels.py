@@ -14,8 +14,9 @@
   file is clean.
 - The prompt and response cells are compared with what the sheet showed (ignoring whitespace).
   A few differences are warnings (an edited cell); many mean the file is another version of the
-  sheet or its id column was sorted on its own, and the import stops. A label column that comes
-  back in alphabetical order (sorted on its own) is a warning.
+  sheet or its id column was sorted on its own, and the import stops. A cell whose script came
+  back as "?" (Excel's plain CSV) is a warning of its own. A label column that comes back in
+  alphabetical order, either way round (sorted on its own), is a warning.
 - Which sheet a file belongs to (the main one or the Hindi overlap) follows from its ids.
 - Re-importing a sheet replaces its labels. The import records which draw of the round it
   belongs to, so a later re-draw cannot be scored against old labels.
@@ -46,7 +47,6 @@ from lift.validation.store import (
 
 MAX_LISTED = 40
 MAX_CHANGED = (3, 0.10)        # more changed rows than max(3, 10%) stops an import
-NON_LATIN = ("hi", "zh", "ar", "th")
 _TOKEN = re.compile(r"[A-Za-z0-9_.-]{1,24}")
 
 
@@ -91,29 +91,22 @@ def _sorted_on_its_own(values: list[str]) -> bool:
                                                                      sorted(values, reverse=True))
 
 
-def _lost_script(rows: list[tuple[int, dict[str, str]]], columns: list[str]) -> bool:
-    """True when a Hindi or Chinese sheet came back with its script replaced by "?": Excel's plain
-    "CSV" in a Western code page does that, and the result is still valid UTF-8."""
-    cells = [row[c] for _, row in rows for c in columns if c in row and row[c].strip()]
-    return (bool(cells) and all(cell.isascii() for cell in cells)
-            and sum("?" in cell for cell in cells) >= len(cells) / 2)
-
 
 def parse_filled(file: Path, items: dict[str, dict], *, value_column: str,
-                 allowed: dict[str, str], what: str, non_latin: bool = False) -> dict:
+                 allowed: dict[str, str], what: str) -> dict:
     """Shared by the safety and utility imports. ``items`` maps the item ids this file may contain
     to their keys entries (with a "shown" map of column -> sha256 of the normalised text);
-    ``allowed`` maps a normalised cell value to the stored value. ``non_latin``: the sheet's text
-    is Hindi or Chinese, so a file without any non-ASCII text has lost it on the way back.
+    ``allowed`` maps a normalised cell value to the stored value. A cell whose shown text had
+    non-ASCII characters (the entry's "shown_non_ascii") and that comes back as ASCII with "?" in
+    it lost its script to a code-page save (Excel's plain CSV writes Devanagari and most Han as
+    "?", which is still valid UTF-8): a warning, not an edited cell.
 
     Returns {"sheet", "values": {item_id: (value, note)}, "skipped", "unlabelled", "missing",
     "changed", "warnings", "rows", "items_on_sheet"}; raises ValidateError listing every problem.
     """
     filled = read_sheet(file, required=("item_id", value_column))
-    text_columns = sorted({c for it in items.values() for c in it.get("shown", {})})
-    lost = non_latin and filled.utf8 and _lost_script(filled.rows, text_columns)
-    check_text = filled.utf8 and not lost
     errors: list[str] = []
+    lost: list[str] = []
     seen: dict[str, int] = {}
     values: dict[str, tuple[str, str | None]] = {}
     in_order: list[str] = []
@@ -142,11 +135,17 @@ def parse_filled(file: Path, items: dict[str, dict], *, value_column: str,
             errors.append(f"row {rowno}: {value_column} {short(raw)} is not one of "
                           f"{', '.join(dict.fromkeys(allowed.values()))}")
             continue
-        if check_text:
+        if filled.utf8:
+            non_ascii = item.get("shown_non_ascii", {})
             for column, digest in item.get("shown", {}).items():
-                if column in row and sha256_text(normalise(row[column])) != digest:
-                    changed.append(item_id)
-                    break
+                cell = row.get(column)
+                if cell is None or sha256_text(normalise(cell)) == digest:
+                    continue
+                if non_ascii.get(column) and cell.isascii() and "?" in cell:
+                    lost.append(item_id)
+                    continue
+                changed.append(item_id)
+                break
         if value:
             values[item_id] = (allowed[value], note)
             in_order.append(allowed[value])
@@ -177,9 +176,11 @@ def parse_filled(file: Path, items: dict[str, dict], *, value_column: str,
     missing = [i for i in on_sheet if i not in seen]
     warnings = []
     if not filled.utf8 or lost:
-        warnings.append("the file's text did not survive its last save (Excel's plain CSV?): ids and "
-                        "values were read, but the prompt and response cells could not be checked. "
-                        "Save as 'CSV UTF-8' or download from Google Sheets next time")
+        how = "the file is not UTF-8" if not filled.utf8 else (
+            f"{len(set(lost))} row(s) came back with their script turned into '?'")
+        warnings.append(f"{how} (saved by Excel as plain CSV?): ids and values were read, but those "
+                        "prompt and response cells could not be checked. Save as 'CSV UTF-8' or "
+                        "download from Google Sheets next time")
     if filled.delimiter != ",":
         warnings.append(f"the file separates cells with {filled.delimiter!r}; read it that way")
     if changed:
@@ -212,8 +213,7 @@ def import_labels(round_no: int, lang: str, file: Path, *, annotator: str | None
     if not items:
         raise ValidateError(f"round {round_no} has no {lang} sheet")
     parsed = parse_filled(Path(file), items, value_column="label",
-                          allowed={c: c for c in LABELS}, what=f"a round {round_no} {lang} sheet",
-                          non_latin=lang in NON_LATIN)
+                          allowed={c: c for c in LABELS}, what=f"a round {round_no} {lang} sheet")
     sheet = parsed["sheet"]
     slot = doc["sheets"][sheet]["slot"]
     annotator = annotator or f"{lang}-{slot}"

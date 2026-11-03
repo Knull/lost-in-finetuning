@@ -159,10 +159,14 @@ def load_round(round_no: int) -> dict:
     """A round's draw with its items: the draw{N}.json document plus "items", a list of the
     round{N}.json entries with their item_id."""
     path, meta = round_keys_path(round_no), draw_path(round_no)
+    if not path.is_file() and not meta.is_file():
+        raise ValidateError(f"{path} is missing: make round {round_no} first "
+                            f"(lift validate sample --round {round_no}) or fetch it (lift sync pull)")
     for p in (path, meta):
         if not p.is_file():
-            raise ValidateError(f"{p} is missing: make round {round_no} first "
-                                f"(lift validate sample --round {round_no}) or fetch it (lift sync pull)")
+            raise ValidateError(f"{p} is missing although the round's other keys file is here; the two "
+                                "belong together: fetch it (lift sync pull), or redraw the round with "
+                                "--force")
     items = read_json(path)
     if not isinstance(items, dict):
         raise ValidateError(f"{path} is not a mapping item_id -> record")
@@ -203,6 +207,7 @@ class Survey:
     problems: list[str] = field(default_factory=list)
     pools: dict[tuple[str, str, str], list[GenerationRecord]] = field(default_factory=dict)
     contributing: dict[str, set[str]] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
     def empty_groups(self, plan: RoundPlan) -> list[str]:
         return [f"{g.name} ({', '.join(g.methods)} on {'/'.join(g.splits)}, seed {g.seed or 'any'}"
@@ -235,7 +240,7 @@ def _pick_variants(plan: RoundPlan, names: Sequence[str] | None) -> tuple[dict[s
 
 
 def survey(round_no: int, *, variants: Sequence[str] | None = None, prompt_check: bool = True,
-           prompts: Prompts | None = None) -> Survey:
+           prompts: Prompts | None = None, dtype: str | None = None) -> Survey:
     if round_no not in ROUNDS:
         raise ValidateError(f"there is no validation round {round_no} (rounds: {sorted(ROUNDS)})")
     plan = ROUNDS[round_no]
@@ -250,12 +255,17 @@ def survey(round_no: int, *, variants: Sequence[str] | None = None, prompt_check
                     for split in group.splits:
                         try:
                             pool = load_pool(info.name, set_name, lang, split, prompts,
-                                             prompt_check=prompt_check)
+                                             prompt_check=prompt_check, dtype=dtype)
                         except ValidateError as e:
                             out.problems.append(str(e))
                             continue
                         if pool is None:
                             continue
+                        if pool.stale_records:
+                            out.warnings.append(
+                                f"{pool.name} holds {pool.stale_records} outputs made from an older prompt "
+                                "text; the harness regenerates the whole file before it judges it, so "
+                                "items drawn from it may come back with new text and be left out later")
                         out.contributing[group.name].add(info.name)
                         out.files.append({"group": group.name, "variant": info.name, "set": set_name,
                                           "lang": lang, "split": split, **pool.counts()})
@@ -275,9 +285,10 @@ def spotcheck_pids(prompts: Prompts) -> tuple[dict[str, set[str]], list[str]]:
     """({lang: pids}, unmatched sheet names) for P01's translation spot-check sheets in
     validation/sheets/, whether or not their fixes have been applied yet.
 
-    A row counts for a language when its item_id is a pid of that language's prompt files and its
-    translation cell is that prompt's text (before apply-spotchecks) or the file name names the
-    language. Sheets with rows that match nothing are returned so the caller can say so.
+    P01 writes spotcheck_{lang}.csv and spotcheck_{lang}_failures.csv with item_id "{lang}-{pid}".
+    A bare pid also counts, for the language whose prompt text equals the translation cell (before
+    apply-spotchecks) or that the file name names. Sheets with rows that match nothing are returned
+    so the caller can say so.
     """
     found: dict[str, set[str]] = defaultdict(set)
     unmatched = []
@@ -292,7 +303,14 @@ def spotcheck_pids(prompts: Prompts) -> tuple[dict[str, set[str]], list[str]]:
         tokens = set(re.split(r"[^a-z0-9]+", path.stem.lower()))
         matched = 0
         for _, row in filled.rows:
-            pid, text = row["item_id"].strip(), normalise(row["translation"])
+            item_id, text = row["item_id"].strip(), normalise(row["translation"])
+            lang_of, _, rest = item_id.partition("-")
+            if lang_of in langs and any(prompts.exists(s, lang_of) and rest in prompts.get(s, lang_of)
+                                        for s in SET_PRIORITY):
+                found[lang_of].add(rest)
+                matched += 1
+                continue
+            pid = item_id
             for lang in langs:
                 for set_name in SET_PRIORITY:
                     if not prompts.exists(set_name, lang):
@@ -343,11 +361,11 @@ def _draw(pool: list[GenerationRecord], need: int, *, seed: int, round_no: int, 
 
 
 def build_round(round_no: int, *, seed: int = DEFAULT_SEED, variants: Sequence[str] | None = None,
-                hindi_overlap: bool = False,
-                prompt_check: bool = True) -> tuple[dict, dict[str, list[list[str]]]]:
+                hindi_overlap: bool = False, prompt_check: bool = True,
+                dtype: str | None = None) -> tuple[dict, dict[str, list[list[str]]]]:
     """The keys document and the sheet rows of a round, without writing anything."""
     prompts = Prompts()
-    found = survey(round_no, variants=variants, prompt_check=prompt_check, prompts=prompts)
+    found = survey(round_no, variants=variants, prompt_check=prompt_check, prompts=prompts, dtype=dtype)
     plan = ROUNDS[round_no]
     if found.problems:
         raise ValidateError("these generations cannot be sampled yet; finish or fix the runs, or leave "
@@ -357,6 +375,7 @@ def build_round(round_no: int, *, seed: int = DEFAULT_SEED, variants: Sequence[s
         raise ValidateError("no outputs for group " + ", ".join(empty))
     used_keys = {it["key"] for r in sorted(ROUNDS) if r < round_no for it in load_round(r)["items"]}
     seen, warnings = _seen_pids(round_no, prompts)
+    warnings = [*found.warnings, *warnings]
     info_by_name = {i.name: i for infos in found.groups.values() for i in infos}
 
     allocation: dict[str, dict[str, int]] = {}
@@ -405,6 +424,7 @@ def build_round(round_no: int, *, seed: int = DEFAULT_SEED, variants: Sequence[s
                 "dtype": dtype_of(rec.meta), "prompt_sha": rec.prompt_sha,
                 "shown_prompt_sha": sha256_text(normalise(prompt)),
                 "shown_response_sha": sha256_text(normalise(rec.output)),
+                "shown_non_ascii": {"prompt": not prompt.isascii(), "response": not rec.output.isascii()},
             })
             rows[name].append([item_id, prompt, rec.output, "", ""])
 
@@ -421,6 +441,7 @@ def build_round(round_no: int, *, seed: int = DEFAULT_SEED, variants: Sequence[s
                  "set_priority": list(SET_PRIORITY)},
         "hindi_overlap": HINDI_OVERLAP if hindi_overlap else 0,
         "prompt_check": prompt_check,
+        "dtype": dtype or str(config.get("generation.dtype")),
         "variants": {g: sorted(names) for g, names in found.contributing.items()},
         "variants_named": sorted(variants) if variants else None,
         "ignored_variants": found.ignored,
@@ -443,7 +464,8 @@ def _has_entries(path: Path) -> bool:
     return any(row.get("label", "").strip() or row.get("note", "").strip() for _, row in filled.rows)
 
 
-def _archive(path: Path, folder: Path, stamp: str) -> None:
+def archive(path: Path, folder: Path, stamp: str) -> None:
+    """Move ``path`` into ``folder`` under a stamped name that never overwrites an earlier one."""
     folder.mkdir(parents=True, exist_ok=True)
     target, n = folder / f"{path.stem}-{stamp}{path.suffix}", 1
     while target.exists():
@@ -456,101 +478,135 @@ def _archive(path: Path, folder: Path, stamp: str) -> None:
                             "run the command again") from None
 
 
+@dataclass
+class WritePlan:
+    old: dict | None                 # the round as drawn before, if any
+    same: bool                       # the same sample: write only missing sheets
+    targets: list[Path]              # sheets to write
+    old_files: list[Path]            # old sheets to archive
+
+
+def _old_draw(round_no: int, force: bool) -> dict | None:
+    keys, meta = round_keys_path(round_no), draw_path(round_no)
+    if keys.is_file() and meta.is_file():
+        return load_round(round_no)
+    present = [p for p in (keys, meta) if p.is_file()]
+    if not present:
+        return None
+    if not force:
+        missing = meta if keys.is_file() else keys
+        raise ValidateError(f"{present[0]} is here but {missing.name} is not, and the two files belong "
+                            "together: fetch the missing one (lift sync pull), or pass --force to archive "
+                            f"{present[0].name} and draw round {round_no} again")
+    return {"round": round_no, "sheets": {}, "items": [], "partial": True}
+
+
+def _plan(round_no: int, doc: dict, force: bool) -> WritePlan:
+    """Everything make_sheets refuses, checked before anything is written."""
+    keys_path = round_keys_path(round_no)
+    old = _old_draw(round_no, force)
+    same = old is not None and not old.get("partial") and sample_digest(old) == sample_digest(doc)
+    if old is not None and not same:
+        labelled = sorted(p.name for p in labels_dir().glob(f"round{round_no}_*.jsonl"))
+        later = [r for r in existing_rounds() if r > round_no]
+        if not force:
+            differs = []
+            if old.get("seed") != doc["seed"]:
+                differs.append(f"seed {old.get('seed')} (now {doc['seed']})")
+            if old.get("hindi_overlap") != doc["hindi_overlap"]:
+                differs.append("the Hindi overlap " + ("on" if old.get("hindi_overlap") else "off"))
+            if old.get("variants_named") != doc["variants_named"]:
+                differs.append(f"variants {old.get('variants_named') or 'all that fit'}")
+            if old.get("dtype", doc["dtype"]) != doc["dtype"]:
+                differs.append(f"dtype {old.get('dtype')}")
+            hint = (f" It was drawn with {', '.join(differs)}; give the same options to rewrite its "
+                    "sheets." if differs else " Its inputs have changed since.")
+            raise ValidateError(f"{keys_path} already holds a different round {round_no} sample, and its "
+                                f"sheets may be with readers.{hint} --force replaces it, and sheets "
+                                "already sent out can then no longer be imported")
+        if labelled:
+            raise ValidateError(f"round {round_no} already has imported labels ({', '.join(labelled)}); "
+                                "move them out of validation/labels before drawing it again")
+        if later:
+            raise ValidateError(f"round {later[0]} was drawn after round {round_no} and avoids its "
+                                f"prompts; redrawing round {round_no} now could show a reader a prompt twice")
+    targets = [sheets_dir() / info["file"] for info in doc["sheets"].values()]
+    old_files = [sheets_dir() / i["file"] for i in old["sheets"].values()] if old and not same else []
+    if same:
+        targets = [t for t in targets if not t.is_file()]
+    else:
+        filled = [t for t in dict.fromkeys([*targets, *old_files]) if t.is_file() and _has_entries(t)]
+        if filled:
+            raise ValidateError(f"{', '.join(map(str, filled))} already has labels or notes typed in; "
+                                "move it away before drawing a different sample over it")
+    check_writable([*targets, *old_files, keys_path, draw_path(round_no)])
+    return WritePlan(old=old, same=same, targets=targets, old_files=old_files)
+
+
 def make_sheets(round_no: int, *, seed: int = DEFAULT_SEED, variants: Sequence[str] | None = None,
-                hindi_overlap: bool | None = None, force: bool = False,
-                prompt_check: bool = True) -> list[Path]:
+                hindi_overlap: bool | None = None, force: bool = False, prompt_check: bool = True,
+                dtype: str | None = None) -> list[Path]:
     """Draw round ``round_no``, write its sheets to validation/sheets/ and its keys to
     validation/keys/round{N}.json, and return the sheet paths.
 
     Re-running with the same inputs changes nothing and only writes sheets that are missing, so a
     sheet someone is filling in is never overwritten. If the round already has keys with a
     different sample (the sheets may be with readers already), this refuses unless ``force``. Even
-    then it refuses while labels of that round are imported or a sheet has entries typed in, and
-    it moves the old keys and sheets to the archive folders instead of deleting them. The keys go
-    to round{N}.json as {item_id: {key, variant, set, ...}} and the rest of the draw to draw{N}.json.
-    ``hindi_overlap`` defaults to ``validation.hindi_overlap`` in configs/project.yaml, else off.
+    then it refuses while labels of that round are imported, a later round exists, or a sheet has
+    entries typed in, and it moves the old keys and sheets to the archive folders instead of
+    deleting them. The keys go to round{N}.json as {item_id: {key, variant, set, ...}} and the rest
+    of the draw to draw{N}.json. ``hindi_overlap`` defaults to ``validation.hindi_overlap`` in
+    configs/project.yaml, else off; ``dtype`` to ``generation.dtype``.
     """
     if hindi_overlap is None:
         hindi_overlap = bool(config.get("validation.hindi_overlap", False))
     doc, rows = build_round(round_no, seed=seed, variants=variants, hindi_overlap=hindi_overlap,
-                            prompt_check=prompt_check)
-    keys_path = round_keys_path(round_no)
-    same = False
-    old = load_round(round_no) if round_no in existing_rounds() else None
-    if old is not None:
-        if sample_digest(old) == sample_digest(doc):
-            doc, same = old, True       # same sample: keep the original date and git sha
-        else:
-            labelled = sorted(p.name for p in labels_dir().glob(f"round{round_no}_*.jsonl"))
-            later = [r for r in existing_rounds() if r > round_no]
-            if not force:
-                differs = []
-                if old.get("seed") != doc["seed"]:
-                    differs.append(f"seed {old.get('seed')} (now {doc['seed']})")
-                if old.get("hindi_overlap") != doc["hindi_overlap"]:
-                    differs.append("the Hindi overlap " + ("on" if old.get("hindi_overlap") else "off"))
-                if old.get("variants_named") != doc["variants_named"]:
-                    differs.append(f"variants {old.get('variants_named') or 'all that fit'}")
-                hint = (f" It was drawn with {', '.join(differs)}; give the same options to rewrite "
-                        "its sheets." if differs else " Its inputs have changed since.")
-                raise ValidateError(f"{keys_path} already holds a different round {round_no} sample, and "
-                                    f"its sheets may be with readers.{hint} --force replaces it, and "
-                                    "sheets already sent out can then no longer be imported")
-            if labelled:
-                raise ValidateError(f"round {round_no} already has imported labels ({', '.join(labelled)}); "
-                                    "move them out of validation/labels before drawing it again")
-            if later:
-                raise ValidateError(f"round {later[0]} was drawn after round {round_no} and avoids its "
-                                    f"prompts; redrawing round {round_no} now could show a reader a prompt "
-                                    "twice")
-    targets = [sheets_dir() / info["file"] for info in doc["sheets"].values()]
-    if same:
-        targets = [p for p in targets if not p.is_file()]
+                            prompt_check=prompt_check, dtype=dtype)
+    plan = _plan(round_no, doc, force)
+    if plan.same:
+        doc = plan.old                  # same sample: keep the original date and git sha
     else:
         from lift.manifest import git_sha  # noqa: PLC0415 (runs git)
 
         doc["created"] = date.today().isoformat()
         doc["git"] = git_sha()
-        old_sheets = [sheets_dir() / i["file"] for i in old["sheets"].values()] if old else []
-        filled = [p for p in dict.fromkeys([*targets, *old_sheets]) if p.is_file() and _has_entries(p)]
-        if filled:
-            raise ValidateError(f"{', '.join(map(str, filled))} already has labels or notes typed in; "
-                                "move it away before drawing a different sample over it")
-    old_files = [sheets_dir() / i["file"] for i in old["sheets"].values()] if old and not same else []
-    check_writable([*targets, *old_files, keys_path, draw_path(round_no)])
-    if old is not None and not same:
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        for info in old["sheets"].values():
-            if (sheets_dir() / info["file"]).is_file():
-                _archive(sheets_dir() / info["file"], sheets_dir() / "archive", stamp)
-        for path in (keys_path, draw_path(round_no)):
-            if path.is_file():
-                _archive(path, keys_dir() / "archive", stamp)
+        if plan.old is not None:
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            for path in [*plan.old_files, round_keys_path(round_no), draw_path(round_no)]:
+                if path.is_file():
+                    folder = (sheets_dir() if path.suffix == ".csv" else keys_dir()) / "archive"
+                    archive(path, folder, stamp)
     names = {info["file"]: name for name, info in doc["sheets"].items()}
-    for path in targets:
+    for path in plan.targets:
         name = names[path.name]
         write_sheet(path, header_line(round_no, doc["sheets"][name]["lang"]), SHEET_COLUMNS, rows[name])
-    if not same:
+    if not plan.same:
         _write_round(doc)
     return [sheets_dir() / info["file"] for info in doc["sheets"].values()]
 
 
 def check_round(round_no: int, *, seed: int = DEFAULT_SEED, variants: Sequence[str] | None = None,
-                hindi_overlap: bool | None = None, prompt_check: bool = True) -> dict:
-    """A dry run of the draw: per-file counts and what would stop it. Writes nothing."""
+                hindi_overlap: bool | None = None, prompt_check: bool = True, force: bool = False,
+                dtype: str | None = None) -> dict:
+    """A dry run of ``make_sheets`` with the same options: per-file counts, the draw's warnings and
+    everything that would stop it. Writes nothing."""
     if hindi_overlap is None:
         hindi_overlap = bool(config.get("validation.hindi_overlap", False))
-    found = survey(round_no, variants=variants, prompt_check=prompt_check)
+    found = survey(round_no, variants=variants, prompt_check=prompt_check, dtype=dtype)
     plan = ROUNDS[round_no]
     problems = list(found.problems) + [f"no outputs for group {g}" for g in found.empty_groups(plan)]
+    warnings = list(found.warnings)
     if not problems:
         try:
-            build_round(round_no, seed=seed, variants=variants, hindi_overlap=hindi_overlap,
-                        prompt_check=prompt_check)
+            doc, _ = build_round(round_no, seed=seed, variants=variants, hindi_overlap=hindi_overlap,
+                                 prompt_check=prompt_check, dtype=dtype)
+            warnings = doc["warnings"]
+            _plan(round_no, doc, force)
         except ValidateError as e:
             problems.append(str(e))
     return {"round": round_no, "variants": {g: sorted(v) for g, v in found.contributing.items()},
-            "ignored_variants": found.ignored, "files": found.files, "problems": problems}
+            "ignored_variants": found.ignored, "files": found.files, "problems": problems,
+            "warnings": warnings}
 
 
 def score(round_no: int | None = None, **options) -> dict:
