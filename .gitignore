@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Secrets
+.env
+*.token
+kaggle.json
+
+# Data and outputs never go in git. The only committed data are the frozen split id lists.
+data/*
+!data/splits/
+!data/splits/**
+outputs/
+runs/
+wandb/
+*.safetensors
+*.bin
+*.pt
+*.gguf
+checkpoints/
+adapters/
+validation/sheets/
+validation/labels/
+
+# Notebooks' scratch
+.ipynb_checkpoints/
+/kaggle/working/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lift"
+version = "0.1.0"
+description = "Lost in Fine-Tuning: retain, repair or reject a Hindi adapter of Tiny Aya Global"
+readme = "README.md"
+requires-python = ">=3.12"
+# Core stays light so the offline tests run anywhere (no torch needed).
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "pyyaml>=6.0",
+  "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+# Model work: Kaggle T4 or a local CUDA GPU. Versions follow SafeTune 0.1.12's pins.
+gpu = [
+  "torch>=2.7",
+  "transformers>=5.15,<6",
+  "peft>=0.13,<1",
+  "accelerate>=0.34,<2",
+  "trl>=0.12,<1.15",
+  "datasets>=3.0,<6",
+  "safetensors>=0.4",
+  "huggingface_hub>=0.26",
+  "bitsandbytes>=0.43",
+  "safetune==0.1.12",
+]
+# Data build: needs network (HF Hub, Google Translate).
+data = [
+  "curatorkit[hf]==0.1.22",
+  "datasets>=3.0,<6",
+  "huggingface_hub>=0.26",
+  "deep-translator>=1.11",
+  "fasttext>=0.9.3",
+  "pandas>=2.0",
+]
+# Judging, statistics and the AuditKIT record.
+eval = [
+  "auditkit==1.1.3",
+  "scikit-learn>=1.4",
+  "pandas>=2.0",
+  "openai>=1.40",
+  "anthropic>=0.40",
+  "tenacity>=8.2",
+]
+report = [
+  "matplotlib>=3.8",
+  "pandas>=2.0",
+  "gradio>=4.40",
+]
+dev = [
+  "pytest>=8",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+lift = "lift.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "gpu: needs a CUDA GPU and the real Tiny Aya weights",
+  "net: needs network access (HF Hub, translation APIs)",
+  "torch: needs torch and transformers installed (CPU is fine)",
+]
+addopts = "-m 'not gpu and not net'"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
