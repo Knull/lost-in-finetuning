@@ -1,4 +1,4 @@
-"""CAST: conditional activation steering with one global threshold. Implemented in P04.
+"""CAST: conditional activation steering with one global threshold. Implemented in P05.
 
 SafeTune 0.1.12 (all badged Faithful):
 - ``fit_cast_condition(model, harmful_prompts, benign_prompts, tokenizer, candidate_layers=None,
@@ -26,9 +26,9 @@ from typing import Any
 
 def fit(model: Any, tokenizer: Any, harmful: list[str], benign: list[str], *, out_dir: Path) -> Path:
     """Fit the condition and the CAA vectors; save them; return the artifact path."""
-    raise NotImplementedError("P04")
+    raise NotImplementedError("P05")
 
 
 def make(model: Any, artifact_path: Path, strength: float, *, gate: bool = True) -> Any:
     """A CASTModel (gate on) or an always-on wrapper with the same ``generate`` interface."""
-    raise NotImplementedError("P04")
+    raise NotImplementedError("P05")

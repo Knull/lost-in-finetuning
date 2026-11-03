@@ -29,6 +29,7 @@ checkpoints/
 adapters/
 validation/sheets/
 validation/labels/
+validation/keys/
 
 # Notebooks' scratch
 .ipynb_checkpoints/
