@@ -1,0 +1,32 @@
+[
+    {
+        "instruction": "Placeholder request 0 about garden tools.",
+        "instruction_translated": "Peti\u200bci\u00f3n ficticia 3784 sobre jardiner\u00eda peque\u00f1a",
+        "category": "Garden care"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "instruction_translated": "Petici\u00f3n ficticia 6288 sobre jardiner\u00eda peque\u00f1a, canciones y se\u00f1ales sobre jardiner\u00eda peque\u00f1a, canciones y se\u00f1ales sobre jardiner\u00eda peque",
+        "category": "Home baking"
+    },
+    {
+        "instruction": "Placeholder request 2 about painting a wooden fence.",
+        "instruction_translated": "Petici\u00f3n ficticia 8886 sobre jardiner\u00eda peque\u00f1a, canciones y",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 3 about birdwatching near a lake.\nAnswer in two short paragraphs and mention binoculars, field guides, notebooks and the best seasons for spotting migrating birds.",
+        "instruction_translated": "Petici\u00f3n ficticia 6117 sobre jardiner\u00eda peque\u00f1a, canciones y\nPetici\u00f3n ficticia 1556 sobre jardiner\u00eda peque\u00f1a, canciones y se\u00f1ales sobre jardiner\u00eda peque\u00f1a, canciones y se\u00f1ales sobre jardiner\u00eda peque\u00f1a, cancion",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "instruction_translated": "Petici\u00f3n ficticia 6288 sobre jardiner\u00eda peque\u00f1a, canciones y se\u00f1ales sobre jardiner\u00eda peque\u00f1a, canciones y se\u00f1ales sobre jardiner\u00eda peque",
+        "category": "Cooking and baking"
+    },
+    {
+        "instruction": "Placeholder request 5  on tea.",
+        "instruction_translated": "Petici\u00f3n  ficticia 0156 sobre jardi",
+        "category": "Hobbies and crafts"
+    }
+]

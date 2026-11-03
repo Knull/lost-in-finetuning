@@ -1,0 +1,22 @@
+[
+    {
+        "instruction": "Placeholder question 0: name three colours.",
+        "instruction_translated": "Platzhalteranfrage 8265 \u00fcber Gartenarbeit und Kochen \u00fc",
+        "category": null
+    },
+    {
+        "instruction": "Placeholder question 1: write a short poem about autumn leaves falling in a quiet park.",
+        "instruction_translated": "Platzhalteranfrage 4951 \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Koche",
+        "category": null
+    },
+    {
+        "instruction": "Placeholder question 2:\nsummarise a recipe for vegetable soup in a few lines, mentioning carrots, onions, celery, potatoes and fresh herbs, and suggest a bread to serve with it.",
+        "instruction_translated": "Platzhalteranfrage 6451 \u00fcber\nPlatzhalteranfrage 3369 \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und",
+        "category": null
+    },
+    {
+        "instruction": "Placeholder question 3 on maps.",
+        "instruction_translated": "Platzhalteranfrage 8198 \u00fcber Gartenarbe",
+        "category": null
+    }
+]
