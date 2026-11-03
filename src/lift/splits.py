@@ -16,11 +16,18 @@ import numpy as np
 from lift.paths import SPLITS_DIR
 
 
-def assign_splits(pids: Iterable[str], sizes: Mapping[str, int], seed: int) -> dict[str, str]:
+def assign_splits(pids: Iterable[str], sizes: Mapping[str, int], seed: int,
+                  groups: Mapping[str, str] | None = None) -> dict[str, str]:
     """Map each pid to a split name. ``sizes`` must sum to the number of pids exactly.
 
     The order of ``sizes`` matters (first name takes the first slice of the permutation), so pass
     the dict straight from the config.
+
+    ``groups`` maps pids to a group key; pids sharing a key always land in the same split. The
+    build uses it for prompts whose English text is identical (PolyRefuse's harmful test repeats
+    10 prompts), so the same prompt can never sit in both dev and final. Groups are permuted with
+    the seed and each split, in config order, takes the next groups that still fit, so the sizes
+    stay exact. Without ``groups`` the assignment is the plain permutation, unchanged.
     """
     pids = list(pids)
     unique = sorted(set(pids))
@@ -29,13 +36,32 @@ def assign_splits(pids: Iterable[str], sizes: Mapping[str, int], seed: int) -> d
     total = sum(sizes.values())
     if total != len(unique):
         raise ValueError(f"sizes sum to {total}, but there are {len(unique)} pids")
-    order = np.random.default_rng(seed).permutation(len(unique))
     out: dict[str, str] = {}
-    start = 0
+    if groups is None:
+        order = np.random.default_rng(seed).permutation(len(unique))
+        start = 0
+        for name, n in sizes.items():
+            for j in order[start : start + n]:
+                out[unique[int(j)]] = name
+            start += n
+        return out
+
+    members: dict[str, list[str]] = {}
+    for pid in unique:
+        members.setdefault(str(groups.get(pid, pid)), []).append(pid)
+    keys = sorted(members)
+    pending = [keys[int(j)] for j in np.random.default_rng(seed).permutation(len(keys))]
     for name, n in sizes.items():
-        for j in order[start : start + n]:
-            out[unique[int(j)]] = name
-        start += n
+        room, rest = n, []
+        for key in pending:
+            if len(members[key]) <= room:
+                room -= len(members[key])
+                out.update(dict.fromkeys(members[key], name))
+            else:
+                rest.append(key)
+        if room:
+            raise ValueError(f"cannot fill split {name!r} exactly with whole groups ({room} short)")
+        pending = rest
     return out
 
 
