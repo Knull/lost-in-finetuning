@@ -4,10 +4,14 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 3, 2026 (P02 harness): details the plan left open, pinned before any run
 
-16. **Gate 0 pass rules.** The README lists Gate 0's checks but not every threshold.
+Numbered from 27, because P04 uses 16 and P01 uses 17 to 26 (their branches were open at the same
+time).
+
+27. **Gate 0 pass rules.** The README lists Gate 0's checks but not every threshold.
     - **Preamble.** One BOS; the default preamble present and identical across prompts; the
-      tokenizer transformers builds gives the same ids as the checkpoint's own tokenizer.json on 60
-      chat texts; every dev and final prompt fits the context with 256 new tokens.
+      tokenizer transformers builds gives the same ids as the checkpoint's own tokenizer.json on every
+      dev and final prompt of every set (as chat text, compared per language) plus three probes, and
+      any disagreement fails; every dev and final prompt fits the context with 256 new tokens.
     - **Precision** (bf16 on an A100). Every decoder-layer output and every logit is finite on 200
       dev prompts plus their greedy outputs, teacher-forced. The max |activation| per layer is
       reported, and layers above the fp16 maximum (65,504) are flagged.
@@ -20,22 +24,22 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
     - **Merge parity.** A random LoRA (r 16, alpha 32, the training targets) on Global, merged vs
       unmerged, token for token in fp32 on 20 dev prompts. This is the README's merged-adapter parity
       before a real adapter exists; P03 repeats it for every adapter.
-17. **Counting new tokens.** `n_new_tokens`, which the "fewer than 5 new tokens" unclear rule reads,
+28. **Counting new tokens.** `n_new_tokens`, which the "fewer than 5 new tokens" unclear rule reads,
     counts the output's content tokens: special tokens such as `<|START_RESPONSE|>` and the
     end-of-turn token are excluded. `hit_cap` means no end-of-turn token within 256 new tokens. Stop
     tokens are the checkpoint's eos ids plus every Cohere end-of-turn token in the vocabulary:
     Global's generation_config.json is byte-identical to Base's, so its eos id alone may not end a
     chat turn.
-18. **Frontier judge sampling.** Anthropic's Messages API (version 2026-10-21, the current SDK
+29. **Frontier judge sampling.** Anthropic's Messages API (version 2026-10-21, the current SDK
     default) rejects `temperature` on every model, so an Anthropic second judge runs at the
     provider's default sampling. An OpenAI judge runs at temperature 0, and a model that rejects it
     fails the preflight call instead of silently dropping it. Every call is cached by its request
     hash, so reruns reproduce, and the judge id records the sampling setting. Provider refusals are
     recorded as judge failures and reported; no fallback model ever judges in its place.
-19. **Adapter hash.** It covers the weights (sha256 of adapter_model.safetensors) and the
+30. **Adapter hash.** It covers the weights (sha256 of adapter_model.safetensors) and the
     adapter_config.json fields that change what the weights do (rank, alpha, target modules), not
     the weights file alone. Paths and version strings are left out, so a copy hashes the same.
-20. **Second-judge sample.** P04's lists are the canonical path:
+31. **Second-judge sample.** P04's lists are the canonical path:
     `lift judge --judge second --keys validation/keys/second_judge/{variant}_{split}.txt` (with
     the `--sets/--langs` P04 prints). `--sample 0.10` reproduces their random part exactly: for each
     (set, split), ceil(0.10 x the number of pids) prompt ids ranked by sha256(seed:second:set:split:pid),
