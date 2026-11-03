@@ -34,4 +34,25 @@ refusal and benign" is useful to us.
 ## Translation spot checks (separate sheet)
 
 For each machine-translated prompt, mark `ok`, `fixed` (and paste the corrected text) or `bad`
-(it changes the meaning or reads as nonsense). These are short: about 50 per language.
+(it changes the meaning or reads as nonsense). These are short: about 50 per set, three sets per
+language.
+
+Each language gets two sheets:
+- `spotcheck_{lang}.csv` holds the random sample.
+- `spotcheck_{lang}_failures.csv` lists the translations our automatic checks rejected. The note
+  says why: often the language detector misread a short sentence, and the translation is fine.
+  - Use `ok` when the translation is correct.
+  - Use `fixed` and fill `corrected` when you can repair it.
+  - Use `bad` otherwise.
+
+Column rules, so the sheet can be read back:
+- Fill only `verdict`, `corrected` and `note`.
+- Leave `item_id`, `set`, `english` and `translation` exactly as they are.
+- Use `corrected` only with `fixed`.
+- An empty `verdict` means "not checked", which is fine.
+
+Save as **CSV UTF-8**:
+- **Google Sheets:** File > Download > Comma-separated values.
+- **Excel:** File > Save As > "CSV UTF-8 (Comma delimited)".
+
+Other CSV formats re-encode Hindi and Chinese, and the sheet is then rejected.
