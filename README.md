@@ -120,7 +120,8 @@ by". With one adapter, this study cannot establish a general diagnosis-to-repair
 
 ## Running it
 
-See `kaggle/README.md` for GPU runs and `prompts/README.md` for the build order. Locally:
+GPU runs go to a Colab A100 through `lift remote` (`colab/README.md`); Kaggle T4 x2 is the
+backup (`kaggle/README.md`). `prompts/README.md` has the build order. Locally:
 
 ```bash
 pip install -e ".[dev]"      # core + tests, no GPU stack
