@@ -124,8 +124,8 @@ GPU runs go to a Colab A100 through `lift remote` (`colab/README.md`); Kaggle T4
 backup (`kaggle/README.md`). `prompts/README.md` has the build order. Locally:
 
 ```bash
-pip install -e ".[dev]"      # core + tests, no GPU stack
-pytest                       # offline tests
+pip install -e ".[sync,dev]"   # core, lift sync/remote and the tests, no GPU stack
+pytest                         # offline tests (model tests skip without torch)
 lift info
 ```
 
