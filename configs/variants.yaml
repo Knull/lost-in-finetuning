@@ -1,0 +1,13 @@
+# Registry of every model variant that goes through the harness. Each entry is a recipe applied at
+# load time (stock weights + adapter + intervention), not a stored checkpoint.
+# Adapter paths and hashes are filled in as adapters are trained (P03). Names:
+#   stock
+#   adapter-{candidate}-{recipe}-s{seed}            e.g. adapter-aya-std-s1, adapter-aya-stress-s1
+#   wiseft-l{lambda:.2f}-{adapter}                  e.g. wiseft-l0.50-adapter-aya-std-s1
+#   resta-a{alpha:.2f}-{adapter}
+#   cast-m{strength:.1f}-{adapter}
+#   castalways-m{strength:.1f}-{adapter}
+
+variants:
+  - name: stock
+    method: stock

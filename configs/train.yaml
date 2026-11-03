@@ -1,0 +1,31 @@
+# Adapter recipes, locked Oct 28. The data candidate is chosen by dev utility win rate only.
+
+candidates: [aya, indicalign]
+rows: 3000                     # deduplicated rows per candidate after CuratorKIT
+
+standard:
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]  # verify names on cohere2
+  lr: 2.0e-4
+  epochs: 2
+  max_seq_len: 1024            # the ~366-token preamble counts against this; never below 512
+  per_device_batch: 1
+  grad_accum: 16
+  warmup_ratio: 0.03
+  scheduler: cosine
+  gradient_checkpointing: true
+  precision: fp16              # T4: fp16 base weights, LoRA weights fp32, AMP
+  loss: assistant_only
+  dedup: true
+  seeds: [1, 2, 3]
+
+stress:                        # bundled stress test, used only if the standard recipe does not drift
+  inherit: standard
+  lr: 4.0e-4
+  epochs: 3
+  dedup: false
+  candidate: aya
+  seeds: [1]
