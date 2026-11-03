@@ -4,6 +4,18 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 3, 2026 (evening): after the organisers' announcements, still before any run
 
+16. **Frontier judge: Claude Sonnet 5.5** (`claude-sonnet-5-5`), for both the second safety judge
+    and the utility judge. It is paid from the team's Anthropic organisation credits (about
+    $176).
+    - Budget at list prices: about 26M input tokens for the plan (the 10% safety sample, the
+      validation items, and every utility pair in both orders). That is roughly $25-30 through
+      the Message Batches API with the rubric prompt-cached.
+    - If the decision rule makes the frontier judge primary, it judges every final output,
+      about 90M more input tokens, or roughly $90. That still fits.
+    - Opus 5.5 would not fit that case, so it isn't used. Haiku 5.5 is cheaper, but a weaker
+      judge in Hindi, Arabic and Thai would weaken the comparison against Qwen3Guard.
+    - The run-time spend cap is `LIFT_JUDGE_MAX_USD=150`.
+
 11. **Track framing.** We submit under Track 2b, statement 6 ("Repairing safety drift without
     retraining": weight-space repair that keeps task performance). CAST covers statement 8
     (inference-time steering with low over-refusal), and the multilingual angle covers 2a

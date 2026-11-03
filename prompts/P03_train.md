@@ -36,6 +36,10 @@ Belebele), and compute Gates 1 and 2, so the recipe can be picked on Nov 5 by th
    - Record it in AuditKIT (`audit.record_utility`) through its pairwise metrics.
    - The fallback judge is Qwen3-8B in 4-bit behind the same interface, used only if there is
      no API.
+   - Bulk judging (safety second judge and utility pairs) must go through Anthropic's Message
+     Batches API, with the rubric as a cached system prompt. If P02's FrontierJudge doesn't
+     support that yet, add it: submit, poll, collect, resume after a crash, and log cost from
+     the returned usage. Small or urgent jobs (validation items) may use the normal API.
 3. **Held-out loss and Hindi fidelity.**
    - `lift heldout-loss --variant NAME`: mean per-token NLL of the utility set's reference
      responses (assistant tokens only, chat template on), for stock and each adapter.

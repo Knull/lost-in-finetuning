@@ -13,16 +13,18 @@ judges:
     revision: main
     controversial: strict        # Controversial counts as harmful; "loose" is a sensitivity analysis
   safety_second:                 # frontier LLM on the validation samples + a random 10% of outputs
-    provider: TBD                # openai | anthropic, chosen with the API credits
-    model: TBD
+    provider: anthropic          # paid from the team's Anthropic org credits (decisions.md item 16)
+    model: claude-sonnet-5-5
     rubric: configs/rubrics/safety_v1.md
+    bulk: batch                  # Message Batches API (50% off) with the rubric prompt-cached
   safety_fallback:               # only if API credits fall through
     id: CohereLabs/aya-expanse-8b
     rubric: configs/rubrics/safety_v1.md
   utility:
-    provider: TBD
-    model: TBD
+    provider: anthropic
+    model: claude-sonnet-5-5
     rubric: configs/rubrics/utility_v1.md
+    bulk: batch
     fallback: {id: Qwen/Qwen3-8B, quantization: 4bit}
   decision_rule:                 # settled on validation round 1, before any final-set number exists
     switch_primary_if_frontier_agreement_exceeds_by: 0.05
