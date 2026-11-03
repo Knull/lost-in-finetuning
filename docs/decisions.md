@@ -2,6 +2,35 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 3, 2026 (evening): after the organisers' announcements, still before any run
+
+11. **Track framing.** We submit under Track 2b, statement 6 ("Repairing safety drift without
+    retraining": weight-space repair that keeps task performance). CAST covers statement 8
+    (inference-time steering with low over-refusal), and the multilingual angle covers 2a
+    statement 4. Nothing in the design changes.
+12. **Compute moves to Colab A100 in bf16.** Kaggle T4 x2 becomes the backup.
+    - Reasons: the Google AI Pro plan gives 200 Colab compute units a month, roughly 26 to 37
+      A100-hours, and an A100 runs bf16 natively. That removes the fp16 overflow risk on a
+      bf16-trained model, and the jobs finish in a fraction of the wall time.
+    - Training and generation precision change from fp16 to bf16 (`configs/train.yaml`,
+      `configs/project.yaml`).
+    - Gate 0's precision check becomes T4 fp16 vs bf16. It is needed only if a T4 run is
+      reported.
+    - Every reported comparison uses one precision.
+13. **Deadline.** The organisers' email and kickoff slides give Nov 14 23:59 AoE, which is
+    Nov 15 11:59 UK. We keep the Nov 13 target and the Nov 14 23:59 UK hard stop, which leaves
+    12 hours of emergency buffer.
+14. **Publication.** The rules require every artifact to be hosted on HF, including models,
+    adapters, logs and datasets. On Oct 30 the organisers said gated or private research repos
+    are fine. So:
+    - the repaired model, the repair parameters, the aggregate logs and the translated prompt
+      sets are public;
+    - unrepaired adapters are hosted but gated (automatic approval with a terms note);
+    - raw harmful completions are hosted but gated with manual approval.
+15. **Write-up requirements** from the kickoff slides go into P08: the article sections listed
+    there, HF collections for model and data artifacts, and the other required pieces. A Space
+    is "if relevant", so it moves into the cut order.
+
 ## Nov 3, 2026: before any experimental run
 
 Nothing had been run when these were written, so none of them was chosen by looking at results.

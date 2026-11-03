@@ -3,9 +3,9 @@
 Tiny Aya facts that matter here (CohereLabs/tiny-aya-global, gated, CC-BY-NC-4.0):
 - cohere2 / Cohere2ForCausalLM, 36 layers at ``model.model.layers``, d_model 2048, 262k vocab,
   tied embeddings, parallel attention+MLP blocks, 3:1 sliding-window:global attention.
-- Weights are bf16 (~6.7 GB). A T4 has no bf16, so load fp16 there. fp16 may overflow on a
-  bf16-trained model: Gate 0 compares fp16 with fp32 on 200 prompts (finite activations, same
-  refusal labels) before any fp16 number is reported.
+- Weights are bf16 (~6.7 GB). Reported runs use bf16 on a Colab A100/L4. A T4 has no bf16, so it
+  loads fp16, which may overflow on a bf16-trained model: Gate 0 compares T4 fp16 with bf16 on 200
+  prompts (finite activations, same judge labels) before any T4 number is reported.
 - The chat template always injects a default system preamble (~366 tokens, "contextual safety
   mode"). We keep it on for training and evaluation alike. Never strip it except in the explicit
   preamble on/off diagnosis.

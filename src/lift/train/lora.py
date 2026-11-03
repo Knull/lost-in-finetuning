@@ -3,9 +3,12 @@
 Recipe in configs/train.yaml (standard and stress). Notes:
 - TRL SFTTrainer + PEFT LoRA on q,k,v,o,gate,up,down (check the cohere2 module names), with the
   chat template ON so the preamble stays in distribution. Loss on assistant tokens only.
-- T4: fp16 base weights, LoRA weights in fp32, AMP, gradient checkpointing, sequence 1024,
-  batch 1, gradient accumulation 16. The 262k vocabulary makes fp32 logits about 1 GB per
-  1,024-token sequence, so batch 4 will run out of memory.
+- Colab A100 (primary): bf16, gradient checkpointing, sequence 1024; raise the per-device batch
+  and lower gradient accumulation so the effective batch stays 16.
+- T4 (backup): fp16 base weights, LoRA weights in fp32, AMP, batch 1, gradient accumulation 16.
+  The 262k vocabulary makes fp32 logits about 1 GB per 1,024-token sequence, so batch 4 runs out
+  of memory on a T4.
+- All three seeds of a recipe train on the same hardware and precision.
 - Log the number of supervised (assistant) tokens per batch; fail if any batch has zero
   (the preamble crowding out the target).
 - Seeds 1, 2, 3 set torch, numpy, python and data order.

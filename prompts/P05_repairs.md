@@ -77,9 +77,11 @@ sweep, apply the selection rule (overall and per repair family), and hand over t
 
 ## Hand back
 
-End with these Kaggle jobs, with GPU-hour estimates:
+End with these GPU jobs, as `lift remote --gpu A100` commands (Kaggle runner cells as the
+fallback), with GPU-hour estimates:
 
 1. `lift fit-cast` for seed 1.
-2. `lift sweep` (about 4 GPU-hours; say how to split it across two sessions).
+2. `lift sweep` (about 4 T4-hours, so roughly 1 A100-hour; say how to split it if a session
+   drops).
 3. `lift select`.
 4. After the tag: `lift fit-cast` for seeds 2-3.

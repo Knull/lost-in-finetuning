@@ -1,8 +1,9 @@
-# Running on Kaggle
+# Running on Kaggle (backup GPU)
 
-GPU work runs on Kaggle T4 x2 notebooks, or on a local CUDA GPU with the same commands. Claude
-Code writes the code and prints the exact `lift ...` commands; a person pastes them into the
-runner notebook and starts it.
+The primary GPU is a Colab A100 in bf16 (colab/README.md). Kaggle's free T4 x2 sessions are
+overflow. A T4 runs fp16, so its numbers count only if Gate 0's fp16-vs-bf16 check passes, and
+they are never paired with bf16 numbers. Claude Code prints the exact `lift ...` commands; a
+person pastes them into the runner notebook and starts it.
 
 ## One-time setup
 

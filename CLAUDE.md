@@ -5,7 +5,10 @@ two disagree, README.md wins and this file gets fixed.
 
 ## The project
 
-Lexsi AI Safety and Alignment Hackathon, Track 2. Submit Nov 13 2026; hard stop Nov 14 23:59 UK.
+Lexsi AI Safety and Alignment Hackathon, Track 2b, problem statement 6 ("Repairing safety drift
+without retraining"). CAST also covers statement 8 (inference-time steering), and the
+multilingual angle covers 2a statement 4. The official deadline is Nov 14 23:59 AoE (Nov 15 11:59
+UK). We submit on Nov 13 and treat Nov 14 23:59 UK as the hard stop.
 
 We take one useful Hindi LoRA adapter of Tiny Aya Global (CohereLabs/tiny-aya-global, 3.35B) and
 run a retain / repair / reject acceptance test. Does the adapter drift on safety, in Hindi and in
@@ -34,10 +37,12 @@ not over-refusing? Every repair is measured against simply scaling the adapter d
    interventions, and never hand-edit outputs.
 5. **Locked decisions** (README pre-registration, `configs/*.yaml`) change only with a dated
    entry and a reason in `docs/decisions.md`. No new experimental arms.
-6. **Harmful content stays private.** Raw generations, judge logs and unrepaired adapters live
-   only in `outputs/` (gitignored) and the private HF runs repo (`LIFT_RUNS_REPO`). Never put a
-   harmful completion in a commit, PR, issue, printed log or summary. Quote at most ~10 words,
-   then `[redacted]`. Public artifacts carry refusals, labels, ids and aggregates only.
+6. **Harmful content stays out of public view.** During the build, raw generations, judge logs
+   and unrepaired adapters live only in `outputs/` (gitignored) and the private HF runs repo
+   (`LIFT_RUNS_REPO`). At submission the rules require every artifact to be hosted on HF, so
+   adapters and raw logs go up as gated repos (manual approval for raw harmful completions);
+   everything else is public. Never put a harmful completion in a commit, PR, issue, printed log
+   or summary. Quote at most ~10 words, then `[redacted]`.
 7. **Tests run offline on CPU.** `pytest` (which skips the `gpu` and `net` markers by default)
    passes on every commit. Model code is tested on a tiny randomly initialised cohere2 model
    built from a config (fixture `tiny_cohere2` in `tests/conftest.py`, marker `torch`), never by
@@ -66,7 +71,8 @@ src/lift/       config io paths schemas cachekey splits selection manifest cli  
   report/       tables figures cost                                               <- P07
   audit.py      AuditKIT record                                                   <- P02, P03
   sync.py       outputs <-> private HF dataset repo                               <- P02
-kaggle/         bootstrap.sh, runner notebook, how to run on Kaggle
+colab/          how to run jobs on Colab A100 with the Colab CLI (primary GPU)
+kaggle/         bootstrap.sh, runner notebook, how to run on Kaggle (backup GPU)
 prompts/        the implementation prompts and the schedule (prompts/README.md)
 validation/     guidelines.md for the human annotators
 hf/             model card, dataset cards, Space, article drafts                  <- P08
@@ -93,14 +99,24 @@ six languages, so pairing, splitting and clustering all go by pid.
 - **Python and install.** SafeTune needs Python 3.12. Install everything with
   `pip install -e ".[gpu,data,eval,report,dev]"`; the core needs only numpy, scipy, pyyaml and
   pydantic.
-- **Where GPU runs happen.** Kaggle (T4 x2) or a local CUDA GPU. A T4 x2 is two separate 16 GB
-  devices, not one 32 GB pool: put the generator on `cuda:0` and the judge on `cuda:1`. Kaggle
-  bills session hours whether one or both GPUs are busy.
-- **Claude Code sessions** usually have no GPU and may not reach huggingface.co. That's expected.
-  Write the code and offline tests, then end with the exact commands for the human to run on
-  Kaggle (see `kaggle/README.md`).
+- **Where GPU runs happen.**
+  - **Primary: Colab A100, bf16.** The Google AI Pro plan gives 200 compute units a month.
+    Jobs are launched with the Colab CLI (`google-colab-cli`, command `colab`) from a local
+    Claude Code session (`colab/README.md`), or from a notebook if the CLI misbehaves.
+  - **Backup: Kaggle T4 x2, fp16** (`kaggle/README.md`). A T4 x2 is two separate 16 GB devices:
+    the generator goes on `cuda:0` and the judge on `cuda:1`. On a single GPU, both share it.
+- **One precision for every reported number.** Every reported generation uses bf16. A T4 fp16
+  run can count only if Gate 0's fp16-vs-bf16 check passes. Paired comparisons never mix
+  precisions; the cache key includes the dtype and the stats refuse mixed pairs.
+- **Claude Code sessions** usually have no GPU and may not reach huggingface.co. That's
+  expected. Write the code and offline tests, then either launch the job yourself with the Colab
+  CLI (when it is installed and logged in) or end with the exact commands for the human.
+- **Sessions are wiped.** Colab and Kaggle sessions lose their disk when they end (Kaggle after
+  12 h). Every job pulls from and pushes to the runs repo (`lift sync`), and resumes by cache
+  key.
 - **Secrets.** `HF_TOKEN` (with accepted access to tiny-aya-global and tiny-aya-base),
-  `GITHUB_TOKEN` (Kaggle clones this private repo), the judge API key and `LIFT_RUNS_REPO`.
+  `GITHUB_TOKEN` (remote runtimes clone this private repo), the judge API key and
+  `LIFT_RUNS_REPO`.
 
 ## Tiny Aya
 
@@ -109,8 +125,8 @@ six languages, so pairing, splitting and clustering all go by pid.
   run attention and MLP in parallel, and attention alternates sliding-window and global layers
   3:1.
 - **Weights and precision.** Weights are bf16 (~6.7 GB, gated, CC-BY-NC-4.0 plus Cohere's
-  acceptable-use policy). T4s have no bf16, so load fp16 there. Gate 0 checks fp16 against fp32
-  on 200 prompts before any fp16 number counts.
+  acceptable-use policy). A100 and L4 run bf16 natively. T4s have no bf16, so they load fp16,
+  and Gate 0 checks fp16 against bf16 on 200 prompts before any T4 number counts.
 - **Chat template.** The template always injects a ~366-token default "contextual safety mode"
   preamble. It stays on for training and evaluation. The only exception is the preamble on/off
   diagnosis.

@@ -71,10 +71,11 @@ Belebele), and compute Gates 1 and 2, so the recipe can be picked on Nov 5 by th
 
 ## Hand back
 
-End with these Kaggle jobs, as runner-cell command lists, with GPU-hour estimates:
+End with these GPU jobs, as `lift remote --gpu A100` commands (with the Kaggle runner-cell
+version as the fallback) and GPU-hour estimates:
 
 1. Pilots: `adapter-aya-std-s1`, `adapter-indicalign-std-s1` and `adapter-aya-stress-s1`, each
-   with its parity check. They fit in one Save & Run All session.
+   with its parity check. All three seeds of a recipe use the same GPU type and precision.
 2. Pilot dev evals:
    - `lift run-dev` for each pilot;
    - `lift utility --split dev` for each;

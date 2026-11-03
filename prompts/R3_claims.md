@@ -23,7 +23,14 @@ leaks harmful content. Fix discrepancies in the generators (P08), not in the tex
   - Every change appears in docs/decisions.md with its date.
 - **Nothing harmful is public.**
   - No raw harmful completion appears in any public file or repo, or in the Space.
-  - The adapters and the runs repo are still private.
+  - The raw completions are gated with manual approval, the adapters are gated, and the runs
+    repo is still private.
+- **Organisers' requirements.**
+  - Every artifact is hosted on HF and listed in the two collections.
+  - The repo is public, and `lift publish preflight` passes on it.
+  - There are before-and-after metrics, more than one of them.
+  - The article has every section in prompts/P08_publish.md, including "what we would do with
+    more credits" and the teammate tags.
 - **Licences.** The licence notices and the OR-Bench attribution are present.
 - **Submission checklist.** Walk the checklist in the build plan:
   - the toolkit chain is described;

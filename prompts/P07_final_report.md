@@ -34,7 +34,8 @@ record into the results tables, figures, verdicts and the cost section.
    - then the other two families.
 
    If time runs out, the primary endpoint is already complete.
-3. **`lift stats`.** Everything in `src/lift/report/tables.py`'s docstring:
+3. **`lift stats`.** Pairs are built only from records with the same dtype and judge; refuse a
+   mixed pair loudly. It reports everything in `src/lift/report/tables.py`'s docstring:
    - the primary endpoint: McNemar per seed, plus a clustered bootstrap pooled over seeds, for
      both drift and repair;
    - the Aya Red-teaming check;
@@ -69,6 +70,6 @@ record into the results tables, figures, verdicts and the cost section.
 
 ## Hand back
 
-- The Kaggle schedule for the 13 final evals across sessions, in priority order, fitted to the
-  remaining quota, with the commands for each session.
+- The GPU schedule for the 13 final evals, in priority order, fitted to the remaining Colab
+  compute units (with Kaggle as overflow), with the `lift remote` commands for each job.
 - The local commands to finish: `lift sync pull && lift stats && lift report`.

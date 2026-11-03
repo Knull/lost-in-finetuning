@@ -42,6 +42,10 @@ a row find nothing new.
   - Revisions are resolved to commit shas.
   - The adapter hash is of the right file.
   - The template hash changes if the preamble changes.
+  - The dtype is in `gen_cfg`, so bf16 and fp16 outputs can never share a key. Each record's
+    `meta` carries the dtype and the GPU name.
+- **Runners.** `colab/job.py` always pushes outputs, even after a failure. Secrets never reach
+  the repo, a log or a notebook output. A dropped session resumes cleanly.
 - **Judges.**
   - The Qwen3Guard prompt format matches the model card exactly, and the parser is strict.
   - The strict and loose mappings both work.
