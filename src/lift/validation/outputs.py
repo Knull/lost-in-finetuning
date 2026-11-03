@@ -4,12 +4,13 @@ Codes against lift.schemas and the CLAUDE.md file layout, not against the harnes
 
 - A generation is *current* when its ``prompt_sha`` equals ``sha256_text`` of the prompt text now
   in data/prompts. A translation fixed after a run (the native spot checks) leaves a stale record
-  behind, and the harness writes a new one under a new key when the run resumes. A pid whose only
-  records are stale is left out of the pool and counted. If no record of a file matches its
-  prompts at all, the hashing convention is wrong, which is an error.
+  behind until the harness regenerates the file, which it does for the whole file: the other
+  prompts come back under the same keys, possibly with new text. A pid whose only records are stale
+  is left out of the pool and counted. If no record of a file matches its prompts at all, the
+  hashing convention is wrong, which is an error.
 - Records in a precision other than ``generation.dtype`` (meta "dtype", e.g. a T4 fp16 check) are
-  left out and counted, since no reported number uses them. Two current records for one pid
-  (two runs mixed in one file) are an error.
+  left out and counted, unless that precision is asked for (a T4 run Gate 0 has cleared). Two
+  current records for one pid (two runs mixed in one file) are an error.
 - A pid of the split with no record at all means the run is unfinished. The harness batches by
   length, so a partial run holds only the shortest prompts, and sampling from it would bias the
   sheet. Callers refuse such files.
@@ -48,6 +49,7 @@ _NAME_SCHEME = (   # configs/variants.yaml documents these names
     (re.compile(rf"^cast-m[0-9.]+-{_ADAPTER}$"), "cast"),
     (re.compile(rf"^castalways-m[0-9.]+-{_ADAPTER}$"), "cast_always"),
 )
+_NL, _CR = chr(10), chr(13)
 _DTYPES = {"bfloat16": "bf16", "float16": "fp16", "half": "fp16", "float32": "fp32", "float": "fp32"}
 
 
@@ -91,20 +93,31 @@ def variants_with_outputs() -> list[str]:
 
 
 def read_records(path: Path) -> Iterator[tuple[int, dict]]:
-    """(line number, row) for each record of a JSONL file. A last line cut short by a killed run is
-    skipped, as lift.io.existing_keys does (its pid then counts as missing); any other unreadable
-    line is a ValidateError naming the file and line, never a traceback."""
+    """(line number, row) for each record of a JSONL file.
+
+    Lines end at a newline only, as lift.io reads them (stable_json leaves U+2028 and friends
+    unescaped inside strings, so str.splitlines would cut records apart). A last line without its
+    newline that does not parse was cut short by a killed append and is skipped, as
+    lift.io.existing_keys and the harness's repair do (its pid then counts as missing). Any other
+    unreadable line is a ValidateError naming the file and line, never a traceback.
+    """
     try:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        text = Path(path).read_text(encoding="utf-8")
     except UnicodeDecodeError:
         raise ValidateError(f"{path}: not a UTF-8 JSONL file") from None
-    numbered = [(i, line) for i, line in enumerate(lines, 1) if line.strip()]
-    for k, (lineno, line) in enumerate(numbered):
+    complete = text.endswith(_NL)
+    lines = text.split(_NL)
+    if complete:
+        lines.pop()                                      # the empty piece after the final newline
+    for lineno, line in enumerate(lines, 1):
+        line = line.removesuffix(_CR)
+        if not line.strip():
+            continue
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
-            if k == len(numbered) - 1 and not line.endswith("}"):
-                return                                   # truncated by a killed append
+            if lineno == len(lines) and not complete:
+                return                                   # cut short by a killed append
             raise ValidateError(f"{path}:{lineno}: not a JSON record") from None
         if not isinstance(row, dict):
             raise ValidateError(f"{path}:{lineno}: not a JSON object")
@@ -187,8 +200,8 @@ class Pool:
     def problem(self) -> str | None:
         """Why the pool cannot be sampled from, or None."""
         if not self.records and self.other_dtype:
-            return (f"{self.name}: its {self.other_dtype} records are in another dtype than "
-                    f"generation.dtype ({config.get('generation.dtype')}); no reported number uses them")
+            return (f"{self.name}: its {self.other_dtype} records are in another dtype than the one "
+                    "asked for (generation.dtype, or --dtype once Gate 0 has cleared a T4 run)")
         if not self.records and self.stale_records:
             return (f"{self.name}: none of its {self.stale_records} records matches the current prompt "
                     f"text. {STALE_HINT}")
@@ -213,19 +226,20 @@ def generations_path(variant: str, set_name: str, lang: str, split: str) -> Path
 
 
 def load_pool(variant: str, set_name: str, lang: str, split: str, prompts: Prompts, *,
-              prompt_check: bool = True) -> Pool | None:
+              prompt_check: bool = True, dtype: str | None = None) -> Pool | None:
     """None when the variant has no generations file for this set, language and split.
 
     ``prompt_check=False`` is the escape hatch for a harness that hashes something other than the
     prompt text: every record then counts as current, and stale outputs can no longer be told
-    apart (callers record and announce it).
+    apart (callers record and announce it). ``dtype`` is the precision the outputs must have
+    (default ``generation.dtype``; fp16 only once Gate 0 has cleared a T4 run).
     """
     path = generations_path(variant, set_name, lang, split)
     if not path.is_file():
         return None
     texts = prompts.get(set_name, lang)
     expected = {pid for pid, p in texts.items() if p.split == split and included(p)}
-    want_dtype = str(config.get("generation.dtype"))
+    want_dtype = dtype or str(config.get("generation.dtype"))
     by_key: dict[str, GenerationRecord] = {}
     duplicates = other_dtype = 0
     for i, row in read_records(path):
