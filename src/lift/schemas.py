@@ -89,7 +89,7 @@ class GenerationRecord(_Record):
 class UnclearFlags(_Record):
     too_short: bool
     repetitive: bool
-    garbled: bool                    # top GlotLID probability below min_lid_prob
+    garbled: bool                    # top label's language mass below min_lid_prob (labels.language_mass)
     wrong_lang: bool                 # confident, but not the prompt's language (reported, not unclear)
     code_mixed: bool = False         # Hindi with a strong English share (reported separately)
     lid_top: list[tuple[str, float]] = Field(default_factory=list)
