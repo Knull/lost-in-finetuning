@@ -19,16 +19,32 @@ Rules, and why:
   judge output"), never a guessed label. A provider refusal is a failure too ("refused: <reason>"),
   and no fallback model ever answers in the judge's place.
 - Only deterministic outcomes become item failures: a refusal, a reply unparseable after the
-  reminder, an item-level API error (a 4xx, or a 5xx the server says not to retry). Transient API
-  errors (rate limits, 5xx, Anthropic's 529, timeouts, dropped connections) back off with jitter
-  (base 2 s, cap 60 s, 6 attempts); an item that still fails is left unjudged, because a recorded
-  failure would never be retried (a resumed run skips judged keys). The other items finish, then
-  FrontierUnavailable stops the run with the finished results in ``partial``; a rerun resumes from
-  the cache. ``breaker`` (5) items in a row running out of retries stop the run at once.
-- Configuration errors (key, access, model, credit, or anything failing the preflight) raise
-  FrontierConfigError and stop the run. The preflight sends one benign pair with the exact
-  production settings before the first real call, so a rejected parameter costs one tiny call
-  instead of a run of failures.
+  reminder, an item-level API error (a 4xx, or a 5xx the server says not to retry), which is
+  recorded with the API's message ("BadRequestError 400: <message>") once the call finishes.
+  Transient API errors (rate limits, 5xx, Anthropic's 529, timeouts, dropped connections) back off
+  with jitter (base 2 s, cap 60 s, 6 attempts); an item that still fails is left unjudged, because
+  a recorded failure would never be retried (a resumed run skips judged keys). The other items
+  finish, then FrontierUnavailable stops the run with the finished results in ``partial``; a rerun
+  resumes from the cache. ``breaker`` (5) items in a row that run out of retries stop it at once.
+- An item-level API error is recorded only once the API has answered a request sent after the error
+  came in. An error every request gets (an account error not known as one, a new API rule) says
+  nothing about the items, and no count of errors in a row tells it from per-item errors: a cache hit
+  is no reply, so a rerun meets a stopped cell's per-item errors back to back, and a reply to a
+  request sent earlier says nothing about a later error. So the benign preflight pair is sent again
+  (a probe: uncached, counted toward the spend cap) when a call would end without that answer, and
+  as soon as ``breaker`` items fail with one error without it. A reply proves the API takes
+  requests: the errors are the items' own. The same error on the probe stops the run with
+  FrontierUnavailable and leaves those items unjudged, so a rerun asks again; any other error on it
+  is handled as on the preflight.
+- Configuration and account errors raise FrontierConfigError, stop the run and leave the remaining
+  items unjudged: key, access, model, billing (402, billing_error, insufficient_quota), a spend limit
+  set in the Console (Anthropic's 400 "You have reached your specified [workspace] API usage
+  limits"), exhausted credits ("Your credit balance is too low"), or anything failing the
+  preflight. The preflight sends one benign pair with the exact production settings before the
+  first real call, so a rejected parameter costs one tiny call instead of a run of failures.
+- A judges entry may carry ``bulk: batch | sync | null``. This judge always calls the Messages API
+  synchronously, so bulk changes nothing, the judge id included; with batch it says once (INFO)
+  that the run pays synchronous prices, because the Message Batches API path is P03's.
 - Every completed call is appended to outputs/judge_cache/frontier/{provider}__{model}.jsonl, keyed
   by everything that can change the reply, so a rerun is free and a stopped run resumes for free.
   A last line cut by a kill is repaired before the first append (completed if it parses, else
@@ -54,6 +70,7 @@ import random
 import re
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from contextlib import contextmanager
@@ -83,6 +100,8 @@ TIMEOUT_S = 120.0
 CONNECT_TIMEOUT_S = 10.0
 OVERHEAD_TOKENS_PER_TURN = 16
 OPENAI_SYSTEM_ROLE = "developer"
+API_MESSAGE_CHARS = 200
+BULK_MODES = ("batch", "sync")
 
 # Anthropic list prices in USD per million tokens (input, output), from the claude-api reference
 # cached 2026-10-06 (the SDK carries no prices). Haiku 5.5's rate holds for prompts up to 100K
@@ -115,10 +134,15 @@ FATAL_STATUS = frozenset({401, 402, 403, 404})
 FATAL_CODES = frozenset({"insufficient_quota", "billing_error"})
 RETRY_STATUS = frozenset({408, 409, 429})
 _EXPLAINED_STATUS = frozenset({400, 402, 404, 409, 413, 422, 429})
+# Anthropic's messages when the account cannot pay for more requests: a spend limit set in the Console
+# was reached (a 400; docs api/rate-limits) or the credits are exhausted (docs about-claude/
+# api-credits-for-subscribers, which gives no status).
+_ACCOUNT_LIMIT = re.compile(r"You have reached your specified (workspace )?API usage limits"
+                            r"|Your credit balance is too low", re.IGNORECASE)
 
 _SETTINGS = ("max_tokens", "temperature", "effort", "thinking", "workers", "price_usd_per_mtok", "cache_path",
              "breaker")
-_ENTRY_KEYS = frozenset({"provider", "model", "rubric", "fallback"})
+_ENTRY_KEYS = frozenset({"provider", "model", "rubric", "fallback", "bulk"})
 _SNAPSHOT_SUFFIX = re.compile(r"-(\d{4}-\d{2}-\d{2}|\d{8})")
 _EFFORTS = {
     "openai": ("none", "minimal", "low", "medium", "high", "xhigh", "max"),
@@ -130,7 +154,8 @@ _CACHE_FIELDS = ("key", "text", "stop_reason", "refused", "refusal_reason", "inp
 
 # ----------------------------------------------------------------------------------------- errors --
 class FrontierConfigError(RuntimeError):
-    """The judge cannot work as configured (key, access, model, credit, spend cap, preflight).
+    """The judge cannot work as configured (key, access, model, billing, a spend limit on the account,
+    LIFT_JUDGE_MAX_USD, preflight).
 
     Stops the run. ``partial`` holds the results finished before the stop (None where an item was
     not judged); finished calls are also in the disk cache."""
@@ -156,11 +181,18 @@ class SpendCapExceeded(RuntimeError):
 
 class FrontierUnavailable(RuntimeError):
     """A transient API error (rate limit, 5xx, 529, timeout, dropped connection) outlived its
-    retries. Stops the run instead of recording a failure that a resumed run would never retry;
+    retries, or the benign preflight pair, sent again after item-level API errors, failed with the
+    same error. Stops the run instead of recording failures that a resumed run would never retry;
     finished calls are cached, so a rerun resumes for free. ``partial`` as for FrontierConfigError,
     with None for every item left unjudged."""
 
     partial: list[dict | None] | None = None
+
+
+def _one_line(text: Any) -> str:
+    """``text`` on one line, cut to API_MESSAGE_CHARS characters."""
+    line = " ".join(str(text or "").split())
+    return line if len(line) <= API_MESSAGE_CHARS else line[:API_MESSAGE_CHARS - 3] + "..."
 
 
 class ProviderError(Exception):
@@ -169,7 +201,9 @@ class ProviderError(Exception):
     ``status`` is the HTTP status (None for a transport failure), ``code`` the API's error code or
     type (e.g. "insufficient_quota", "billing_error"), ``transport`` marks timeouts and connection
     errors, ``should_retry`` carries the server's x-should-retry header and ``retry_after`` its delay
-    in seconds. ``message`` is the SDK's message, used only in configuration errors."""
+    in seconds. ``message`` is the API's own error message on one line, at most API_MESSAGE_CHARS
+    characters, never the request: it goes next to the label of a recorded item failure and into
+    stop messages, and it tells Anthropic's account-limit 400s (see ``kind``) from other 400s."""
 
     def __init__(self, name: str, *, status: int | None = None, code: str | None = None,
                  transport: bool = False, should_retry: bool | None = None,
@@ -180,7 +214,7 @@ class ProviderError(Exception):
         self.transport = transport
         self.should_retry = should_retry
         self.retry_after = retry_after
-        self.message = message
+        self.message = _one_line(message)
         super().__init__(self.label)
 
     @property
@@ -192,11 +226,15 @@ class ProviderError(Exception):
     def kind(self) -> str:
         """"fatal" (stop the run), "retryable" (back off and try again) or "item" (fail this item).
 
-        Fatal: 401, 402, 403, 404, insufficient_quota, billing_error. Retryable, like the SDKs' own
-        policy: timeouts, connection errors, 408, 409, 429 and every status >= 500 (Anthropic's 529
-        is not an InternalServerError subclass, so it is matched by status), unless the server's
-        x-should-retry header says otherwise."""
-        if self.status in FATAL_STATUS or self.code in FATAL_CODES:
+        Fatal: 401, 402, 403, 404, insufficient_quota, billing_error, and a 4xx saying the account
+        cannot pay for more requests (Anthropic: "You have reached your specified [workspace] API
+        usage limits ...", "Your credit balance is too low ..."), because no request succeeds until a
+        person acts. Retryable, like the SDKs' own policy: timeouts, connection errors, 408, 409, 429
+        and every status >= 500 (Anthropic's 529 is not an InternalServerError subclass, so it is
+        matched by status), unless the server's x-should-retry header says otherwise."""
+        if (self.status in FATAL_STATUS or self.code in FATAL_CODES
+                or (self.status is not None and 400 <= self.status < 500
+                    and _ACCOUNT_LIMIT.match(self.message))):
             return "fatal"
         if self.transport:
             return "retryable"
@@ -208,7 +246,13 @@ class ProviderError(Exception):
 
 
 class _ItemError(Exception):
-    """A deterministic item-level API failure (a 4xx, a 5xx not to retry): recorded, not raised."""
+    """A deterministic item-level API failure (a 4xx, a 5xx not to retry). safety() records it as the
+    item's failure, "<label>: <API message>", once the whole call finishes. ``mark`` is the number of
+    requests sent when it came in: a reply to a request numbered above it tells it is the item's own."""
+
+    def __init__(self, err: ProviderError, mark: int = 0) -> None:
+        super().__init__(f"{err.label}: {err.message}" if err.message else err.label)
+        self.label, self.detail, self.mark = err.label, _describe(err, 1), mark
 
 
 class _Unavailable(Exception):
@@ -273,11 +317,23 @@ def _retry_after(headers: Mapping[str, str]) -> float | None:
     return None
 
 
+def _api_message(exc: Exception) -> str:
+    """The API's own error message: the response body's error.message, else the SDK's message. The
+    anthropic SDK (2.4.0) keeps the whole body and puts its repr in its message; the openai SDK
+    (3.43.0) keeps body["error"] as the body. Both build these from the response, never the request."""
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, Mapping) else None
+    message = error.get("message") if isinstance(error, Mapping) else None
+    if isinstance(message, str) and message.strip():
+        return message
+    return str(getattr(exc, "message", "") or "")
+
+
 def _sdk_error(exc: Exception, sdk: Any) -> ProviderError:
     """Translate an openai/anthropic APIError. Both SDKs share the shape: APIConnectionError (incl.
     APITimeoutError) for transport failures, APIStatusError with status_code and response headers."""
     name = type(exc).__name__
-    message = str(getattr(exc, "message", "") or "")[:300]
+    message = _api_message(exc)
     if isinstance(exc, sdk.APIConnectionError):
         return ProviderError(name, transport=True, message=message)
     headers = getattr(getattr(exc, "response", None), "headers", None) or {}
@@ -412,13 +468,13 @@ class FakeProvider:
 
     ``script`` is a list consumed one item per call, or a callable ``(call) -> item`` that gets the
     recorded call. An item is a reply text, a dict (sent as its JSON), a ProviderResult (e.g.
-    ``FakeProvider.refusal()``) or an exception to raise (e.g. ``FakeProvider.error(429)``). Preflight
-    calls (the judge's fixed benign pair, reminder turn included) are answered with ``preflight`` and
-    never consume the script; pass ``preflight=None`` to script them too. Every call is recorded in
-    ``calls`` (with a "preflight" flag). ``usage`` fixes the (input, output) token counts; by default
-    they are UTF-8 bytes / 4. Replies echo ``model_echo``, by default the requested model (also a
-    scripted ProviderResult whose model_echo is ""). Passing a FakeProvider as ``client`` makes
-    LIFT_JUDGE_MAX_USD optional.
+    ``FakeProvider.refusal()``) or an exception to raise (e.g. ``FakeProvider.error(429)``). Calls of
+    the judge's fixed benign pair (the preflight, its reminder turn, the probes) are answered with
+    ``preflight`` and never consume the script; pass ``preflight=None`` to script them too. Every call
+    is recorded in ``calls`` (with a "preflight" flag). ``usage`` fixes the (input, output) token
+    counts; by default they are UTF-8 bytes / 4. Replies echo ``model_echo``, by default the requested
+    model (also a scripted ProviderResult whose model_echo is ""). Passing a FakeProvider as
+    ``client`` makes LIFT_JUDGE_MAX_USD optional.
     """
 
     name = "fake"
@@ -490,8 +546,11 @@ class FakeProvider:
 
     @staticmethod
     def error(status: int | None = None, *, code: str | None = None, name: str | None = None,
-              retry_after: float | None = None, should_retry: bool | None = None) -> ProviderError:
-        """An API failure as the real providers report it; ``status=None`` is a timeout."""
+              retry_after: float | None = None, should_retry: bool | None = None,
+              message: str = "") -> ProviderError:
+        """An API failure as the real providers report it; ``status=None`` is a timeout. ``message`` is
+        the API's own message (an Anthropic spend-limit 400 starts "You have reached your specified
+        API usage limits")."""
         if name is None:
             if status is None:
                 name = "APITimeoutError"
@@ -500,7 +559,7 @@ class FakeProvider:
             else:
                 name = _FAKE_STATUS_NAMES.get(status, "APIStatusError")
         return ProviderError(name, status=status, code=code, transport=status is None,
-                             should_retry=should_retry, retry_after=retry_after)
+                             should_retry=should_retry, retry_after=retry_after, message=message)
 
 
 # ----------------------------------------------------------------------------------------- rubric --
@@ -629,6 +688,7 @@ def _check_choice(provider: str, model: str, entry: str | None) -> None:
 
 
 def _entry_settings(entry: str | None) -> dict[str, Any]:
+    """The settings in judges.<entry>, plus its ``bulk`` mode (batch, sync or null; P04 sets batch)."""
     if entry is None:
         return {}
     node = config.get(f"judges.{entry}")
@@ -636,8 +696,12 @@ def _entry_settings(entry: str | None) -> dict[str, Any]:
         raise ValueError(f"judges.{entry} in configs/project.yaml must be a mapping")
     unknown = sorted(set(node) - _ENTRY_KEYS - set(_SETTINGS))
     if unknown:
-        raise ValueError(f"judges.{entry} has unknown keys {unknown}; known: {sorted(_SETTINGS)}")
-    return {k: v for k, v in node.items() if k in _SETTINGS}
+        raise ValueError(f"judges.{entry} has unknown keys {unknown}; known: "
+                         f"{sorted(_ENTRY_KEYS | set(_SETTINGS))}")
+    bulk = node.get("bulk")
+    if bulk is not None and (not isinstance(bulk, str) or bulk not in BULK_MODES):
+        raise ValueError(f"judges.{entry}.bulk must be one of {BULK_MODES} or null, got {bulk!r}")
+    return {k: v for k, v in node.items() if k in _SETTINGS or k == "bulk"}
 
 
 def _settings(provider: str, entry: str | None, overrides: Mapping[str, Any]) -> dict[str, Any]:
@@ -654,7 +718,7 @@ def _settings(provider: str, entry: str | None, overrides: Mapping[str, Any]) ->
         )
     s: dict[str, Any] = {
         "max_tokens": 1024, "workers": 4, "thinking": None, "price_usd_per_mtok": None, "cache_path": None,
-        "breaker": BREAKER_ITEMS,
+        "breaker": BREAKER_ITEMS, "bulk": None,
         "temperature": 0.0 if provider == "openai" else None,
         "effort": None if provider == "openai" else "low",
         **given,
@@ -867,10 +931,13 @@ class FrontierJudge:
     default "low"; OpenAI reasoning_effort only when set), thinking (Anthropic, passed through),
     workers (4), price_usd_per_mtok {input, output} (built in for Anthropic models, required for
     OpenAI), cache_path and breaker (5: items in a row that may run out of retries before the run
-    stops at once). ``config_entry=None`` reads no config. ``stats`` counts this instance's calls,
-    cache hits, duplicates (items answered by an identical item of the same call), backoff retries,
-    reminder turns, failures, refusals, unavailable items, tokens and USD spent (actual usage; a
-    call lost in transport counts its reservation, as it may have been billed).
+    stops at once, or fail with one item-level API error before the benign pair is sent again to see
+    whether the API takes requests). The entry may also carry ``bulk`` (batch | sync | null), which
+    changes nothing here (see the module docstring); it is kept in ``bulk``. ``config_entry=None``
+    reads no config. ``stats`` counts this instance's calls (preflight and probes included), cache
+    hits, duplicates (items answered by an identical item of the same call), backoff retries,
+    reminder turns, failures, refusals, unavailable items, probes, tokens and USD spent (actual usage;
+    a call lost in transport counts its reservation, as it may have been billed).
     """
 
     def __init__(self, provider: str, model: str, rubric_path: str | Path, *, client: Any = None,
@@ -886,6 +953,7 @@ class FrontierJudge:
         self.thinking: dict[str, Any] | None = settings["thinking"]
         self.workers: int = settings["workers"]
         self.breaker: int = settings["breaker"]
+        self.bulk: str | None = settings["bulk"]
         self.price = _price(provider, model, settings["price_usd_per_mtok"])
         self.cap = _spend_cap(required=not isinstance(client, FakeProvider))
         if hasattr(client, "complete"):
@@ -900,17 +968,26 @@ class FrontierJudge:
         self._tag = _settings_tag(self.temperature, self.effort, self.thinking, self.max_tokens)
         self._lock = threading.Lock()
         self._preflight_lock = threading.Lock()
+        self._probe_lock = threading.Lock()
         self._preflight_ok = False
         self._halt: Exception | None = None
         self._reserved = 0.0
         self._unavailable_in_a_row = 0
+        self._sent = 0                                   # requests sent; each is numbered in send order
+        self._answered = 0                               # the highest request number that got a reply
+        self._unanswered: list[tuple[int, str]] = []     # item-level API errors no reply has answered for:
+                                                         # (requests sent when it came in, label)
         self._key_locks: dict[str, list[Any]] = {}       # key -> [lock, number of holders and waiters]
         self._stats: dict[str, Any] = dict.fromkeys(
             ("calls", "cache_hits", "duplicates", "retries", "reminders", "failures", "refusals",
-             "unavailable", "input_tokens", "output_tokens"), 0)
+             "unavailable", "probes", "input_tokens", "output_tokens"), 0)
         self._stats["usd"] = 0.0
         log.info("frontier %s: %d cached calls in %s, cap %s USD (this process)", self.judge_id,
                  len(self._cache), self.cache_path, f"{self.cap:g}")
+        if self.bulk == "batch":
+            log.info("frontier %s: judges.%s.bulk is 'batch', but this judge calls the Messages API one "
+                     "request at a time, so this run pays synchronous prices; the Message Batches API path "
+                     "is P03's (prompts/P03_train.md on the P04 branch)", self.judge_id, config_entry)
 
     @classmethod
     def from_config(cls, config_entry: str = "safety_second", *, client: Any = None,
@@ -951,7 +1028,9 @@ class FrontierJudge:
         item-level API error) has label None and the cause in ``error``; it is returned, never
         dropped. Identical pairs are judged once and share the judgement. FrontierConfigError,
         SpendCapExceeded and FrontierUnavailable stop the run and carry the finished results in
-        ``partial``."""
+        ``partial``. An item-level API error is recorded only when the whole call finishes, after the
+        API answered a request sent after it came in (a probe, if no item's request did): a stopped
+        call leaves its item unjudged (None in ``partial``), so a rerun asks the API again."""
         if not len(prompts) == len(responses) == len(prompt_langs):
             raise ValueError(f"prompts, responses and prompt_langs differ in length: {len(prompts)}, "
                              f"{len(responses)}, {len(prompt_langs)}")
@@ -963,12 +1042,15 @@ class FrontierJudge:
             first.setdefault(user, i)
         results: list[dict | None] = [None] * len(users)
         unavailable: dict[int, str] = {}
+        rejected: dict[int, _ItemError] = {}
 
         def work(i: int) -> None:
             try:
                 results[i] = self._judge_item(users[i])
             except _Unavailable as err:
                 unavailable[i] = str(err)
+            except _ItemError as err:
+                rejected[i] = err
 
         unique = list(first.values())
         workers = min(self.workers, len(unique))
@@ -977,8 +1059,17 @@ class FrontierJudge:
             wait(futures, return_when=FIRST_EXCEPTION)
             for future in futures:
                 future.cancel()
-        self._share(users, first, results)
         errors = [e for f in futures if not f.cancelled() and (e := f.exception()) is not None]
+        if rejected and not errors and not unavailable:
+            try:
+                self._probe(max(err.mark for err in rejected.values()))
+            except _STOPS as stop:
+                errors.append(stop)
+        if not errors and not unavailable:
+            for i, err in rejected.items():
+                results[i] = _failure(str(err), None)
+            self._count(failures=len(rejected))
+        self._share(users, first, results)
         if errors:
             raise _stop_error(errors, results)
         if unavailable:
@@ -999,7 +1090,9 @@ class FrontierJudge:
     # -------------------------------------------------------------------------------- internals --
     def _judge_item(self, user: str) -> dict:
         """One distinct item. _Unavailable when a transient error outlived the retries (the item is
-        left unjudged); FrontierUnavailable when that makes ``breaker`` such items in a row."""
+        left unjudged), _ItemError for an item-level API error (safety() records it if the call
+        finishes); FrontierUnavailable when ``breaker`` items in a row ran out of retries, or when a
+        probe got the item-level error too."""
         try:
             outcome, _ = self._judge_one(user)
         except _Unavailable as err:
@@ -1051,28 +1144,26 @@ class FrontierJudge:
                     self.judge_id, n, len(results))
         return stop
 
-    def _judge_one(self, user: str, *, preflight: bool = False) -> tuple[dict, ProviderResult | None]:
-        """Judge one rendered user turn: strict parse, then one reminder turn on a parse failure."""
-        try:
-            first = self._call(user, preflight=preflight)
-            if first.refused:
-                return _failure(_refusal_error(first), first), first
-            parsed = parse_safety_reply(first.text)
-            if parsed is not None:
-                return _success(parsed, first), first
-            self._count(reminders=1)
-            history: tuple[dict[str, str], ...] = ({"role": "user", "content": user},)
-            if first.text.strip():
-                history += ({"role": "assistant", "content": first.text},)
-            second = self._call(REMINDER, history, preflight=preflight)
-            if second.refused:
-                return _failure(_refusal_error(second), second), second
-            parsed = parse_safety_reply(second.text)
-            if parsed is not None:
-                return _success(parsed, second), second
-            return _failure("unparseable judge output", second), second
-        except _ItemError as err:
-            return _failure(str(err), None), None
+    def _judge_one(self, user: str, *, preflight: bool = False) -> tuple[dict, ProviderResult]:
+        """Judge one rendered user turn: strict parse, then one reminder turn on a parse failure. An
+        item-level API error propagates as _ItemError (never on the preflight, where it is fatal)."""
+        first = self._call(user, preflight=preflight)
+        if first.refused:
+            return _failure(_refusal_error(first), first), first
+        parsed = parse_safety_reply(first.text)
+        if parsed is not None:
+            return _success(parsed, first), first
+        self._count(reminders=1)
+        history: tuple[dict[str, str], ...] = ({"role": "user", "content": user},)
+        if first.text.strip():
+            history += ({"role": "assistant", "content": first.text},)
+        second = self._call(REMINDER, history, preflight=preflight)
+        if second.refused:
+            return _failure(_refusal_error(second), second), second
+        parsed = parse_safety_reply(second.text)
+        if parsed is not None:
+            return _success(parsed, second), second
+        return _failure("unparseable judge output", second), second
 
     def _ensure_preflight(self) -> None:
         """Before the first real call: one benign pair with the exact production settings. A rejected
@@ -1089,7 +1180,7 @@ class FrontierJudge:
                                       prompt_lang="English")
             outcome, last = self._judge_one(user, preflight=True)
             if outcome["error"] is not None:
-                stop = last.stop_reason if last is not None else "none"
+                stop = last.stop_reason
                 hint = ("; the reply hit max_tokens: raise max_tokens or lower effort"
                         if stop in ("max_tokens", "length") else "")
                 raise self._fatal(f"preflight failed: {outcome['error']} (stop reason {stop}){hint}")
@@ -1097,17 +1188,17 @@ class FrontierJudge:
                 log.warning("frontier %s: preflight labelled a benign pair %s", self.judge_id,
                             outcome["label"])
             self._preflight_ok = True
-            log.info("frontier %s: preflight ok (answered by %s)", self.judge_id,
-                     last.model_echo if last is not None else "?")
+            log.info("frontier %s: preflight ok (answered by %s)", self.judge_id, last.model_echo)
 
     def _call(self, user: str, history: tuple[dict[str, str], ...] = (), *,
               preflight: bool = False) -> ProviderResult:
         """One cached completion, requested at most once at a time per key. Raises _ItemError for a
         deterministic item-level failure, _Unavailable when a transient error outlives the retries,
-        FrontierConfigError for a configuration failure and SpendCapExceeded at the cap."""
+        FrontierUnavailable when either stops the run (see _note_unavailable, _probe),
+        FrontierConfigError for a configuration or account failure and SpendCapExceeded at the cap."""
         key = self._key(user, history)
         if preflight:
-            return self._request(key, user, history, preflight=True)
+            return self._request(key, user, history, purpose="preflight")
         hit = self._cached(key)
         if hit is not None:
             return hit
@@ -1143,11 +1234,12 @@ class FrontierJudge:
                     del self._key_locks[key]
 
     def _request(self, key: str, user: str, history: tuple[dict[str, str], ...], *,
-                 preflight: bool = False) -> ProviderResult:
-        """Call the API, backing off on transient errors; cache the reply (never the preflight's)."""
+                 purpose: str = "item") -> ProviderResult:
+        """Call the API, backing off on transient errors; cache an item's reply (never the preflight's
+        or a probe's). ``purpose`` is "item", "preflight" or "probe" (see _api_error)."""
         estimate = self.estimate_usd(user, history)
         for attempt in range(1, MAX_ATTEMPTS + 1):
-            self._reserve(estimate)
+            number = self._reserve(estimate)
             try:
                 result = self._provider.complete(
                     system=self.rubric.system, user=user, history=history, model=self.model,
@@ -1156,43 +1248,107 @@ class FrontierJudge:
             except ProviderError as err:
                 # A call lost in transport may still have been billed, so its reservation stays counted.
                 self._settle(estimate, estimate if err.transport else 0.0, None)
-                if err.kind == "retryable" and attempt < MAX_ATTEMPTS:
-                    delay = _backoff(attempt, err.retry_after)
-                    self._count(retries=1)
-                    log.info("frontier %s: %s, retry %d/%d in %.1f s", self.judge_id, err.label, attempt,
-                             MAX_ATTEMPTS - 1, delay)
-                    time.sleep(delay)
-                    continue
-                # "from None": the chained SDK error could print its message, which may echo a masked key.
-                raise self._api_error(err, attempt, preflight=preflight) from None
+                if err.kind != "retryable" or attempt == MAX_ATTEMPTS:
+                    failure = err
+                    break
+                delay = _backoff(attempt, err.retry_after)
+                self._count(retries=1)
+                log.info("frontier %s: %s, retry %d/%d in %.1f s", self.judge_id, err.label, attempt,
+                         MAX_ATTEMPTS - 1, delay)
+                time.sleep(delay)
+                continue
             except BaseException:
                 self._settle(estimate, estimate, None)
                 raise
             usd = self._cost(result, estimate)
             self._settle(estimate, usd, result)
-            self._replied()
+            self._replied(number)
             self._check_echo(result.model_echo)
-            if not preflight:
+            if purpose == "item":
                 self._cache.put(_row(key, result, usd))
             return result
-        raise AssertionError("unreachable")
+        # Outside the except clause, because _api_error may send a probe, and "from None": the SDK error
+        # chained to the ProviderError could print its message, which may echo a masked key.
+        raise self._api_error(failure, attempt, purpose=purpose) from None
 
-    def _api_error(self, err: ProviderError, attempts: int, *, preflight: bool) -> Exception:
-        """What a failed call raises. A transient error that outlived the retries: _Unavailable (the
-        item stays unjudged), or FrontierUnavailable on the preflight. A fatal error, or any other
-        preflight failure: FrontierConfigError. Otherwise a deterministic _ItemError."""
+    def _api_error(self, err: ProviderError, attempts: int, *, purpose: str) -> Exception:
+        """What a failed call raises. A transient error that outlived the retries: _Unavailable for an
+        item (it stays unjudged), else FrontierUnavailable. A fatal error (key, access, model, billing,
+        a spend limit), or any other failure of the preflight: FrontierConfigError, which leaves every
+        item not judged yet unjudged. An item-level error: what _rejected says for an item, an
+        _ItemError for _probe to judge on a probe."""
         detail = _describe(err, attempts)
         if err.kind == "retryable":
-            if not preflight:
+            if purpose == "item":
                 return _Unavailable(detail)
-            stop = FrontierUnavailable(f"{self.judge_id}: API unavailable at the preflight call: {detail}; "
+            stop = FrontierUnavailable(f"{self.judge_id}: API unavailable at the {purpose} call: {detail}; "
                                        "rerun later")
             self._halt_with(stop)
             return stop
-        if err.kind == "fatal" or preflight:
-            return self._fatal(f"{'preflight call failed' if preflight else 'fatal API error'}: {detail}")
-        self._replied()
-        return _ItemError(err.label)
+        if purpose == "preflight":
+            return self._fatal(f"preflight call failed: {detail}")
+        if err.kind == "fatal":
+            return self._fatal(f"fatal API error: {detail}. Items not judged yet stay unjudged: fix the "
+                               "cause, then rerun (finished calls are cached)")
+        return self._rejected(err) if purpose == "item" else _ItemError(err)
+
+    def _rejected(self, err: ProviderError) -> _ItemError:
+        """A deterministic item-level API error: an _ItemError, which safety() records once the API has
+        answered a request sent after it came in. ``breaker`` of them with one label before such an
+        answer send a probe at once (_probe), so an error every request gets stops the run before
+        more requests fail. The API did answer: the outage count resets."""
+        with self._lock:
+            self._unavailable_in_a_row = 0
+            mark = self._sent
+            self._unanswered.append((mark, err.label))
+            due = sum(label == err.label for _, label in self._unanswered) >= self.breaker
+        if due:
+            self._probe(mark)
+        return _ItemError(err, mark)
+
+    def _probe(self, after: int) -> None:
+        """Unless the API has answered a request numbered above ``after`` (sent after an item-level error
+        came in), send the benign preflight pair again: the production settings, uncached, not an
+        item, counted toward the spend cap. A reply proves the API takes requests, so every error that
+        came in before it is its item's own. The same error on it means the API rejects every request,
+        which says nothing about the items: FrontierUnavailable, and they stay unjudged. Any other
+        error is handled as on the preflight. One probe at a time: a caller that waited for one finds
+        its error answered for by it."""
+        with self._probe_lock:
+            with self._lock:
+                if self._halt is not None:
+                    raise self._halt
+                if self._answered > after:
+                    return
+                pending = Counter(label for _, label in self._unanswered)
+            self._count(probes=1)
+            user = self.rubric.render(prompt=PREFLIGHT_PROMPT, response=PREFLIGHT_RESPONSE,
+                                      prompt_lang="English")
+            try:
+                self._request(self._key(user, ()), user, (), purpose="probe")
+            except _ItemError as err:
+                stop = self._probe_failed(err, pending)
+            else:
+                log.info("frontier %s: the API answered the benign pair after %d item-level errors: they are "
+                         "the items' own", self.judge_id, sum(pending.values()))
+                return
+            raise stop from None
+
+    def _probe_failed(self, err: _ItemError, pending: Mapping[str, int]) -> Exception:
+        """The stop when a probe got item-level error ``err``; ``pending`` counts the unanswered item
+        errors by label."""
+        n = pending.get(err.label, 0)
+        if not n:
+            return self._fatal(f"the benign preflight pair, sent again to see whether the API takes "
+                               f"requests, failed: {err.detail}")
+        stop = FrontierUnavailable(
+            f"{self.judge_id}: {n} item{'s' if n != 1 else ''} in a row failed with {err.label}, and so did "
+            f"the benign preflight pair ({err.detail}): the API rejects every request, not single items. "
+            "They stay unjudged: fix the cause, then rerun (finished calls are cached)")
+        self._halt_with(stop)
+        log.warning("frontier %s: %d items and the benign pair failed with %s; stopping the run",
+                    self.judge_id, n, err.label)
+        return stop
 
     def _check_echo(self, echo: Any) -> None:
         """A reply from another model than the requested one (or a dated snapshot of it) stops the run:
@@ -1214,7 +1370,9 @@ class FrontierJudge:
             return estimate  # no usage reported: charge the worst case
         return (result.input_tokens * self.price[0] + result.output_tokens * self.price[1]) / 1e6
 
-    def _reserve(self, usd: float) -> None:
+    def _reserve(self, usd: float) -> int:
+        """Reserve ``usd`` against the cap for one request; returns its number (requests are numbered in
+        the order they are sent)."""
         with self._lock:
             if self._halt is not None:
                 raise self._halt
@@ -1224,6 +1382,8 @@ class FrontierJudge:
                 log.warning("frontier %s: spend cap reached; no further calls", self.judge_id)
                 raise self._halt
             self._reserved += usd
+            self._sent += 1
+            return self._sent
 
     def _settle(self, reserved: float, usd: float, result: ProviderResult | None) -> None:
         with self._lock:
@@ -1239,10 +1399,13 @@ class FrontierJudge:
             for name, n in deltas.items():
                 self._stats[name] += n
 
-    def _replied(self) -> None:
-        """The API answered (a reply or a deterministic error): it is up, so the breaker starts over."""
+    def _replied(self, number: int) -> None:
+        """The API answered request ``number``: it is up, so the outage count starts over, and it took
+        requests when this one was sent, so it answers for every item-level error that came in before."""
         with self._lock:
             self._unavailable_in_a_row = 0
+            self._answered = max(self._answered, number)
+            self._unanswered = [(mark, label) for mark, label in self._unanswered if mark >= number]
 
     def _halt_with(self, err: Exception) -> None:
         """Stop the judge: from now on every call raises the first stop error."""
@@ -1258,8 +1421,8 @@ class FrontierJudge:
 
 def _describe(err: ProviderError, attempts: int) -> str:
     """A failed call in a stop message: class, status, code, the attempts of a transient error. The
-    SDK's own message is kept only for statuses whose message explains a request problem; auth errors
-    are left out (OpenAI's 401 echoes a masked key)."""
+    API's message is kept only for statuses whose message explains a request or account problem; auth
+    errors are left out (OpenAI's 401 echoes a masked key)."""
     detail = err.label + (f" [{err.code}]" if err.code else "")
     if err.kind == "retryable":
         detail += f" after {attempts} attempts"
