@@ -31,7 +31,9 @@ HIT_CAP = [True, False, False, True, False, False]
 GUARD_ID = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
 META = {"run_config": "rc0", "model_rev": "c" * 40, "harness": 1, "template": "9" * 16, "decoding": "d" * 16,
         "torch": "2.15.0", "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB"}
+GPU_CLASS = {"bf16": "8.0", "fp16": "7.5"}       # meta.gpu_capability: bf16 on the A100, fp16 on the T4
 STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}     # the judge's
+DIGEST = "e" * 64                                 # the bf16 Gate 0 run the T4 comparison paired with
 
 
 @pytest.fixture
@@ -54,7 +56,8 @@ def write_cell(dtype: str = "bf16") -> None:
         gens.append(GenerationRecord(
             key=key, variant=variant, pid=pid, lang=lang, set=set_name, split=split,
             prompt_sha=sha256_text(TEXTS[pid]), output=OUTPUTS[i], n_prompt_tokens=10, n_new_tokens=20,
-            hit_cap=HIT_CAP[i], seconds=0.1, meta={"dtype": dtype, **META}))
+            hit_cap=HIT_CAP[i], seconds=0.1,
+            meta={"dtype": dtype, **META, "gpu_capability": GPU_CLASS[dtype]}))
         flags = UnclearFlags(too_short=False, repetitive=False, garbled=False, wrong_lang=WRONG_LANG[i],
                              lid_top=[("hin_Deva", 0.9)])
         native = {"label_loose": LOOSE[i], "stack": STACK,
@@ -116,15 +119,18 @@ def test_a_judge_without_a_loose_reading_records_none(cell):
         audit.record_safety(*CELL)
 
 
-def write_licence(n: int = 200, **fields):
+def write_licence(n: int = 200, digest: str = DIGEST, **fields):
     """outputs/metrics/gate0-fp16.json as Gate 0's T4 comparison run writes it (its fp16 check compared
-    ``n`` prompts), and the passing bf16 Gate 0 it compared against (gate0.json); only the fields the
-    licence reads."""
+    ``n`` prompts with the bf16 run ``DIGEST``, under META's harness and decoding, on a T4), and the passing
+    bf16 Gate 0 it compared against (gate0.json, whose run is ``digest``); only the fields the licence
+    reads."""
     metrics_dir().mkdir(parents=True, exist_ok=True)
-    reference = {"dtype": "bf16", "pass": True, "revisions": {"global": "c" * 40}}
+    reference = {"dtype": "bf16", "pass": True, "checks": {"precision": {"pass": True, "digest": digest}},
+                 "revisions": {"global": "c" * 40}}
     (metrics_dir() / "gate0.json").write_text(json.dumps(reference), encoding="utf-8")
-    fp16 = {"pass": True, "comparable": True, "n": n}
-    doc = {"dtype": "fp16", "reference_dtype": "bf16", "pass": True,
+    fp16 = {"pass": True, "comparable": True, "n": n, "reference_digest": DIGEST, "harness": META["harness"],
+            "decoding": META["decoding"]}
+    doc = {"dtype": "fp16", "reference_dtype": "bf16", "pass": True, "gpu_capability": GPU_CLASS["fp16"],
            "checks": {"precision": {"pass": True}, "fp16": fp16}, "revisions": {"global": "c" * 40}, **fields}
     (metrics_dir() / "gate0-fp16.json").write_text(json.dumps(doc), encoding="utf-8")
 
@@ -138,9 +144,11 @@ def test_a_cell_in_another_precision_needs_gate0s_licence_and_gets_its_own_file(
     with pytest.raises(ValueError, match=r"gate0-fp16\.json"):        # naming the dtype is no licence
         audit.record_safety(*CELL, dtype="fp16")
     write_licence(**{"pass": False})                                  # Gate 0's fp16 check failed
-    refused: list[str] = []
+    refused: dict[str, str] = {}
     run_cmd._record(*CELL, dtype="fp16", refused=refused)             # lift judge / run-dev --dtype fp16
-    assert refused == ["harmful_hi_dev"] and not (metrics_dir() / "auditkit").exists()
+    assert list(refused) == ["harmful_hi_dev"]
+    assert 'gate0-fp16.json "pass" is False' in refused["harmful_hi_dev"]
+    assert not (metrics_dir() / "auditkit").exists()
 
     write_licence()
     path = audit.record_safety(*CELL, dtype="fp16")
@@ -164,11 +172,47 @@ def test_a_licence_from_fewer_than_200_prompts_writes_no_record(cell):
     write_licence(n=18)
     with pytest.raises(ValueError, match=r"checks\.fp16\.n is 18: the comparison must cover at least 200"):
         audit.record_safety(*CELL, dtype="fp16")
-    refused: list[str] = []
+    refused: dict[str, str] = {}
     run_cmd._record(*CELL, dtype="fp16", refused=refused)
-    assert refused == ["harmful_hi_dev"] and not (metrics_dir() / "auditkit").exists()
+    assert list(refused) == ["harmful_hi_dev"] and "checks.fp16.n is 18" in refused["harmful_hi_dev"]
+    assert not (metrics_dir() / "auditkit").exists()
     write_licence(n=200)
     assert audit.record_safety(*CELL, dtype="fp16").name == "harmful_hi_dev-fp16.json"
+
+
+def test_no_fp16_record_after_the_bf16_gate0_is_re_run(cell):
+    """Review 4, W6: a bf16 Gate 0 re-run after a harness fix passes again and replaces gate0.json and its
+    reference run. The T4 comparison never paired with that run, so no -fp16 record is written from it until
+    the comparison is re-run against the current bf16 Gate 0 (contract J)."""
+    from lift.commands import run as run_cmd
+
+    write_cell("fp16")
+    write_licence(digest="9" * 64)
+    with pytest.raises(ValueError, match=r"gate0\.json checks\.precision\.digest is 9{12}, not the e{12}"):
+        audit.record_safety(*CELL, dtype="fp16")
+    refused: dict[str, str] = {}
+    run_cmd._record(*CELL, dtype="fp16", refused=refused)
+    assert list(refused) == ["harmful_hi_dev"] and "checks.precision.digest" in refused["harmful_hi_dev"]
+    assert not (metrics_dir() / "auditkit").exists()
+    write_licence()
+    assert audit.record_safety(*CELL, dtype="fp16").name == "harmful_hi_dev-fp16.json"
+
+
+def test_a_retired_record_is_read_as_none_and_replaced(cell):
+    """Contract H: ``lift restart`` empties a cell's AuditKIT records ("retired": the next push sends the
+    empty file as an update), so a reader skips an empty record and record_safety writes a new one over it."""
+    path = audit.auditkit_path("qwen3guard", *CELL)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"")
+    assert audit.load_record(path) is None
+    assert audit.record_safety(*CELL) == path
+    record = audit.load_record(path)
+    assert record.headline["harmful_rate"] == rates(LABELS)["harmful_rate"]
+    assert [p.name for p in path.parent.iterdir()] == [path.name]
+    path.write_bytes(b"\n")                                            # whitespace only: retired as well
+    assert audit.load_record(path) is None
+    with pytest.raises(FileNotFoundError):
+        audit.load_record(path.with_name("harmful_en_dev.json"))       # never made: not a retired record
 
 
 def test_unknown_label_raises(cell, monkeypatch):

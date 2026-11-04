@@ -175,13 +175,36 @@ def test_stale_records_are_never_mixed(stock, tmp_path):
 
 
 def test_a_file_never_mixes_configurations_even_outside_the_current_prompts(stock, tmp_path):
-    # A --limit run in one dtype, then a run on other prompts in another dtype, into the same file.
+    # A --limit run in one dtype, then a run on other prompts in another dtype (or another configuration),
+    # into the same file.
     path = tmp_path / "g.jsonl"
     run(stock, path, ps=prompts()[:2])
-    with pytest.raises(gen.StaleOutputError, match="another configuration"):
+    with pytest.raises(gen.OtherPrecisionError, match="made in fp32"):
         run(dataclasses.replace(stock, dtype="fp16"), path, ps=prompts()[2:])
+    with pytest.raises(gen.StaleOutputError, match="another configuration"):
+        run(stock, path, ps=prompts()[2:], max_new_tokens=CAP - 1)
     assert all(r.meta["run_config"] == gen.read_generations(path)[0].meta["run_config"]
                for r in gen.read_generations(path))
+
+
+@pytest.mark.parametrize("finished", [True, False])
+def test_a_cell_made_in_another_precision_is_never_started_over(stock, finished):
+    # W3: a cell made on the A100 is met by the T4 backup's run in fp16 (here the fixture's fp32 file and an
+    # fp16 run). It is not stale: a restart would discard the other precision's outputs, and the next push
+    # would replace the runs repo's copy. So the refusal names both precisions and the two remedies (the
+    # file's --dtype, or leaving the cell out), and carries no restart line.
+    path = cell_path()
+    run(stock, path, ps=prompts() if finished else prompts()[:2])
+    before = path.read_bytes()
+    with pytest.raises(gen.OtherPrecisionError) as exc:
+        run(dataclasses.replace(stock, dtype="fp16"), path)
+    message = str(exc.value)
+    assert isinstance(exc.value, gen.StaleOutputError)          # commands skip it like a stale cell
+    assert exc.value.command is None and exc.value.dtype == "fp32"
+    assert "made in fp32" in message and "this run is fp16" in message
+    assert "--dtype fp32" in message and "--sets/--langs" in message
+    assert "lift restart" not in message
+    assert path.read_bytes() == before
 
 
 def moved_stack(monkeypatch, **changes):
@@ -190,8 +213,10 @@ def moved_stack(monkeypatch, **changes):
     monkeypatch.setattr(gen, "stack", lambda device: {**real(device), **changes})
 
 
-# The cell every prompts() record belongs to, and the job line that starts it over.
-RESTART = "lift restart --variant stock --split dev --sets harmful --langs en"
+# The cell every prompts() record belongs to, and the job line that starts it over. The stock fixture runs
+# in fp32, not generation.dtype (bf16), so its line names its precision: lift restart refuses a cell made
+# in another precision than its --dtype.
+RESTART = "lift restart --variant stock --split dev --sets harmful --langs en --dtype fp32"
 
 
 def cell_path():
@@ -231,7 +256,7 @@ def test_changed_inputs_name_the_restart_line(stock, tmp_path):
     assert f"run `{RESTART}` as a job line right after `lift sync pull`" in str(exc.value)
     assert exc.value.command == RESTART
     with pytest.raises(gen.StaleOutputError, match="another configuration") as exc:
-        run(dataclasses.replace(stock, dtype="fp16"), path)
+        run(stock, path, max_new_tokens=CAP - 1)               # other decoding settings: other inputs
     assert f"run `{RESTART}` as a job line right after `lift sync pull`" in str(exc.value)
     assert exc.value.command == RESTART
     other = tmp_path / "elsewhere.jsonl"                    # not a cell's file: no lift restart line for it
@@ -241,10 +266,29 @@ def test_changed_inputs_name_the_restart_line(stock, tmp_path):
     assert "`lift restart" not in str(exc.value) and exc.value.command is None
 
 
-def test_restart_command_names_the_cell_and_the_judge():
+def test_restart_command_names_the_cell_the_judge_and_a_precision_other_than_the_default():
     assert gen.restart_command("stock", "easy_benign", "hi", "final") == (
         "lift restart --variant stock --split final --sets easy_benign --langs hi")
     assert gen.restart_command("stock", "harmful", "hi", "dev", judge="second").endswith(" --judge second")
+    plain = gen.restart_command("stock", "harmful", "hi", "dev")
+    assert gen.restart_command("stock", "harmful", "hi", "dev", dtype="bf16") == plain    # generation.dtype
+    assert gen.restart_command("stock", "harmful", "hi", "dev", dtype="fp16") == plain + " --dtype fp16"
+    assert gen.restart_command("stock", "harmful", "hi", "dev", judge="primary", dtype="fp16") == (
+        plain + " --judge primary --dtype fp16")
+
+
+@pytest.mark.parametrize("dtype", ["bf16", "fp16"])
+def test_the_restart_line_of_a_stale_cell_names_the_runs_precision(stock, monkeypatch, dtype):
+    # A T4's fp16 cell cut short, met on another stack: its line carries --dtype fp16, so the restart it
+    # names is not refused as another precision. A bf16 cell (generation.dtype) gets the plain line.
+    variant = dataclasses.replace(stock, dtype=dtype)
+    run(variant, cell_path(), ps=prompts()[:2])
+    moved_stack(monkeypatch, torch="2.99.0+cu130")
+    with pytest.raises(gen.StaleOutputError) as exc:
+        run(variant, cell_path())
+    line = "lift restart --variant stock --split dev --sets harmful --langs en"
+    assert exc.value.command == line + (" --dtype fp16" if dtype == "fp16" else "")
+    assert f"run `{exc.value.command}` as a job line" in str(exc.value)
 
 
 def test_a_finished_file_is_reused_under_another_stack(stock, tmp_path, monkeypatch, caplog):
@@ -282,7 +326,7 @@ def test_changed_inputs_are_refused_under_any_stack(stock, tmp_path, monkeypatch
     path = tmp_path / "g.jsonl"
     run(stock, path)
     moved_stack(monkeypatch, transformers="5.99.0")
-    with pytest.raises(gen.StaleOutputError, match="another configuration"):
+    with pytest.raises(gen.OtherPrecisionError, match="made in fp32"):
         run(dataclasses.replace(stock, dtype="fp16"), path)
     with pytest.raises(gen.StaleOutputError, match="another configuration"):
         run(stock, path, ps=prompts()[:2], max_new_tokens=CAP - 1)

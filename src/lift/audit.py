@@ -24,6 +24,9 @@ Controversial harmful rate and the judge-failure count, read from the same check
 - ``text="redacted"`` (default) stores ``[redacted sha256:<hash of the output>]`` instead of each
   output, so the file can be public. ``text="full"`` keeps the completions and writes
   ``*.full.json`` beside it, which stays private (gated at submission) like every raw generation.
+- An empty record file is a retired record: ``lift restart`` empties every record of a cell it sets
+  aside (sync never deletes, so the next push sends the empty file as an update). ``load_record`` reads
+  it as None, so readers (P07, P08) skip it, and ``record_safety`` writes the cell's next record over it.
 
 Do NOT use auditkit's paired_bootstrap (src/auditkit/_bootstrap.py), nor RunComparison /
 CompareResult / Experiment ``.significance()`` that call it: it resamples uncentred differences
@@ -263,6 +266,15 @@ def _check(result: Any, rows: list[_Row], expected: dict[str, Any], metric_names
         raise RuntimeError("AuditKIT did not record exactly our numbers: " + "; ".join(problems))
 
 
+def load_record(path: str | Path) -> Any | None:
+    """The AuditKIT RunResult at ``path``, or None for a retired record (an empty file, or whitespace only:
+    what ``lift restart`` leaves), which holds no numbers and is skipped. A missing file raises."""
+    path = Path(path)
+    if not path.read_bytes().strip():
+        return None
+    return _auditkit().RunResult.load(str(path))
+
+
 def _write_json_lf(path: Path, obj: Any) -> None:
     """UTF-8 (unicode kept), LF and atomic (temp file + rename), like lift.io.write_jsonl."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -285,7 +297,8 @@ def record_safety(variant: str, set_name: str, lang: str, split: str, *, judge: 
     refused unless named and licensed by Gate 0 (``pipeline.check_dtype_licence``); its record then
     carries the dtype in its file name. The lift metadata adds the cell's provenance, the loose harmful
     rate and the judge-failure count. Raises instead of writing if the labels cannot be reported or
-    AuditKIT's numbers differ from ``lift.stats.paired.rates`` in any way.
+    AuditKIT's numbers differ from ``lift.stats.paired.rates`` in any way. A retired (empty) record at
+    the path is replaced like any other.
     """
     from lift.judge.pipeline import PROVENANCE_META, judge_dir, provenance
 

@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import sys
 
 import pytest
@@ -7,21 +8,22 @@ import pytest
 from lift.cli import build_parser, main
 from lift.commands import run as run_cmd
 from lift.io import sha256_text, write_jsonl
-from lift.paths import generations_dir, judgements_dir, output_dir
+from lift.paths import generations_dir, judgements_dir, metrics_dir, output_dir
 
 GUARD_SHA = "6ec42827da0c1ff11e7a49dc269d2e810d27e108"
+RECORD = b'{"metadata": {"lift": {"refusal_rate": 1.0}}}\n'      # an AuditKIT record's placeholder
 
 
-def write_generation(set_name, lang, split, *, variant="stock"):
-    """One generations file holding one record (pid "{set[:3]}-0001", prompt text "t", no real output);
-    returns the record's key."""
+def write_generation(set_name, lang, split, *, variant="stock", dtype="bf16"):
+    """One generations file holding one record (pid "{set[:3]}-0001", prompt text "t", no real output)
+    made in ``dtype``; returns the record's key."""
     from lift.models.generate import generations_path
 
     key = sha256_text(f"{variant}:{set_name}:{lang}:{split}")
     write_jsonl(generations_path(variant, set_name, lang, split), [{
         "key": key, "variant": variant, "pid": f"{set_name[:3]}-0001", "lang": lang, "set": set_name,
         "split": split, "prompt_sha": sha256_text("t"), "output": "o", "n_prompt_tokens": 1,
-        "n_new_tokens": 1, "hit_cap": False, "seconds": 0.1, "meta": {"dtype": "bf16"}}])
+        "n_new_tokens": 1, "hit_cap": False, "seconds": 0.1, "meta": {"dtype": dtype}}])
     return key
 
 
@@ -30,6 +32,14 @@ def write_judgements(judge_dir, set_name, lang, split, *, variant="stock", n=2):
     path = judgements_dir() / judge_dir / variant / f"{set_name}_{lang}_{split}.jsonl"
     write_jsonl(path, [{"key": sha256_text(f"{judge_dir}:{variant}:{set_name}:{lang}:{split}:{i}"),
                         "pid": f"{set_name[:3]}-{i:04d}", "label": "refusal"} for i in range(n)])
+    return path
+
+
+def write_record(judge_dir, name, *, variant="stock"):
+    """An AuditKIT record file named ``name`` (outputs/metrics/auditkit/{judge_dir}/{variant}/{name})."""
+    path = metrics_dir() / "auditkit" / judge_dir / variant / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(RECORD)
     return path
 
 
@@ -63,11 +73,11 @@ class StubGuard:
                  "raw": "Safety: Safe\nCategories: None\nRefusal: Yes", "error": None} for _ in prompts]
 
 
-def guard(die_on_call=None):
+def guard(die_on_call=None, dtype="bf16"):
     """The real Qwen3Guard adapter (it writes its stack into every judgement) over a StubGuard."""
     from lift.judge.pipeline import Qwen3GuardAdapter
 
-    return Qwen3GuardAdapter(StubGuard(die_on_call), strict=True, device="cpu", dtype="bf16")
+    return Qwen3GuardAdapter(StubGuard(die_on_call), strict=True, device="cpu", dtype=dtype)
 
 
 class FakeLID:
@@ -97,6 +107,17 @@ def moved_stack(monkeypatch, **changes):
 
     real = gen.stack
     monkeypatch.setattr(gen, "stack", lambda device: {**real(device), **changes})
+
+
+def offline_runs_repo(monkeypatch):
+    """lift sync against tests/test_sync.py's FakeHub: the Hub offline, a dummy token, a test runs repo."""
+    pytest.importorskip("huggingface_hub")
+    import huggingface_hub.constants as hf_constants
+
+    monkeypatch.setattr(hf_constants, "HF_HUB_OFFLINE", True)
+    monkeypatch.setattr(hf_constants, "HF_DEBUG", False)
+    monkeypatch.setenv("HF_TOKEN", "hf_dummy_not_a_real_token")
+    monkeypatch.setenv("LIFT_RUNS_REPO", "tester/lift-runs")
 
 
 def short_runs(monkeypatch, *, chunk=2, new_tokens=6):
@@ -254,16 +275,21 @@ def test_judge_with_keys_covers_every_file_holding_one(monkeypatch, caplog, expl
 
 
 def test_a_refused_auditkit_record_is_reported_not_fatal(monkeypatch, caplog):
+    # Contract G: "done, but some cells are listed" is exit 3, never 1 (an error, which ends a GPU job).
     def refuse(*a, **kw):
         raise ValueError("3 generations are not in bf16")
 
     monkeypatch.setattr("lift.audit.record_safety", refuse)
     monkeypatch.setattr(run_cmd, "_complete", lambda *a: True)
-    refused: list[str] = []
+    refused: dict[str, str] = {}
     run_cmd._record("stock", "harmful", "hi", "dev", dtype="bf16", refused=refused)
-    assert refused == ["harmful_hi_dev"] and "not in bf16" in caplog.text
-    assert run_cmd._refused_exit(refused) == 1 and run_cmd._refused_exit([]) == 0
-    assert run_cmd._refused_exit([], {"harmful_hi_dev": "lift restart ..."}) == 1
+    assert list(refused) == ["harmful_hi_dev"] and "not in bf16" in caplog.text
+    caplog.clear()
+    assert run_cmd._refused_exit(refused) == 3
+    assert "harmful_hi_dev: 3 generations are not in bf16" in caplog.text     # listed with its remedy
+    assert run_cmd._refused_exit({}) == 0 and run_cmd._refused_exit({}, {}) == 0
+    assert run_cmd._refused_exit({}, {"stale": {"harmful_hi_dev": "lift restart ..."}}) == 3
+    assert run_cmd._refused_exit({}, {"precision": {"harmful_hi_dev": "made in fp16"}}) == 3
 
 
 # --- lift restart ---------------------------------------------------------------------------------------
@@ -353,6 +379,141 @@ def test_restart_refuses_an_unknown_variant_and_needs_sets_and_langs():
     assert not (output_dir() / ".aside").exists()
 
 
+CELL_RECORDS = ("harmful_hi_dev.json", "harmful_hi_dev-fp16.json", "harmful_hi_dev.full.json",
+                "harmful_hi_dev-fp16.full.json", "harmful_hi_dev-bf16.json")
+
+
+@pytest.mark.parametrize("judge", [None, "primary", "second"])
+def test_restart_retires_the_cells_auditkit_records(judge, caplog):
+    # W11/W19: a restarted cell's records would outlive its outputs on the runs repo (the push that sends
+    # the emptied outputs sees them unchanged), describing outputs that were set aside, and a record of the
+    # other precision is never rewritten. lift restart copies and empties them: an empty record is retired.
+    from lift.judge.pipeline import judge_dir
+
+    caplog.set_level(logging.INFO, logger="lift.run")
+    write_generation("harmful", "hi", "dev")
+    cell = {d: [write_record(d, name) for name in CELL_RECORDS] for d in ("qwen3guard", "frontier")}
+    others = [write_record(d, name) for d in ("qwen3guard", "frontier")
+              for name in ("harmful_hi_final.json", "harmful_en_dev.json", "easy_benign_hi_dev-fp16.json",
+                           "harmful_hi_dev-draft.json")]
+    others.append(write_record("qwen3guard", "harmful_hi_dev.json", variant="other"))
+    assert main([*RESTART, "--sets", "harmful", "--langs", "hi", *(["--judge", judge] if judge else [])]) == 0
+    stamp, = (output_dir() / ".aside").iterdir()
+    retired = ("qwen3guard", "frontier") if judge is None else (judge_dir(judge),)
+    for judge_name, paths in cell.items():
+        for path in paths:
+            copy = stamp / path.relative_to(output_dir())
+            if judge_name in retired:                        # emptied, never removed: the next push sends it
+                assert path.read_bytes() == b"" and copy.read_bytes() == RECORD
+            else:
+                assert path.read_bytes() == RECORD and not copy.exists()
+    assert all(p.read_bytes() == RECORD for p in others)
+    assert caplog.text.count("AuditKIT record retired") == len(CELL_RECORDS) * len(retired)
+    caplog.clear()
+    assert main([*RESTART, "--sets", "harmful", "--langs", "hi", *(["--judge", judge] if judge else [])]) == 0
+    assert "AuditKIT record retired" not in caplog.text                    # already retired: nothing new
+    assert len(list((output_dir() / ".aside").iterdir())) == 1
+
+
+def test_restart_refuses_a_cell_made_in_another_precision_unless_forced(caplog):
+    # W3: a restart would discard a cell of another precision (the T4 backup's fp16 line over Colab's bf16
+    # cell), and the next push would replace the runs repo's copy. Refused, with nothing moved for any listed
+    # cell, unless --force.
+    caplog.set_level(logging.INFO, logger="lift.run")
+    write_generation("harmful", "hi", "dev", dtype="bf16")
+    write_generation("easy_benign", "hi", "dev", dtype="fp16")
+    write_judgements("qwen3guard", "harmful", "hi", "dev")
+    write_record("qwen3guard", "harmful_hi_dev.json")
+    before = {p: p.read_bytes() for p in output_dir().rglob("*") if p.is_file()}
+    both = [*RESTART, "--sets", "harmful", "easy_benign", "--langs", "hi"]
+    for argv in ([*both, "--dtype", "fp16"], both, [*both, "--dtype", "fp16", "--judge", "primary"]):
+        caplog.clear()
+        assert main(argv) == 1
+        assert {p: p.read_bytes() for p in output_dir().rglob("*") if p.is_file()} == before
+        assert not (output_dir() / ".aside").exists()
+        made, run_in = ("bf16", "fp16") if "fp16" in argv else ("fp16", "bf16")
+        assert f"made in {made}" in caplog.text and f"not {run_in}" in caplog.text
+        assert "would discard" in caplog.text and "--force" in caplog.text
+    assert main([*RESTART, "--sets", "easy_benign", "--langs", "hi", "--dtype", "fp16"]) == 0
+    caplog.clear()
+    assert main([*both, "--dtype", "fp16", "--force"]) == 0
+    assert generations_dir().joinpath("stock", "harmful_hi_dev.jsonl").read_bytes() == b""
+    assert "--force" in caplog.text and "bf16" in caplog.text           # the discarded precision is named
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_a_whole_cell_restart_names_the_line_that_refills_the_second_judges_file(swapped, monkeypatch,
+                                                                                caplog):
+    # W9: a whole-cell restart also sets aside the second judge's judgements of the cell, and the line that
+    # failed (run-dev, or generate and judge) never judges with the second judge. The log names the line
+    # that refills it: P04's key list (decisions.md 31), the run's precision when it is not the default.
+    # Swapped: P04's decision rule made the frontier judge primary, so the Qwen3Guard file is the second's.
+    from lift import config
+    from lift.judge.pipeline import judge_dir
+
+    if swapped:
+        judges = config.load("project")["judges"]
+        judges["safety_primary"], judges["safety_second"] = judges["safety_second"], judges["safety_primary"]
+    caplog.set_level(logging.INFO, logger="lift.run")
+    write_generation("harmful", "hi", "dev", dtype="fp16")
+    for judge in ("qwen3guard", "frontier"):
+        write_judgements(judge, "harmful", "hi", "dev")
+    second = judgements_dir() / judge_dir("second") / "stock" / "harmful_hi_dev.jsonl"
+    monkeypatch.delenv("LIFT_VALIDATION_DIR")              # a GPU runtime's layout: validation/ in the repo
+    refill = ("lift judge --variant stock --split dev --sets harmful --langs hi --judge second "
+              "--keys validation/keys/second_judge/stock_dev.txt --dtype fp16")
+    assert main([*RESTART, "--sets", "harmful", "--langs", "hi", "--dtype", "fp16"]) == 0
+    assert f"  {second}: {refill}\n" in caplog.text
+    assert "--judge primary" not in caplog.text and "lift run-dev" in caplog.text
+    for role in ("primary", "second"):                     # one role's restart: the failed line refills it
+        for judge in ("qwen3guard", "frontier"):
+            write_judgements(judge, "harmful", "hi", "dev")
+        caplog.clear()
+        assert main([*RESTART, "--sets", "harmful", "--langs", "hi", "--dtype", "fp16", "--judge", role]) == 0
+        assert caplog.text.count("set aside in") == 1 and "lift judge --variant" not in caplog.text
+
+
+def test_the_refill_line_quotes_a_key_list_outside_the_repo():
+    # LIFT_VALIDATION_DIR moved validation/ (here a tmp dir): the line names the list's own path, quoted.
+    import shlex
+
+    from lift.paths import validation_dir
+
+    line = run_cmd._judge_line("stock", "harmful", "hi", "dev", role="second", dtype="bf16")
+    words = shlex.split(line)
+    assert words[-2:] == ["--keys", str(validation_dir() / "keys" / "second_judge" / "stock_dev.txt")]
+    assert "--dtype" not in words                          # generation.dtype is the default
+    assert "--keys" not in run_cmd._judge_line("stock", "harmful", "hi", "dev", role="primary", dtype="bf16")
+
+
+def test_a_restart_retires_the_runs_repo_copies_of_a_cell_taken_over_in_another_precision(tmp_path,
+                                                                                            monkeypatch):
+    # W11: the runs repo holds the T4's licensed fp16 cell and its -fp16 record; Colab takes the cell over in
+    # bf16. The bf16 run refuses it as another precision, so the operator restarts it with --force; the next
+    # push replaces the cell's outputs AND its record with empty files (the record is retired), so no fp16
+    # record outlives the outputs it describes.
+    offline_runs_repo(monkeypatch)
+    from test_sync import GEN, JUD, FakeHub, gen_row, jud_row, lines, machine, record_path
+
+    from lift import sync
+    from lift.io import sha256_obj
+
+    rec = record_path(dtype="fp16")
+    gens = [gen_row(f"{i:064x}", f"pid-{i}", dtype="fp16") for i in range(2)]
+    judged = [jud_row(g["key"], g["pid"], "refusal", output_sha=sha256_text(g["output"])) for g in gens]
+    record = {"metadata": {"lift": {"keys_sha256": sha256_obj({g["pid"]: g["key"] for g in gens}),
+                                    "labels_sha256": sha256_obj({g["pid"]: "refusal" for g in gens})}}}
+    hub = FakeHub({GEN: lines(*gens), JUD: lines(*judged), rec: (json.dumps(record) + "\n").encode()})
+    machine(tmp_path / "colab", monkeypatch)
+    assert sync.pull(api=hub).ok
+    argv = ["restart", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en"]
+    assert main(argv) == 1                                  # bf16 by default: it would discard fp16 outputs
+    assert main([*argv, "--force"]) == 0
+    report = sync.push(api=hub)
+    assert report.ok
+    assert hub.files[GEN] == hub.files[JUD] == hub.files[rec] == b""
+
+
 @pytest.mark.torch
 @pytest.mark.parametrize("push_first", [True, False])
 def test_restart_after_the_pull_lets_the_next_session_generate_the_cell_again(tiny_model_dir, tmp_path,
@@ -361,8 +522,7 @@ def test_restart_after_the_pull_lets_the_next_session_generate_the_cell_again(ti
     # by the job's own `lift sync pull` (sync never deletes). The refusal's lift restart line, right
     # after the pull, empties it: the next push replaces the runs repo's copy, and the cell is generated
     # again (in the same job, or in the next session after a push).
-    pytest.importorskip("huggingface_hub")
-    import huggingface_hub.constants as hf_constants
+    offline_runs_repo(monkeypatch)
     from fakes import make_prompt
     from test_sync import GEN, FakeHub, machine
 
@@ -370,10 +530,6 @@ def test_restart_after_the_pull_lets_the_next_session_generate_the_cell_again(ti
     from lift.models import generate as gen
     from lift.models.variants import build_variant, get_spec
 
-    monkeypatch.setattr(hf_constants, "HF_HUB_OFFLINE", True)
-    monkeypatch.setattr(hf_constants, "HF_DEBUG", False)
-    monkeypatch.setenv("HF_TOKEN", "hf_dummy_not_a_real_token")
-    monkeypatch.setenv("LIFT_RUNS_REPO", "tester/lift-runs")
     hub = FakeHub()
     variant = build_variant(get_spec("stock"), device="cpu", dtype="bf16", model_id=str(tiny_model_dir))
     prompts = [make_prompt(f"prh-test-{i:04d}", "en", text=f"placeholder {i}") for i in range(4)]
@@ -412,7 +568,9 @@ def test_restart_after_the_pull_lets_the_next_session_generate_the_cell_again(ti
 
 
 @pytest.mark.torch
-def test_generate_skips_a_stale_cell_and_exits_1(fake_prompt_files, tiny_model_dir, monkeypatch, caplog):
+def test_generate_skips_a_stale_cell_and_exits_3(fake_prompt_files, tiny_model_dir, monkeypatch, caplog):
+    # Contract G: exit 3 is "done, but some cells were skipped", so a GPU job goes on with its next lines
+    # (exit 1, an error, ends it: one stale cell would cost every later line of the session).
     pytest.importorskip("torch")
     from fakes import make_prompt
 
@@ -434,7 +592,7 @@ def test_generate_skips_a_stale_cell_and_exits_1(fake_prompt_files, tiny_model_d
     moved_stack(monkeypatch, torch="2.99.0+cu130")
     argv = ["generate", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "hi",
             "--device", "cpu", "--dtype", "bf16"]
-    assert main(argv) == 1
+    assert main(argv) == 3
     assert part.read_bytes() == before
     assert len(gen.read_generations(gen.generations_path("stock", "harmful", "hi", "dev"))) == 3
     line = "lift restart --variant stock --split dev --sets harmful --langs en"
@@ -442,7 +600,7 @@ def test_generate_skips_a_stale_cell_and_exits_1(fake_prompt_files, tiny_model_d
 
 
 @pytest.mark.parametrize("role", ["primary", "second"])
-def test_judge_skips_a_stale_cell_and_exits_1(role, monkeypatch, caplog):
+def test_judge_skips_a_stale_cell_and_exits_3(role, monkeypatch, caplog):
     # judge_file's refusal (a StaleOutputError) names the cell's restart line; lift judge lists it and
     # judges the other cells.
     from lift.judge import pipeline
@@ -466,20 +624,137 @@ def test_judge_skips_a_stale_cell_and_exits_1(role, monkeypatch, caplog):
     monkeypatch.setattr(run_cmd, "_record", lambda variant, set_name, lang, *a, **kw: recorded.append(lang))
     argv = ["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "hi",
             "--judge", role, "--device", "cpu"]
-    assert main(argv) == 1
+    assert main(argv) == 3
     assert judged_paths == [generations_path("stock", "harmful", "hi", "dev")]
     assert recorded == (["hi"] if role == "primary" else [])
     assert f"harmful_en_dev: {line}\n" in caplog.text
 
 
+def listing(caplog, heading):
+    """The one end-of-run listing whose message starts with "N cells " + ``heading`` ("" if none)."""
+    found = [r.getMessage() for r in caplog.records if re.match(rf"\d+ cells {heading}", r.getMessage())]
+    assert len(found) <= 1
+    return found[0] if found else ""
+
+
+def test_judge_lists_stale_other_precision_and_other_judge_cells_apart(monkeypatch, caplog):
+    # Contract I: three kinds of skipped cell, three remedies. A stale one is started over with its restart
+    # line; one made in another precision is never started over (that would discard it): its --dtype, or
+    # leave it out; one holding another judge's judgements: the file's judge, or its --judge restart line.
+    from lift.judge import pipeline
+    from lift.models.generate import OtherPrecisionError
+
+    pin(judge=True)
+    for lang in ("en", "hi", "zh", "es"):
+        write_generation("harmful", lang, "dev")
+    restart = "lift restart --variant stock --split dev --sets harmful --langs {} --judge primary"
+    errors = {
+        "en": pipeline.StaleJudgementsError("judged on another stack", command=restart.format("en")),
+        "hi": OtherPrecisionError("generated in fp16, and the judge runs in bf16", dtype="fp16"),
+        "zh": pipeline.MixedJudgesError("another judge's judgements", command=restart.format("zh")),
+    }
+    judged_langs = []
+
+    def judge_file(path, **kw):
+        lang = path.stem.split("_")[1]
+        if lang in errors:
+            raise errors[lang]
+        judged_langs.append(lang)
+        return path
+
+    monkeypatch.setattr(pipeline, "judge_file", judge_file)
+    monkeypatch.setattr(pipeline, "make_judge", lambda *a, **kw: object())
+    monkeypatch.setattr(run_cmd, "_record", lambda *a, **kw: None)
+    argv = ["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "hi", "zh",
+            "es", "--device", "cpu"]
+    assert main(argv) == 3
+    assert judged_langs == ["es"]
+    stale = listing(caplog, "were skipped as stale")
+    precision = listing(caplog, "were made in another precision")
+    judges = listing(caplog, "hold another judge's judgements")
+    assert f"  harmful_en_dev: {restart.format('en')}\n" in stale
+    assert ("harmful_hi_dev: made in fp16: run it with --dtype fp16 where fp16 runs, or leave it out with "
+            "--sets/--langs") in precision
+    assert "lift restart" not in precision and "would discard" in precision
+    assert f"  harmful_zh_dev: {restart.format('zh')}" in judges and "the file's judge" in judges
+    for text, own in ((stale, "en"), (precision, "hi"), (judges, "zh")):
+        assert [c for c in ("en", "hi", "zh", "es") if f"harmful_{c}_dev" in text] == [own]
+
+
+@pytest.mark.parametrize("argv", [
+    ["generate", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "hi"],
+    ["run-dev", "--variant", "stock", "--sets", "harmful", "--langs", "hi", "--judge-device", "cuda:0"],
+    ["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "hi"],
+])
+@pytest.mark.parametrize("capability, dtype, refused", [
+    ("8.0", "fp16", True), ("9.0", "fp16", True),           # an A100 or H100: bf16 is native there
+    ("8.0", "bf16", False),                                 # generation.dtype is never refused
+    ("7.5", "fp16", False),                                 # the T4 the fp16 licence is for
+])
+def test_another_precision_than_the_default_is_refused_on_a_gpu_with_native_bf16(argv, capability, dtype,
+                                                                                 refused, monkeypatch):
+    # W15 / contract L: an fp16 line reused on an A100 (say the Kaggle quota ran out) would make fp16 cells
+    # the licence never compared, read for reporting under the T4's comparison. Refused before a model loads.
+    from lift.judge import pipeline
+    from lift.models import generate as gen
+    from lift.models import variants
+
+    class Loaded(Exception):
+        pass
+
+    def loading(*a, **kw):
+        raise Loaded
+
+    pin(judge=True)
+    write_generation("harmful", "hi", "dev")
+    monkeypatch.setattr(gen, "stack", lambda device: {"torch": "2.9.0", "transformers": "5.22.1",
+                                                      "gpu_capability": capability})
+    monkeypatch.setattr(variants, "build_variant", loading)
+    monkeypatch.setattr(pipeline, "make_judge", loading)
+    full = [*argv, "--device", "cuda:0", "--dtype", dtype]
+    if not refused:
+        with pytest.raises(Loaded):
+            main(full)
+        return
+    with pytest.raises(SystemExit) as exc:
+        main(full)
+    message = str(exc.value.code)
+    assert f"--dtype {dtype}" in message and capability in message and "T4" in message
+
+
+@pytest.mark.parametrize("argv", [
+    ["generate", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "hi"],
+    ["run-dev", "--variant", "stock", "--sets", "harmful", "--langs", "hi", "--judge-device", "cpu"],
+    ["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "hi"],
+])
+def test_a_cpu_device_is_never_refused_another_precision(argv, monkeypatch):
+    # Contract L's exemption: tests (and a laptop) run in fp32 on CPU.
+    from lift.judge import pipeline
+    from lift.models import variants
+
+    class Loaded(Exception):
+        pass
+
+    def loading(*a, **kw):
+        raise Loaded
+
+    pin(judge=True)
+    write_generation("harmful", "hi", "dev")
+    monkeypatch.setattr(variants, "build_variant", loading)
+    monkeypatch.setattr(pipeline, "make_judge", loading)
+    dtype = "fp16" if argv[0] == "run-dev" else "fp32"        # run-dev offers bf16 and fp16 only
+    with pytest.raises(Loaded):
+        main([*argv, "--device", "cpu", "--dtype", dtype])
+
+
 @pytest.mark.torch
-def test_run_dev_skips_a_stale_cell_exits_1_and_its_restart_line_lets_it_finish(fake_prompt_files,
+def test_run_dev_skips_a_stale_cell_exits_3_and_its_restart_line_lets_it_finish(fake_prompt_files,
                                                                                  tiny_model_dir, monkeypatch,
                                                                                  caplog):
     # R2 on the judge side, through lift run-dev with the real Qwen3Guard adapter. Session 1's judge dies in
     # the middle of easy_benign's judgements (chunks of 2: calls 1-2 judge harmful, call 3 the first two of
     # easy_benign). Session 2 resolved a newer transformers: easy_benign cannot be finished on it, so it is
-    # skipped and listed with its restart line, hard_benign is still done, and run-dev exits 1.
+    # skipped and listed with its restart line, hard_benign is still done, and run-dev exits 3.
     pytest.importorskip("torch")
     from fakes import make_prompt
 
@@ -508,7 +783,7 @@ def test_run_dev_skips_a_stale_cell_exits_1_and_its_restart_line_lets_it_finish(
     assert [judged("stock", s, "en") for s in sets] == [3, 2, 0]
     moved_stack(monkeypatch, transformers="5.99.0")
     caplog.clear()
-    assert main(argv) == 1
+    assert main(argv) == 3
     assert [judged("stock", s, "en") for s in sets] == [3, 2, 3]
     line = "lift restart --variant stock --split dev --sets easy_benign --langs en --judge primary"
     assert f"easy_benign_en_dev: {line}\n" in caplog.text
@@ -519,6 +794,127 @@ def test_run_dev_skips_a_stale_cell_exits_1_and_its_restart_line_lets_it_finish(
     assert [judged("stock", s, "en") for s in sets] == [3, 3, 3]
     assert len(judge_stacks("stock", "easy_benign", "en")) == 1
     assert recorded.count("easy_benign") == 1             # its AuditKIT record waits for the whole cell
+
+
+def tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, sets, *, n=3):
+    """run-dev on the tiny model (CPU), short outputs, the real Qwen3Guard adapter in the run's precision
+    over a StubGuard, a fake LID; the en prompts of ``sets`` are "question {i}" placeholders."""
+    from fakes import make_prompt
+
+    from lift.judge import pipeline
+    from lift.models import variants
+
+    pin(judge=True)
+    for s in sets:
+        fake_prompt_files[(s, "en")] = [make_prompt(f"{s[:3]}-{i}", "en", s, "dev", text=f"question {i}")
+                                        for i in range(n)]
+    real_build = variants.build_variant
+    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: real_build(
+        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)))
+    short_runs(monkeypatch)
+    monkeypatch.setattr(pipeline, "make_judge", lambda role, **kw: guard(dtype=kw.get("dtype") or "bf16"))
+    monkeypatch.setattr("lift.lang.LangID", FakeLID)
+    return ["run-dev", "--variant", "stock", "--langs", "en", "--device", "cpu", "--judge-device", "cpu"]
+
+
+@pytest.mark.torch
+def test_an_fp16_run_leaves_a_bf16_cell_alone_and_a_restart_needs_force(fake_prompt_files, tiny_model_dir,
+                                                                         monkeypatch, caplog):
+    # W3: Colab finished harmful_en in bf16; the Kaggle backup then runs the variant in fp16 (every T4 line
+    # takes --dtype fp16). The bf16 cell is listed as made in another precision, with its two remedies and
+    # never a restart line (following one would replace the runs repo's bf16 cell with fp16 outputs), the
+    # other cells are made in fp16, and run-dev exits 3. A restart in fp16 is refused unless --force.
+    pytest.importorskip("torch")
+    from lift.models.generate import generations_path, read_generations
+
+    argv = tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, ("harmful", "easy_benign"))
+    monkeypatch.setattr("lift.audit.record_safety", lambda *a, **kw: "record.json")
+    assert main([*argv, "--sets", "harmful", "--dtype", "bf16"]) == 0          # Colab
+    cell = generations_path("stock", "harmful", "en", "dev")
+    bf16 = cell.read_bytes()
+    caplog.clear()
+    assert main([*argv, "--sets", "harmful", "easy_benign", "--dtype", "fp16"]) == 3     # the T4 backup
+    assert cell.read_bytes() == bf16
+    assert "lift restart" not in caplog.text
+    precision = listing(caplog, "were made in another precision")
+    assert "harmful_en_dev: made in bf16: run it with --dtype bf16 where bf16 runs, or leave" in precision
+    made = read_generations(generations_path("stock", "easy_benign", "en", "dev"))
+    assert {g.meta["dtype"] for g in made} == {"fp16"} and judged("stock", "easy_benign", "en") == 3
+
+    restart = ["restart", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en",
+               "--dtype", "fp16"]
+    assert main(restart) == 1 and cell.read_bytes() == bf16
+    assert not (output_dir() / ".aside").exists()
+    assert main([*restart, "--force"]) == 0 and cell.read_bytes() == b""
+
+
+@pytest.mark.torch
+def test_a_restarted_cells_second_judge_sample_is_refilled_by_the_line_both_logs_name(fake_prompt_files,
+                                                                                     tiny_model_dir,
+                                                                                     monkeypatch, caplog):
+    # W9, with decision 9's case: a translation is fixed after the second judge read the cell. run-dev lists
+    # the whole-cell restart line AND the line that refills the second judge's sample (the restart sets that
+    # file aside too, and run-dev never judges with the second judge); the restart's log names it again. The
+    # documented job (restart, run-dev) plus that line leaves no empty second-judge sample behind.
+    pytest.importorskip("torch")
+    import shlex
+
+    from fakes import make_prompt
+
+    from lift import config
+    from lift.judge import pipeline
+    from lift.judge.pipeline import JudgeOutcome
+    from lift.models.generate import generations_path, read_generations
+    from lift.paths import validation_dir
+
+    class Frontier:
+        """Stands in for the frontier second judge (an API judge: no stack, no precision)."""
+
+        judge_id = "openai/placeholder-model@t0"
+        short = "frontier"
+
+        def judge(self, items):
+            return [JudgeOutcome("refusal", {"label": "REFUSAL", "reason": "placeholder"}, "") for _ in items]
+
+    argv = tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, ("harmful",), n=4)
+    config.load("project")["judges"]["safety_second"].update(provider="openai", model="placeholder-model")
+    monkeypatch.setattr(pipeline, "make_judge",
+                        lambda role, **kw: guard() if role == "primary" else Frontier())
+    monkeypatch.setattr("lift.audit.record_safety", lambda *a, **kw: "record.json")
+    keys = validation_dir() / "keys" / "second_judge" / "stock_dev.txt"     # P04's list (decisions.md 31)
+
+    def p04_list():
+        keys.parent.mkdir(parents=True, exist_ok=True)
+        cell = generations_path("stock", "harmful", "en", "dev")
+        keys.write_text("".join(g.key + "\n" for g in read_generations(cell)[:2]), encoding="utf-8")
+
+    def second_judged():
+        return len(pipeline.load_records("stock", "harmful", "en", "dev", judge="second", complete=False))
+
+    assert main([*argv, "--sets", "harmful"]) == 0
+    p04_list()
+    assert main(["judge", "--variant", "stock", "--split", "dev", "--judge", "second", "--keys",
+                 str(keys)]) == 0
+    assert second_judged() == 2
+
+    fake_prompt_files[("harmful", "en")][1] = make_prompt("har-1", "en", "harmful", "dev", text="question 1b")
+    caplog.clear()
+    assert main([*argv, "--sets", "harmful"]) == 3
+    stale = listing(caplog, "were skipped as stale")
+    restart = "lift restart --variant stock --split dev --sets harmful --langs en"
+    refill = ["lift", "judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en",
+              "--judge", "second", "--keys", str(keys)]
+    found = re.search(r"harmful_en_dev: (lift restart [^\n]+)\n\s+.*?(lift judge [^\n]+)", stale)
+    assert found and found.group(1) == restart and shlex.split(found.group(2)) == refill
+
+    caplog.clear()
+    assert main(restart.split()[1:]) == 0                   # the job: restart, the failed line, the refill
+    logged = re.search(r"frontier\S*harmful_en_dev\.jsonl: (lift judge [^\n]+)", caplog.text)
+    assert logged and shlex.split(logged.group(1)) == refill
+    assert main([*argv, "--sets", "harmful"]) == 0
+    p04_list()                                              # P04's list, drawn again for the new keys
+    assert main(refill[1:]) == 0
+    assert second_judged() == 2 and judged("stock", "harmful", "en") == 4
 
 
 # --- lift smoke -------------------------------------------------------------------------------------------
@@ -666,17 +1062,18 @@ class TestRunCells:
         # The verifier's R2 scenario with the real Qwen3Guard adapter. Session 1's judge dies in the middle
         # of harmful_hi's judgements (chunks of 2: calls 1-2 judge harmful_en, call 3 the first two of
         # harmful_hi). Session 2 resolved a newer transformers: harmful_hi cannot be finished on it, so it
-        # is skipped with its restart line, and every other cell is judged.
+        # is skipped with its restart line, and every other cell is judged. The judge runs in the cells'
+        # precision (fp32 here): a judge in another one is refused before it judges anything.
         make_holder, cells = setup
         short_runs(monkeypatch)
         with pytest.raises(RuntimeError, match="judge died"):
-            self.session(mode, make_holder, guard(die_on_call=4), cells)
+            self.session(mode, make_holder, guard(die_on_call=4, dtype="fp32"), cells)
         assert [judged("stock", *c) for c in cells[:2]] == [3, 2]
         moved_stack(monkeypatch, transformers="5.99.0")
-        stale: dict[str, str] = {}
-        self.session(mode, make_holder, guard(), cells, stale=stale)
+        skipped: dict[str, dict[str, str]] = {}
+        self.session(mode, make_holder, guard(dtype="fp32"), cells, skipped=skipped)
         line = "lift restart --variant stock --split dev --sets harmful --langs hi --judge primary"
-        assert stale == {"harmful_hi_dev": line}
+        assert skipped == {"stale": {"harmful_hi_dev": line + " --dtype fp32"}}        # the cell's precision
         assert [judged("stock", *c) for c in cells] == [3, 2, 3, 3]
 
     @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
@@ -692,10 +1089,31 @@ class TestRunCells:
         gen_mod.generate(make_holder()["variant"], cut_short, out_path=part)
         before = part.read_bytes()
         moved_stack(monkeypatch, torch="2.99.0+cu130")
-        stale: dict[str, str] = {}
-        self.session(mode, make_holder, self.Judge(), cells, stale=stale)
-        line = "lift restart --variant stock --split dev --sets harmful --langs hi"
-        assert stale == {"harmful_hi_dev": line}
+        skipped: dict[str, dict[str, str]] = {}
+        self.session(mode, make_holder, self.Judge(), cells, skipped=skipped)
+        line = "lift restart --variant stock --split dev --sets harmful --langs hi --dtype fp32"   # the run's
+        assert skipped == {"stale": {"harmful_hi_dev": line}}
+        assert part.read_bytes() == before
+        assert [judged("stock", *c) for c in cells] == [3, 0, 3, 3]
+
+    @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
+    def test_a_cell_made_in_another_precision_is_listed_apart_with_its_dtype(self, setup, monkeypatch, mode):
+        # W3: the cell is never offered a restart (that would discard the other precision's outputs).
+        import dataclasses
+
+        from lift.models import generate as gen_mod
+        from lift.prompts import load
+
+        make_holder, cells = setup
+        short_runs(monkeypatch)
+        part = gen_mod.generations_path("stock", "harmful", "hi", "dev")
+        other = dataclasses.replace(make_holder()["variant"], dtype="fp16")
+        gen_mod.generate(other, load("harmful", "hi", "dev"), out_path=part)
+        before = part.read_bytes()
+        skipped: dict[str, dict[str, str]] = {}
+        self.session(mode, make_holder, self.Judge(), cells, skipped=skipped)
+        assert skipped == {"precision": {"harmful_hi_dev": (
+            "made in fp16: run it with --dtype fp16 where fp16 runs, or leave it out with --sets/--langs")}}
         assert part.read_bytes() == before
         assert [judged("stock", *c) for c in cells] == [3, 0, 3, 3]
 
@@ -712,8 +1130,9 @@ class TestRunCells:
         moved_stack(monkeypatch, torch="2.99.0+cu130")
         with pytest.raises(gen_mod.StaleOutputError) as exc:
             self.session(mode, make_holder, self.Judge(), cells)
-        line = "lift restart --variant stock --split dev --sets harmful --langs hi"
-        assert f"1 cells were skipped as stale: harmful_hi_dev: {line}" in str(exc.value)
+        line = "lift restart --variant stock --split dev --sets harmful --langs hi --dtype fp32"
+        assert "1 cells were skipped as stale" in str(exc.value)
+        assert f"harmful_hi_dev: {line}" in str(exc.value)
         assert [judged("stock", *c) for c in cells] == [3, 0, 3, 3]
 
     def test_a_judge_crash_in_the_thread_surfaces(self, setup):
