@@ -3,8 +3,10 @@ PolyRefuse tree, built into tmp data and splits dirs. Every test checks the repo
 
 import json
 import logging
+import re
 import runpy
-from collections import Counter
+import shutil
+from collections import Counter, defaultdict
 
 import pytest
 from datafakes import FakeLID, FakeTranslator, fake_translation
@@ -13,15 +15,17 @@ from fake_build import (
     BlockingTranslator,
     fixture_cfg,
     fixture_ctx,
+    fixture_hub,
     isolate,
     read_sheet,
     repo_state,
     snapshot,
     write_sheet,
 )
+from fake_sft import QUIRK_DRAW, aya_dataset_rows, near
 from fake_sources import belebele_rows_by_config, orbench_rows, redteam_rows
 
-from lift import config
+from lift import config, splits
 from lift.data import build, polyrefuse, sources
 from lift.data.build import SheetError
 from lift.data.text import clean_text
@@ -123,14 +127,23 @@ def test_fixture_build_without_translation(dirs, caplog):
         frozen = split_file(dirs, set_name)["assignments"]
         assert {pid: s for pid, s in stamps[0].items() if pid in frozen} == frozen
 
-    # the repeated harmful prompt shares a split; the train row repeating a test prompt is out everywhere
+    # linked prompts share a split: the repeated harmful prompt, two OR-Bench prompts with English
+    # Jaccard 0.806 (the plain assignment puts them in dev and final), Belebele's two-question passages
     harmful = split_file(dirs, "harmful")["assignments"]
     assert harmful["prh-test-0001"] == harmful["prh-test-0004"]
     assert summary["splits"]["harmful"]["grouped"] == 2
+    hard = split_file(dirs, "hard_benign")["assignments"]
+    assert hard["orb-0005"] == hard["orb-0011"]
+    plain = splits.assign_splits(sorted(hard), CFG["sizes"]["hard_benign"], SEED)
+    assert plain["orb-0005"] != plain["orb-0011"]
+    assert {k: summary["splits"][k]["group_sizes"] for k in build.SPLIT_SETS} == {
+        "harmful": {"2": 1}, "easy_benign": {}, "hard_benign": {"2": 1}, "utility": {}, "belebele": {"2": 2}}
     for lang in ("en", "zh", "es", "ar", "th"):
         assert "prh-train-0001" not in by_pid("harmful", lang)
         assert report(dirs, f"harmful_{lang}")["exclusions"] == [
-            {"pid": "prh-train-0001", "reason": "duplicate_of:prh-test-0002"}]
+            {"pid": "prh-train-0001", "reason": "duplicate_of:prh-test-0002",
+             "detail": "en same text; zh es ar th same text"}]
+        assert report(dirs, f"harmful_{lang}")["cross_split_duplicates"] == []
     en = by_pid("harmful", "en")
     assert Counter(r.split for r in en.values()) == {"dev": 2, "final": 4, "train": 2, "val": 2}
     assert en["prh-test-0003"].text == clean_text(FIX["HARMFUL_TEST"][3][0])       # inner newline kept
@@ -167,6 +180,9 @@ def test_fixture_build_without_translation(dirs, caplog):
         assert rep["records"] == len(build.load_prompts(set_name, lang)) and rep["lid_failures"] == []
         if set_name != "belebele":
             assert all(r.lid is not None for r in build.load_prompts(set_name, lang))
+        # the same-text check runs on PromptRecord files only, and only they carry its key
+        has_key = ("cross_split_duplicates" in rep, "cross_split_duplicates" in summary["files"][name])
+        assert has_key == ((True, True) if set_name != "belebele" else (False, False)), name
     assert {r.lid.label for r in en.values()} == {"eng_Latn"}
     dumps = [p.read_text(encoding="utf-8") for p in (dirs.data / "prompts" / "reports").glob("*.json")]
     leaked = [t for t in fixture_texts() if any(t in d for d in [*dumps, caplog.text])]
@@ -197,6 +213,18 @@ def test_full_build_translates_every_missing_file_from_english(dirs):
     assert report(dirs, "hard_benign_th")["engines"] == {"google": 6}
     assert report(dirs, "harmful_en")["engines"] == {"original": 10}
 
+    # every file in every language, translated or not, carries the English file's splits, and those
+    # are the split file's (test, fit, dev and final pids) or train and val
+    for set_name in ("harmful", "easy_benign", "hard_benign", "belebele"):
+        frozen = split_file(dirs, set_name)["assignments"]
+        stamps = {pid: split_of(x) for pid, x in by_pid(set_name, "en").items()}
+        assert {pid: s for pid, s in stamps.items() if pid in frozen} == frozen
+        assert {s for pid, s in stamps.items() if pid not in frozen} <= {"train", "val"}
+        assert Counter(stamps.values()) == {**CFG["sizes"][set_name], **{
+            "harmful": {"train": 2, "val": 2}, "easy_benign": {"train": 3}}.get(set_name, {})}
+        for lang in LANGS[1:]:
+            assert {pid: split_of(x) for pid, x in by_pid(set_name, lang).items()} == stamps, (set_name, lang)
+
 
 def test_rebuild_reproduces_every_file_byte_for_byte(dirs):
     build.build_all(ctx=fixture_ctx())
@@ -215,6 +243,141 @@ def test_utility_heldout_never_reaches_the_training_rows(dirs):
     for variant in VARIANTS:
         ids = {"utl-" + row["id"] for row in read_jsonl(dirs.data / "sft" / variant / "sft_messages.jsonl")}
         assert ids and not ids & held
+
+
+def test_training_rows_never_near_duplicate_a_utility_record(dirs):
+    """A held-out draw forced to meet every near-duplicate quirk of the SFT fixture (fake_sft.QUIRK_DRAW):
+    the build must drop their near-duplicates from training, not only the held-out rows themselves."""
+    cfg = fixture_cfg()
+    cfg["sources"]["sft"]["heldout"]["per_source"] = QUIRK_DRAW["per_source"]
+    cfg["sizes"]["utility"] = QUIRK_DRAW["utility"]
+    summary = build.build_all(ctx=fixture_ctx(cfg=cfg), only=["utility", "sft"], langs=["hi"])
+    pools = json.loads((dirs.data / "sft" / "report.json").read_text(encoding="utf-8"))["sources"]
+    assert pools["aya"]["near_dup_excluded"] > 0 and pools["indicalign"]["near_dup_excluded"] > 0
+    assert pools["indicalign"]["near_dup_of"]["aya"] > 0                          # across sources too
+    util = list(by_pid("utility", "hi").values())
+    assert len(util) == 20 and summary["sft"]["decision"]["rows"] >= 1
+    for variant in VARIANTS:
+        rows = list(read_jsonl(dirs.data / "sft" / variant / "sft_messages.jsonl"))
+        assert rows
+        for row in rows:
+            user, assistant = (m["content"] for m in row["messages"])
+            assert not [r.pid for r in util if near(user, assistant, r.text, r.extra["reference"])], row["id"]
+
+
+def test_sft_checks_the_frozen_utility_split_before_writing(dirs, caplog):
+    caplog.set_level(logging.WARNING)
+    summary = build.build_all(ctx=fixture_ctx(), only=["sft"], langs=["hi"])       # no utility file built
+    assert summary["splits"]["utility"]["status"] == "created" and built_files(dirs) == set()
+    assert f"{dirs.splits / 'utility.json'}: commit it; split files are frozen once committed" in caplog.text
+    frozen = split_file(dirs, "utility")["assignments"]
+    held = int(min(p for p in frozen if p.startswith("utl-aya-")).rsplit("-", 1)[1])
+    fewer = [row for k, row in enumerate(aya_dataset_rows()) if k != held]       # the draw loses a row
+    shutil.rmtree(dirs.data / "sft")
+    before = snapshot(dirs.data)
+    with pytest.raises(ValueError, match=r"utility.json covers 4 pids .* The utility held-out draw changed"):
+        build.build_all(ctx=fixture_ctx(hub=fixture_hub({"aya_dataset": fewer})), only=["sft"], langs=["hi"])
+    assert snapshot(dirs.data) == before and not (dirs.data / "sft").exists()
+    assert split_file(dirs, "utility")["assignments"] == frozen
+    summary = build.build_all(ctx=fixture_ctx(), only=["sft"], langs=["hi"])       # the same pool passes
+    assert summary["splits"]["utility"]["status"] == "loaded" and summary["sft"]["decision"]["rows"] == 5
+
+
+class CollidingTranslator(FakeTranslator):
+    """A FakeTranslator giving each source in ``same`` the translation of the source it maps to: two
+    English prompts, one output."""
+
+    def __init__(self, same, **kw):
+        super().__init__(**kw)
+        self.same = dict(same)
+
+    def __call__(self, text, lang):
+        return super().__call__(self.same.get(text, text), lang)
+
+
+def test_texts_a_translation_makes_equal_are_caught_in_that_language(dirs, caplog):
+    build.build_all(ctx=fixture_ctx(), only=["harmful", "hard_benign"], langs=["en"])
+    hard = split_file(dirs, "hard_benign")["assignments"]
+    dev, final = (min(p for p, s in hard.items() if s == split) for split in ("dev", "final"))
+    test = min(split_file(dirs, "harmful")["assignments"])
+    english = {r.pid: r.text for s in ("harmful", "hard_benign") for r in build.load_prompts(s, "en")}
+    translator = CollidingTranslator({english["prh-train-0000"]: english[test], english[dev]: english[final]})
+    caplog.set_level(logging.WARNING)
+    summary = build.build_all(ctx=fixture_ctx(translator=translator), only=["harmful", "hard_benign"],
+                              langs=["en", "hi"])
+    # a train prompt whose translation is a test prompt's: dropped in that language only
+    assert "prh-train-0000" not in by_pid("harmful", "hi") and "prh-train-0000" in by_pid("harmful", "en")
+    exclusions = report(dirs, "harmful_hi")["exclusions"]
+    assert [e for e in exclusions if e["pid"] == "prh-train-0000"] == [
+        {"pid": "prh-train-0000", "reason": f"same_text_as:{test}"}]
+    assert summary["files"]["harmful_hi"]["exclusions"] == 2 and not report(dirs, "harmful_hi")[
+        "cross_split_duplicates"]
+    # a dev and a final prompt with one translation: kept (the frozen split cannot regroup them), reported
+    rep = report(dirs, "hard_benign_hi")
+    pair = [{"pid": dev, "split": "dev"}, {"pid": final, "split": "final"}]
+    assert rep["cross_split_duplicates"] == [sorted(pair, key=lambda x: x["pid"])]
+    assert {dev, final} <= set(by_pid("hard_benign", "hi")) and rep["exclusions"] == []
+    assert summary["files"]["hard_benign_hi"]["cross_split_duplicates"] == 1
+    assert summary["files"]["hard_benign_en"]["cross_split_duplicates"] == 0
+    assert "1 texts repeat across splits of the frozen hard_benign split" in caplog.text
+
+
+def test_same_text_drops_train_copies_of_held_out_texts_and_lists_split_straddlers():
+    def rec(pid, split, text):
+        return PromptRecord(pid=pid, lang="hi", set="harmful", split=split, text=text, source="polyrefuse")
+
+    records = [rec("prh-test-0001", "final", "पाठ एक"), rec("prh-test-0002", "dev", " पाठ  एक"),
+               rec("prh-train-0001", "train", "पाठ एक "), rec("prh-val-0001", "val", "पाठ दो"),
+               rec("prh-train-0002", "train", "पाठ दो"), rec("prh-test-0003", "dev", "पाठ तीन"),
+               rec("prh-test-0004", "dev", "पाठ तीन"), rec("orb-0001", "fit", "पाठ चार"),
+               rec("orb-0002", "dev", "पाठ चार")]
+    kept, same, cross = build._same_text(records)
+    assert same == [{"pid": "prh-train-0001", "reason": "same_text_as:prh-test-0001"}]
+    assert [r.pid for r in kept] == [r.pid for r in records if r.pid != "prh-train-0001"]   # val 1 = train 2
+    assert cross == [[{"pid": "orb-0001", "split": "fit"}, {"pid": "orb-0002", "split": "dev"}],
+                     [{"pid": "prh-test-0001", "split": "final"}, {"pid": "prh-test-0002", "split": "dev"}]]
+
+
+def test_a_shared_polyrefuse_translation_links_prompts_in_every_build(dirs, tmp_path):
+    """A copy of the fixture tree whose th file gives two test prompts one translation, and a train
+    prompt a test prompt's: they are linked even by a build of en alone, since every PolyRefuse
+    translation is read whatever --only and --langs say."""
+    root = tmp_path / "tree" / POLYREFUSE_FIXTURE.name
+    shutil.copytree(POLYREFUSE_FIXTURE, root)
+    test_th = root / "PolyRefuse" / "harmful_test_translated_th.json"
+    train_th = root / "PolyRefuse" / "harmful_train_translated_th.json"
+    tests, train = (json.loads(path.read_text(encoding="utf-8")) for path in (test_th, train_th))
+    tests[3]["instruction_translated"] = tests[0]["instruction_translated"]
+    train[0]["instruction"] = tests[5]["instruction_translated"]
+    FIX["dump"](test_th, tests)
+    FIX["dump"](train_th, train)
+    summary = build.build_all(ctx=fixture_ctx(polyrefuse_root=root), only=["harmful"], langs=["en"])
+
+    harmful = split_file(dirs, "harmful")["assignments"]
+    english_only = splits.assign_splits(sorted(harmful), CFG["sizes"]["harmful"], SEED,
+                                        {"prh-test-0001": "prh-test-0001", "prh-test-0004": "prh-test-0001"})
+    assert english_only["prh-test-0000"] != english_only["prh-test-0003"]
+    assert harmful["prh-test-0000"] == harmful["prh-test-0003"]
+    assert summary["splits"]["harmful"]["group_sizes"] == {"2": 2}
+    exclusions = {e["pid"]: e for e in report(dirs, "harmful_en")["exclusions"]}
+    assert set(exclusions) == {"prh-train-0000", "prh-train-0001"}
+    assert "prh-train-0000" not in by_pid("harmful", "en")
+    assert exclusions["prh-train-0000"]["reason"] == "near_duplicate_of:prh-test-0005"
+    assert re.fullmatch(r"en 0\.\d{3}; th same text", exclusions["prh-train-0000"]["detail"])
+
+
+def test_belebele_questions_on_one_passage_share_a_split(dirs):
+    cfg = fixture_cfg()
+    cfg["split_seed"] = 0
+    plain = splits.assign_splits([f"bel-{i:03d}" for i in range(5)], cfg["sizes"]["belebele"], 0)
+    assert plain["bel-003"] != plain["bel-004"]                       # one passage, two questions
+    summary = build.build_all(ctx=fixture_ctx(cfg=cfg), only=["belebele"], langs=["en", "hi"])
+    assert (summary["splits"]["belebele"]["groups"], summary["splits"]["belebele"]["grouped"]) == (2, 4)
+    for lang in ("en", "hi"):
+        by_link = defaultdict(set)
+        for item in by_pid("belebele", lang).values():
+            by_link[item["link"]].add(item["split"])
+        assert len(by_link) == 3 and all(len(found) == 1 for found in by_link.values())
 
 
 def test_only_and_langs_choose_the_files(dirs, caplog):

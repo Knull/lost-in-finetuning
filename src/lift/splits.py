@@ -24,10 +24,14 @@ def assign_splits(pids: Iterable[str], sizes: Mapping[str, int], seed: int,
     the dict straight from the config.
 
     ``groups`` maps pids to a group key; pids sharing a key always land in the same split. The
-    build uses it for prompts whose English text is identical (PolyRefuse's harmful test repeats
-    10 prompts), so the same prompt can never sit in both dev and final. Groups are permuted with
-    the seed and each split, in config order, takes the next groups that still fit, so the sizes
-    stay exact. Without ``groups`` the assignment is the plain permutation, unchanged.
+    build passes the connected components of its prompt links (lift.data.build: equal English, an
+    English character 3-gram Jaccard >= split_near_dup, or equal text in one PolyRefuse
+    translation) and Belebele's questions on one passage: on the pinned data, harmful 21 pairs (the
+    10 test repeats and 11 near pairs) and belebele 412 pairs. So a linked prompt can never sit in
+    both dev and final. Groups are permuted with the seed and each split, in config order, takes
+    the next groups that still fit, so the sizes stay exact; for an unlucky seed with few single
+    pids left this can fail ("cannot fill"). Without ``groups`` the assignment is the plain
+    permutation, unchanged.
     """
     pids = list(pids)
     unique = sorted(set(pids))

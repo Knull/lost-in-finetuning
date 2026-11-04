@@ -24,7 +24,12 @@ counts as aya / indicalign:
    sha256(seed, tag, row id) among rows whose instruction occurs once in the pool and that
    CuratorKIT's schema gate keeps (10-2,048 tokens), with no two near-duplicates among the 300 (the
    indicalign draw also avoids the aya draw). pid ``utl-{aya|ind}-{idx:05d}``; the build splits
-   them 100 dev / 200 final.
+   them 100 dev / 200 final into data/splits/utility.json. The draw is a function of the pools, so
+   a change to the pools' revisions or cleaning (unclear.max_repetition_ratio,
+   languages.accept_labels.hi, langid) or to ``heldout`` draws other rows. Once the split file
+   exists, every build of utility or sft (build.py freezes or checks it first) and
+   ``build_candidate`` (``check_frozen_heldout``) stop with ValueError before writing a training
+   row unless the draw gives exactly its pids.
 3. ``exclude_heldout``: removes the held-out rows, and every row that near-duplicates a held-out row
    of EITHER source, from BOTH training pools: 1,000 -> 790 / 10,322 -> 10,144. Near-duplicate
    (``heldout.near_dup``): exact character 3-gram Jaccard (the quantity MinHash estimates) of the
@@ -48,8 +53,11 @@ Files under the data dir (training rows use the messages format TRL's SFTTrainer
                                                          rejected.jsonl, lexsi_provenance.json + summary
     sft/report.json                                      every stage count and the N decision
 variant is ``dedup`` (both candidates) or ``raw`` (aya, stress recipe). The utility records go to
-prompts/utility_hi.jsonl through build.py. CuratorKIT's own files carry run timestamps; everything
-this module writes is byte-identical on a rebuild.
+prompts/utility_hi.jsonl through build.py. CuratorKIT's own files carry run timestamps (manifest.json:
+run_timestamp, wall_clock_seconds and its provenance's created_at; lexsi_provenance.json:
+created_at), so interim/sft/ and the sft/{cand}/{variant}/curatorkit/ copies of manifest.json and
+lexsi_provenance.json change on every run; everything else this module writes is byte-identical on a
+rebuild.
 """
 
 from __future__ import annotations
@@ -69,7 +77,7 @@ from itertools import chain
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
 
-from lift import config
+from lift import config, splits
 from lift.data.text import char_ngrams, clean_text, dup_key
 from lift.io import sha256_file, sha256_text, write_jsonl
 from lift.judge.labels import repetition_ratio
@@ -264,13 +272,14 @@ def _at_least(a: frozenset[str], b: frozenset[str], t: Fraction) -> bool:
 
 
 def _is_near(a: _Grams, b: _Grams, nd: _NearDup) -> bool:
-    """The near-duplicate rule on one pair (the reference ``_join`` agrees with)."""
+    """The near-duplicate rule on one pair (the reference ``jaccard_pairs`` agrees with)."""
     return _at_least(a.ins, b.ins, nd.instruction) or _at_least(a.res, b.res, nd.response)
 
 
-def _join(left: Sequence[frozenset[str]], right: Sequence[frozenset[str]],
-          t: Fraction) -> list[tuple[int, int]]:
-    """Every (i, j) with Jaccard(left[i], right[j]) >= t; empty sets never match.
+def jaccard_pairs(left: Sequence[frozenset[str]], right: Sequence[frozenset[str]],
+                  t: Fraction) -> list[tuple[int, int]]:
+    """Every (i, j) with Jaccard(left[i], right[j]) >= t; empty sets never match. Passing one list
+    twice gives a self-join: (i, i) and both orders of every pair (lift.data.build links prompts so).
 
     Exact, via prefix filtering: rank grams by how many sets hold them (rarest first, then by the
     gram). Two sets that similar share at least ceil(t * |S|) grams, so the first gram they share
@@ -317,9 +326,9 @@ def near_duplicates(rows: Sequence[SftRow], heldout: Iterable[PromptRecord | Sft
     held = [_grams(ins, res, nd) for _, ins, res in items]
     mine = [_grams(r.instruction, r.response, nd) for r in rows]
     hits: dict[int, set[int]] = defaultdict(set)
-    for i, j in _join([g.ins for g in mine], [g.ins for g in held], nd.instruction):
+    for i, j in jaccard_pairs([g.ins for g in mine], [g.ins for g in held], nd.instruction):
         hits[i].add(j)
-    for i, j in _join([g.res for g in mine], [g.res for g in held], nd.response):
+    for i, j in jaccard_pairs([g.res for g in mine], [g.res for g in held], nd.response):
         hits[i].add(j)
     return {rows[i].row_id(): min(items[j][0] for j in js) for i, js in sorted(hits.items())}
 
@@ -622,18 +631,41 @@ def build_candidates(train_pools: Mapping[str, Any], *,
     return report
 
 
+def check_frozen_heldout(heldout: Iterable[PromptRecord | SftRow]) -> None:
+    """If data/splits/utility.json exists (lift.splits.SPLITS_DIR), it must hold exactly the pids of
+    ``heldout``. The draw is a function of the pools, so another pool revision, cleaning rule
+    (unclear.max_repetition_ratio, languages.accept_labels.hi, langid.min_prob or revision) or
+    ``heldout`` setting draws other rows, and training could then take frozen dev/final rows.
+    ValueError naming the mismatch (counts and pids); nothing to check while no split file exists."""
+    path = splits.SPLITS_DIR / "utility.json"
+    if not path.exists():
+        return
+    frozen = set(splits.load_split("utility"))
+    drawn = {pid for pid, _, _ in _heldout_items(heldout)}
+    if frozen != drawn:
+        lost, new = sorted(frozen - drawn), sorted(drawn - frozen)
+        raise ValueError(f"{path} holds {len(frozen)} utility pids but the held-out draw gives {len(drawn)}: "
+                         f"{len(lost)} frozen pids not drawn (e.g. {lost[:5]}), {len(new)} drawn pids not "
+                         f"frozen (e.g. {new[:5]}). The SFT pools, their cleaning or sources.sft.heldout "
+                         "changed since the split was frozen; nothing was written")
+
+
 def build_candidate(name: str, *, dedup: bool = True, rows: int = 3000, cfg: Mapping[str, Any] | None = None,
                     train_cfg: Mapping[str, Any] | None = None, curate: Curate | None = None,
                     pools: Mapping[str, Any] | None = None) -> Path:
     """One candidate end to end (held-out set and exclusion included) with min(rows, curated) rows,
     no equal-size rule and no report.json; build.py uses build_candidates. pools None ->
-    load_pools(cfg=cfg). Returns the directory holding sft_messages.jsonl and the CuratorKIT copies."""
+    load_pools(cfg=cfg). A frozen utility split must hold exactly the held-out pids
+    (``check_frozen_heldout``, before anything is written). Returns the directory holding
+    sft_messages.jsonl and the CuratorKIT copies."""
     cfg = cfg if cfg is not None else config.load("project")
     train_cfg = train_cfg if train_cfg is not None else config.load("train")
     if name not in train_cfg["candidates"]:
         raise ValueError(f"unknown candidate {name!r}; train.yaml lists {train_cfg['candidates']}")
     pools = pools if pools is not None else load_pools(cfg=cfg)
-    train = exclude_heldout(pools, build_utility_heldout(pools, cfg=cfg), cfg=cfg)
+    heldout = build_utility_heldout(pools, cfg=cfg)
+    check_frozen_heldout(heldout)
+    train = exclude_heldout(pools, heldout, cfg=cfg)
     variant = "dedup" if dedup else "raw"
     pool = train[name][0]
     curated, summary = _curate(name, variant, pool, curate if curate is not None else run_curatorkit)
