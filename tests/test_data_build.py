@@ -307,10 +307,11 @@ class CollidingTranslator(FakeTranslator):
 def test_texts_a_translation_makes_equal_are_caught_in_that_language(dirs, caplog):
     build.build_all(ctx=fixture_ctx(), only=["harmful", "hard_benign"], langs=["en"])
     hard = split_file(dirs, "hard_benign")["assignments"]
-    dev, final = (min(p for p, s in hard.items() if s == split) for split in ("dev", "final"))
+    fit, dev, final = (min(p for p, s in hard.items() if s == split) for split in ("fit", "dev", "final"))
     test = min(split_file(dirs, "harmful")["assignments"])
     english = {r.pid: r.text for s in ("harmful", "hard_benign") for r in build.load_prompts(s, "en")}
-    translator = CollidingTranslator({english["prh-train-0000"]: english[test], english[dev]: english[final]})
+    translator = CollidingTranslator({english["prh-train-0000"]: english[test], english[dev]: english[final],
+                                      english[fit]: english[final]})
     caplog.set_level(logging.WARNING)
     summary = build.build_all(ctx=fixture_ctx(translator=translator), only=["harmful", "hard_benign"],
                               langs=["en", "hi"])
@@ -321,11 +322,14 @@ def test_texts_a_translation_makes_equal_are_caught_in_that_language(dirs, caplo
         {"pid": "prh-train-0000", "reason": f"same_text_as:{test}"}]
     assert summary["files"]["harmful_hi"]["exclusions"] == 2 and not report(dirs, "harmful_hi")[
         "cross_split_duplicates"]
-    # a dev and a final prompt with one translation: kept (the frozen split cannot regroup them), reported
+    # a dev and a final prompt with one translation: kept (the frozen split cannot regroup them), reported;
+    # a fit prompt with it too is dropped, since CAST fits on hard_benign fit
     rep = report(dirs, "hard_benign_hi")
     pair = [{"pid": dev, "split": "dev"}, {"pid": final, "split": "final"}]
     assert rep["cross_split_duplicates"] == [sorted(pair, key=lambda x: x["pid"])]
-    assert {dev, final} <= set(by_pid("hard_benign", "hi")) and rep["exclusions"] == []
+    assert {dev, final} <= set(by_pid("hard_benign", "hi")) and fit not in by_pid("hard_benign", "hi")
+    assert rep["exclusions"] == [{"pid": fit, "reason": f"same_text_as:{min(dev, final)}"}]
+    assert fit in by_pid("hard_benign", "en")
     assert summary["files"]["hard_benign_hi"]["cross_split_duplicates"] == 1
     assert summary["files"]["hard_benign_en"]["cross_split_duplicates"] == 0
     assert "1 texts repeat across splits of the frozen hard_benign split" in caplog.text
@@ -335,8 +339,8 @@ def test_texts_a_translation_makes_equal_are_caught_in_that_language(dirs, caplo
     assert st["files"]["harmful_hi"]["exclusions"] == {"duplicate_of": 1, "same_text_as": 1}
     assert st["files"]["harmful_hi"]["cross_split_duplicates"] == 0
     lines = build.format_stats(st).splitlines()
-    assert ("  hard_benign_hi: 1 texts repeat across splits (kept: the frozen split cannot regroup "
-            "them)") in lines
+    assert ("  hard_benign_hi: exclusions same_text_as 1; 1 texts repeat across splits (kept: the frozen "
+            "split cannot regroup them)") in lines
     assert "  harmful_hi: exclusions duplicate_of 1, same_text_as 1" in lines
     assert not [line for line in lines if line.startswith("  hard_benign_en:")]   # nothing to note
 
@@ -349,12 +353,15 @@ def test_same_text_drops_train_copies_of_held_out_texts_and_lists_split_straddle
                rec("prh-train-0001", "train", "पाठ एक "), rec("prh-val-0001", "val", "पाठ दो"),
                rec("prh-train-0002", "train", "पाठ दो"), rec("prh-test-0003", "dev", "पाठ तीन"),
                rec("prh-test-0004", "dev", "पाठ तीन"), rec("orb-0001", "fit", "पाठ चार"),
-               rec("orb-0002", "dev", "पाठ चार")]
+               rec("orb-0002", "dev", "पाठ चार"), rec("orb-0003", "fit", "पाठ पाँच"),
+               rec("orb-0004", "fit", "पाठ पाँच")]
     kept, same, cross = build._same_text(records)
-    assert same == [{"pid": "prh-train-0001", "reason": "same_text_as:prh-test-0001"}]
-    assert [r.pid for r in kept] == [r.pid for r in records if r.pid != "prh-train-0001"]   # val 1 = train 2
-    assert cross == [[{"pid": "orb-0001", "split": "fit"}, {"pid": "orb-0002", "split": "dev"}],
-                     [{"pid": "prh-test-0001", "split": "final"}, {"pid": "prh-test-0002", "split": "dev"}]]
+    # hard_benign's fit is a fitting pool (CAST), like train and val: its copy of a dev text goes
+    assert same == [{"pid": "orb-0001", "reason": "same_text_as:orb-0002"},
+                    {"pid": "prh-train-0001", "reason": "same_text_as:prh-test-0001"}]
+    gone = {"orb-0001", "prh-train-0001"}
+    assert [r.pid for r in kept] == [r.pid for r in records if r.pid not in gone]   # val 1 = train 2; 2 fits
+    assert cross == [[{"pid": "prh-test-0001", "split": "final"}, {"pid": "prh-test-0002", "split": "dev"}]]
 
 
 def test_a_shared_polyrefuse_translation_links_prompts_in_every_build(dirs, tmp_path):
@@ -1434,7 +1441,7 @@ def test_stats_count_files_failures_and_exclusions(dirs, spot):
     text = build.format_stats(st)
     assert "hard_benign_hi" in text and "N = 5 rows" in text and "failures empty 1, wrong_lang 1" in text
     assert ("excluded = copies of a test prompt or a red-teaming repeat (duplicate_of, near_duplicate_of), "
-            "train/val texts a dev/final record has (same_text_as) and spot-check bad") in text
+            "train/val/fit texts a dev/final record has (same_text_as) and spot-check bad") in text
     assert f"last build {st['build']['run_id']}: complete" in text.splitlines()
     assert "  harmful_en: exclusions duplicate_of 1" in text.splitlines()
     assert not [t for t in fixture_texts() if t in text]

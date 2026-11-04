@@ -4,7 +4,7 @@ Inputs, all pinned in configs/project.yaml: the PolyRefuse clone (raw/Multilingu
 or checked by ``polyrefuse.ensure_clone``, then ``polyrefuse.check_alignment`` on every build that
 reads it), the Hub sources through one ``Hub`` (OR-Bench-Hard-1K, Aya Red-teaming, Belebele, the SFT
 sources), Google Translate through ``translate.translate_records`` (one rate-limited backend for the
-whole build; every output cached), GlotLID and CuratorKIT. ``BuildContext`` holds them; tests pass
+whole build; every non-blank output cached), GlotLID and CuratorKIT. ``BuildContext`` holds them; tests pass
 fakes.
 
 Where each file comes from (``build_all``; sets in SETS order, languages in config order):
@@ -46,12 +46,13 @@ same-text check -> GlotLID -> the file, its excluded file and its report.
   14 train, 3 val; prh-train-0226 is the one duplicate_of (prh-test-0008); prh-train-0009 and
   prh-train-0252 are also prh-test-0050 and prh-test-0079 word for word in th. Aya Red-teaming's
   repeats (sources.redteam_records) are ``duplicate_of`` too.
-- Same text after the split stamp (``_same_text``, every PromptRecord file): a train/val record whose
-  text (dup_key) a dev/final record of the file also has is left out of that file alone, listed as
-  ``same_text_as:<the smallest such pid>``. One text in two split-file splits (fit, dev, final)
-  cannot be regrouped once the split is frozen: listed as ``cross_split_duplicates`` (pids and splits)
-  in the report and counted in build.json's files, with a WARNING. The links make this a no-op in
-  PolyRefuse's own languages; it guards hi, our zh harmless translations and hard_benign's.
+- Same text after the split stamp (``_same_text``, every PromptRecord file): a record of a fitting
+  pool (train, val, or hard_benign's fit, which CAST fits on) whose text (dup_key) a dev/final record
+  of the file also has is left out of that file alone, listed as ``same_text_as:<the smallest such
+  pid>``. One text in dev and final cannot be regrouped once the split is frozen: listed as
+  ``cross_split_duplicates`` (pids and splits) in the report and counted in build.json's files, with
+  a WARNING. The links make this a no-op in PolyRefuse's own languages; it guards hi, our zh harmless
+  translations and hard_benign's.
 - Translation failures (translate.py's rules) are listed in the report and the pid is left out of
   that file, never replaced by English. TranslationBlocked stops all Google translation for the rest
   of the run: every file that still needs one is skipped (never a partial file), everything else is
@@ -98,7 +99,8 @@ not draw: each item is on one sheet only. Readers fill verdict ok / fixed (with 
 then checks every row against the current build and the stored verdicts, raising one SheetError with
 every problem (a legacy-encoding save among them) before anything is written; then it appends the
 verdicts that differ from the stored ones to interim/translations/spotchecks.jsonl and rebuilds those
-files from the cache (no network, splits untouched), listing any record the rebuild lost. Every
+files from the cache (no translation engine is called; the sources load as in a build; splits
+untouched), listing any record the rebuild lost. Every
 build applies the latest verdict per (lang, pid): fixed replaces the text (checked; edited when it
 differs) if the English is unchanged; ok marks it checked and bad moves it to prompts/excluded/ if
 the reader saw the engine output the build has; a verdict on a failed item builds the record from
@@ -108,8 +110,8 @@ never applied.
 
 Files under the data dir (lift.paths). A rebuild reproduces every file byte for byte except build.json
 (run id, timings) and CuratorKIT's run records (lift.data.sft): interim/sft/ and the
-sft/{cand}/{variant}/curatorkit/ copies of manifest.json and lexsi_provenance.json carry
-run_timestamp, wall_clock_seconds and created_at.
+sft/{cand}/{variant}/curatorkit/ copies of manifest.json, lexsi_provenance.json and rejected.jsonl
+carry run_timestamp, wall_clock_seconds, created_at and provenance timestamps.
     prompts/{set}_{lang}.jsonl           PromptRecord lines (belebele: dicts), sorted by pid
     prompts/excluded/{set}_{lang}.jsonl  records readers marked bad (extra.excluded, excluded_reason)
     prompts/reports/{set}_{lang}.json    counts by split and engine; lid_failures, translation
@@ -980,11 +982,11 @@ def _stamp(set_name: str, rec: PromptRecord, mapping: Mapping[str, str] | None) 
 
 def _same_text(records: Sequence[PromptRecord]) -> tuple[list[PromptRecord], list[dict[str, str]],
                                                          list[list[dict[str, str]]]]:
-    """Texts one file holds more than once (dup_key), after the split stamp. A train/val record whose
-    text a dev/final record also has is dropped (``same_text_as:<the smallest such pid>``). Records of
-    one text in different split-file splits (fit, dev, final) cannot be regrouped once the split is
-    frozen: they come back as cross-split groups [{"pid", "split"}, ...]. Returns (the records kept,
-    the exclusions, the cross-split groups)."""
+    """Texts one file holds more than once (dup_key), after the split stamp. A record of a fitting pool
+    (train, val; hard_benign's fit, which CAST fits on) whose text a dev/final record also has is
+    dropped (``same_text_as:<the smallest such pid>``). Dev and final records of one text cannot be
+    regrouped once the split is frozen: they come back as cross-split groups [{"pid", "split"}, ...].
+    Returns (the records kept, the exclusions, the cross-split groups)."""
     by_text: dict[str, list[PromptRecord]] = defaultdict(list)
     for rec in records:
         by_text[dup_key(rec.text)].append(rec)
@@ -995,8 +997,8 @@ def _same_text(records: Sequence[PromptRecord]) -> tuple[list[PromptRecord], lis
             continue
         held = sorted(r.pid for r in recs if r.split in ("dev", "final"))
         if held:
-            dropped.update((r.pid, held[0]) for r in recs if r.split in ("train", "val"))
-        framed = sorted((r for r in recs if r.split not in ("train", "val")), key=_pid)
+            dropped.update((r.pid, held[0]) for r in recs if r.split in ("train", "val", "fit"))
+        framed = sorted((r for r in recs if r.split in ("dev", "final")), key=_pid)
         if len({r.split for r in framed}) > 1:
             cross.append([{"pid": r.pid, "split": r.split} for r in framed])
     same = [{"pid": pid, "reason": f"same_text_as:{first}"} for pid, first in sorted(dropped.items())]
@@ -1004,16 +1006,16 @@ def _same_text(records: Sequence[PromptRecord]) -> tuple[list[PromptRecord], lis
 
 
 def _write_prompts(run: _Run, src: _Sources, f: _File) -> None:
-    """Stamp splits, drop the train/val records whose text a dev/final record shares and list the
-    texts that straddle splits (``_same_text``: it matters for our own translations, hi, zh harmless
-    and hard_benign; PolyRefuse's languages are linked before), run GlotLID, write the file, its
-    excluded file and its report."""
+    """Stamp splits, drop the train/val/fit records whose text a dev/final record shares and list the
+    texts that straddle dev and final (``_same_text``: it matters for our own translations, hi, zh
+    harmless and hard_benign; PolyRefuse's languages are linked before), run GlotLID, write the file,
+    its excluded file and its report."""
     name = f"{f.set_name}_{f.lang}"
     mapping = src.splits.get(f.set_name)
     kept, same, cross = _same_text([_stamp(f.set_name, rec, mapping) for rec in sorted(f.records, key=_pid)])
     if same:
-        log.info("%s: dropped %d train/val records whose text a dev/final record has: %s", name, len(same),
-                 ", ".join(f"{e['pid']} ({e['reason']})" for e in same))
+        log.info("%s: dropped %d train/val/fit records whose text a dev/final record has: %s", name,
+                 len(same), ", ".join(f"{e['pid']} ({e['reason']})" for e in same))
     if cross:
         log.warning("%s: %d texts repeat across splits of the frozen %s split, which cannot regroup them: %s",
                     name, len(cross), f.set_name,
@@ -1853,8 +1855,8 @@ def format_stats(st: Mapping[str, Any]) -> str:
                        for i, (cell, w) in enumerate(zip(row, widths, strict=True))) for row in table]
     lines.append("lid = GlotLID rejections (kept, listed); failed = translation failures (open = still "
                  "absent from the file); excluded = copies of a test prompt or a red-teaming repeat "
-                 "(duplicate_of, near_duplicate_of), train/val texts a dev/final record has (same_text_as) "
-                 "and spot-check bad")
+                 "(duplicate_of, near_duplicate_of), train/val/fit texts a dev/final record has "
+                 "(same_text_as) and spot-check bad")
     for name, e in st["files"].items():
         notes = []
         if e.get("translation_failures"):

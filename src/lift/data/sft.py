@@ -55,9 +55,9 @@ Files under the data dir (training rows use the messages format TRL's SFTTrainer
 variant is ``dedup`` (both candidates) or ``raw`` (aya, stress recipe). The utility records go to
 prompts/utility_hi.jsonl through build.py. CuratorKIT's own files carry run timestamps (manifest.json:
 run_timestamp, wall_clock_seconds and its provenance's created_at; lexsi_provenance.json:
-created_at), so interim/sft/ and the sft/{cand}/{variant}/curatorkit/ copies of manifest.json and
-lexsi_provenance.json change on every run; everything else this module writes is byte-identical on a
-rebuild.
+created_at; rejected.jsonl: each row's provenance_chain timestamps), so interim/sft/ and the
+sft/{cand}/{variant}/curatorkit/ copies of those three files change on every run; everything else
+this module writes is byte-identical on a rebuild (checked Nov 4 on the pinned data).
 """
 
 from __future__ import annotations
