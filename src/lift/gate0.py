@@ -1,6 +1,6 @@
 """Gate 0: the pipeline check before any reported run (README, Gates). GPU only.
 
-Checks (each PASS or FAIL; numbers go to outputs/metrics/gate0.json and gate0.md):
+Checks (each PASS, FAIL or NOT RUN; numbers go to outputs/metrics/gate0.json and gate0.md):
 
   preamble    the chat template renders the default preamble block once, with one BOS; the tokenizer
               transformers builds matches the checkpoint's own tokenizer.json; every dev and final
@@ -10,7 +10,9 @@ Checks (each PASS or FAIL; numbers go to outputs/metrics/gate0.json and gate0.md
               state and logit is finite and records the max |activation| per layer.
   fp16        only with --compare-dtype fp16, on a T4: the same 200 prompts in fp16 against the stored
               bf16 run (pulled from the runs repo): greedy output agreement and judge-label agreement.
-              This decides whether T4 runs can ever be reported.
+              This decides whether T4 runs can ever be reported, so it counts only against a bf16 Gate 0
+              that passed (gate0.json) for the same revision, on all of at least 200 prompts made with
+              the same inputs and decoding settings.
   throughput  batch sizes 8, 16 and 32 at real prompt lengths: prompts/sec, tokens/sec, peak memory.
   dry_run     20 prompts x 6 languages x 3 sets through generate and judge: exactly one generation
               and one judgement per prompt, and no judge failure.
@@ -18,7 +20,18 @@ Checks (each PASS or FAIL; numbers go to outputs/metrics/gate0.json and gate0.md
               fp32 on 20 dev prompts (the README's merged-adapter parity, before any real adapter exists).
 
 Decision rule (README, Gate 0): any failure means fix first. If the fp16 check fails, T4 runs are
-never reported and everything reported runs in bf16 on an A100/L4.
+never reported and everything reported runs in bf16 on an A100/L4. The fp16 check fails only on a
+real result: a non-finite fp16 run, or a valid comparison under the agreement bar.
+
+Verdicts. A check that raises is a FAIL with its error, and so is a model whose revision cannot be
+resolved or that cannot load (the "load" check), so a report is always written. A check that cannot
+run for want of a resource or an input (one GPU with no room for the judge; an fp16 run with no valid
+comparison) is NOT RUN: it decides nothing and leaves the run incomplete, never failed.
+Any failure is a full verdict, gate0.json (gate0-fp16.json for the comparison run), so a failed
+re-run replaces an earlier PASS. A run that is only incomplete (--skip, NOT RUN) is written as
+gate0-partial.json (gate0-fp16-partial.json) and never replaces the full record. A refused
+configuration writes nothing: --compare-dtype fp16 on a GPU with native bf16, and the reference gate
+(no --compare-dtype) on one without (a T4), whose failed load would replace the A100's gate0.json.
 
 Pass thresholds that the README leaves open are pinned in docs/decisions.md (Nov 3, P02):
 the fp16 run passes if every activation is finite and its final labels agree with bf16 on at least
@@ -30,6 +43,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import tempfile
 import time
@@ -39,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from lift import config
+from lift.models.load import DTYPES
 from lift.paths import ensure, metrics_dir, output_dir
 from lift.prompts import SAFETY_SETS
 from lift.schemas import LANGS, PromptRecord
@@ -54,16 +69,47 @@ BATCH_SIZES = (8, 16, 32)
 FP16_MAX = 65504.0
 FP16_MIN_LABEL_AGREEMENT = 0.95
 CHECKS = ("preamble", "precision", "fp16", "throughput", "dry_run", "parity")
+FLAGS = ("too_short", "repetitive", "garbled", "wrong_lang", "code_mixed")      # of UnclearFlags
+PIN_KEYS = {"global": "models.global", "base": "models.base", "judge": "judges.safety_primary"}
 DECISION = {
     "pass": "Gate 0 passes: the pipeline may produce reported numbers.",
     "fail": "Fix first (README, Gate 0). Nothing is reported until every check passes.",
     "fp16_fail": "fp16 failed: T4 runs are never reported; everything reported runs in bf16 on an A100/L4.",
     "incomplete": "Incomplete: {} did not run. Gate 0 passes only when every required check has run.",
+    "not_comparable": ("Not comparable: this {dtype} run could not be paired with a passing {reference} "
+                       "Gate 0 of this revision ({reason}). Nothing is decided about T4 runs: pull the "
+                       "{reference} Gate 0 (lift sync pull), or re-run the {reference} Gate 0 on this code "
+                       "until gate0.json passes, then run this check again with the same --n-precision, "
+                       "at least {n} (the default)."),
+    "stub": ("Checks reached the {} stubs: run GPU jobs on a ref that has both P01 and P02 (main after both "
+             "merge, or an integration branch with p01-data merged into p02-harness)."),
 }
+_DTYPE_SEGMENT = re.compile(rf"#(?:{'|'.join(DTYPES)})(?=#|$)")
+_STUB = re.compile(r"NotImplementedError: (P\d\d)\b")
 
 
 def gate0_dir(dtype: str) -> Path:
     return output_dir() / "gate0" / dtype
+
+
+def not_run(reason: str) -> dict[str, Any]:
+    """The record of a check that could not run (no room for the judge, no valid fp16 comparison).
+    It decides nothing: ``decide`` counts it as missing, never as failed."""
+    return {"pass": False, "not_run": True, "reason": reason}
+
+
+def _error(exc: BaseException, prefix: str = "") -> dict[str, Any]:
+    return {"pass": False, "error": f"{prefix}{type(exc).__name__}: {exc}"[:500]}
+
+
+def check_status(check: dict[str, Any]) -> str:
+    """PASS, FAIL or NOT RUN, as the report prints a check."""
+    return "NOT RUN" if check.get("not_run") else "PASS" if check.get("pass") else "FAIL"
+
+
+def verdict(result: dict[str, Any]) -> str:
+    """PASS, FAIL, or INCOMPLETE when nothing failed but a required check did not run."""
+    return "PASS" if result["pass"] else "FAIL" if result.get("failed") else "INCOMPLETE"
 
 
 # --- preamble -------------------------------------------------------------------------------------
@@ -185,13 +231,17 @@ def generate_and_judge(variant: Any, judge: Any, prompts: Sequence[PromptRecord]
                        lid: Any = None, batch_size: int | None = None,
                        max_new_tokens: int | None = None) -> dict[str, Any]:
     """Generate and judge ``prompts`` under ``root`` (one file per set and language), then count:
-    generations and judgements per prompt, judge failures, labels, cap hits."""
+    generations and judgements per prompt, judge failures, cap hits, final labels per set and
+    language ("{set}:{lang}:{label}"), and per language the unclear labels and each flag of
+    ``FLAGS`` (``by_lang``), so a language the LID misreads (clean Hindi called garbled, hence
+    unclear) shows. Counts only."""
     from lift.judge.pipeline import judge_file
     from lift.models.generate import generate, read_generations
     from lift.schemas import JudgementRecord
 
     counts: Counter = Counter()
     labels: Counter = Counter()
+    by_lang: dict[str, Counter] = {}
     problems: list[str] = []
     for (set_name, lang), cell in sorted(_by_cell(prompts).items()):
         gen_path = root / "generations" / f"{set_name}_{lang}_dev.jsonl"
@@ -213,8 +263,16 @@ def generate_and_judge(variant: Any, judge: Any, prompts: Sequence[PromptRecord]
         counts["cap_hits"] += sum(g.hit_cap for g in gens)
         counts["judge_failures"] += sum("judge_failure" in j.native for j in juds)
         counts["wrong_lang"] += sum(j.flags.wrong_lang for j in juds)
-        labels.update(f"{set_name}:{j.label}" for j in juds)
-    return {"counts": dict(counts), "labels": dict(sorted(labels.items())), "problems": problems}
+        labels.update(f"{set_name}:{lang}:{j.label}" for j in juds)
+        tally = by_lang.setdefault(lang, Counter())
+        tally["n"] += len(juds)
+        tally["unclear"] += sum(j.label == "unclear" for j in juds)
+        for flag in FLAGS:
+            tally[flag] += sum(getattr(j.flags, flag) for j in juds)
+    return {"counts": dict(counts), "labels": dict(sorted(labels.items())),
+            "by_lang": {lang: {k: by_lang[lang][k] for k in ("n", "unclear", *FLAGS)}
+                        for lang in sorted(by_lang, key=LANGS.index)},
+            "problems": problems}
 
 
 def _read(path: Path) -> list[dict]:
@@ -236,7 +294,12 @@ def precision_pairs(root: Path) -> list[tuple[str, str]]:
     return pairs
 
 
-PROVENANCE_FIELDS = ("model_rev", "harness", "template")
+PROVENANCE_FIELDS = ("model_rev", "harness", "template", "decoding")
+
+
+def _judge_identity(judge_id: str) -> str:
+    """A judge id without its precision segment ("...@sha#bf16#strict" -> "...@sha#strict")."""
+    return _DTYPE_SEGMENT.sub("", judge_id)
 
 
 def compare_runs(reference_root: Path, candidate_root: Path, tokenizer: Any) -> dict[str, Any]:
@@ -244,8 +307,10 @@ def compare_runs(reference_root: Path, candidate_root: Path, tokenizer: Any) -> 
     divergence, final-label agreement and kappa, harmful rate in each.
 
     The pairs are only valid if both runs saw the same prompt text, model revision, chat template,
-    harness and judge revision (only the dtype may differ), so every mismatch is counted and listed
-    in ``invalid``: a stale reference run (a fixed translation, a harness fix) must be re-run first."""
+    harness, decoding settings (``meta.decoding``: cap, stop tokens) and judge (model, revision and
+    Controversial mode: only the precision may differ), so every mismatch is counted and listed in
+    ``invalid``: a stale reference run (a fixed translation, a harness fix, another cap) must be re-run
+    first."""
     from lift.models.generate import read_generations
     from lift.schemas import JudgementRecord
     from lift.stats import cohens_kappa, mcnemar_exact
@@ -255,7 +320,7 @@ def compare_runs(reference_root: Path, candidate_root: Path, tokenizer: Any) -> 
         for gpath in sorted((root / "generations").glob("*.jsonl")):
             juds = [JudgementRecord.model_validate(j) for j in _read(root / "judgements" / gpath.name)]
             labels = {j.key: j.label for j in juds}
-            judges.update(j.judge.split("#", 1)[0] for j in juds)
+            judges.update(_judge_identity(j.judge) for j in juds)
             for g in read_generations(gpath):
                 out[(g.set, g.lang, g.pid)] = {
                     "output": g.output, "label": labels.get(g.key, "missing"), "prompt_sha": g.prompt_sha,
@@ -274,7 +339,7 @@ def compare_runs(reference_root: Path, candidate_root: Path, tokenizer: Any) -> 
             if a is None or b is None or a != b:
                 invalid[field] = invalid.get(field, 0) + 1
     if ref_judges != cand_judges:
-        invalid["judge_revision"] = len(shared)
+        invalid["judge"] = len(shared)
     same_text = [ref[k]["output"] == cand[k]["output"] for k in shared]
     divergence = []
     for k in shared:
@@ -299,6 +364,68 @@ def compare_runs(reference_root: Path, candidate_root: Path, tokenizer: Any) -> 
         "harmful_rate_candidate": sum(x == "harmful" for x in cand_labels) / len(shared),
         "harmful_mcnemar_p": mc.p_value,
     }
+
+
+def fp16_verdict(cmp: dict[str, Any], precision: dict[str, Any], n_precision: int, *,
+                 reference: str, reference_problem: str | None) -> dict[str, Any]:
+    """The fp16 check from ``compare_runs`` and the finished fp16 run's precision check (decisions.md,
+    entry 27). It fails only on a real result: a non-finite fp16 run, or a valid comparison under
+    ``FP16_MIN_LABEL_AGREEMENT``. Without a valid comparison (no reference run, other prompts, fewer
+    than ``N_PRECISION``, missing labels, pairs made from other inputs, or a reference whose own Gate 0
+    did not pass for this revision: ``reference_problem``, see ``reference_gate_problem``) it is not
+    run: nothing about fp16 is known, and the remedy is the reference run, never giving up T4 runs."""
+    out = {k: v for k, v in cmp.items() if k not in ("pass", "error")}
+    out["min_label_agreement"] = FP16_MIN_LABEL_AGREEMENT
+    if precision.get("all_finite") is False:
+        return {**out, "pass": False, "failure": "non-finite values in the fp16 run"}
+    why = _not_comparable(cmp, n_precision, reference, reference_problem)
+    if why:
+        return {**out, "comparable": False, **not_run(why)}
+    ok = cmp["label_agreement"] >= FP16_MIN_LABEL_AGREEMENT
+    out.update({"comparable": True, "pass": ok})
+    if not ok:
+        out["failure"] = f"label agreement {cmp['label_agreement']:.3f} is under {FP16_MIN_LABEL_AGREEMENT}"
+    return out
+
+
+def _not_comparable(cmp: dict[str, Any], n_precision: int, reference: str,
+                    reference_problem: str | None) -> str | None:
+    """Why ``compare_runs`` made no valid comparison, or None. A valid one pairs all ``n_precision``
+    prompts, at least ``N_PRECISION``, with a reference run whose own Gate 0 passed for this revision:
+    what check_dtype_licence asks of the licence, so a comparison it would refuse never reads PASS."""
+    reasons = [reference_problem] if reference_problem else []
+    if n_precision < N_PRECISION:
+        reasons.append(f"{n_precision} prompts, under the {N_PRECISION} decisions.md 27 requires")
+    if not cmp.get("n"):
+        reasons.append(cmp.get("error") or f"no prompt shared with the {reference} run")
+    elif cmp["n"] != n_precision:
+        reasons.append(f"{cmp['n']} of {n_precision} prompts shared with the {reference} run, which has "
+                       f"{cmp.get('n_reference')}")
+    if cmp.get("missing_labels"):
+        reasons.append(f"{cmp['missing_labels']} labels missing")
+    if cmp.get("invalid"):
+        reasons.append(f"pairs made from other inputs {cmp['invalid']}")
+    return "; ".join(reasons) or None
+
+
+def reference_gate_problem(revision: str, reference: str) -> str | None:
+    """Why the reference run's own Gate 0 verdict (outputs/metrics/gate0.json) cannot back a comparison
+    with it, or None: it must be there, pass, and be for ``revision``. A comparison against a failed,
+    missing or stale reference proves nothing, and check_dtype_licence would refuse its licence."""
+    path = metrics_dir() / "gate0.json"
+    name = f"the {reference} Gate 0 ({path.name})"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return f"{name} is missing"
+    except (OSError, ValueError) as exc:          # unreadable, or not JSON
+        return f"{name} cannot be read ({type(exc).__name__})"
+    doc = doc if isinstance(doc, dict) else {}
+    if doc.get("pass") is not True:
+        return f"{name} did not pass"
+    revisions = doc.get("revisions")
+    got = revisions.get("global") if isinstance(revisions, dict) else None
+    return None if got == revision else f"{name} is for Global revision {got}, not {revision}"
 
 
 # --- throughput -------------------------------------------------------------------------------------
@@ -432,15 +559,47 @@ JUDGE_HEADROOM_GB = 4.0      # its KV cache and the activation scan's logits
 
 def required_checks(compare_dtype: str | None) -> tuple[str, ...]:
     """The checks a run must complete before its verdict counts. A comparison run (a T4) only has to
-    settle the fp16 question; the pipeline itself was checked by the reference run."""
+    settle the fp16 question; the pipeline itself was checked by the reference run, whose gate0.json
+    must have passed (``reference_gate_problem``)."""
     return ("precision", "fp16") if compare_dtype else tuple(c for c in CHECKS if c != "fp16")
 
 
 def report_name(result: dict[str, Any]) -> str:
-    """gate0 or gate0-fp16, with "-partial" when a required check did not run, so an incomplete run
-    never replaces the full record."""
+    """gate0, or gate0-{dtype} for a comparison run (gate0-fp16). A failure (the model did not load,
+    or a required check failed) is a full verdict even when other checks did not run, so a failed
+    re-run replaces an earlier PASS. A run that is only incomplete (--skip removed a required check,
+    or one did not run) gets "-partial", so it never replaces the full record."""
     name = f"gate0-{result['dtype']}" if result.get("reference_dtype") else "gate0"
-    return name + ("-partial" if result.get("incomplete") else "")
+    failed = set(result.get("failed", ())) & {"load", *result.get("required", ())}
+    return name + ("-partial" if result.get("incomplete") and not failed else "")
+
+
+def pin_revisions() -> dict[str, str]:
+    """Base's and the primary judge's commit shas for the pin list; one that cannot be resolved is
+    "unresolved: <error>" (a metadata lookup never blocks the gate). A primary judge with no revision
+    (the frontier judge, once P04's decision swaps the judges) has nothing to pin and is left out."""
+    from lift.models.load import resolved_revision
+
+    roles = ("base", "judge") if "revision" in (_local_primary_judge() or {}) else ("base",)
+    out = {}
+    for role in roles:
+        try:
+            out[role] = resolved_revision(config.get(f"{PIN_KEYS[role]}.id"),
+                                          config.get(f"{PIN_KEYS[role]}.revision"))
+        except Exception as exc:  # recorded; a metadata lookup never blocks the gate
+            out[role] = f"unresolved: {type(exc).__name__}"
+    return out
+
+
+def _local_primary_judge() -> dict[str, Any] | None:
+    """The judges.safety_primary entry when that judge runs here (Qwen3Guard), else None: the frontier
+    judge, once P04's decision makes it primary, needs no GPU memory and has no revision."""
+    from lift.judge.pipeline import judge_dir
+
+    try:
+        return config.get(PIN_KEYS["judge"]) if judge_dir("primary") == "qwen3guard" else None
+    except (KeyError, ValueError):      # a broken entry: make_judge says what is wrong
+        return None
 
 
 def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compare_dtype: str | None = None,
@@ -450,12 +609,18 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
               max_new_tokens: int | None = None, resolve_pins: bool = True) -> dict[str, Any]:
     """Run every check not in ``skip`` and return the full result (``write_report`` saves it).
 
-    A check that raises is recorded as a failure with its error and the gate goes on, so the report
-    is always written. ``model_id``/``revision``, ``judge``, ``lid`` and ``max_new_tokens`` are for
-    tests (a tiny local model, fakes, short outputs); the real gate decodes the locked 256 new tokens.
-    ``resolve_pins`` also resolves Base's and the judge's revisions for the pin list.
+    A refused configuration raises ValueError before any check, so nothing is written: an unknown
+    check, --compare-dtype fp16 on a GPU with native bf16, or the reference gate (no ``compare_dtype``)
+    on one without (a T4), whose failed load would otherwise be a full FAIL replacing the A100's
+    gate0.json, and with it the fp16 licence. An unusable ``device`` raises from torch.
+    Otherwise there is always a result to write: a check that raises is recorded as a failure with
+    its error and the gate goes on; a revision that cannot be resolved or a model that cannot load
+    is the failed "load" check; every check draws its own prompts, so missing prompt files (or a P01
+    stub) fail the checks that need them.
+    ``model_id``/``revision``, ``judge``, ``lid`` and ``max_new_tokens`` are for tests (a tiny local
+    model, fakes, short outputs); the real gate decodes the locked 256 new tokens. ``resolve_pins``
+    also resolves Base's and the primary judge's revisions for the pin list (``pin_revisions``).
     """
-    from lift.judge.pipeline import make_judge
     from lift.models.load import device_name, resolved_revision
     from lift.models.variants import build_variant
     from lift.prompts import mixed_sample
@@ -472,22 +637,32 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
     if compare_dtype == "fp16" and capability and capability[0] >= 8:
         raise ValueError(f"{device_name(device)} runs bf16 natively; the fp16 check licenses T4 runs, so run "
                          "it on the GPU it licenses (Kaggle T4 x2)")
+    if not compare_dtype and capability and capability[0] < 8:
+        major, minor = capability
+        raise ValueError(f"{device_name(device)} has no native bf16 (compute capability {major}.{minor}): "
+                         f"the reference Gate 0 runs in {base_dtype} on an A100/L4; on a T4, run lift smoke "
+                         f"--compare-dtype fp16, which checks fp16 against the stored {base_dtype} run")
     to_run = [c for c in CHECKS if c not in skip and (c != "fp16" or compare_dtype)]
     model_id = model_id or config.get("models.global.id")
-    rev = resolved_revision(model_id, revision or config.get("models.global.revision"))
     result: dict[str, Any] = {
         "dtype": dtype, "reference_dtype": base_dtype if compare_dtype else None, "device": device,
         "gpu": device_name(device), "gpu_capability": ".".join(map(str, capability)) if capability else "cpu",
-        "model_id": model_id, "revisions": {"global": rev}, "required": list(required_checks(compare_dtype)),
+        "model_id": model_id, "revisions": {}, "required": list(required_checks(compare_dtype)),
         "skipped": sorted(skip), "checks": {},
     }
-    for role, key in (("base", "models.base"), ("judge", "judges.safety_primary")) if resolve_pins else ():
-        try:
-            ident, pinned = config.get(f"{key}.id"), config.get(f"{key}.revision")
-            result["revisions"][role] = resolved_revision(ident, pinned)
-        except Exception as exc:  # recorded; a metadata lookup never blocks the gate
-            result["revisions"][role] = f"unresolved: {type(exc).__name__}"
-    checks = result["checks"]
+    checks, revisions = result["checks"], result["revisions"]
+    try:
+        rev = resolved_revision(model_id, revision or config.get("models.global.revision"))
+        revisions["global"] = rev
+        if resolve_pins:
+            revisions.update(pin_revisions())
+        stock = build_variant(VariantSpec(name="stock", method="stock"), device=device, dtype=dtype,
+                              model_id=model_id, revision=rev)
+    except Exception as exc:  # no check can run; the verdict says why
+        log.exception("Gate 0 could not load %s", model_id)
+        revisions.setdefault("global", f"unresolved: {type(exc).__name__}")
+        checks["load"] = _error(exc)
+        return decide(result)
 
     def attempt(name: str, fn: Any) -> None:
         t0 = time.perf_counter()
@@ -495,47 +670,25 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
             checks[name] = fn()
         except Exception as exc:  # the gate goes on and the report says what broke
             log.exception("Gate 0 check %s raised", name)
-            checks[name] = {"pass": False, "error": f"{type(exc).__name__}: {exc}"[:500]}
+            checks[name] = _error(exc)
             _free()
         checks[name]["seconds"] = round(time.perf_counter() - t0, 1)
-        log.info("%s: %s", name, "PASS" if checks[name].get("pass") else "FAIL")
-
-    # Gate 0 tests the code as it is now: this dtype's earlier outputs of a check that runs now are
-    # discarded rather than resumed (a fixed parser must re-judge). The reference dtype's run is kept.
-    stale = {"precision": "precision", "fp16": "precision", "dry_run": "dry_run"}
-    for check in to_run:
-        if check in stale and (gate0_dir(dtype) / stale[check]).exists():
-            log.info("removing the previous Gate 0 outputs in %s", gate0_dir(dtype) / stale[check])
-            shutil.rmtree(gate0_dir(dtype) / stale[check], ignore_errors=True)
-
-    try:
-        stock = build_variant(VariantSpec(name="stock", method="stock"), device=device, dtype=dtype,
-                              model_id=model_id, revision=rev)
-    except Exception as exc:
-        checks["load"] = {"pass": False, "error": f"{type(exc).__name__}: {exc}"[:500]}
-        return decide(result)
+        log.info("%s: %s", name, check_status(checks[name]))
 
     if "preamble" in to_run:
         attempt("preamble", lambda: check_preamble(stock, all_prompts(),
                                                    reference_tokenizer=reference_tokenizer(model_id, rev)))
     if "throughput" in to_run:          # before the judge loads, so peak memory is the generator's own
-        sample = mixed_sample(n_throughput, split="dev", seed=SEED + 1)
-        attempt("throughput", lambda: throughput(stock, sample, batch_sizes, max_new_tokens=max_new_tokens))
+        attempt("throughput", lambda: throughput(
+            stock, mixed_sample(n_throughput, split="dev", seed=SEED + 1), batch_sizes,
+            max_new_tokens=max_new_tokens))
 
     needs_judge = {"precision", "fp16", "dry_run"} & set(to_run)
     if needs_judge and judge is None:
-        problem = _judge_memory_problem(device, judge_device)
-        if problem:
-            for check in sorted(needs_judge):
-                checks[check] = {"pass": False, "error": problem}
+        judge, refusal = _primary_judge(device, judge_device, dtype)
+        if refusal is not None:
+            checks.update({check: dict(refusal) for check in CHECKS if check in needs_judge})
             needs_judge = set()
-        else:
-            try:
-                judge = make_judge("primary", device=judge_device, dtype=dtype)
-            except Exception as exc:
-                for check in sorted(needs_judge):
-                    checks[check] = {"pass": False, "error": f"judge: {type(exc).__name__}: {exc}"[:500]}
-                needs_judge = set()
     if judge is not None:
         # tied_lm_head False would mean the judge is not numerically the model Qwen evaluated.
         result["judge"] = {"id": judge.judge_id, "info": getattr(judge, "info", None)}
@@ -544,30 +697,29 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
         root = gate0_dir(dtype) / "precision"
 
         def precision() -> dict[str, Any]:
-            run = generate_and_judge(stock, judge, mixed_sample(n_precision, split="dev", seed=SEED), root,
-                                     lid=lid, max_new_tokens=max_new_tokens)
+            _fresh(root)
+            sample = mixed_sample(n_precision, split="dev", seed=SEED)
+            run = generate_and_judge(stock, judge, sample, root, lid=lid, max_new_tokens=max_new_tokens)
             scan = activation_scan(stock.model, stock.tokenizer, precision_pairs(root), device=device)
             return {**scan, **run, "pass": scan["all_finite"] and not run["problems"]}
 
+        def fp16() -> dict[str, Any]:
+            if "all_finite" not in checks["precision"]:      # it raised: there is no fp16 run to compare
+                return {"comparable": False, **not_run("the precision run did not finish")}
+            cmp = compare_runs(gate0_dir(base_dtype) / "precision", root, stock.tokenizer)
+            return fp16_verdict(cmp, checks["precision"], n_precision, reference=base_dtype,
+                                reference_problem=reference_gate_problem(rev, base_dtype))
+
         attempt("precision", precision)
         if "fp16" in needs_judge:
-
-            def fp16() -> dict[str, Any]:
-                cmp = compare_runs(gate0_dir(base_dtype) / "precision", root, stock.tokenizer)
-                cmp["min_label_agreement"] = FP16_MIN_LABEL_AGREEMENT
-                cmp["pass"] = bool(cmp.get("n") == n_precision and checks["precision"].get("all_finite")
-                                   and not cmp.get("missing_labels") and not cmp.get("invalid")
-                                   and cmp.get("label_agreement", 0.0) >= FP16_MIN_LABEL_AGREEMENT)
-                return cmp
-
             attempt("fp16", fp16)
 
     if "dry_run" in needs_judge:
 
         def dry_run() -> dict[str, Any]:
+            out = _fresh(gate0_dir(dtype) / "dry_run")
             sample = mixed_sample(n_dry * len(SAFETY_SETS) * len(LANGS), split="dev", seed=SEED + 2)
-            run = generate_and_judge(stock, judge, sample, gate0_dir(dtype) / "dry_run", lid=lid,
-                                     max_new_tokens=max_new_tokens)
+            run = generate_and_judge(stock, judge, sample, out, lid=lid, max_new_tokens=max_new_tokens)
             c = run["counts"]
             one_each = c["prompts"] == c["generations"] == c["judgements"] == len(sample)
             run["pass"] = bool(not run["problems"] and one_each and c["judge_failures"] == 0)
@@ -578,10 +730,37 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
     if "parity" in to_run:
         del stock, judge
         _free()
-        sample = mixed_sample(N_PARITY, split="dev", seed=SEED + 3)
-        attempt("parity", lambda: check_parity(model_id, rev, sample, device=device,
-                                               max_new_tokens=max_new_tokens))
+        attempt("parity", lambda: check_parity(
+            model_id, rev, mixed_sample(N_PARITY, split="dev", seed=SEED + 3), device=device,
+            max_new_tokens=max_new_tokens))
     return decide(result)
+
+
+def _fresh(path: Path) -> Path:
+    """``path``, emptied. A check that runs starts with it: Gate 0 tests the code as it is now, so this
+    dtype's earlier outputs are discarded rather than resumed (a fixed parser must re-judge). The
+    reference run (another dtype) and the outputs of a check that does not run are kept."""
+    if path.exists():
+        log.info("removing the previous Gate 0 outputs in %s", path)
+        shutil.rmtree(path, ignore_errors=True)
+    return path
+
+
+def _primary_judge(device: str, judge_device: str | None,
+                   dtype: str) -> tuple[Any, dict[str, Any] | None]:
+    """The primary judge, or None and the record of each check that needs it: not run when one GPU has
+    no room for a local judge beside the generator (a resource refusal decides nothing), failed when
+    the judge does not load."""
+    from lift.judge.pipeline import make_judge
+
+    try:
+        problem = _judge_memory_problem(device, judge_device) if _local_primary_judge() is not None else None
+        if problem:
+            return None, not_run(problem)
+        return make_judge("primary", device=judge_device, dtype=dtype), None
+    except Exception as exc:  # each judged check fails with it
+        log.exception("Gate 0 could not load the primary judge")
+        return None, _error(exc, "judge: ")
 
 
 def _capability(device: str) -> tuple[int, int] | None:
@@ -607,44 +786,83 @@ def _judge_memory_problem(device: str, judge_device: str | None) -> str | None:
 
 
 def decide(result: dict[str, Any]) -> dict[str, Any]:
-    """Overall verdict with the README's decision rule. A required check that did not run makes the
-    run incomplete, which never passes."""
+    """Overall verdict with the README's decision rule. A failed check fails the gate. A required check
+    that did not run (--skip) and a check recorded as not run (``not_run``: no room for the judge, no
+    valid fp16 comparison) decide nothing: the run is incomplete, which never passes and is never a
+    failure. "fp16 failed" needs a real fp16 result (the check's ``failure``)."""
     checks = result["checks"]
-    failed = sorted(name for name, c in checks.items() if not c.get("pass"))
-    missing = [c for c in result.get("required", ()) if c not in checks]
-    result["failed"] = failed
-    result["incomplete"] = missing
-    result["pass"] = not failed and not missing and bool(checks)
-    if "fp16" in failed:
-        others = set(failed) - {"fp16"}
-        result["decision"] = DECISION["fp16_fail"] + (" " + DECISION["fail"] if others else "")
-    elif failed:
-        result["decision"] = DECISION["fail"]
-    elif missing:
-        result["decision"] = DECISION["incomplete"].format(", ".join(missing))
-    else:
-        result["decision"] = DECISION["pass"]
+    unrun = [name for name, c in checks.items() if c.get("not_run")]
+    failed = sorted(name for name, c in checks.items() if not c.get("pass") and not c.get("not_run"))
+    wanted = dict.fromkeys([*result.get("required", ()), *unrun])
+    incomplete = [c for c in wanted if c not in checks or c in unrun]
+    result.update(failed=failed, not_run=unrun, incomplete=incomplete)
+    result["pass"] = not failed and not incomplete and bool(checks)
+    result["decision"] = _decision(result)
     return result
 
 
+def _decision(result: dict[str, Any]) -> str:
+    checks, failed, missing = result["checks"], result["failed"], result["incomplete"]
+    fp16, precision = checks.get("fp16", {}), checks.get("precision", {})
+    if "fp16" in failed and fp16.get("failure"):
+        others = set(failed) - {"fp16"}
+        if precision.get("all_finite") is False and not precision.get("problems"):
+            others.discard("precision")         # the same non-finite fp16 run, not a second problem
+        text = DECISION["fp16_fail"] + (" " + DECISION["fail"] if others else "")
+    elif failed:
+        text = DECISION["fail"]
+    elif missing:
+        text = " ".join([DECISION["incomplete"].format(", ".join(missing)), *_not_run_notes(result)])
+    else:
+        text = DECISION["pass"]
+    stubs = sorted({m.group(1) for c in checks.values() if (m := _STUB.search(str(c.get("error", ""))))})
+    return text + (" " + DECISION["stub"].format(", ".join(stubs)) if stubs else "")
+
+
+def _not_run_notes(result: dict[str, Any]) -> list[str]:
+    """Why the incomplete checks did not run, each reason once; a missing fp16 comparison says how
+    to get one."""
+    notes = []
+    for name in result["incomplete"]:
+        c = result["checks"].get(name, {})
+        if name == "fp16" and c.get("comparable") is False:
+            notes.append(DECISION["not_comparable"].format(
+                dtype=result.get("dtype"), reference=result.get("reference_dtype"), reason=c["reason"],
+                n=N_PRECISION))
+        elif c.get("reason"):
+            notes.append(f"Not run: {c['reason']}.")
+    return list(dict.fromkeys(notes))
+
+
 def write_report(result: dict[str, Any], *, name: str = "gate0") -> tuple[Path, Path]:
-    """outputs/metrics/{name}.json and .md. Counts and rates only: no prompt or output text."""
+    """outputs/metrics/{name}.json and .md. Counts, rates, and each check's error or reason for not
+    running: no prompt or output text."""
     out = ensure(metrics_dir())
     json_path, md_path = out / f"{name}.json", out / f"{name}.md"
     text = json.dumps(result, indent=1, ensure_ascii=False, default=str) + "\n"
     json_path.write_text(text, encoding="utf-8", newline="\n")
-    verdict = "PASS" if result["pass"] else "FAIL"
-    lines = [f"# Gate 0 ({result['dtype']}, {result['gpu']})", "", f"**{verdict}**: {result['decision']}", "",
+    lines = [f"# Gate 0 ({result['dtype']}, {result['gpu']})", "",
+             f"**{verdict(result)}**: {result['decision']}", "",
              "| Check | Result | Key numbers |", "| --- | --- | --- |"]
     for check, c in result["checks"].items():
-        lines.append(f"| {check} | {'PASS' if c.get('pass') else 'FAIL'} | {_summary(check, c)} |")
-    lines += ["", "Revisions (pin these in configs/project.yaml with a docs/decisions.md entry):", ""]
-    lines += [f"- {k}: `{v}`" for k, v in result["revisions"].items()]
+        lines.append(f"| {check} | {check_status(c)} | {_cell(_summary(check, c))} |")
+    pins, unresolved = _pins(result)
+    lines += ["", "Revisions to pin in configs/project.yaml (with a dated docs/decisions.md entry):", ""]
+    lines += [f"- `{pin}`" for pin in pins] + [f"- not resolved: {key}" for key in unresolved]
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return json_path, md_path
 
 
+def _cell(text: str) -> str:
+    """One markdown table cell: one line, pipes escaped."""
+    return " ".join(text.split()).replace("|", "\\|")
+
+
 def _summary(check: str, c: dict[str, Any]) -> str:
+    if c.get("not_run"):
+        return str(c.get("reason"))
+    if c.get("error"):
+        return str(c["error"])[:200]
     if check == "preamble":
         return (f"system block {c.get('system_block_tokens')} tokens, prefix {c.get('prefix_tokens')}, "
                 f"BOS {c.get('bos_count')}, longest prompt {c.get('longest_prompt_tokens')} "
@@ -653,29 +871,50 @@ def _summary(check: str, c: dict[str, Any]) -> str:
     if check == "precision":
         return (f"non-finite hidden {c.get('hidden_nonfinite')}, logits {c.get('logits_nonfinite')}, "
                 f"max |h| {max(c.get('max_abs_per_layer') or [0])}, "
-                f"fp16-overflow layers {c.get('fp16_overflow_layers')}")
+                f"fp16-overflow layers {c.get('fp16_overflow_layers')}{_lang_shares(c)}")
     if check == "fp16":
-        return (f"n {c.get('n')}, label agreement {c.get('label_agreement')}, kappa {c.get('kappa')}, "
-                f"exact output {c.get('exact_output_agreement')}")
+        numbers = (f"n {c.get('n')}, label agreement {c.get('label_agreement')}, kappa {c.get('kappa')}, "
+                   f"exact output {c.get('exact_output_agreement')}")
+        return f"{c['failure']}; {numbers}" if c.get("failure") else numbers
     if check == "throughput":
         return "; ".join(f"bs {r['batch_size']}: {r['prompts_per_sec']} p/s, {r['tokens_per_sec']} tok/s, "
                          f"{r['peak_gb']} GB" for r in c.get("rows", []))
     if check == "dry_run":
         k = c.get("counts", {})
         return (f"{k.get('generations')} generations, {k.get('judgements')} judgements, "
-                f"{k.get('judge_failures')} judge failures, {k.get('cap_hits')} cap hits")
+                f"{k.get('judge_failures')} judge failures, {k.get('cap_hits')} cap hits{_lang_shares(c)}")
     if check == "parity":
         return f"{c.get('n_match')}/{c.get('n')} identical in {c.get('dtype')}"
     return ""
 
 
-def pin_hint(result: dict[str, Any]) -> str:
-    """The config lines to pin the resolved revisions (a person makes the change, with a dated entry)."""
-    revs = result["revisions"]
-    return "\n".join([
-        "configs/project.yaml:",
-        f"  models.global.revision: {revs.get('global')}",
-        f"  models.base.revision: {revs.get('base')}",
-        f"  judges.safety_primary.revision: {revs.get('judge')}",
-    ])
+def _lang_shares(c: dict[str, Any]) -> str:
+    """The report's "; garbled/unclear by language: en 0.00/0.01, hi 0.12/0.15, ...": shares of each
+    language's judgements, so a language the LID misreads stands out."""
+    shares = [f"{lang} {v['garbled'] / v['n']:.2f}/{v['unclear'] / v['n']:.2f}"
+              for lang, v in (c.get("by_lang") or {}).items() if v.get("n")]
+    return "; garbled/unclear by language: " + ", ".join(shares) if shares else ""
 
+
+def _pins(result: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """("models.global.revision: <sha>", ...) for the resolved revisions, and the config keys of the
+    unresolved ones with their error: those are named, never offered as a value to pin."""
+    pins, unresolved = [], []
+    for role, rev in result["revisions"].items():
+        key = PIN_KEYS.get(role, role)
+        if str(rev).startswith("unresolved"):
+            unresolved.append(f"{key} ({str(rev).removeprefix('unresolved: ')})")
+        else:
+            pins.append(f"{key}.revision: {rev}")
+    return pins, unresolved
+
+
+def pin_hint(result: dict[str, Any]) -> str:
+    """The config lines to pin the resolved revisions (a person makes the change, with a dated entry).
+    A revision that could not be resolved is named on its own line, never printed as a value to pin,
+    and a primary judge with nothing to pin (the frontier judge) is not listed."""
+    pins, unresolved = _pins(result)
+    lines = ["configs/project.yaml:", *(f"  {pin}" for pin in pins)]
+    if unresolved:
+        lines.append("not resolved (resolve by hand, or re-run Gate 0): " + ", ".join(unresolved))
+    return "\n".join(lines)
