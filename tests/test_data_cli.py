@@ -12,7 +12,7 @@ from fake_build import BlockingTranslator, fixture_ctx, isolate, read_sheet, rep
 
 from lift.cli import build_parser, main
 from lift.commands import data as data_command
-from lift.data import build
+from lift.data import build, translate
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -88,24 +88,66 @@ def test_the_parser_imports_no_data_code():
     assert out.strip() == "[]"
 
 
-def test_build_exits_0_when_complete_and_3_when_a_file_is_skipped(dirs, monkeypatch, capsys):
+def test_build_exits_0_when_built_including_files_skip_translation_left_out(dirs, monkeypatch, capsys):
     use_fixtures(monkeypatch)
     assert main(["data", "build"]) == 0
     out = capsys.readouterr().out
-    assert "complete;" in out and "sft: 5 rows per candidate" in out
-    assert main(["data", "build", "--only", "hard_benign", "--skip-translation"]) == 3
+    assert out.splitlines()[-1].startswith("complete; summary in ") and "sft: 5 rows per candidate" in out
+    # the laptop path while Google is blocked: nothing a rerun could add is missing
+    assert main(["data", "build", "--only", "hard_benign", "--skip-translation"]) == 0
     out = capsys.readouterr().out
-    assert "skipped hard_benign_hi: needs translation (--skip-translation)" in out and "INCOMPLETE" in out
+    assert "skipped hard_benign_hi: needs translation (--skip-translation)" in out and "INCOMPLETE" not in out
+    assert out.splitlines()[-1].startswith("built; 5 files left out by --skip-translation (run without it to "
+                                           "translate them); summary in ")
     nothing_to_translate = ["--only", "belebele", "redteam", "--skip-translation"]
     assert main(["data", "build", *nothing_to_translate]) == 0
+    assert capsys.readouterr().out.splitlines()[-1].startswith("complete; ")
 
 
 def test_build_exits_3_when_translation_is_blocked(dirs, monkeypatch, capsys):
     use_fixtures(monkeypatch, translator=BlockingTranslator())
     assert main(["data", "build", "--only", "harmful", "--langs", "en", "hi"]) == 3
     out = capsys.readouterr().out
-    assert "BLOCKED" in out and "skipped harmful_hi: translation blocked" in out
+    assert "skipped harmful_hi: translation blocked" in out
+    assert "translation BLOCKED (Google refused this IP, HTTP 429): wait 30 minutes or more" in out
+    assert "blocked: fake http_429 [stopped at item 0 of 10]" in out
+    assert out.splitlines()[-1].startswith("INCOMPLETE: rerun to resume from the cache; ")
     assert (dirs.data / "prompts" / "harmful_en.jsonl").exists()
+
+
+def test_build_exits_3_and_says_check_the_network_after_a_streak(dirs, monkeypatch, capsys):
+    use_fixtures(monkeypatch, translator=BlockingTranslator(kind="streak"))
+    assert main(["data", "build", "--only", "harmful", "--langs", "en", "hi"]) == 3
+    out = capsys.readouterr().out
+    assert ("translation STOPPED: 10 items in a row failed with network or service errors (not an IP block): "
+            "check the network, then rerun; the cache keeps everything done") in out
+    assert "refused this IP" not in out and "30 minutes" not in out and "blocked: fake streak" in out
+    assert out.splitlines()[-1].startswith("INCOMPLETE: rerun to resume from the cache; ")
+
+
+def test_build_exits_1_when_the_nllb_packages_are_missing(dirs, monkeypatch, capsys, caplog):
+    def missing():
+        raise ImportError("--fallback-engine nllb needs torch and transformers, and torch does not import "
+                          "(fake). Install both (pip install -e \".[gpu]\" brings everything)")
+
+    monkeypatch.setattr(translate, "check_nllb", missing)
+    use_fixtures(monkeypatch)
+    caplog.set_level(logging.ERROR)
+    nllb = ["--only", "hard_benign", "--langs", "en", "hi", "--fallback-engine", "nllb"]
+    assert main(["data", "build", *nllb]) == 1
+    assert "needs torch and transformers" in caplog.text and capsys.readouterr().out == ""
+    assert "installs the data packages" not in caplog.text            # its own install hint, no other
+    assert not dirs.data.exists()
+
+    def no_translator(cfg):                               # deep-translator missing: raised on the first call
+        raise ModuleNotFoundError("No module named 'deep_translator'", name="deep_translator")
+
+    monkeypatch.setattr(translate, "google_backend", no_translator)
+    use_fixtures(monkeypatch, translator=None)
+    caplog.clear()
+    assert main(["data", "build", "--only", "harmful", "--langs", "en", "hi"]) == 1
+    assert ("No module named 'deep_translator' (pip install -e \".[data]\" installs the data "
+            "packages)") in caplog.text
 
 
 def test_build_exits_3_when_cache_only_misses_items(dirs, monkeypatch, capsys):
@@ -138,13 +180,88 @@ def test_stats_sheets_and_apply_on_a_built_fixture(dirs, monkeypatch, capsys, ca
     rows[0]["verdict"] = "ok"
     write_sheet(sheet, rows)
     assert main(["data", "apply-spotchecks", "--file", str(sheet), "--dry-run"]) == 0
-    assert "dry run: 1 verdicts checked, nothing written" in capsys.readouterr().out
+    assert "dry run: 1 verdicts checked (1 new, 0 unchanged), nothing written" in capsys.readouterr().out
     assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 0
     out = capsys.readouterr().out
-    assert "harmful_hi: ok 1" in out and "1 verdicts applied; rebuilt harmful_hi" in out
+    assert "harmful_hi: ok 1, fixed 0 [], bad 0 [], unchanged 0, unreviewed 0" in out
+    assert "rebuilt harmful_hi: 10 records, 0 open failures, 0 errors" in out
+    assert out.splitlines()[-1] == "1 verdicts applied, 0 unchanged; rebuilt harmful_hi"
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 0            # the same sheet again
+    out = capsys.readouterr().out
+    assert "harmful_hi: ok 0, fixed 0 [], bad 0 [], unchanged 1" in out
+    assert out.splitlines()[-1] == "0 verdicts applied, 1 unchanged; rebuilt nothing"
 
     rows[1]["verdict"] = "perhaps"
     write_sheet(sheet, rows)
     caplog.clear()
     assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 1
     assert "verdict must be ok, fixed or bad" in caplog.text and rows[1]["translation"] not in caplog.text
+
+
+def test_spotcheck_sheets_exits_1_before_a_build(dirs, monkeypatch, capsys, caplog):
+    use_fixtures(monkeypatch)
+    caplog.set_level(logging.ERROR)
+    assert main(["data", "spotcheck-sheets", "--langs", "hi"]) == 1
+    assert "lift data build" in caplog.text and capsys.readouterr().out == ""
+    assert not dirs.sheets.exists()
+
+
+def sheet_rows(records, verdict):
+    return [{"item_id": f"hi-{r.pid}", "set": r.set, "english": r.text_en, "translation": r.text,
+             "verdict": verdict, "corrected": "", "note": ""} for r in records]
+
+
+def test_apply_exits_3_when_the_rebuild_loses_records_and_1_without_the_cache(dirs, monkeypatch, capsys,
+                                                                              caplog):
+    use_fixtures(monkeypatch)
+    assert main(["data", "build", "--only", "harmful", "--langs", "en", "hi"]) == 0
+    sheet = dirs.sheets / "sheet.csv"
+    sheet.parent.mkdir(parents=True)
+    records = build.load_prompts("harmful", "hi")
+    write_sheet(sheet, sheet_rows(records[:2], "ok"))
+    victim = records[5].pid
+    real = build._translate
+
+    def losing(run, todo, lang, engine, **kw):
+        done, failures = real(run, todo, lang, engine, **kw)
+        return [r for r in done if r.pid != victim], failures
+
+    monkeypatch.setattr(build, "_translate", losing)
+    capsys.readouterr()
+    caplog.set_level(logging.ERROR)
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 3
+    out = capsys.readouterr().out
+    assert f"LOST from harmful_hi: 1 records ['{victim}']" in out and "rebuilt harmful_hi: 9 records" in out
+    # no rerun is promised: the cache check rules out a missing row, so the cause is in the reports
+    assert out.splitlines()[-1] == ("INCOMPLETE: the rebuild lost records (listed above); the verdicts are "
+                                    "stored. The files' reports (translation_failures) and the not applied "
+                                    "lines say why")
+    assert "harmful_hi: 1 records were in the file before the rebuild" in caplog.text
+    assert "lift data build" not in caplog.text
+
+    monkeypatch.setattr(build, "_translate", real)
+    (dirs.data / "interim" / "translations" / "google" / "hi.jsonl").unlink()
+    write_sheet(sheet, sheet_rows(records[:1], "bad"))
+    caplog.clear()
+    assert main(["data", "apply-spotchecks", "--file", str(sheet), "--dry-run"]) == 1
+    assert "lacks the engine output of items in the files this sheet has verdicts on" in caplog.text
+    assert "harmful_hi: 9 items (e.g." in caplog.text and capsys.readouterr().out == ""
+
+
+def test_apply_exits_1_when_glotlid_cannot_load_and_stores_nothing(dirs, monkeypatch, capsys, caplog):
+    use_fixtures(monkeypatch)
+    assert main(["data", "build", "--only", "harmful", "--langs", "en", "hi"]) == 0
+    sheet = dirs.sheets / "sheet.csv"
+    sheet.parent.mkdir(parents=True)
+    write_sheet(sheet, sheet_rows(build.load_prompts("harmful", "hi")[:1], "ok"))
+
+    def no_fasttext(cfg=None):
+        raise ModuleNotFoundError("No module named 'fasttext'", name="fasttext")
+
+    monkeypatch.setattr("lift.lang.LangID", no_fasttext)
+    use_fixtures(monkeypatch, lid=None)
+    capsys.readouterr()
+    caplog.set_level(logging.ERROR)
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 1
+    assert "No module named 'fasttext'" in caplog.text and capsys.readouterr().out == ""
+    assert not (dirs.data / "interim" / "translations" / "spotchecks.jsonl").exists()

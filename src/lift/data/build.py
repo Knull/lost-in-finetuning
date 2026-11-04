@@ -53,14 +53,22 @@ same-text check -> GlotLID -> the file, its excluded file and its report.
   in the report and counted in build.json's files, with a WARNING. The links make this a no-op in
   PolyRefuse's own languages; it guards hi, our zh harmless translations and hard_benign's.
 - Translation failures (translate.py's rules) are listed in the report and the pid is left out of
-  that file, never replaced by English. TranslationBlocked (HTTP 429, or ten items in a row failing
-  every retry) stops all translation for the rest of the run: every file that still needs one is
-  skipped (never a partial file), everything else is built, and the summary says blocked. So does
-  --skip-translation. A rerun resumes from the cache. Items that failed with a transport error, or
-  with --cache-only were not cached, leave their file incomplete (summary "incomplete").
+  that file, never replaced by English. TranslationBlocked stops all Google translation for the rest
+  of the run: every file that still needs one is skipped (never a partial file), everything else is
+  built, and the summary says blocked, with ``blocked_kind`` "http_429" (Google refused this IP:
+  wait 30 minutes or more) or "streak" (ten items in a row failed every retry: a network or service
+  outage, not an IP block). --skip-translation skips the same files on request. A rerun resumes
+  from the cache. Items that failed with a transient error, or with --cache-only were not cached,
+  leave their file incomplete (summary "incomplete").
 - hard_benign items Google failed take an NLLB translation from the cache when one passes the same
-  checks; ``fallback_engine="nllb"`` (--fallback-engine nllb, needs torch and transformers) makes
-  the missing ones. Opt-in, so the files stay a function of the cache whatever the flags.
+  checks; ``fallback_engine="nllb"`` (--fallback-engine nllb) makes the missing ones. Opt-in, so the
+  files stay a function of the cache whatever the flags. It needs torch and transformers: a build
+  that may make one runs translate.check_nllb before anything else (ImportError). A TranslationBlocked
+  from NLLB is no Google block: it stops the build with a RuntimeError (the Google outputs are cached).
+- The summary's ``complete`` is False when anything was blocked, skipped or left incomplete;
+  ``rerun_needed`` is True when a rerun can add something: translation was blocked, a file was
+  skipped without --skip-translation asking for it (each skipped entry says ``requested``), or a file
+  is incomplete. ``lift data build`` exits 3 iff rerun_needed, else 0 (lift.commands.data).
 - GlotLID: every record gets ``lid``; one its language check rejects stays in the file and is
   listed (lid_failures). Belebele: the question is checked, no field added.
 
@@ -81,16 +89,22 @@ disjoint from its pids, so a held-out draw that changed (lift.data.sft) stops it
 before a training row is written.
 
 Spot checks: ``write_spotcheck_sheets`` writes, per language (default hi zh es), n unchecked
-dev/final machine translations per set by sha256 rank (ours and PolyRefuse's) and a failures sheet
-with every open translation failure plus every machine translation GlotLID rejected. Readers fill
-verdict ok / fixed (with the corrected text) / bad. ``apply_spotchecks`` checks a returned sheet
-against the current build, raising one SheetError with every problem before anything is written,
-then appends the verdicts to interim/translations/spotchecks.jsonl and rebuilds those files from the
-cache (no network, splits untouched). Every build applies the latest verdict per (lang, pid): fixed
-replaces the text (checked; edited when it differs) if the English is unchanged; ok marks it checked
-and bad moves it to prompts/excluded/ if the reader saw the current text; a verdict on a failed item
-builds the record from the English one (ok accepts the engine's output). A verdict that no longer
-fits is logged and listed, never applied.
+dev/final machine translations per set by sha256 rank (ours and PolyRefuse's; blind: no note) and a
+failures sheet with every open translation failure (with its cached engine output: a cache that
+lacks one is refused) plus every unchecked machine translation GlotLID rejected that the sample did
+not draw: each item is on one sheet only. Readers fill verdict ok / fixed (with the corrected text)
+/ bad and save UTF-8 CSV (commas, semicolons or tabs are read). ``apply_spotchecks`` refuses
+(SheetError) a translation cache that lacks an engine output of the files the sheet has verdicts on,
+then checks every row against the current build and the stored verdicts, raising one SheetError with
+every problem (a legacy-encoding save among them) before anything is written; then it appends the
+verdicts that differ from the stored ones to interim/translations/spotchecks.jsonl and rebuilds those
+files from the cache (no network, splits untouched), listing any record the rebuild lost. Every
+build applies the latest verdict per (lang, pid): fixed replaces the text (checked; edited when it
+differs) if the English is unchanged; ok marks it checked and bad moves it to prompts/excluded/ if
+the reader saw the engine output the build has; a verdict on a failed item builds the record from
+the English one (ok accepts the engine's output); one on a hard_benign item whose reader saw its
+cached NLLB translation goes to the NLLB record. A verdict that no longer fits is logged and listed,
+never applied.
 
 Files under the data dir (lift.paths). A rebuild reproduces every file byte for byte except build.json
 (run id, timings) and CuratorKIT's run records (lift.data.sft): interim/sft/ and the
@@ -105,9 +119,13 @@ run_timestamp, wall_clock_seconds and created_at.
                                          (belebele reports have no such key); no text
     prompts/reports/build.json           the last build: options, sources, splits (status, counts,
                                          groups and their sizes), files (PromptRecord files also
-                                         count cross_split_duplicates), skipped, the SFT row
-                                         decision, PolyRefuse alignment, timings
-    interim/translations/                the translation cache and spotchecks.jsonl
+                                         count cross_split_duplicates), complete, rerun_needed,
+                                         blocked (blocked_kind, blocked_reason), skipped (set, lang,
+                                         reason, requested), incomplete, the SFT row decision,
+                                         PolyRefuse alignment, timings
+    interim/translations/                the translation cache and spotchecks.jsonl (verdict rows:
+                                         lang pid set verdict corrected note source_sha seen_sha
+                                         sheet applied; the latest per (lang, pid) wins)
     sft/...                              the candidates and sft/report.json (lift.data.sft)
 Logs, reports and exception messages carry counts, pids, labels and hashes, never prompt text.
 """
@@ -116,6 +134,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import io
 import json
 import logging
 import math
@@ -162,11 +181,18 @@ _KIND = {set_name: kind for kind, set_name in polyrefuse.SET_NAMES.items()}   # 
 _SPLIT_NAMES = ("train", "val", "fit", "dev", "final")
 _ITEM_ID = re.compile(r"[a-z]{2}-[a-z]{3}-[a-z0-9-]{1,24}")
 _VERDICT_FIELDS = ("lang", "pid", "set", "verdict", "corrected", "note", "source_sha", "seen_sha")
+_UNCACHED_RULES = ("error", "empty")          # failures whose output is never cached (translate.py)
+_CACHED_RULES = ("wrong_lang", "identical")   # failures whose output is (every non-blank output is)
+_DELIMITERS = ((",", "commas"), (";", "semicolons"), ("\t", "tabs"))   # sheet delimiters, tried in order
+_SAVE_AS = ('save the sheet as CSV UTF-8 (Excel: File > Save As > "CSV UTF-8 (Comma delimited)"; '
+            "Google Sheets: File > Download > Comma-separated values)")
 
 
 class SheetError(ValueError):
-    """A returned spot-check sheet that cannot be applied. ``problems`` lists every problem by sheet
-    row and item id, never cell text."""
+    """A returned spot-check sheet that cannot be applied. ``problems`` lists what was found, never
+    cell text: a row's problems by sheet row and item id, a legacy-encoding save once for the sheet
+    (with its rows), a missing translation cache by file (count and pids). A sheet that cannot be
+    read at all (not UTF-8, refused by the csv module, no header) has none: the message says why."""
 
     def __init__(self, message: str, problems: Sequence[str] = ()) -> None:
         super().__init__(message)
@@ -252,26 +278,35 @@ class BuildContext:
 
 
 class _Run:
-    """One pass over some files: its options, the readers' verdicts, and what the summary reports."""
+    """One pass over some files: its options, the readers' verdicts, and what the summary reports.
+
+    ``previous_failures`` (apply_spotchecks' cache-only rebuild only): (set, lang) -> {(pid, engine):
+    (rule, detail)} of the previous report's failures that are never cached (_UNCACHED_RULES); such an
+    item, "error: not cached" in the rebuild, keeps that rule and detail (_resolve_failures)."""
 
     def __init__(self, ctx: BuildContext, *, skip_translation: bool, cache_only: bool,
-                 retranslate_failed: bool, fallback_engine: str | None, create_splits: bool = True) -> None:
+                 retranslate_failed: bool, fallback_engine: str | None, create_splits: bool = True,
+                 previous_failures: Mapping[tuple[str, str], Mapping[tuple[str, str], tuple[str, str]]]
+                 | None = None) -> None:
         if cache_only and retranslate_failed:
             raise ValueError("cache_only and retranslate_failed exclude each other")
         self.ctx, self.cfg = ctx, ctx.cfg
         self.skip_translation, self.cache_only = skip_translation, cache_only
         self.retranslate_failed, self.fallback_engine = retranslate_failed, fallback_engine
         self.create_splits = create_splits
+        self.previous_failures = dict(previous_failures or {})
         self.verdicts = _read_verdicts()
         self.blocked: str | None = None
-        self.skipped: list[dict[str, str]] = []
+        self.blocked_kind: str | None = None                  # TranslationBlocked.kind
+        self.skipped: list[dict[str, Any]] = []
         self.files: dict[str, dict[str, Any]] = {}
         self.splits: dict[str, dict[str, Any]] = {}
         self.timings: dict[str, float] = {}
 
-    def skip(self, set_name: str, lang: str, reason: str) -> None:
+    def skip(self, set_name: str, lang: str, reason: str, *, requested: bool) -> None:
+        """A file not written: ``requested`` by --skip-translation, or not (translation blocked)."""
         log.warning("%s_%s not written: %s", set_name, lang, reason)
-        self.skipped.append({"set": set_name, "lang": lang, "reason": reason})
+        self.skipped.append({"set": set_name, "lang": lang, "reason": reason, "requested": requested})
 
 
 @dataclass
@@ -304,6 +339,7 @@ class _File:
     applied: Counter[str] = field(default_factory=Counter)
     ignored: list[dict[str, str]] = field(default_factory=list)
     touched: set[str] = field(default_factory=set)        # pids whose verdict was looked at
+    deferred: set[str] = field(default_factory=set)       # failed pids whose verdict _fallback applies
 
 
 def build_all(*, only: Iterable[str] | None = None, langs: Iterable[str] | None = None,
@@ -311,9 +347,16 @@ def build_all(*, only: Iterable[str] | None = None, langs: Iterable[str] | None 
     """Build ``only`` these sets (default SETS) in ``langs`` (default languages.all), freeze their
     splits, write prompts/reports/build.json and return that summary.
 
-    ``summary["complete"]`` is False when translation was blocked (``blocked``), a file was skipped
-    for translation (``skipped``) or a file misses items that only a rerun can translate
-    (``incomplete``). Listed failures (wrong language, empty, identical) do not make it incomplete.
+    ``summary["complete"]`` is False when translation was blocked (``blocked``; ``blocked_kind``
+    "http_429" or "streak", ``blocked_reason`` its message), a file was skipped for translation
+    (``skipped``, on request or because of the block) or a file misses items that only a rerun can
+    translate (``incomplete``). ``summary["rerun_needed"]`` is True when a rerun can add something:
+    blocked, a skipped entry whose ``requested`` is False (only --skip-translation requests one), or
+    incomplete. Listed failures (wrong language, empty, identical) are neither.
+
+    With fallback_engine "nllb" and no fallback_translator, a build that may translate hard_benign
+    out of English (not cache_only, not skipping translation) runs translate.check_nllb first, so a
+    missing torch or transformers raises ImportError before anything is written.
     """
     ctx = ctx if ctx is not None else BuildContext.default()
     cfg = ctx.cfg
@@ -323,6 +366,9 @@ def build_all(*, only: Iterable[str] | None = None, langs: Iterable[str] | None 
     want_sft = "sft" in sets and cfg["languages"]["target"] in langs
     run = _Run(ctx, skip_translation=skip_translation or ctx.skip_translation, cache_only=ctx.cache_only,
                retranslate_failed=ctx.retranslate_failed, fallback_engine=ctx.fallback_engine)
+    if (run.fallback_engine == "nllb" and ctx.fallback_translator is None and not run.cache_only
+            and not run.skip_translation and any(s == "hard_benign" and lang != "en" for s, lang in pairs)):
+        translate.check_nllb()
     options = {"only": sets, "langs": langs, "skip_translation": run.skip_translation,
                "cache_only": run.cache_only, "retranslate_failed": run.retranslate_failed,
                "fallback_engine": run.fallback_engine}
@@ -342,11 +388,13 @@ def build_all(*, only: Iterable[str] | None = None, langs: Iterable[str] | None 
     run.timings["total"] = round(time.perf_counter() - started, 3)
     summary = _summary(run, src, options, sft_summary, record["run_id"])
     _write_json(prompts_dir() / "reports" / "build.json", summary)
-    manifest.finish_run(record, complete=summary["complete"], blocked=summary["blocked"],
+    manifest.finish_run(record, complete=summary["complete"], rerun_needed=summary["rerun_needed"],
+                        blocked=summary["blocked"], blocked_kind=summary["blocked_kind"],
                         files=len(run.files), skipped=len(run.skipped))
-    log.info("data build %s: %d files, %d records, %d skipped%s", "complete" if summary["complete"] else
-             "INCOMPLETE", summary["totals"]["files"], summary["totals"]["records"], len(run.skipped),
-             "; translation BLOCKED: rerun later to resume from the cache" if run.blocked else "")
+    log.info("data build: %d files, %d records, %d skipped: %s", summary["totals"]["files"],
+             summary["totals"]["records"], len(run.skipped), build_state(summary))
+    if run.blocked:
+        log.error("%s", blocked_advice(run.blocked_kind))
     return summary
 
 
@@ -713,9 +761,11 @@ def _from_files(run: _Run, src: _Sources, set_name: str, lang: str) -> list[Prom
 
 def _build_prompts(run: _Run, src: _Sources, set_name: str, lang: str) -> None:
     english = _to_translate(run, src, set_name, lang)
-    if english and (run.skip_translation or run.blocked):
-        run.skip(set_name, lang, "translation blocked earlier in this run" if run.blocked
-                 else "needs translation (--skip-translation)")
+    if english and run.blocked:
+        run.skip(set_name, lang, "translation blocked earlier in this run", requested=False)
+        return
+    if english and run.skip_translation:
+        run.skip(set_name, lang, "needs translation (--skip-translation)", requested=True)
         return
     f = _File(set_name, lang, exclusions=list(src.exclusions.get(set_name, ())))
     built = _from_files(run, src, set_name, lang)
@@ -729,12 +779,12 @@ def _build_prompts(run: _Run, src: _Sources, set_name: str, lang: str) -> None:
         f.records = _apply_verdicts(run, f, built)
         still_open = _resolve_failures(run, f, failures, by_pid)
         _fallback(run, f, still_open, by_pid)
-    except TranslationBlocked as e:
-        run.blocked = str(e)
-        log.error("%s_%s: translation blocked after %d items (%s). No more translation in this run: every "
-                  "file that still needs one is skipped; rerun later to resume from the cache",
-                  set_name, lang, e.done, e)
-        run.skip(set_name, lang, "translation blocked")
+    except TranslationBlocked as e:              # Google's: _fallback turns an NLLB one into RuntimeError
+        run.blocked, run.blocked_kind = str(e), e.kind
+        log.error("%s_%s: translation blocked (%s) after %d items (%s). No more translation in this run: "
+                  "every file that still needs one is skipped; rerun later to resume from the cache",
+                  set_name, lang, e.kind, e.done, e)
+        run.skip(set_name, lang, "translation blocked", requested=False)
         return
     for (v_lang, pid), v in run.verdicts.items():
         if v_lang == lang and v.get("set") == set_name and pid not in f.touched:
@@ -782,13 +832,16 @@ def _exclude(f: _File, rec: PromptRecord) -> None:
     f.exclusions.append({"pid": rec.pid, "reason": "spotcheck:bad"})
 
 
-def _apply_verdicts(run: _Run, f: _File, records: Iterable[PromptRecord]) -> list[PromptRecord]:
+def _apply_verdicts(run: _Run, f: _File, records: Iterable[PromptRecord],
+                    skip: Iterable[str] = ()) -> list[PromptRecord]:
     """The readers' latest verdicts on built records: fixed and ok stay (checked), bad moves to
-    f.excluded. A verdict that no longer fits is listed and the record kept as built."""
+    f.excluded. A verdict that no longer fits is listed and the record kept as built. The verdicts
+    on ``skip`` pids were judged (and listed) already: their records stay as built."""
+    skip = set(skip)
     out = []
     for rec in records:
         v = _verdict(run, f, rec.pid)
-        if v is None:
+        if v is None or rec.pid in skip:
             out.append(rec)
             continue
         why = "not a machine translation" if rec.translation is None else _stale(v, rec.text_en, rec.text)
@@ -823,12 +876,23 @@ def _from_english(en: PromptRecord, lang: str, text: str, info: TranslationInfo)
 def _resolve_failures(run: _Run, f: _File, failures: Sequence[TranslationFailure],
                       english: Mapping[str, PromptRecord]) -> list[TranslationFailure]:
     """List every failure; build the record of each one a reader resolved (fixed: the reader's text;
-    ok: the engine's output; bad: to f.excluded). Returns the failures still open."""
+    ok: the engine's output; bad: to f.excluded). Returns the failures still open.
+
+    A hard_benign verdict whose seen_sha is the sha256 of the item's cached NLLB translation and not
+    of the Google output was given on the NLLB record the file held: it stays open, in f.deferred,
+    for _fallback to apply to the NLLB record. In apply_spotchecks' rebuild an item the cache-only
+    pass fails as "error: not cached" keeps the rule and detail of the previous report
+    (run.previous_failures: errors and empty outputs, which are never cached)."""
     still_open = []
     cache: TranslationCache | None = None
+    previous = run.previous_failures.get((f.set_name, f.lang), {})
+    nllb = translate.ENGINE_NAMES["nllb"]
     for fail in sorted(failures, key=lambda x: x.pid or ""):
-        row: dict[str, Any] = {"pid": fail.pid, "rule": fail.rule, "detail": fail.detail,
-                               "engine": fail.engine, "resolved": None}
+        rule, detail = fail.rule, fail.detail
+        if (rule, detail) == ("error", "not cached") and (fail.pid, fail.engine) in previous:
+            rule, detail = previous[(fail.pid, fail.engine)]
+        row: dict[str, Any] = {"pid": fail.pid, "rule": rule, "detail": detail, "engine": fail.engine,
+                               "resolved": None}
         f.failures.append(row)
         v = _verdict(run, f, fail.pid)
         if v is None:
@@ -836,6 +900,14 @@ def _resolve_failures(run: _Run, f: _File, failures: Sequence[TranslationFailure
             continue
         en = english[fail.pid]
         output = clean_text(fail.output) if fail.output else ""
+        cache = cache if cache is not None else TranslationCache()
+        if f.set_name == "hard_benign":
+            fallback = cache.get(nllb, f.lang, en.text)
+            if (fallback is not None and v["seen_sha"] == sha256_text(clean_text(fallback["output"]))
+                    and v["seen_sha"] != sha256_text(output)):
+                f.deferred.add(fail.pid)
+                still_open.append(fail)
+                continue
         why = _stale(v, en.text, output)
         if why is None and v["verdict"] == "ok" and not output:
             why = "no engine output to accept"
@@ -843,7 +915,6 @@ def _resolve_failures(run: _Run, f: _File, failures: Sequence[TranslationFailure
             _ignore(f, fail.pid, v, why)
             still_open.append(fail)
             continue
-        cache = cache if cache is not None else TranslationCache()
         hit = cache.get(fail.engine, f.lang, en.text)
         text = clean_text(v["corrected"]) if v["verdict"] == "fixed" else output
         info = TranslationInfo(engine=fail.engine, source_lang="en", date=hit["date"] if hit else None,
@@ -861,28 +932,42 @@ def _resolve_failures(run: _Run, f: _File, failures: Sequence[TranslationFailure
 def _fallback(run: _Run, f: _File, still_open: Sequence[TranslationFailure],
               english: Mapping[str, PromptRecord]) -> None:
     """NLLB for the hard_benign items Google failed: a cached NLLB translation that passes the checks
-    is always used; with fallback_engine "nllb" the missing ones are made (and cached)."""
-    if f.set_name != "hard_benign" or not still_open:
-        return
+    is always used; with fallback_engine "nllb" the missing ones are made (and cached).
+
+    The readers' verdicts are applied to the NLLB records (_apply_verdicts), once: a verdict
+    _resolve_failures already listed as not applied is not judged again. A deferred verdict
+    (f.deferred: the reader saw the NLLB record) whose item gets no NLLB record now is listed as not
+    applied. A TranslationBlocked from NLLB (its circuit breaker) becomes a RuntimeError that stops
+    the build: it is no Google block, and the Google outputs are cached."""
     name = translate.ENGINE_NAMES["nllb"]
     make = run.fallback_engine == "nllb" and not run.cache_only
-    todo = [english[x.pid] for x in still_open]
-    if not make:
+    todo = [english[x.pid] for x in still_open] if f.set_name == "hard_benign" else []
+    if todo and not make:
         cache = TranslationCache()
         todo = [rec for rec in todo if cache.get(name, f.lang, rec.text) is not None]
-        if not todo:
-            return
-    done, failed = _translate(run, todo, f.lang, "nllb", cache_only=not make, retranslate=False)
-    resolved = {rec.pid for rec in done}
-    for row in f.failures:
-        if row["pid"] in resolved and row["resolved"] is None:
-            row["resolved"] = f"fallback:{name}"
-    f.fallback = {"engine": name, "resolved": sorted(resolved),
-                  "failures": [{"pid": x.pid, "rule": x.rule, "detail": x.detail}
-                               for x in sorted(failed, key=lambda x: x.pid or "")]}
-    log.info("%s_%s: NLLB fallback resolved %d of %d failed items", f.set_name, f.lang, len(resolved),
-             len(todo))
-    f.records += _apply_verdicts(run, f, done)
+    resolved: set[str] = set()
+    failed: list[TranslationFailure] = []
+    if todo:
+        try:
+            done, failed = _translate(run, todo, f.lang, "nllb", cache_only=not make, retranslate=False)
+        except TranslationBlocked as e:
+            raise RuntimeError(f"{f.set_name}_{f.lang}: the NLLB fallback stopped after {e.done} items "
+                               f"({e.kind}); the Google translations are cached: rerun without "
+                               "--fallback-engine or fix the NLLB setup") from e
+        resolved = {rec.pid for rec in done}
+        for row in f.failures:
+            if row["pid"] in resolved and row["resolved"] is None:
+                row["resolved"] = f"fallback:{name}"
+        f.fallback = {"engine": name, "resolved": sorted(resolved),
+                      "failures": [{"pid": x.pid, "rule": x.rule, "detail": x.detail}
+                                   for x in sorted(failed, key=lambda x: x.pid or "")]}
+        log.info("%s_%s: NLLB fallback resolved %d of %d failed items", f.set_name, f.lang, len(resolved),
+                 len(todo))
+        f.records += _apply_verdicts(run, f, done, skip={x["pid"] for x in f.ignored})
+    why = {x.pid: f"{x.rule} {x.detail}".strip() for x in failed}
+    for pid in sorted(f.deferred - resolved):
+        _ignore(f, pid, run.verdicts[(f.lang, pid)],
+                f"the NLLB translation it was given on fails the checks now ({why.get(pid, 'not cached')})")
 
 
 def _stamp(set_name: str, rec: PromptRecord, mapping: Mapping[str, str] | None) -> PromptRecord:
@@ -1038,12 +1123,41 @@ def _summary(run: _Run, src: _Sources, options: Mapping[str, Any], sft_summary: 
     return {
         "run_id": run_id, "options": dict(options),
         "complete": run.blocked is None and not run.skipped and not incomplete,
-        "blocked": run.blocked is not None, "blocked_reason": run.blocked,
+        "rerun_needed": (run.blocked is not None or any(not x["requested"] for x in run.skipped)
+                         or bool(incomplete)),
+        "blocked": run.blocked is not None, "blocked_kind": run.blocked_kind, "blocked_reason": run.blocked,
         "skipped": run.skipped, "incomplete": incomplete,
         "files": files, "totals": {"files": len(files), **totals},
         "splits": run.splits, "sft": sft_summary, "alignment": src.alignment,
         "sources": _pins(run.cfg), "timings": run.timings,
     }
+
+
+def build_state(summary: Mapping[str, Any]) -> str:
+    """A build summary (build_all's, or build.json's) in one line, the last ``lift data build`` prints:
+    "INCOMPLETE: rerun to resume from the cache" when ``rerun_needed`` (a build.json older than that
+    key: when not ``complete``), "built; N files left out by --skip-translation (run without it to
+    translate them)" when every skip was requested, else "complete"."""
+    rerun = summary.get("rerun_needed")
+    if rerun is None:                                     # a build.json from before rerun_needed
+        rerun = not summary.get("complete")
+    if rerun:
+        return "INCOMPLETE: rerun to resume from the cache"
+    if summary.get("skipped"):
+        return (f"built; {len(summary['skipped'])} files left out by --skip-translation (run without it to "
+                "translate them)")
+    return "complete"
+
+
+def blocked_advice(kind: str | None) -> str:
+    """What a translation block of ``kind`` (TranslationBlocked.kind; None: a build.json older than
+    blocked_kind) means and what to do."""
+    if kind == "streak":
+        return (f"translation STOPPED: {translate.MAX_CONSECUTIVE_ERRORS} items in a row failed with network "
+                "or service errors (not an IP block): check the network, then rerun; the cache keeps "
+                "everything done")
+    return ("translation BLOCKED (Google refused this IP, HTTP 429): wait 30 minutes or more, then rerun; "
+            "the cache keeps everything done")
 
 
 def _pins(cfg: Mapping[str, Any]) -> dict[str, Any]:
@@ -1146,11 +1260,16 @@ def write_spotcheck_sheets(*, langs: Iterable[str] | None = None, n: int | None 
     Per language (default languages.primary + transfer_validated, minus en): spotcheck_{lang}.csv
     with, for each translated set, the ``n`` (default validation.translation_spot_check) unchecked
     dev/final records that are machine translations (ours and PolyRefuse's) with the smallest
-    sha256(f"{seed}:spotcheck:{lang}:{set}:{pid}"); and spotcheck_{lang}_failures.csv with every
-    open translation failure (translation = the engine's output from the cache, or empty) and every
-    unchecked machine translation GlotLID rejected, the note prefilled with the auto-check result.
+    sha256(f"{seed}:spotcheck:{lang}:{set}:{pid}"), GlotLID's verdict aside, and an empty note (the
+    sample is blind); and spotcheck_{lang}_failures.csv with every open translation failure
+    (translation = the engine's output from the cache; empty for an empty, error or too_long failure,
+    which has none) and every unchecked machine
+    translation GlotLID rejected that the sample did not draw, the note prefilled with the auto-check
+    result. Each item is on one sheet only, so two readers never give one item two verdicts.
     Columns SHEET_COLUMNS; item_id "{lang}-{pid}". Refuses to overwrite any sheet unless
-    ``overwrite`` (FileExistsError, before writing anything). Returns the paths written.
+    ``overwrite`` (FileExistsError), and raises FileNotFoundError for a missing report or when the
+    translation cache lacks the output of a failure whose output was cached (a data dir copied
+    without it: _failure_rows), all before writing anything. Returns the paths written.
     """
     cfg = ctx.cfg if ctx is not None else config.load("project")
     lang_cfg = cfg["languages"]
@@ -1176,9 +1295,9 @@ def write_spotcheck_sheets(*, langs: Iterable[str] | None = None, n: int | None 
             candidates = [r for r in records if r.translation is not None and not r.translation.checked
                           and r.split in ("dev", "final")]
             ranked = sorted(candidates, key=lambda r, tag=tag: sha256_text(f"{seed}:{tag}:{r.pid}"))
-            sample += [[f"{lang}-{r.pid}", set_name, r.text_en or "", r.text, "", "", ""]
-                       for r in sorted(ranked[:n], key=_pid)]
-            failed += _failure_rows(set_name, lang, records)
+            drawn = sorted(ranked[:n], key=_pid)
+            sample += [[f"{lang}-{r.pid}", set_name, r.text_en or "", r.text, "", "", ""] for r in drawn]
+            failed += _failure_rows(set_name, lang, records, sampled={r.pid for r in drawn})
         sheets[out_dir / f"spotcheck_{lang}.csv"] = sample
         sheets[out_dir / f"spotcheck_{lang}_failures.csv"] = failed
         log.info("spot-check sheets %s: %d sampled items, %d failures", lang, len(sample), len(failed))
@@ -1191,9 +1310,14 @@ def write_spotcheck_sheets(*, langs: Iterable[str] | None = None, n: int | None 
     return list(sheets)
 
 
-def _failure_rows(set_name: str, lang: str, records: Sequence[PromptRecord]) -> list[list[str]]:
+def _failure_rows(set_name: str, lang: str, records: Sequence[PromptRecord],
+                  sampled: Iterable[str] = ()) -> list[list[str]]:
     """The failures sheet rows of one (set, lang): open translation failures (absent from the file)
-    and unchecked machine translations GlotLID rejected (in the file)."""
+    and unchecked machine translations GlotLID rejected (in the file), except the ``sampled`` pids
+    (on the sample sheet, blind). FileNotFoundError when the translation cache lacks the output of a
+    failure whose output was cached (_CACHED_RULES: a data dir copied without it): the row would show
+    an empty translation a reader could not accept."""
+    sampled = set(sampled)
     report = _read_report(set_name, lang)
     if report is None:
         raise FileNotFoundError(f"{_report_path(set_name, lang)} does not exist: run `lift data build`")
@@ -1204,14 +1328,24 @@ def _failure_rows(set_name: str, lang: str, records: Sequence[PromptRecord]) -> 
     if still_open:
         english = {r.pid: r.text for r in load_prompts(set_name, "en")}
         cache = TranslationCache()
+        hits = {(x["pid"], x["engine"]): cache.get(x["engine"], lang, english[x["pid"]]) for x in still_open}
+        missing = sorted(x["pid"] for x in still_open
+                         if x["rule"] in _CACHED_RULES and hits[(x["pid"], x["engine"])] is None)
+        if missing:
+            where = _shown(cache.root)
+            raise FileNotFoundError(f"{set_name}_{lang}: the translation cache ({where}) lacks the engine "
+                                    f"output of {len(missing)} translation failures the failures sheet shows "
+                                    f"(e.g. {', '.join(missing[:5])}): copy {where} from the machine that "
+                                    "built the files, or rerun `lift data build`")
         for x in still_open:
-            hit = cache.get(x["engine"], lang, english[x["pid"]])
+            hit = hits[(x["pid"], x["engine"])]
             shown = clean_text(hit["output"]) if hit else ""
             note = f"auto-check failed: {x['rule']} {x['detail']}".strip()
             rows.append([f"{lang}-{x['pid']}", set_name, english[x["pid"]], shown, "", "", note])
     for x in report["lid_failures"]:
         rec = by_pid.get(x["pid"])
-        if rec is not None and rec.translation is not None and not rec.translation.checked:
+        if (rec is not None and rec.translation is not None and not rec.translation.checked
+                and rec.pid not in sampled):
             note = f"auto-check failed: wrong_lang top={x['label']} {x['prob']}"
             rows.append([f"{lang}-{rec.pid}", set_name, rec.text_en or "", rec.text, "", "", note])
     return sorted(rows, key=lambda row: row[0])
@@ -1232,23 +1366,49 @@ def _write_sheet(path: Path, rows: Sequence[Sequence[str]]) -> None:
         raise
 
 
+def _trim(cells: list[str]) -> list[str]:
+    """A spreadsheet row without its trailing empty cells."""
+    while cells and not cells[-1].strip():
+        cells = cells[:-1]
+    return cells
+
+
 def _read_sheet(path: Path) -> tuple[list[tuple[int, list[str]]], list[str]]:
-    """(spreadsheet row number, the 7 cells) of every non-blank row, and the row problems. SheetError
-    if the header is not exactly SHEET_COLUMNS (trailing empty cells aside)."""
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        table = list(csv.reader(f))
+    """(spreadsheet row number, the 7 cells) of every non-blank row, and the row problems.
 
-    def trim(cells: list[str]) -> list[str]:
-        while cells and not cells[-1].strip():
-            cells = cells[:-1]
-        return cells
-
-    header = [cell.strip() for cell in trim(table[0])] if table else []
-    if tuple(header) != SHEET_COLUMNS:
-        raise SheetError(f"{path.name}: the header must be exactly {','.join(SHEET_COLUMNS)}")
+    UTF-8, with or without a BOM. The delimiter is chosen on the header record alone: commas, else
+    semicolons (Excel saves "CSV UTF-8" with the locale's list separator), else tabs, the first that
+    gives exactly SHEET_COLUMNS (trailing empty cells aside), logged when not commas; then the whole
+    sheet is read with it (a cell such as 'said,"' in a semicolon sheet would swallow the rest of the
+    file read with commas). SheetError, saying how to save the sheet, when the bytes are not UTF-8
+    (UTF-16 "Unicode Text"; cp1252 "CSV (Comma delimited)" with an accented letter), the csv module
+    refuses the sheet, or no delimiter gives the header. A cp1252 save that left only ASCII (a "?" for
+    every Devanagari, Han, Arabic or Thai letter) decodes: apply_spotchecks refuses it by its "?" cells
+    (_lossy, _lossy_text)."""
+    try:
+        text = path.read_bytes().decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise SheetError(f"{path.name}: not UTF-8 (byte {e.start} does not decode): {_SAVE_AS}") from None
+    for delimiter, named in _DELIMITERS:
+        try:
+            header = next(csv.reader(io.StringIO(text, newline=""), delimiter=delimiter), [])
+        except csv.Error:                            # not this delimiter's header
+            continue
+        if tuple(cell.strip() for cell in _trim(header)) == SHEET_COLUMNS:
+            if delimiter != ",":
+                log.info("%s: the header parses with %s, not commas: reading the sheet that way", path.name,
+                         named)
+            break
+    else:
+        raise SheetError(f"{path.name}: the header must be exactly {','.join(SHEET_COLUMNS)} (commas, "
+                         f"semicolons or tabs between the cells): {_SAVE_AS}")
+    try:
+        table = list(csv.reader(io.StringIO(text, newline=""), delimiter=delimiter))
+    except csv.Error as e:                           # its messages hold no cell text
+        raise SheetError(f"{path.name}: the csv module cannot read it ({e}): {_SAVE_AS}") from None
     rows, problems = [], []
     for number, cells in enumerate(table[1:], start=2):
-        cells = trim(cells)
+        cells = _trim(cells)
         if not cells:
             continue
         if len(cells) > len(SHEET_COLUMNS):
@@ -1263,28 +1423,57 @@ def _cell_text(cell: str) -> str:
     return clean_text(cell.replace("\r\n", "\n").replace("\r", "\n"))
 
 
+class _Item(NamedTuple):
+    """One spot-checkable item of the current build."""
+
+    english: str          # text_en; a failure: the en file's text
+    text: str             # the translation as built; a failure: the cached engine output, or ""
+    machine: bool         # a machine translation (ours or PolyRefuse's)
+    edited: bool          # the text is a reader's correction (a fixed verdict applied), not the engine's
+
+
+class _SheetRow(NamedTuple):
+    """A sheet row that names an item of the current build: its cells stripped, the verdict lowercased
+    ("" = not reviewed) and, if given, one of VERDICTS."""
+
+    number: int
+    where: str            # "row N (item_id)", for messages
+    set_name: str
+    lang: str
+    pid: str
+    item: _Item
+    english: str
+    shown: str
+    verdict: str
+    corrected: str
+    note: str
+
+
 class _Items:
-    """The current build's spot-checkable items per (set, lang): pid -> (English, translation as
-    built, is a machine translation). Records in the prompt file, then the excluded file, then open
-    translation failures (English from the en file, translation = the cached engine output)."""
+    """The current build's spot-checkable items per (set, lang), pid -> _Item: records in the prompt
+    file, then the excluded file, then open translation failures (English from the en file,
+    translation = the cached engine output, "" when there is none: apply_spotchecks first checks that
+    the files a sheet has verdicts on lack no cached output)."""
 
     def __init__(self) -> None:
-        self._files: dict[tuple[str, str], dict[str, tuple[str, str, bool]]] = {}
+        self._files: dict[tuple[str, str], dict[str, _Item]] = {}
         self._cache: TranslationCache | None = None
 
-    def find(self, set_name: str, lang: str, pid: str) -> tuple[str, str, bool] | None:
+    def find(self, set_name: str, lang: str, pid: str) -> _Item | None:
         if (set_name, lang) not in self._files:
             self._files[(set_name, lang)] = self._load(set_name, lang)
         return self._files[(set_name, lang)].get(pid)
 
-    def _load(self, set_name: str, lang: str) -> dict[str, tuple[str, str, bool]]:
-        items: dict[str, tuple[str, str, bool]] = {}
+    def _load(self, set_name: str, lang: str) -> dict[str, _Item]:
+        items: dict[str, _Item] = {}
         name = f"{set_name}_{lang}.jsonl"
         for path in (prompts_dir() / name, prompts_dir() / "excluded" / name):
             if path.exists():
                 for row in read_jsonl(path):
                     rec = PromptRecord.model_validate(row)
-                    items.setdefault(rec.pid, (rec.text_en or "", rec.text, rec.translation is not None))
+                    info = rec.translation
+                    items.setdefault(rec.pid, _Item(rec.text_en or "", rec.text, info is not None,
+                                                    bool(info is not None and info.edited)))
         report = _read_report(set_name, lang)
         failed = [x for x in (report or {}).get("translation_failures", []) if x["pid"] not in items]
         if failed:
@@ -1292,24 +1481,49 @@ class _Items:
             self._cache = self._cache if self._cache is not None else TranslationCache()
             for x in failed:
                 hit = self._cache.get(x["engine"], lang, english[x["pid"]])
-                items[x["pid"]] = (english[x["pid"]], clean_text(hit["output"]) if hit else "", True)
+                items[x["pid"]] = _Item(english[x["pid"]], clean_text(hit["output"]) if hit else "", True,
+                                        False)
         return items
 
 
 def apply_spotchecks(path: str | Path, *, ctx: BuildContext | None = None,
                      dry_run: bool = False) -> dict[str, Any]:
-    """Apply a returned spot-check sheet.
+    """Apply a returned spot-check sheet (UTF-8 CSV; commas, semicolons or tabs: _read_sheet).
 
-    Every row is checked against the current build first, and every problem is raised together as one
-    SheetError before anything is written: item ids that do not parse or name no item of that set and
-    language (prompt file, excluded file or translation failure), a set the item is not in, a
+    The translation cache first: the files the sheet has verdicts on (ok, fixed, bad) must have in it
+    every engine output they hold (_uncached_items: the records made from the cache, the failures whose
+    output was cached, which a failures sheet shows); otherwise, also on a ``dry_run`` (which only
+    checks), a SheetError names each file, its count and pids, and nothing is applied. Then every row
+    is checked against the current build and the stored verdicts, and every problem is raised together
+    as one SheetError before anything is written: item ids that do not parse or name no item of that
+    set and language (prompt file, excluded file or translation failure), a set the item is not in, a
     verdict other than ok / fixed / bad (empty = not reviewed: counted, ignored), fixed without a
-    corrected text or corrected filled for another verdict, ok on an item with no engine output,
-    and english or translation cells that no longer match the build (a stale or re-saved sheet;
-    compared by dup_key). Then the verdicts are appended to interim/translations/spotchecks.jsonl
-    (source_sha and seen_sha are the sha256 of the item's English and of its translation as built)
-    and the files they touch are rebuilt from the cache, splits untouched. ``dry_run`` only checks.
-    Returns per file: ok (count), fixed and bad (pids), unreviewed (count).
+    corrected text or corrected filled for another verdict, ok on an empty text (no engine output), an
+    english cell that no longer matches the build (dup_key), a translation cell that matches neither
+    the current translation (dup_key) nor, exactly (sha256 of the cleaned cell), the text the item's
+    latest stored verdict saw (its seen_sha: e.g. the engine output a fixed verdict replaced, which the
+    sheet still shows), and one that matches the current translation where that is a reader's
+    correction (every verdict is given on an engine output, and a rebuild compares an ok or bad with
+    it; a correction goes in corrected). A legacy-encoding save is one problem for the whole sheet,
+    naming its rows: translation cells (reviewed or not) that are the build's text with ASCII ("?" among
+    it) in place of every character outside ASCII (_lossy), and corrected texts it emptied (_lossy_text).
+
+    A row whose set, verdict, corrected text and note equal the item's latest stored verdict, for the
+    same English (source_sha) and the same seen text (seen_sha), is unchanged: counted, not stored
+    again, no rebuild. Every other row is a new verdict: source_sha is the sha256 of the item's
+    English, seen_sha that of the text the reader saw (the stored verdict's seen text when the cell
+    is exactly that, else the current translation). Then the rebuild's sources, splits and GlotLID are
+    loaded (a missing package or source raises before anything is stored), the new verdicts are
+    appended to interim/translations/spotchecks.jsonl and their files rebuilt from the cache, splits
+    untouched (an "error" or "empty" failure keeps its rule and detail, not "not cached":
+    run.previous_failures). A pid that was in a rebuilt prompt file and is neither in it nor in its
+    new report's exclusions afterwards is lost (ERROR).
+
+    Returns sheet, rows, reviewed (rows with a verdict) = new + unchanged, unreviewed, dry_run; files:
+    per file ok (count), fixed and bad (pids) of the new verdicts, unchanged and unreviewed (counts);
+    rebuilt (names), files_rebuilt (each one's build entry: records, open_failures, errors, ...),
+    lost ({file: [pids]}), not_applied (the verdicts of this sheet the reports of their files list as
+    not applied, unchanged ones included; empty on a dry run).
     """
     ctx = ctx if ctx is not None else BuildContext.default()
     cfg = ctx.cfg
@@ -1317,10 +1531,10 @@ def apply_spotchecks(path: str | Path, *, ctx: BuildContext | None = None,
     rows, problems = _read_sheet(path)
     langs = [lang for lang in cfg["languages"]["all"] if lang != "en"]
     items = _Items()
-    entries: list[dict[str, Any]] = []
+    stored = _read_verdicts()
     files: dict[str, dict[str, Any]] = {}
+    named: list[_SheetRow] = []
     seen: dict[str, int] = {}
-    today = date.today().isoformat()
     for number, cells in rows:
         item_id, set_name, english, shown, verdict, corrected, note = (cell.strip() for cell in cells)
         valid = bool(_ITEM_ID.fullmatch(item_id))
@@ -1342,63 +1556,229 @@ def apply_spotchecks(path: str | Path, *, ctx: BuildContext | None = None,
             problems.append(f"{where}: " + (f"the item is in set {other[0]}, not {set_name}" if other
                                             else f"no such item in the current {set_name}_{lang} build"))
             continue
-        tally = files.setdefault(f"{set_name}_{lang}", {"ok": 0, "fixed": [], "bad": [], "unreviewed": 0})
+        files.setdefault(f"{set_name}_{lang}", {"ok": 0, "fixed": [], "bad": [], "unchanged": 0,
+                                                "unreviewed": 0})
         verdict = verdict.lower()
-        if not verdict:
-            tally["unreviewed"] += 1
-            continue
-        if verdict not in VERDICTS:
+        if verdict and verdict not in VERDICTS:
             problems.append(f"{where}: verdict must be ok, fixed or bad (empty: not reviewed)")
             continue
-        english_text, current, machine = found
-        corrected, note = _cell_text(corrected), _cell_text(note)
-        stale = "differs from the current build (a stale or re-saved sheet)"
+        named.append(_SheetRow(number, where, set_name, lang, pid, found, english, shown, verdict, corrected,
+                               note))
+    # before any cell is compared with what the build took from the cache (a failure's engine output)
+    _check_cache(path, _in_order({(r.set_name, r.lang) for r in named if r.verdict}, cfg))
+    entries: list[dict[str, Any]] = []
+    reviewed: dict[tuple[str, str], str] = {}               # (lang, pid) -> set, every row with a verdict
+    lossy: list[int] = []                                   # the row of each cell a legacy save emptied
+    today = date.today().isoformat()
+    for r in named:
+        tally = files[f"{r.set_name}_{r.lang}"]
+        prev = stored.get((r.lang, r.pid))
+        shown_text = _cell_text(r.shown)
+        seen_sha: str | None = None
+        via_build = lossy_cell = False
+        if prev is not None and sha256_text(shown_text) == prev["seen_sha"]:
+            seen_sha = prev["seen_sha"]              # what an earlier verdict saw: the output a fix replaced
+        elif dup_key(r.shown) == dup_key(r.item.text):
+            shown_text, seen_sha, via_build = r.item.text, sha256_text(r.item.text), True
+        elif _lossy(r.shown, r.item.text):
+            lossy_cell = True
+            lossy.append(r.number)
+        if not r.verdict:
+            tally["unreviewed"] += 1
+            continue
+        corrected, note = _cell_text(r.corrected), _cell_text(r.note)
+        lossy_fix = r.verdict == "fixed" and _lossy_text(corrected, _latin_only(cfg, r.lang))
+        if lossy_fix:
+            lossy.append(r.number)
         found_problems = [
-            (not machine, "not a machine translation"),
-            (verdict == "fixed" and not corrected, "fixed needs the corrected translation"),
-            (verdict != "fixed" and bool(corrected), f"corrected is filled but the verdict is {verdict}"),
-            (verdict == "ok" and not current, "there is no engine output to accept (use fixed or bad)"),
-            (dup_key(english) != dup_key(english_text), f"english {stale}"),
-            (dup_key(shown) != dup_key(current), f"translation {stale}"),
+            (not r.item.machine, "not a machine translation"),
+            (r.verdict == "fixed" and not corrected, "fixed needs the corrected translation"),
+            (r.verdict != "fixed" and bool(corrected), f"corrected is filled but the verdict is {r.verdict}"),
+            (r.verdict == "ok" and seen_sha is not None and not shown_text,
+             "there is no engine output to accept (use fixed or bad)"),
+            (via_build and r.item.edited,
+             "the translation cell shows the reader's correction the build holds, not the engine output a "
+             "verdict is given on: restore the cell (a correction goes in corrected)"),
+            (dup_key(r.english) != dup_key(r.item.english),
+             "english differs from the current build (a stale or re-saved sheet)"),
+            (seen_sha is None and not lossy_cell,
+             "the translation cell matches neither the current build nor what an earlier verdict on the "
+             "item saw: the sheet is older than the build or a spreadsheet changed the cell; restore the "
+             "cell or write fresh sheets"),
         ]
-        problems += [f"{where}: {what}" for bad, what in found_problems if bad]
-        entries.append({"lang": lang, "pid": pid, "set": set_name, "verdict": verdict,
-                        "corrected": corrected or None, "note": note or None,
-                        "source_sha": sha256_text(english_text), "seen_sha": sha256_text(current),
-                        "sheet": path.name, "applied": today})
-        if verdict == "ok":
-            tally["ok"] += 1
+        found_problems = [f"{r.where}: {what}" for bad, what in found_problems if bad]
+        if found_problems or lossy_cell or lossy_fix:      # a legacy save: one problem for the sheet, below
+            problems += found_problems
+            continue
+        reviewed[(r.lang, r.pid)] = r.set_name
+        entry = {"lang": r.lang, "pid": r.pid, "set": r.set_name, "verdict": r.verdict,
+                 "corrected": corrected or None, "note": note or None,
+                 "source_sha": sha256_text(r.item.english), "seen_sha": seen_sha,
+                 "sheet": path.name, "applied": today}
+        if prev is not None and all((prev[k] or None) == (entry[k] or None) for k in _VERDICT_FIELDS):
+            tally["unchanged"] += 1
         else:
-            tally[verdict].append(pid)
+            entries.append(entry)
+            if r.verdict == "ok":
+                tally["ok"] += 1
+            else:
+                tally[r.verdict].append(r.pid)
+    if lossy:
+        at = sorted(set(lossy))
+        at_rows = ", ".join(map(str, at[:10])) + (", ..." if len(at) > 10 else "")
+        at_rows = ("rows " if len(at) > 1 else "row ") + at_rows
+        problems.insert(0, f"{len(lossy)} cell(s) hold '?' in place of letters ({at_rows}): the sheet was "
+                           f"saved in a legacy encoding; {_SAVE_AS}")
     if problems:
         listed = problems[:50] + ([f"... and {len(problems) - 50} more"] if len(problems) > 50 else [])
         raise SheetError(f"{path.name}: {len(problems)} problem(s), nothing applied:\n  "
                          + "\n  ".join(listed), problems)
-    summary: dict[str, Any] = {"sheet": path.name, "rows": len(rows), "reviewed": len(entries),
+    pairs = _in_order({(e["set"], e["lang"]) for e in entries}, cfg)
+    unchanged = sum(t["unchanged"] for t in files.values())
+    summary: dict[str, Any] = {"sheet": path.name, "rows": len(rows), "reviewed": len(entries) + unchanged,
+                               "new": len(entries), "unchanged": unchanged,
                                "unreviewed": sum(t["unreviewed"] for t in files.values()), "dry_run": dry_run,
-                               "files": dict(sorted(files.items())), "rebuilt": [], "not_applied": []}
-    if dry_run or not entries:
+                               "files": dict(sorted(files.items())), "rebuilt": [], "files_rebuilt": {},
+                               "lost": {}, "not_applied": []}
+    if dry_run:
         return summary
-    _append_verdicts(entries)
-    order = {s: i for i, s in enumerate(SETS)}
-    pairs = sorted({(e["set"], e["lang"]) for e in entries},
-                   key=lambda p: (order[p[0]], cfg["languages"]["all"].index(p[1])))
-    run = _Run(ctx, skip_translation=False, cache_only=True, retranslate_failed=False, fallback_engine=None,
-               create_splits=False)
-    src = _prepare(run, {s for s, _ in pairs})
-    for set_name, lang in pairs:
-        _build_file(run, src, set_name, lang)
-    ours = {(e["lang"], e["pid"]) for e in entries}
-    for set_name, lang in pairs:
+    if entries:
+        before = {pair: _prompt_pids(*pair) for pair in pairs}
+        previous = {pair: _uncached_failures(*pair) for pair in pairs}
+        run = _Run(ctx, skip_translation=False, cache_only=True, retranslate_failed=False,
+                   fallback_engine=None, create_splits=False, previous_failures=previous)
+        # sources, splits and GlotLID load before a verdict is stored: a re-applied sheet whose verdicts
+        # are stored counts as unchanged, so a rebuild that could not start would never be retried
+        src = _prepare(run, {s for s, _ in pairs})
+        ctx.load_lid()
+        _append_verdicts(entries)
+        run.verdicts = _read_verdicts()
+        for set_name, lang in pairs:
+            _build_file(run, src, set_name, lang)
+        summary["rebuilt"] = [f"{s}_{lang}" for s, lang in pairs]
+        summary["files_rebuilt"] = {f"{s}_{lang}": run.files.get(f"{s}_{lang}") for s, lang in pairs}
+        summary["lost"] = _lost(before)
+    for set_name, lang in _in_order({(s, lang) for (lang, _), s in reviewed.items()}, cfg):
         report = _read_report(set_name, lang) or {}
-        ignored = report.get("spotchecks", {}).get("ignored", [])
-        summary["not_applied"] += [{**x, "set": set_name, "lang": lang} for x in ignored
-                                   if (lang, x["pid"]) in ours]
-    summary["rebuilt"] = [f"{s}_{lang}" for s, lang in pairs]
-    summary["files_rebuilt"] = {f"{s}_{lang}": run.files.get(f"{s}_{lang}") for s, lang in pairs}
-    log.info("applied %d verdicts from %s to %s (%d unreviewed rows)", len(entries), path.name,
-             ", ".join(summary["rebuilt"]), summary["unreviewed"])
+        summary["not_applied"] += [{**x, "set": set_name, "lang": lang}
+                                   for x in report.get("spotchecks", {}).get("ignored", [])
+                                   if reviewed.get((lang, x["pid"])) == set_name]
+    log.info("%s: %d new verdicts applied, %d unchanged, %d unreviewed rows; rebuilt %s", path.name,
+             len(entries), unchanged, summary["unreviewed"], ", ".join(summary["rebuilt"]) or "nothing")
     return summary
+
+
+def _in_order(pairs: Iterable[tuple[str, str]], cfg: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """(set, lang) pairs in SETS order, then languages.all order."""
+    order = {s: i for i, s in enumerate(SETS)}
+    return sorted(pairs, key=lambda p: (order[p[0]], cfg["languages"]["all"].index(p[1])))
+
+
+def _lossy(cell: str, current: str) -> bool:
+    """Is ``cell`` what a legacy-encoding save makes of ``current``? A save that still decodes as UTF-8
+    kept ASCII only (_read_sheet refuses one with another byte left): a "?" for every character the
+    code page lacks (cp1252, "CSV (Comma delimited)", has no Devanagari, Han, Arabic or Thai) and, with
+    Windows' best fit, an ASCII look-alike for some (Chinese fullwidth punctuation becomes "," or "(").
+    So: an ASCII cell with a "?" that is ``current`` character for character, any ASCII in place of each
+    character outside it. A "?" a reader typed is no match."""
+    shown = _cell_text(cell)
+    text = current.replace("\r\n", "\n").replace("\r", "\n")
+    return (shown.isascii() and "?" in shown and not text.isascii() and len(shown) == len(text)
+            and all(a == b or not b.isascii() for a, b in zip(shown, text, strict=True)))
+
+
+def _lossy_text(text: str, latin_only: bool) -> bool:
+    """Does a reader's text look emptied by a legacy-encoding save (ASCII only, a "?" for each other
+    character)? A "?" and not one letter left; or, for a language not written in Latin letters alone
+    (_latin_only), ASCII only with a "??", the trace of a word in its script, while names, numbers and
+    acronyms such as "AI" keep their letters. A romanised correction passes unless it holds a "??"."""
+    return "?" in text and (not any(c.isalpha() for c in text)
+                            or (not latin_only and text.isascii() and "??" in text))
+
+
+def _latin_only(cfg: Mapping[str, Any], lang: str) -> bool:
+    """Is every GlotLID label that counts as ``lang`` (languages.accept_labels) a Latin-script one (en,
+    es)? hi accepts romanised Hindi too, but its translations are Devanagari."""
+    return all(label.endswith("_Latn") for label in cfg["languages"]["accept_labels"][lang])
+
+
+def _prompt_pids(set_name: str, lang: str) -> set[str]:
+    path = prompts_dir() / f"{set_name}_{lang}.jsonl"
+    return {row["pid"] for row in read_jsonl(path)} if path.exists() else set()
+
+
+def _uncached_failures(set_name: str, lang: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """(pid, engine) -> (rule, detail) of the report's translation failures whose output is never
+    cached (_UNCACHED_RULES), which a cache-only rebuild can only call "error: not cached"."""
+    report = _read_report(set_name, lang) or {}
+    return {(x["pid"], x["engine"]): (x["rule"], x["detail"]) for x in report.get("translation_failures", [])
+            if x["rule"] in _UNCACHED_RULES}
+
+
+def _uncached_items(set_name: str, lang: str, cache: TranslationCache) -> list[str]:
+    """Pids of (set, lang) whose engine output a cache-only rebuild needs and the translation cache
+    lacks: records of the prompt and excluded files made from it (a cached engine,
+    translate.ENGINE_NAMES, and a date), which the rebuild would drop (a bad one back to an open
+    failure), and the report's translation failures whose output was cached (_CACHED_RULES), which
+    would become "error: not cached" and which a failures sheet shows with that output. A record a
+    reader wrote for a failure with no cached output (empty, error, too_long) has no date and needs no
+    row: its stored verdict makes it again."""
+    engines = set(translate.ENGINE_NAMES.values())
+    name = f"{set_name}_{lang}.jsonl"
+    missing = set()
+    for path in (prompts_dir() / name, prompts_dir() / "excluded" / name):
+        if not path.exists():
+            continue
+        for row in read_jsonl(path):
+            rec = PromptRecord.model_validate(row)
+            info = rec.translation
+            if (info is not None and info.engine in engines and info.date is not None
+                    and (rec.text_en is None or cache.get(info.engine, lang, rec.text_en) is None)):
+                missing.add(rec.pid)
+    cached = [x for x in (_read_report(set_name, lang) or {}).get("translation_failures", [])
+              if x["rule"] in _CACHED_RULES]
+    if cached:
+        english = {rec.pid: rec.text for rec in load_prompts(set_name, "en")}
+        missing.update(x["pid"] for x in cached if cache.get(x["engine"], lang, english[x["pid"]]) is None)
+    return sorted(missing)
+
+
+def _check_cache(sheet: Path, pairs: Iterable[tuple[str, str]]) -> None:
+    """SheetError, naming each file, its count and up to 5 pids, unless the translation cache holds
+    every engine output a cache-only rebuild of these files needs (_uncached_items): without it the
+    rebuild would drop records, and failures would lose the output a reader judged."""
+    cache = TranslationCache()
+    problems = []
+    for set_name, lang in pairs:
+        missing = _uncached_items(set_name, lang, cache)
+        if missing:
+            problems.append(f"{set_name}_{lang}: {len(missing)} items (e.g. {', '.join(missing[:5])})")
+    if problems:
+        where = _shown(cache.root)
+        raise SheetError(f"{sheet.name}: nothing applied: the translation cache ({where}) lacks the engine "
+                         "output of items in the files this sheet has verdicts on, which the cache-only "
+                         "rebuild needs (it would drop the records, and the failures their output):\n  "
+                         + "\n  ".join(problems) + f"\nCopy {where} from the machine that built the files, "
+                         "or rerun `lift data build`", problems)
+
+
+def _lost(before: Mapping[tuple[str, str], set[str]]) -> dict[str, list[str]]:
+    """file -> the pids that were in its prompt file before the rebuild and are now neither in it nor
+    in its report's exclusions (any reason), each file logged as an ERROR. The cache check rules out a
+    missing cache row, so the cause is in the new report (an open translation failure: a cached output
+    that fails a check now, a stored verdict that no longer fits) or in sources that changed since the
+    last build; the message points there, not at a rerun."""
+    lost: dict[str, list[str]] = {}
+    for (set_name, lang), pids in before.items():
+        report = _read_report(set_name, lang) or {}
+        excluded = {x["pid"] for x in report.get("exclusions", [])}
+        gone = sorted(pids - _prompt_pids(set_name, lang) - excluded)
+        if gone:
+            lost[f"{set_name}_{lang}"] = gone
+            log.error("%s_%s: %d records were in the file before the rebuild and are neither in it nor "
+                      "excluded now: %s; the verdicts are stored. The report (translation_failures) and the "
+                      "verdicts not applied say why", set_name, lang, len(gone), gone[:20])
+    return lost
 
 
 # ---------------------------------------------------------------------------- stats
@@ -1406,8 +1786,10 @@ def apply_spotchecks(path: str | Path, *, ctx: BuildContext | None = None,
 
 def stats(*, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Counts from the prompt files (records per set, language and split) and their reports (GlotLID
-    rejections, translation failures by rule, exclusions by reason, spot-check counts), the SFT row
-    decision (sft/report.json) and the last build's state. Counts and pids only."""
+    rejections, translation failures by rule, exclusions by reason type: duplicate_of,
+    near_duplicate_of, same_text_as, spotcheck; cross-split duplicates of PromptRecord files;
+    spot-check counts), the SFT row decision (sft/report.json) and the last build's state (complete,
+    rerun_needed, blocked and blocked_kind, skipped, incomplete). Counts and pids only."""
     cfg = cfg if cfg is not None else config.load("project")
     files: dict[str, dict[str, Any]] = {}
     missing: list[str] = []
@@ -1436,6 +1818,8 @@ def stats(*, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
                     "excluded": [x["pid"] for x in report["exclusions"]],
                     "checked": report["spotchecks"]["checked"], "edited": report["spotchecks"]["edited"],
                 })
+                if "cross_split_duplicates" in report:            # PromptRecord files (not belebele)
+                    entry["cross_split_duplicates"] = len(report["cross_split_duplicates"])
             files[name] = entry
     out: dict[str, Any] = {"files": files, "missing": missing, "sft": None, "build": None}
     sft_report = sft_dir() / "report.json"
@@ -1448,7 +1832,8 @@ def stats(*, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
     build_json = prompts_dir() / "reports" / "build.json"
     if build_json.exists():
         last = json.loads(build_json.read_text(encoding="utf-8"))
-        out["build"] = {k: last.get(k) for k in ("run_id", "complete", "blocked", "skipped", "incomplete")}
+        out["build"] = {k: last.get(k) for k in ("run_id", "complete", "rerun_needed", "blocked",
+                                                 "blocked_kind", "skipped", "incomplete")}
     return out
 
 
@@ -1467,13 +1852,18 @@ def format_stats(st: Mapping[str, Any]) -> str:
     lines = ["  ".join(cell.ljust(w) if i == 0 else cell.rjust(w)
                        for i, (cell, w) in enumerate(zip(row, widths, strict=True))) for row in table]
     lines.append("lid = GlotLID rejections (kept, listed); failed = translation failures (open = still "
-                 "absent from the file); excluded = duplicates and spot-check bad")
+                 "absent from the file); excluded = copies of a test prompt or a red-teaming repeat "
+                 "(duplicate_of, near_duplicate_of), train/val texts a dev/final record has (same_text_as) "
+                 "and spot-check bad")
     for name, e in st["files"].items():
         notes = []
         if e.get("translation_failures"):
             notes.append("failures " + ", ".join(f"{k} {v}" for k, v in e["translation_failures"].items()))
         if e.get("exclusions"):
             notes.append("exclusions " + ", ".join(f"{k} {v}" for k, v in e["exclusions"].items()))
+        if e.get("cross_split_duplicates"):
+            notes.append(f"{e['cross_split_duplicates']} texts repeat across splits (kept: the frozen split "
+                         "cannot regroup them)")
         if e.get("report") != "ok":
             notes.append(f"report {e.get('report')}")
         if notes:
@@ -1490,9 +1880,9 @@ def format_stats(st: Mapping[str, Any]) -> str:
         lines.append("sft: not built")
     if st.get("build"):
         b = st["build"]
-        state = "complete" if b["complete"] else "INCOMPLETE"
-        state += " (translation blocked)" if b["blocked"] else ""
-        lines.append(f"last build {b['run_id']}: {state}")
+        lines.append(f"last build {b['run_id']}: {build_state(b)}")
+        if b.get("blocked"):
+            lines.append("  " + blocked_advice(b.get("blocked_kind")))
         if b.get("skipped"):
             lines.append("  skipped: " + ", ".join(f"{x['set']}_{x['lang']} ({x['reason']})"
                                                    for x in b["skipped"]))

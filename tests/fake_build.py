@@ -105,24 +105,31 @@ def read_sheet(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
-def write_sheet(path: Path, rows: list[dict[str, str]]) -> None:
-    """Save a filled sheet the way a spreadsheet exports it (UTF-8 with BOM, CRLF)."""
-    with open(path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(build.SHEET_COLUMNS), lineterminator="\r\n")
+def write_sheet(path: Path, rows: list[dict[str, str]], *, delimiter: str = ",", encoding: str = "utf-8-sig",
+                errors: str = "strict") -> None:
+    """Save a filled sheet the way a spreadsheet exports it: by default Excel's "CSV UTF-8" (UTF-8 with
+    BOM, CRLF, commas); ``delimiter`` ";" is that save in a locale whose list separator is ";", "\\t" with
+    encoding "utf-16" is "Unicode Text", encoding "cp1252" with errors "replace" is "CSV (Comma
+    delimited)" (letters cp1252 lacks become "?")."""
+    with open(path, "w", encoding=encoding, errors=errors, newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(build.SHEET_COLUMNS), delimiter=delimiter,
+                                lineterminator="\r\n")
         writer.writeheader()
         writer.writerows(rows)
 
 
 class BlockingTranslator(FakeTranslator):
-    """A FakeTranslator that answers the first ``ok`` calls, then raises TranslationBlocked on every call,
-    as Google does once it answers HTTP 429."""
+    """A FakeTranslator that answers the first ``ok`` calls, then raises TranslationBlocked of ``kind`` on
+    every call: "http_429" as Google does once it answers HTTP 429, "streak" as translate_texts' circuit
+    breaker does after ten items in a row failed every retry."""
 
-    def __init__(self, ok: int = 0, **kw: Any) -> None:
+    def __init__(self, ok: int = 0, *, kind: str = "http_429", **kw: Any) -> None:
         super().__init__(**kw)
         self.ok = ok
+        self.kind = kind
 
     def __call__(self, text: str, lang: str) -> str:
         if len(self.calls) >= self.ok:
             self.calls.append((text, lang))
-            raise TranslationBlocked("fake HTTP 429")
+            raise TranslationBlocked(f"fake {self.kind}", kind=self.kind)
         return super().__call__(text, lang)

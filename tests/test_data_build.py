@@ -1,6 +1,8 @@
 """lift.data.build end to end, offline: FakeHub, FakeLID, FakeTranslator, FakeCurate and the miniature
 PolyRefuse tree, built into tmp data and splits dirs. Every test checks the repo's own data/ is untouched."""
 
+import csv
+import functools
 import json
 import logging
 import re
@@ -25,11 +27,11 @@ from fake_build import (
 from fake_sft import QUIRK_DRAW, aya_dataset_rows, near
 from fake_sources import belebele_rows_by_config, orbench_rows, redteam_rows
 
-from lift import config, splits
-from lift.data import build, polyrefuse, sources
+from lift import config, manifest, splits
+from lift.data import build, polyrefuse, sources, translate
 from lift.data.build import SheetError
 from lift.data.text import clean_text
-from lift.io import read_jsonl, sha256_file
+from lift.io import read_jsonl, sha256_file, sha256_text, write_jsonl
 from lift.schemas import PromptRecord
 
 FIX = runpy.run_path(str(POLYREFUSE_FIXTURE.parent / "make_fixture.py"))    # the texts the tree holds
@@ -105,11 +107,18 @@ def test_fixture_build_without_translation(dirs, caplog):
 
     assert built_files(dirs) == EVERY_FILE - NEEDS_TRANSLATION
     assert {f"{x['set']}_{x['lang']}" for x in summary["skipped"]} == NEEDS_TRANSLATION
-    assert all("--skip-translation" in x["reason"] for x in summary["skipped"])
+    assert all("--skip-translation" in x["reason"] and x["requested"] for x in summary["skipped"])
     assert not summary["complete"] and not summary["blocked"] and ctx.translator.calls == []
+    assert summary["rerun_needed"] is False and summary["blocked_kind"] is None    # nothing a rerun adds
+    assert build.build_state(summary) == (f"built; {len(NEEDS_TRANSLATION)} files left out by "
+                                          "--skip-translation (run without it to translate them)")
+    assert report(dirs, "build")["rerun_needed"] is False
+    assert f"last build {summary['run_id']}: built; {len(NEEDS_TRANSLATION)} files left out by " \
+           "--skip-translation" in build.format_stats(build.stats(cfg=CFG))
     assert summary["alignment"]["files"] and summary["sources"]["polyrefuse"]["commit"]
     [run] = [json.loads(p.read_text(encoding="utf-8")) for p in (dirs.outputs / "manifests").glob("*.json")]
     assert (run["stage"], run["run_id"], run["complete"]) == ("data-build", summary["run_id"], False)
+    assert (run["rerun_needed"], run["blocked_kind"]) == (False, None)
 
     # split files: the shrunken sizes, the set's pids
     for name in build.SPLIT_SETS:
@@ -320,6 +329,16 @@ def test_texts_a_translation_makes_equal_are_caught_in_that_language(dirs, caplo
     assert summary["files"]["hard_benign_hi"]["cross_split_duplicates"] == 1
     assert summary["files"]["hard_benign_en"]["cross_split_duplicates"] == 0
     assert "1 texts repeat across splits of the frozen hard_benign split" in caplog.text
+    # stats: the count per PromptRecord file, exclusions by reason type, a note per file
+    st = build.stats(cfg=CFG)
+    assert st["files"]["hard_benign_hi"]["cross_split_duplicates"] == 1
+    assert st["files"]["harmful_hi"]["exclusions"] == {"duplicate_of": 1, "same_text_as": 1}
+    assert st["files"]["harmful_hi"]["cross_split_duplicates"] == 0
+    lines = build.format_stats(st).splitlines()
+    assert ("  hard_benign_hi: 1 texts repeat across splits (kept: the frozen split cannot regroup "
+            "them)") in lines
+    assert "  harmful_hi: exclusions duplicate_of 1, same_text_as 1" in lines
+    assert not [line for line in lines if line.startswith("  hard_benign_en:")]   # nothing to note
 
 
 def test_same_text_drops_train_copies_of_held_out_texts_and_lists_split_straddlers():
@@ -392,6 +411,20 @@ def test_only_and_langs_choose_the_files(dirs, caplog):
         build.build_all(ctx=fixture_ctx(), only=["harmful", "toxic"])
     with pytest.raises(ValueError, match="unknown languages"):
         build.build_all(ctx=fixture_ctx(), langs=["fr"])
+
+
+def test_build_state_reads_new_and_old_summaries():
+    skipped = [{"set": "harmful", "lang": "hi", "reason": "needs translation (--skip-translation)",
+                "requested": True}]
+    assert build.build_state({"complete": True, "rerun_needed": False, "skipped": []}) == "complete"
+    assert build.build_state({"complete": False, "rerun_needed": False, "skipped": skipped}).startswith(
+        "built; 1 files left out by --skip-translation")
+    assert build.build_state({"complete": False, "rerun_needed": True, "skipped": skipped}).startswith(
+        "INCOMPLETE")
+    old = {"complete": False, "blocked": True, "skipped": [{**skipped[0], "reason": "translation blocked"}]}
+    assert build.build_state(old).startswith("INCOMPLETE")            # a build.json from before rerun_needed
+    assert build.build_state({"complete": True, "skipped": []}) == "complete"
+    assert "HTTP 429" in build.blocked_advice(None) and "not an IP block" in build.blocked_advice("streak")
 
 
 def test_build_context_defaults_and_checks():
@@ -496,16 +529,78 @@ def test_a_blocked_translator_stops_all_translation_and_the_rest_is_built(dirs):
     translator = BlockingTranslator(ok=3)
     summary = build.build_all(ctx=fixture_ctx(translator=translator))
     assert summary["blocked"] and not summary["complete"] and "429" in summary["blocked_reason"]
+    assert summary["blocked_kind"] == "http_429" and summary["rerun_needed"] is True
     assert len(translator.calls) == 4                                  # never called after the block
     reasons = {f"{x['set']}_{x['lang']}": x["reason"] for x in summary["skipped"]}
     assert set(reasons) == NEEDS_TRANSLATION and reasons["harmful_hi"] == "translation blocked"
+    assert not any(x["requested"] for x in summary["skipped"])
     assert built_files(dirs) == EVERY_FILE - NEEDS_TRANSLATION and summary["sft"]["decision"]["rows"] == 5
-    assert report(dirs, "build")["blocked"]
+    assert report(dirs, "build")["blocked"] and report(dirs, "build")["blocked_kind"] == "http_429"
+    text = build.format_stats(build.stats(cfg=CFG))
+    assert f"last build {summary['run_id']}: INCOMPLETE: rerun to resume from the cache" in text
+    assert "translation BLOCKED (Google refused this IP, HTTP 429)" in text
 
     again = FakeTranslator()                                           # Google is back: resume
     summary = build.build_all(ctx=fixture_ctx(translator=again))
-    assert summary["complete"] and built_files(dirs) == EVERY_FILE
+    assert summary["complete"] and built_files(dirs) == EVERY_FILE and summary["rerun_needed"] is False
     assert len(again.calls) == sum(CALLS_PER_LANG.values()) - 3       # the first three came from the cache
+
+
+def test_a_streak_of_network_errors_is_a_block_of_its_own_kind(dirs):
+    summary = build.build_all(ctx=fixture_ctx(translator=BlockingTranslator(kind="streak")),
+                              only=["harmful", "hard_benign"], langs=["en", "hi", "zh"])
+    assert summary["blocked"] and summary["blocked_kind"] == "streak" and summary["rerun_needed"] is True
+    assert {f"{x['set']}_{x['lang']}" for x in summary["skipped"]} == {"harmful_hi", "hard_benign_hi",
+                                                                       "hard_benign_zh"}
+    assert built_files(dirs) == {"harmful_en", "harmful_zh", "hard_benign_en"}
+    st = build.stats(cfg=CFG)
+    assert (st["build"]["blocked_kind"], st["build"]["rerun_needed"]) == ("streak", True)
+    text = build.format_stats(st)
+    assert ("translation STOPPED: 10 items in a row failed with network or service errors (not an IP "
+            "block)") in text
+    assert "refused this IP" not in text
+
+
+def test_an_nllb_breaker_trip_stops_the_build_and_is_no_google_block(dirs):
+    """NLLB's TranslationBlocked must not read as Google refusing the IP (no blocked summary, no skipped
+    files): it stops the build with a RuntimeError, and the Google translations stay cached."""
+    google = FakeTranslator(english_for=[ORB[0].text])
+    ctx = fixture_ctx(translator=google, fallback_engine="nllb",
+                      fallback_translator=BlockingTranslator(kind="streak"))
+    with pytest.raises(RuntimeError, match=r"hard_benign_hi: the NLLB fallback stopped after 0 items "
+                                           r"\(streak\); the Google translations are cached: rerun "
+                                           r"without --fallback-engine"):
+        build.build_all(ctx=ctx, only=["hard_benign"], langs=["en", "hi", "zh"])
+    [run] = [json.loads(p.read_text(encoding="utf-8")) for p in (dirs.outputs / "manifests").glob("*.json")]
+    assert run["error"] == "RuntimeError" and not (dirs.data / "prompts" / "reports" / "build.json").exists()
+    assert len(google.calls) == 6 and all(lang == "hi" for _, lang in google.calls)   # zh never started
+    again = FakeTranslator(english_for=[ORB[0].text])                  # without --fallback-engine: the cache
+    summary = build.build_all(ctx=fixture_ctx(translator=again), only=["hard_benign"], langs=["en", "hi"])
+    assert again.calls == [] and summary["files"]["hard_benign_hi"]["open_failures"] == 1
+
+
+def test_fallback_engine_nllb_checks_its_packages_before_anything_is_written(dirs, monkeypatch):
+    calls = []
+
+    def missing():
+        calls.append("check_nllb")
+        raise ImportError("--fallback-engine nllb needs torch and transformers (fake)")
+
+    start_run = manifest.start_run
+    monkeypatch.setattr(translate, "check_nllb", missing)
+    monkeypatch.setattr(manifest, "start_run",
+                        lambda *a, **kw: calls.append("start_run") or start_run(*a, **kw))
+    with pytest.raises(ImportError, match="needs torch and transformers"):
+        build.build_all(ctx=fixture_ctx(fallback_engine="nllb"), only=["hard_benign"], langs=["en", "hi"])
+    assert calls == ["check_nllb"]                                     # before the run manifest is started
+    assert not dirs.data.exists() and not dirs.splits.exists() and not dirs.outputs.exists()
+    # not when this build cannot make an NLLB translation, or has its own backend
+    for overrides, options in (({}, {"langs": ["en"]}), ({"cache_only": True}, {}),
+                               ({"skip_translation": True}, {}),
+                               ({"fallback_translator": FakeTranslator()}, {}), ({}, {"only": ["harmful"]})):
+        build.build_all(ctx=fixture_ctx(fallback_engine="nllb", **overrides),
+                        **{"only": ["hard_benign"], "langs": ["en", "hi"], **options})
+    assert calls.count("check_nllb") == 1 and calls.count("start_run") == 5
 
 
 def test_cache_only_never_calls_the_engine_and_reports_the_missing_items(dirs):
@@ -635,10 +730,13 @@ def test_apply_spotchecks_round_trip(dirs, spot):
                     second["item_id"]: {"verdict": " OK "}})
     result = build.apply_spotchecks(hi_sheet, ctx=spot_ctx())
     fixed_pid, ok_pid = first["item_id"][3:], second["item_id"][3:]
-    assert result["files"] == {"easy_benign_hi": {"ok": 0, "fixed": [], "bad": [], "unreviewed": 2},
-                               "hard_benign_hi": {"ok": 0, "fixed": [], "bad": [], "unreviewed": 2},
-                               "harmful_hi": {"ok": 1, "fixed": [fixed_pid], "bad": [], "unreviewed": 0}}
+    untouched = {"ok": 0, "fixed": [], "bad": [], "unchanged": 0, "unreviewed": 2}
+    assert result["files"] == {"easy_benign_hi": untouched, "hard_benign_hi": untouched,
+                               "harmful_hi": {"ok": 1, "fixed": [fixed_pid], "bad": [], "unchanged": 0,
+                                              "unreviewed": 0}}
     assert result["rebuilt"] == ["harmful_hi"] and result["not_applied"] == [] and result["reviewed"] == 2
+    assert (result["new"], result["unchanged"], result["lost"]) == (2, 0, {})
+    assert result["files_rebuilt"]["harmful_hi"]["records"] == 10
     harmful = by_pid("harmful", "hi")
     fixed, ok = harmful[fixed_pid], harmful[ok_pid]
     assert fixed.text == "संशोधित नकली अनुवाद\nदूसरी पंक्ति" and fixed.text_en == first["english"]
@@ -705,6 +803,20 @@ def test_a_verdict_that_no_longer_fits_is_listed_not_applied(dirs, spot, caplog)
     assert report(dirs, "harmful_hi")["spotchecks"]["ignored"] == [
         {"pid": pid, "verdict": "ok", "why": "the translation changed after review"}]
     assert "not applied" in caplog.text
+    # the same row again: the reader saw the current translation, which the stored verdict did not, so it
+    # is a new verdict (not "unchanged") and takes effect
+    result = build.apply_spotchecks(sheet, ctx=spot_ctx())
+    assert (result["new"], result["unchanged"], result["not_applied"]) == (1, 0, [])
+    assert by_pid("harmful", "hi")[pid].translation.checked
+    # a later cache row (as --retranslate-failed appends one) changes the translation, so the stored ok no
+    # longer fits: the same sheet again is unchanged, and its verdict is listed as not applied
+    english = by_pid("harmful", "hi")[pid].text_en
+    translate.TranslationCache().put("google", "hi", english, fake_translation(english + " again", "hi"))
+    build.build_all(ctx=spot_ctx(), only=["harmful"], langs=["en", "hi"])
+    result = build.apply_spotchecks(sheet, ctx=spot_ctx())
+    assert (result["new"], result["unchanged"], result["rebuilt"]) == (0, 1, [])
+    assert result["not_applied"] == [{"pid": pid, "verdict": "ok", "set": "harmful", "lang": "hi",
+                                      "why": "the translation changed after review"}]
 
 
 def test_a_half_written_verdict_line_is_ignored_then_closed_off(dirs, caplog):
@@ -734,6 +846,7 @@ def test_apply_spotchecks_rejects_a_bad_sheet_before_writing_anything(dirs, spot
     rows[2].update(verdict="ok", corrected="कोई सुधार")
     rows[3].update(verdict="bad", set="harmful")
     rows[4].update(verdict="ok", translation="बदला हुआ नकली पाठ")
+    rows[5].update(verdict="ok", english=rows[5]["english"] + " in an older wording")
     rows += [{**rows[5], "item_id": "hi-prh-test-0999", "set": "harmful", "verdict": "ok"},
              {**rows[5], "item_id": "not an item id", "verdict": "ok"},
              {**rows[5], "verdict": "ok"}]
@@ -745,15 +858,19 @@ def test_apply_spotchecks_rejects_a_bad_sheet_before_writing_anything(dirs, spot
     expected = [(2, "verdict must be ok, fixed or bad"), (3, "fixed needs the corrected translation"),
                 (4, "corrected is filled but the verdict is ok"),
                 (5, "the item is in set easy_benign, not harmful"),
-                (6, "translation differs from the current build"),
+                (6, "the translation cell matches neither the current build nor what an earlier verdict on "
+                    "the item saw: the sheet is older than the build or a spreadsheet changed the cell; "
+                    "restore the cell or write fresh sheets"),
+                (7, "english differs from the current build (a stale or re-saved sheet)"),
                 (8, "no such item in the current harmful_hi"),
                 (9, "item_id is not <lang>-<pid>"), (10, "the item is also on row 7")]
     assert len(problems) == len(expected)
     for number, what in expected:
         assert any(p.startswith(f"row {number}") and what in p for p in problems), (number, what)
     message = str(e.value)
-    assert "8 problem(s), nothing applied" in message
-    cells = ("कोई सुधार", "बदला हुआ नकली पाठ", rows[0]["english"], rows[0]["translation"], "not an item id")
+    assert "9 problem(s), nothing applied" in message
+    cells = ("कोई सुधार", "बदला हुआ नकली पाठ", rows[0]["english"], rows[0]["translation"], rows[5]["english"],
+             "not an item id")
     assert not any(cell in message for cell in cells)
     assert snapshot(dirs.data) == before
 
@@ -774,6 +891,526 @@ def test_apply_spotchecks_dry_run_checks_and_writes_nothing(dirs, spot):
     assert snapshot(dirs.data) == before
 
 
+def test_an_item_is_on_one_sheet_only_and_the_sample_stays_blind_and_unbiased(dirs, spot):
+    """es prb-test-0002 (GlotLID rejects PolyRefuse's translation) ranks third in its set's sample: with n=3
+    it is drawn, so it is on the sample sheet with no note and off the failures sheet; the draw is the plain
+    hash rank over every unchecked dev/final machine translation, GlotLID's verdict aside."""
+    sample_path, failures_path = build.write_spotcheck_sheets(ctx=spot, langs=["es"], n=3)
+    sample = {r["item_id"]: r for r in read_sheet(sample_path)}
+    failures = {r["item_id"]: r for r in read_sheet(failures_path)}
+    assert sample["es-prb-test-0002"]["note"] == "" and "prb-test-0002" in by_pid("easy_benign", "es")
+    assert set(failures) == {f"es-{ORB[1].pid}"} and not set(sample) & set(failures)
+    for set_name in build.TRANSLATED_SETS:
+        tag = f"spotcheck:es:{set_name}"
+        candidates = [r.pid for r in build.load_prompts(set_name, "es")
+                      if r.translation and not r.translation.checked and r.split in ("dev", "final")]
+        drawn = sorted(candidates, key=lambda pid, tag=tag: sha256_text(f"{SEED}:{tag}:{pid}"))[:3]
+        assert sorted(k[3:] for k, r in sample.items() if r["set"] == set_name) == sorted(drawn), set_name
+    assert all(r["note"] == "" for r in sample.values())
+    _, failures_path = build.write_spotcheck_sheets(ctx=spot, langs=["es"], n=2, overwrite=True)
+    assert "es-prb-test-0002" in {r["item_id"] for r in read_sheet(failures_path)}    # not drawn: listed
+
+
+def test_reapplying_a_sheet_changes_nothing_and_revised_verdicts_on_fixed_items_take_effect(dirs, spot,
+                                                                                        monkeypatch):
+    """After a fixed verdict the build holds the correction, but the sheet still shows the engine output: the
+    row passes through the stored verdict's seen_sha. An unchanged row is not stored again and rebuilds
+    nothing; a revised one (fixed -> bad, a new correction, fixed -> ok) is judged against the engine output
+    and takes effect. ids[4]'s correction equals the engine output by dup_key (a doubled space), so only
+    the exact match on the stored seen_sha says which of the two texts the reader saw."""
+    build.write_spotcheck_sheets(ctx=spot)
+    sheet = dirs.sheets / "spotcheck_hi.csv"
+    rows = read_sheet(sheet)                                  # harmful x2, easy_benign x2, hard_benign x2
+    ids = [r["item_id"] for r in rows]
+    engine = {r["item_id"]: r["translation"] for r in rows}
+    spaced = engine[ids[4]].replace(" ", "  ", 1)             # a correction equal to the output by dup_key
+    fill(sheet, {ids[0]: {"verdict": "fixed", "corrected": "पहला नकली सुधार"}, ids[1]: {"verdict": "ok"},
+                 ids[2]: {"verdict": "fixed", "corrected": "दूसरा नकली सुधार", "note": "a note"},
+                 ids[3]: {"verdict": "bad"}, ids[4]: {"verdict": "fixed", "corrected": spaced}})
+    first = build.apply_spotchecks(sheet, ctx=spot_ctx())
+    assert (first["new"], first["unchanged"], first["not_applied"]) == (5, 0, [])
+    stored = dirs.data / "interim" / "translations" / "spotchecks.jsonl"
+    before, prompts = stored.read_bytes(), snapshot(dirs.data / "prompts")
+    rebuilt = []
+    real = build._build_file
+    monkeypatch.setattr(build, "_build_file", lambda run, src, s, lang: rebuilt.append(f"{s}_{lang}")
+                        or real(run, src, s, lang))
+
+    monkeypatch.setattr("lift.lang.LangID", no_fasttext)          # nothing to rebuild: GlotLID never loads
+    again = build.apply_spotchecks(sheet, ctx=fixture_ctx(lid=None))      # the very same sheet
+    assert (again["new"], again["unchanged"], again["reviewed"], again["rebuilt"]) == (0, 5, 5, [])
+    assert again["files"]["harmful_hi"] == {"ok": 0, "fixed": [], "bad": [], "unchanged": 2, "unreviewed": 0}
+    assert again["not_applied"] == [] and rebuilt == []
+    assert stored.read_bytes() == before and snapshot(dirs.data / "prompts") == prompts
+
+    fill(sheet, {ids[0]: {"verdict": "bad", "corrected": ""}, ids[2]: {"corrected": "नया नकली सुधार"},
+                 ids[4]: {"verdict": "ok", "corrected": ""}})
+    result = build.apply_spotchecks(sheet, ctx=spot_ctx())
+    assert (result["new"], result["unchanged"], result["not_applied"]) == (3, 2, [])
+    assert rebuilt == result["rebuilt"] == ["harmful_hi", "easy_benign_hi", "hard_benign_hi"]
+    latest = {v["pid"]: v for v in read_jsonl(stored)}
+    for item_id in (ids[0], ids[2], ids[4]):                   # the engine output the reader saw
+        assert latest[item_id[3:]]["seen_sha"] == sha256_text(engine[item_id])
+    harmful, easy, hard = (by_pid(s, "hi") for s in ("harmful", "easy_benign", "hard_benign"))
+    assert ids[0][3:] not in harmful                         # fixed -> bad: excluded, as the engine wrote it
+    [excluded] = [PromptRecord.model_validate(r) for r in
+                  read_jsonl(dirs.data / "prompts" / "excluded" / "harmful_hi.jsonl")]
+    assert (excluded.pid, excluded.text, excluded.translation.checked) == (ids[0][3:], engine[ids[0]], True)
+    revised = easy[ids[2][3:]]                                  # a new correction
+    assert (revised.text, revised.translation.edited, revised.translation.note) == ("नया नकली सुधार", True,
+                                                                                     "a note")
+    accepted = hard[ids[4][3:]]                                 # fixed -> ok: the engine output, checked
+    assert (accepted.text, accepted.translation.checked, accepted.translation.edited) == (engine[ids[4]],
+                                                                                           True, False)
+    assert report(dirs, "harmful_hi")["spotchecks"]["applied"] == {"ok": 1, "fixed": 0, "bad": 1}
+
+    rows = read_sheet(sheet)
+    rows[1]["translation"] = "कोई और नकली पाठ"                     # neither the build nor what a verdict saw
+    write_sheet(sheet, rows)
+    with pytest.raises(SheetError, match="row 3 .*matches neither the current build nor what an earlier "
+                                         "verdict on the item saw.*restore the cell or write fresh sheets"):
+        build.apply_spotchecks(sheet, ctx=spot_ctx())
+    # ids[2]'s correction pasted into its translation cell: it matches the build, but a verdict is given on
+    # the engine output (a rebuild compares an ok or bad with it), so none is taken on the correction
+    before = snapshot(dirs.data)
+    for verdict, corrected in (("ok", ""), ("bad", ""), ("fixed", "नया नकली सुधार")):
+        rows = read_sheet(sheet)
+        rows[1]["translation"] = engine[ids[1]]
+        rows[2].update(translation="नया नकली सुधार", verdict=verdict, corrected=corrected)
+        write_sheet(sheet, rows)
+        with pytest.raises(SheetError) as e:
+            build.apply_spotchecks(sheet, ctx=spot_ctx())
+        assert e.value.problems == [f"row 4 ({ids[2]}): the translation cell shows the reader's correction "
+                                    "the build holds, not the engine output a verdict is given on: restore "
+                                    "the cell (a correction goes in corrected)"], verdict
+    assert snapshot(dirs.data) == before
+
+
+def test_a_fixed_verdict_whose_english_changed_is_stored_again(dirs):
+    """The English changes in a way dup_key does not see (a doubled inner space): the stored fixed verdict no
+    longer applies (another source_sha), so the same sheet applied again is a new verdict, not unchanged, and
+    the correction takes effect again."""
+    hard = {"only": ["hard_benign"], "langs": ["en", "hi"]}
+    build.build_all(ctx=fixture_ctx(), **hard)
+    rec = build.load_prompts("hard_benign", "hi")[0]
+    sheet = dirs.sheets / "sheet.csv"
+    sheet.parent.mkdir(parents=True)
+    write_sheet(sheet, [{"item_id": f"hi-{rec.pid}", "set": "hard_benign", "english": rec.text_en,
+                         "translation": rec.text, "verdict": "fixed", "corrected": "नकली सुधार पाठ",
+                         "note": ""}])
+    assert build.apply_spotchecks(sheet, ctx=fixture_ctx())["new"] == 1
+    rows = orbench_rows()
+    row = rows[rec.extra["hf_row"]]
+    row["prompt"] = row["prompt"].replace(" ", "  ", 1)
+    hub = fixture_hub({"orbench": rows})
+    build.build_all(ctx=fixture_ctx(hub=hub), **hard)
+    stale = by_pid("hard_benign", "hi")[rec.pid]
+    assert stale.text_en != rec.text_en and not stale.translation.checked
+    assert report(dirs, "hard_benign_hi")["spotchecks"]["ignored"] == [
+        {"pid": rec.pid, "verdict": "fixed", "why": "the English source changed after review"}]
+    result = build.apply_spotchecks(sheet, ctx=fixture_ctx(hub=hub))
+    assert (result["new"], result["unchanged"], result["not_applied"]) == (1, 0, [])
+    assert by_pid("hard_benign", "hi")[rec.pid].text == "नकली सुधार पाठ"
+
+
+def test_a_verdict_on_a_cached_nllb_record_goes_to_that_record_once(dirs):
+    """hard_benign ORB[0]: Google gives English (wrong_lang), NLLB's cached translation is in the file. A
+    verdict a reader gave on the NLLB text is applied to the NLLB record, once, and never listed as not
+    applied; a correction keeps engine nllb. If the NLLB text later fails the checks, the verdict is listed
+    once, with the reason."""
+    hard = {"only": ["hard_benign"], "langs": ["en", "hi"]}
+    build.build_all(ctx=fixture_ctx(translator=FakeTranslator(english_for=[ORB[0].text]),
+                                    fallback_engine="nllb", fallback_translator=FakeTranslator()), **hard)
+    nllb_text, pid = fake_translation(ORB[0].text, "hi"), ORB[0].pid
+    assert by_pid("hard_benign", "hi")[pid].translation.engine == "nllb-200-distilled-600M"
+    sheet = dirs.sheets / "nllb.csv"
+    sheet.parent.mkdir(parents=True)
+    row = {"item_id": f"hi-{pid}", "set": "hard_benign", "english": ORB[0].text, "translation": nllb_text,
+           "verdict": "ok", "corrected": "", "note": ""}
+    ctx = fixture_ctx(translator=FakeTranslator(english_for=[ORB[0].text]))
+    write_sheet(sheet, [row])
+    result = build.apply_spotchecks(sheet, ctx=ctx)
+    record = by_pid("hard_benign", "hi")[pid]
+    assert result["not_applied"] == [] and record.translation.checked and record.text == nllb_text
+    assert record.translation.engine == "nllb-200-distilled-600M" and not record.translation.edited
+    rep = report(dirs, "hard_benign_hi")
+    assert rep["spotchecks"]["applied"] == {"ok": 1, "fixed": 0, "bad": 0}
+    assert rep["spotchecks"]["ignored"] == []
+    assert rep["translation_failures"][0]["resolved"] == "fallback:nllb-200-distilled-600M"
+
+    write_sheet(sheet, [{**row, "verdict": "fixed", "corrected": "नकली सुधरा एनएलएलबी पाठ"}])
+    result = build.apply_spotchecks(sheet, ctx=ctx)
+    record = by_pid("hard_benign", "hi")[pid]
+    assert result["not_applied"] == [] and record.text == "नकली सुधरा एनएलएलबी पाठ"
+    assert record.translation.engine == "nllb-200-distilled-600M" and record.translation.edited
+    rep = report(dirs, "hard_benign_hi")
+    assert rep["spotchecks"]["applied"] == {"ok": 0, "fixed": 1, "bad": 0}
+    assert rep["spotchecks"]["ignored"] == []
+
+    write_sheet(sheet, [row])                                 # back to ok, then GlotLID rejects the NLLB text
+    build.apply_spotchecks(sheet, ctx=ctx)
+    rejecting = FakeLID(overrides={nllb_text: ("mar_Deva", 0.9)})
+    google = FakeTranslator(english_for=[ORB[0].text])
+    build.build_all(ctx=fixture_ctx(lid=rejecting, translator=google), **hard)
+    assert pid not in by_pid("hard_benign", "hi")
+    assert report(dirs, "hard_benign_hi")["spotchecks"]["ignored"] == [
+        {"pid": pid, "verdict": "ok",
+         "why": "the NLLB translation it was given on fails the checks now (wrong_lang top=mar_Deva 0.9)"}]
+    stored = list(read_jsonl(dirs.data / "interim" / "translations" / "spotchecks.jsonl"))[-1]
+    build._append_verdicts([{**stored, "seen_sha": "0" * 64}])     # a verdict on neither Google's nor NLLB's
+    build.build_all(ctx=fixture_ctx(translator=google), **hard)
+    assert not by_pid("hard_benign", "hi")[pid].translation.checked
+    assert report(dirs, "hard_benign_hi")["spotchecks"]["ignored"] == [            # listed once
+        {"pid": pid, "verdict": "ok", "why": "the translation changed after review"}]
+
+
+def test_a_verdict_on_an_output_both_engines_gave_resolves_the_google_failure(dirs):
+    """Google and NLLB give ORB[0] the same output, which fails the checks for both: a reader's ok on it (the
+    failures sheet shows Google's) was given on Google's output as well, so it resolves the Google failure
+    rather than going to an NLLB record that never passes."""
+    hard = {"only": ["hard_benign"], "langs": ["en", "hi"]}
+    english = {"english_for": [ORB[0].text]}
+    build.build_all(ctx=fixture_ctx(translator=FakeTranslator(**english), fallback_engine="nllb",
+                                    fallback_translator=FakeTranslator(**english)), **hard)
+    assert [x["pid"] for x in report(dirs, "hard_benign_hi")["fallback"]["failures"]] == [ORB[0].pid]
+    sheet = dirs.sheets / "both.csv"
+    sheet.parent.mkdir(parents=True)
+    write_sheet(sheet, [{"item_id": f"hi-{ORB[0].pid}", "set": "hard_benign", "english": ORB[0].text,
+                         "translation": fake_translation(ORB[0].text, "en"), "verdict": "ok", "corrected": "",
+                         "note": ""}])
+    result = build.apply_spotchecks(sheet, ctx=fixture_ctx(translator=FakeTranslator(**english)))
+    record = by_pid("hard_benign", "hi")[ORB[0].pid]
+    assert result["not_applied"] == [] and record.translation.checked
+    assert record.translation.engine == "google"
+    assert [x["resolved"] for x in report(dirs, "hard_benign_hi")["translation_failures"]] == ["ok"]
+
+
+def test_the_apply_rebuild_keeps_failures_the_cache_cannot_hold(dirs, monkeypatch):
+    """Errors and empty outputs are never cached, so the cache-only rebuild of apply_spotchecks can only call
+    them "error: not cached": the report keeps the build's rule and detail instead."""
+    monkeypatch.setattr(translate, "translate_records",                 # no backoff sleeps in a test
+                        functools.partial(translate.translate_records, sleep=lambda _: None))
+    hard = {"only": ["hard_benign"], "langs": ["en", "hi"]}
+    ctx = fixture_ctx(translator=FakeTranslator(always_raise=[ORB[2].text], empty_for=[ORB[1].text]))
+    build.build_all(ctx=ctx, **hard)
+    failures = {(x["pid"], x["rule"], x["detail"])
+                for x in report(dirs, "hard_benign_hi")["translation_failures"]}
+    assert failures == {(ORB[1].pid, "empty", "blank"), (ORB[2].pid, "error", "ConnectionError x5")}
+    rec = build.load_prompts("hard_benign", "hi")[0]
+    sheet = dirs.sheets / "spotcheck_hi.csv"
+    sheet.parent.mkdir(parents=True)
+    write_sheet(sheet, [{"item_id": f"hi-{rec.pid}", "set": "hard_benign", "english": rec.text_en,
+                         "translation": rec.text, "verdict": "ok", "corrected": "", "note": ""}])
+    result = build.apply_spotchecks(sheet, ctx=fixture_ctx())
+    assert result["rebuilt"] == ["hard_benign_hi"]
+    assert result["files_rebuilt"]["hard_benign_hi"]["errors"] == 1     # the ConnectionError, not the empty
+    rows_after = report(dirs, "hard_benign_hi")["translation_failures"]
+    assert {(x["pid"], x["rule"], x["detail"]) for x in rows_after} == failures
+    # the cache has an output for ORB[2] now (English: wrong_lang): the rebuild reports what it found; only an
+    # item it can only call "error: not cached" keeps the earlier rule
+    translate.TranslationCache().put("google", "hi", ORB[2].text, fake_translation(ORB[2].text, "en"))
+    write_sheet(sheet, [{"item_id": f"hi-{rec.pid}", "set": "hard_benign", "english": rec.text_en,
+                         "translation": rec.text, "verdict": "bad", "corrected": "", "note": ""}])
+    assert build.apply_spotchecks(sheet, ctx=fixture_ctx())["new"] == 1
+
+    def rules():
+        failed = report(dirs, "hard_benign_hi")["translation_failures"]
+        return {x["pid"]: (x["rule"], x["detail"]) for x in failed}
+
+    assert rules() == {ORB[1].pid: ("empty", "blank"), ORB[2].pid: ("wrong_lang", "top=eng_Latn 0.95")}
+    build.build_all(ctx=fixture_ctx(cache_only=True), **hard)          # a cache-only build says what it saw
+    assert rules() == {ORB[1].pid: ("error", "not cached"), ORB[2].pid: ("wrong_lang", "top=eng_Latn 0.95")}
+
+
+def test_apply_refuses_to_run_without_the_translation_cache(dirs, spot, tmp_path):
+    """A data dir copied without interim/translations: the cache-only rebuild would drop every translated
+    record of the files a sheet has verdicts on, and a failure would lose the engine output its row shows,
+    so nothing is applied, on a dry run too, and the cache is checked before any cell is compared with the
+    build (a failure's translation cell would match nothing). Fresh failures sheets are refused as well.
+    With one cache row gone, a failure's, that item alone is named."""
+    build.write_spotcheck_sheets(ctx=spot)
+    sheet, failures_sheet = dirs.sheets / "spotcheck_hi.csv", dirs.sheets / "spotcheck_hi_failures.csv"
+    fill(sheet, {read_sheet(sheet)[0]["item_id"]: {"verdict": "ok"}})
+    fill(failures_sheet, {f"hi-{ORB[0].pid}": {"verdict": "ok"}})      # wrong_lang: its output was cached
+    google = dirs.data / "interim" / "translations" / "google"
+    shutil.copytree(google, tmp_path / "google")
+    shutil.rmtree(google)
+    before = snapshot(dirs.data)
+    hard = sorted({r.pid for r in build.load_prompts("hard_benign", "hi")} | {ORB[0].pid})   # + its failure
+    for path, problem in ((sheet, "harmful_hi: 10 items (e.g. prh-test-0000, prh-test-0001, prh-test-0002, "
+                                  "prh-test-0003, prh-test-0004)"),
+                          (failures_sheet, f"hard_benign_hi: 5 items (e.g. {', '.join(hard)})")):
+        for dry_run in (True, False):
+            with pytest.raises(SheetError) as e:
+                build.apply_spotchecks(path, ctx=spot_ctx(), dry_run=dry_run)
+            assert e.value.problems == [problem]
+            message = str(e.value)
+            assert "nothing applied" in message and "interim" in message and "matches neither" not in message
+            assert "from the machine that built the files, or rerun `lift data build`" in message
+            assert snapshot(dirs.data) == before and not (dirs.data / "interim" / "translations" /
+                                                           "spotchecks.jsonl").exists()
+    with pytest.raises(FileNotFoundError, match=rf"hard_benign_hi: the translation cache \(.*\) lacks the "
+                                                rf"engine output of 1 translation failures the failures "
+                                                rf"sheet shows \(e.g. {ORB[0].pid}\): copy"):
+        build.write_spotcheck_sheets(ctx=spot, out_dir=tmp_path / "fresh")
+    assert not (tmp_path / "fresh").exists()
+
+    shutil.copytree(tmp_path / "google", google)
+    cache_file = google / "hi.jsonl"
+    write_jsonl(cache_file, [row for row in read_jsonl(cache_file) if row["source"] != ORB[0].text])
+    with pytest.raises(SheetError) as e:
+        build.apply_spotchecks(failures_sheet, ctx=spot_ctx(), dry_run=True)
+    assert e.value.problems == [f"hard_benign_hi: 1 items (e.g. {ORB[0].pid})"]
+    assert build.apply_spotchecks(sheet, ctx=spot_ctx(), dry_run=True)["new"] == 1     # harmful_hi: all there
+
+
+def test_apply_needs_the_cache_rows_of_excluded_and_nllb_records(dirs):
+    """The cache check reads the excluded file and every cached engine: without its row, a record a reader
+    marked bad would come back as an open failure, and the NLLB record of a Google failure would be
+    dropped."""
+    hard = {"only": ["hard_benign"], "langs": ["en", "hi"]}
+    google = FakeTranslator(english_for=[ORB[0].text])
+    build.build_all(ctx=fixture_ctx(translator=google, fallback_engine="nllb",
+                                    fallback_translator=FakeTranslator()), **hard)
+    bad, other = [r for r in build.load_prompts("hard_benign", "hi") if r.pid != ORB[0].pid][:2]
+    sheet = dirs.sheets / "sheet.csv"
+    sheet.parent.mkdir(parents=True)
+
+    def row(rec, verdict):
+        return {"item_id": f"hi-{rec.pid}", "set": "hard_benign", "english": rec.text_en,
+                "translation": rec.text, "verdict": verdict, "corrected": "", "note": ""}
+
+    write_sheet(sheet, [row(bad, "bad")])
+    build.apply_spotchecks(sheet, ctx=fixture_ctx(translator=google))
+    assert {"pid": bad.pid, "reason": "spotcheck:bad"} in report(dirs, "hard_benign_hi")["exclusions"]
+    cache_file = dirs.data / "interim" / "translations" / "google" / "hi.jsonl"
+    saved = cache_file.read_bytes()
+    write_jsonl(cache_file, [r for r in read_jsonl(cache_file) if r["source"] != bad.text_en])
+    write_sheet(sheet, [row(other, "ok")])
+    before = snapshot(dirs.data)
+    with pytest.raises(SheetError) as e:
+        build.apply_spotchecks(sheet, ctx=fixture_ctx(translator=google))
+    assert e.value.problems == [f"hard_benign_hi: 1 items (e.g. {bad.pid})"]
+    assert snapshot(dirs.data) == before
+
+    cache_file.write_bytes(saved)
+    shutil.rmtree(dirs.data / "interim" / "translations" / "nllb-200-distilled-600M")
+    before = snapshot(dirs.data)
+    with pytest.raises(SheetError) as e:
+        build.apply_spotchecks(sheet, ctx=fixture_ctx(translator=google))
+    assert e.value.problems == [f"hard_benign_hi: 1 items (e.g. {ORB[0].pid})"]
+    assert snapshot(dirs.data) == before
+
+
+def no_fasttext(cfg=None):
+    raise ModuleNotFoundError("No module named 'fasttext'", name="fasttext")
+
+
+def test_apply_loads_what_the_rebuild_needs_before_storing_a_verdict(dirs, spot, monkeypatch):
+    """GlotLID cannot load on this machine: the apply stops before a verdict is stored, so the same sheet
+    applies in full once it can (a stored verdict would count as unchanged and never be rebuilt)."""
+    build.write_spotcheck_sheets(ctx=spot)
+    sheet = dirs.sheets / "spotcheck_hi.csv"
+    hard = [r["item_id"] for r in read_sheet(sheet) if r["set"] == "hard_benign"]
+    fill(sheet, {hard[0]: {"verdict": "ok"}})
+    monkeypatch.setattr("lift.lang.LangID", no_fasttext)
+    before = snapshot(dirs.data)
+    with pytest.raises(ImportError, match="fasttext"):
+        build.apply_spotchecks(sheet, ctx=fixture_ctx(lid=None))
+    assert snapshot(dirs.data) == before
+    assert not (dirs.data / "interim" / "translations" / "spotchecks.jsonl").exists()
+    result = build.apply_spotchecks(sheet, ctx=spot_ctx())
+    assert (result["new"], result["unchanged"], result["rebuilt"]) == (1, 0, ["hard_benign_hi"])
+
+
+def test_a_reader_written_record_needs_no_cache_row_and_lost_records_are_reported(dirs, spot, monkeypatch,
+                                                                                  caplog):
+    """ORB[1] had an empty output (never cached): a reader's correction makes its record, with no date and no
+    cache row, and later sheets on its file still apply; an ok on that row is refused (there is no engine
+    output to accept, and once stored it would replace the correction, which the rebuild would then drop). A
+    record the rebuild loses is listed, an excluded one is not."""
+    build.write_spotcheck_sheets(ctx=spot)
+    failures_sheet = dirs.sheets / "spotcheck_hi_failures.csv"
+    fill(failures_sheet, {f"hi-{ORB[1].pid}": {"verdict": "fixed", "corrected": "नकली सुधारा हुआ अनुरोध"}})
+    build.apply_spotchecks(failures_sheet, ctx=spot_ctx())
+    written = by_pid("hard_benign", "hi")[ORB[1].pid]
+    assert written.translation.engine == "google" and written.translation.date is None
+    fill(failures_sheet, {f"hi-{ORB[1].pid}": {"verdict": "ok", "corrected": ""}})
+    before = snapshot(dirs.data)
+    with pytest.raises(SheetError) as e:
+        build.apply_spotchecks(failures_sheet, ctx=spot_ctx())
+    assert e.value.problems == [f"row 3 (hi-{ORB[1].pid}): there is no engine output to accept (use fixed or "
+                                "bad)"]
+    assert snapshot(dirs.data) == before
+    sheet = dirs.sheets / "spotcheck_hi.csv"
+    rows = read_sheet(sheet)
+    hard = [r["item_id"] for r in rows if r["set"] == "hard_benign"]
+    fill(sheet, {hard[0]: {"verdict": "ok"}})
+    assert build.apply_spotchecks(sheet, ctx=spot_ctx())["rebuilt"] == ["hard_benign_hi"]
+
+    victim = hard[1][3:]
+    real = build._translate
+
+    def losing(run, records, lang, engine, **kw):
+        done, failures = real(run, records, lang, engine, **kw)
+        return [r for r in done if r.pid != victim], failures
+
+    monkeypatch.setattr(build, "_translate", losing)
+    harmful = [r["item_id"] for r in rows if r["set"] == "harmful"]
+    fill(sheet, {hard[0]: {"verdict": "ok", "note": "seen again"}, harmful[0]: {"verdict": "bad"}})
+    caplog.set_level(logging.ERROR)
+    result = build.apply_spotchecks(sheet, ctx=spot_ctx())
+    assert result["lost"] == {"hard_benign_hi": [victim]}
+    assert harmful[0][3:] not in by_pid("harmful", "hi")      # excluded by the reader: not lost
+    assert (f"hard_benign_hi: 1 records were in the file before the rebuild and are neither in it nor "
+            f"excluded now: ['{victim}']; the verdicts are stored. The report (translation_failures) and the "
+            "verdicts not applied say why") in caplog.text
+
+
+# ---------------------------------------------------------------------------- spreadsheet exports
+
+
+CORRECTIONS = {"hi": "नकली सुधार\nदूसरी पंक्ति", "es": "Corrección ficticia\nsegunda línea"}
+
+
+def filled_sheet(dirs, spot, lang="hi"):
+    """``lang``'s sample sheet, freshly written, as a reader fills it: an ok row whose note holds a comma and
+    a semicolon, and a fixed row with a two-line correction."""
+    build.write_spotcheck_sheets(ctx=spot, overwrite=True)
+    sheet = dirs.sheets / f"spotcheck_{lang}.csv"
+    rows = read_sheet(sheet)
+    rows[0].update(verdict="ok", note="fine, thanks; checked")
+    rows[1].update(verdict="fixed", corrected=CORRECTIONS[lang])
+    return sheet, rows
+
+
+@pytest.mark.parametrize("delimiter", [";", "\t"])
+def test_apply_reads_semicolon_and_tab_separated_sheets(dirs, spot, delimiter, caplog):
+    sheet, rows = filled_sheet(dirs, spot)
+    write_sheet(sheet, rows, delimiter=delimiter)
+    caplog.set_level(logging.INFO)
+    result = build.apply_spotchecks(sheet, ctx=spot_ctx())
+    assert result["files"]["harmful_hi"] == {"ok": 1, "fixed": [rows[1]["item_id"][3:]], "bad": [],
+                                             "unchanged": 0, "unreviewed": 0}
+    ok = by_pid("harmful", "hi")[rows[0]["item_id"][3:]]
+    assert ok.translation.checked and ok.translation.note == "fine, thanks; checked"
+    assert by_pid("harmful", "hi")[rows[1]["item_id"][3:]].text == CORRECTIONS["hi"]
+    named = {";": "semicolons", "\t": "tabs"}[delimiter]
+    assert f"the header parses with {named}, not commas" in caplog.text
+
+
+def test_the_delimiter_is_chosen_on_the_header_alone(dirs):
+    """A semicolon sheet whose second row has the cell 'He said,"': read with commas, that quote opens a field
+    that swallows the rest of the file, past the csv module's field limit. The header alone picks the
+    delimiter, so the sheet reads in full."""
+    path = dirs.sheets / "said.csv"
+    path.parent.mkdir(parents=True)
+    blank = dict.fromkeys(build.SHEET_COLUMNS, "")
+    rows = [{**blank, "item_id": "hi-prh-test-0000", "set": "harmful", "english": 'He said,"'}]
+    rows += [{**blank, "item_id": f"hi-prh-train-{i:04d}", "set": "harmful", "english": "x" * 1000}
+             for i in range(150)]
+    write_sheet(path, rows, delimiter=";")
+    with open(path, encoding="utf-8-sig", newline="") as f, pytest.raises(csv.Error, match="field limit"):
+        list(csv.reader(f))                                            # what reading it with commas does
+    read, problems = build._read_sheet(path)
+    assert problems == [] and len(read) == 151
+    assert read[0] == (2, ["hi-prh-test-0000", "harmful", 'He said,"', "", "", "", ""])
+
+
+def test_apply_refuses_other_encodings_and_says_how_to_save(dirs, spot):
+    sheet, rows = filled_sheet(dirs, spot, "es")
+    before = snapshot(dirs.data)
+    save_as = ('CSV UTF-8 (Excel: File > Save As > "CSV UTF-8 (Comma delimited)"; Google Sheets: File > '
+               "Download")
+    write_sheet(sheet, rows, encoding="cp1252", errors="replace")      # Excel's "CSV (Comma delimited)"
+    with pytest.raises(SheetError, match=r"spotcheck_es.csv: not UTF-8 \(byte \d+ does not decode\)") as e:
+        build.apply_spotchecks(sheet, ctx=spot_ctx())
+    assert save_as in str(e.value)
+    write_sheet(sheet, rows, delimiter="\t", encoding="utf-16")          # Excel's "Unicode Text"
+    with pytest.raises(SheetError, match=r"not UTF-8 \(byte 0 does not decode\)"):
+        build.apply_spotchecks(sheet, ctx=spot_ctx())
+    sheet.write_text(",".join(build.SHEET_COLUMNS) + "\n" + "x" * 200_000 + ",harmful\n", encoding="utf-8")
+    with pytest.raises(SheetError, match="the csv module cannot read it"):         # over its field limit
+        build.apply_spotchecks(sheet, ctx=spot_ctx())
+    sheet.write_text("item_id|set|english|translation|verdict|corrected|note\n", encoding="utf-8")
+    with pytest.raises(SheetError, match="header must be exactly .* \\(commas, semicolons or tabs"):
+        build.apply_spotchecks(sheet, ctx=spot_ctx())
+
+    # Hindi in cp1252: a "?" for every letter, so the file is pure ASCII and decodes as UTF-8. One problem for
+    # the sheet: the six translation cells (two reviewed, four not) and the fixed row's correction
+    sheet, rows = filled_sheet(dirs, spot, "hi")
+    write_sheet(sheet, rows, encoding="cp1252", errors="replace")
+    assert sheet.read_bytes().isascii()
+    with pytest.raises(SheetError) as e:
+        build.apply_spotchecks(sheet, ctx=spot_ctx())
+    assert e.value.problems == ["7 cell(s) hold '?' in place of letters (rows 2, 3, 4, 5, 6, 7): the sheet "
+                                f"was saved in a legacy encoding; {build._SAVE_AS}"]
+
+    # failures sheets whose reviewed rows show no engine output (ORB[1] is empty): the build's cell is "" as
+    # well, so only the corrected text, a "?" and no letter, or an unreviewed row's translation gives it away
+    def failures_sheet(lang, change):
+        _, path = build.write_spotcheck_sheets(ctx=spot, langs=[lang], overwrite=True)
+        rows = read_sheet(path)
+        for row in rows:
+            change(row, row["item_id"] == f"{lang}-{ORB[1].pid}")
+        return path, rows
+
+    for lang, change, problem in (
+            ("hi", lambda row, empty: empty and row.update(verdict="fixed", corrected="नकली सुधारा हुआ अनुरोध"),
+             "2 cell(s) hold '?' in place of letters (rows 2, 3)"),          # ORB[0]'s output, the correction
+            ("zh", lambda row, empty: empty and row.update(verdict="fixed", corrected="假的更正文本"),
+             "1 cell(s) hold '?' in place of letters (row 2)"),
+            ("hi", lambda row, empty: empty and row.update(verdict="bad", note="नकली टिप्पणी"),
+             "1 cell(s) hold '?' in place of letters (row 2)")):            # unreviewed ORB[0] alone
+        path, rows = failures_sheet(lang, change)
+        write_sheet(path, rows, encoding="cp1252", errors="replace")
+        with pytest.raises(SheetError) as e:
+            build.apply_spotchecks(path, ctx=spot_ctx())
+        assert [p.split(":")[0] for p in e.value.problems] == [problem], lang
+
+    # a correction keeps the Latin letters of a name or an acronym, and the sheet shows no other engine output
+    # (ORB[0]'s row left off): its "??" gives it away, for a language not written in Latin letters alone
+    for lang, corrected in (("hi", "AI के बारे में नकली अनुरोध"), ("zh", "关于AI的假请求")):
+        def fix(row, empty, corrected=corrected):
+            if empty:
+                row.update(verdict="fixed", corrected=corrected)
+
+        path, rows = failures_sheet(lang, fix)
+        rows = [row for row in rows if row["item_id"] != f"{lang}-{ORB[0].pid}"]
+        write_sheet(path, rows, encoding="cp1252", errors="replace")
+        with pytest.raises(SheetError) as e:
+            build.apply_spotchecks(path, ctx=spot_ctx())
+        problem = "1 cell(s) hold '?' in place of letters (row 2)"
+        assert [p.split(":")[0] for p in e.value.problems] == [problem], lang
+    assert snapshot(dirs.data) == before
+
+    # a "?" a reader typed, and a romanised correction ending in one, are no legacy save
+    def typed(row, empty):
+        if empty:
+            row.update(verdict="fixed", corrected="kya yah nakli anurodh hai?")
+        else:
+            row["translation"] = "?"                                    # an unreviewed row, marked
+
+    path, rows = failures_sheet("hi", typed)
+    write_sheet(path, rows)
+    assert build.apply_spotchecks(path, ctx=spot_ctx())["new"] == 1
+    assert by_pid("hard_benign", "hi")[ORB[1].pid].text == "kya yah nakli anurodh hai?"
+
+
+def test_a_legacy_save_is_told_by_its_question_marks():
+    # Windows' best fit writes an ASCII look-alike for Chinese fullwidth punctuation, "?" for the ideographs
+    assert build._lossy("??,??(??):??", "翻译，测试（文本）：完成")
+    assert build._lossy("Python,??", "Python，代码") and build._lossy("??\r\n??", "नक\nली")
+    assert not build._lossy("?????", "假的更正文本")                       # one character for each
+    assert not build._lossy("??A??", "假的B正文")                          # the build's ASCII stays as it is
+    assert not build._lossy("?", "नकली") and not build._lossy("abcd", "नकली") and not build._lossy("??", "ok")
+    assert build._lossy_text("AI ?? ????", latin_only=False) and build._lossy_text("???", latin_only=True)
+    assert not build._lossy_text("kya yah sach hai?", latin_only=False)    # romanised Hindi, one "?"
+    assert not build._lossy_text("Es real??", latin_only=True)             # cp1252 keeps Spanish letters
+    assert not build._lossy_text("एआई क्या है??", latin_only=False)
+    assert [lang for lang in LANGS if build._latin_only(CFG, lang)] == ["en", "es"]
+
+
 # ---------------------------------------------------------------------------- stats and loading
 
 
@@ -790,8 +1427,16 @@ def test_stats_count_files_failures_and_exclusions(dirs, spot):
     assert st["files"]["redteam_hi"]["by_split"] == {"final": 4}
     assert st["sft"]["decision"]["rows"] == 5 and set(st["sft"]["variants"]) == set(VARIANTS)
     assert st["build"]["complete"] is True
+    b = st["build"]
+    assert (b["rerun_needed"], b["blocked"], b["blocked_kind"]) == (False, False, None)
+    assert st["files"]["harmful_hi"]["cross_split_duplicates"] == 0
+    assert all("cross_split_duplicates" not in st["files"][f"belebele_{lang}"] for lang in LANGS)
     text = build.format_stats(st)
     assert "hard_benign_hi" in text and "N = 5 rows" in text and "failures empty 1, wrong_lang 1" in text
+    assert ("excluded = copies of a test prompt or a red-teaming repeat (duplicate_of, near_duplicate_of), "
+            "train/val texts a dev/final record has (same_text_as) and spot-check bad") in text
+    assert f"last build {st['build']['run_id']}: complete" in text.splitlines()
+    assert "  harmful_en: exclusions duplicate_of 1" in text.splitlines()
     assert not [t for t in fixture_texts() if t in text]
 
     with open(dirs.data / "prompts" / "harmful_en.jsonl", "a", encoding="utf-8", newline="\n") as f:
