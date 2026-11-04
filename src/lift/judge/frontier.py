@@ -936,8 +936,8 @@ class FrontierJudge:
     changes nothing here (see the module docstring); it is kept in ``bulk``. ``config_entry=None``
     reads no config. ``stats`` counts this instance's calls (preflight and probes included), cache
     hits, duplicates (items answered by an identical item of the same call), backoff retries,
-    reminder turns, failures, refusals, unavailable items, probes, tokens and USD spent (actual usage;
-    a call lost in transport counts its reservation, as it may have been billed).
+    reminder turns, failures, refusals, unavailable items, probes sent, tokens and USD spent (actual
+    usage; a call lost in transport counts its reservation, as it may have been billed).
     """
 
     def __init__(self, provider: str, model: str, rubric_path: str | Path, *, client: Any = None,
@@ -1153,11 +1153,10 @@ class FrontierJudge:
         parsed = parse_safety_reply(first.text)
         if parsed is not None:
             return _success(parsed, first), first
-        self._count(reminders=1)
         history: tuple[dict[str, str], ...] = ({"role": "user", "content": user},)
         if first.text.strip():
             history += ({"role": "assistant", "content": first.text},)
-        second = self._call(REMINDER, history, preflight=preflight)
+        second = self._call(REMINDER, history, preflight=preflight, count="reminders")
         if second.refused:
             return _failure(_refusal_error(second), second), second
         parsed = parse_safety_reply(second.text)
@@ -1191,23 +1190,25 @@ class FrontierJudge:
             log.info("frontier %s: preflight ok (answered by %s)", self.judge_id, last.model_echo)
 
     def _call(self, user: str, history: tuple[dict[str, str], ...] = (), *,
-              preflight: bool = False) -> ProviderResult:
+              preflight: bool = False, count: str | None = None) -> ProviderResult:
         """One cached completion, requested at most once at a time per key. Raises _ItemError for a
         deterministic item-level failure, _Unavailable when a transient error outlives the retries,
         FrontierUnavailable when either stops the run (see _note_unavailable, _probe),
-        FrontierConfigError for a configuration or account failure and SpendCapExceeded at the cap."""
+        FrontierConfigError for a configuration or account failure and SpendCapExceeded at the cap.
+        ``count`` names a stat to count once the completion is served (a cache hit) or reserved."""
         key = self._key(user, history)
         if preflight:
-            return self._request(key, user, history, purpose="preflight")
+            return self._request(key, user, history, purpose="preflight", count=count)
         hit = self._cached(key)
-        if hit is not None:
-            return hit
-        with self._key_lock(key):
-            hit = self._cached(key)                 # a concurrent caller may have just made this call
-            if hit is not None:
-                return hit
-            self._ensure_preflight()
-            return self._request(key, user, history)
+        if hit is None:
+            with self._key_lock(key):
+                hit = self._cached(key)             # a concurrent caller may have just made this call
+                if hit is None:
+                    self._ensure_preflight()
+                    return self._request(key, user, history, count=count)
+        if count:
+            self._count(**{count: 1})
+        return hit
 
     def _cached(self, key: str) -> ProviderResult | None:
         row = self._cache.get(key)
@@ -1234,12 +1235,19 @@ class FrontierJudge:
                     del self._key_locks[key]
 
     def _request(self, key: str, user: str, history: tuple[dict[str, str], ...], *,
-                 purpose: str = "item") -> ProviderResult:
+                 purpose: str = "item", count: str | None = None) -> ProviderResult:
         """Call the API, backing off on transient errors; cache an item's reply (never the preflight's
-        or a probe's). ``purpose`` is "item", "preflight" or "probe" (see _api_error)."""
+        or a probe's). ``purpose`` is "item", "preflight" or "probe" (see _api_error). ``count`` (a stat:
+        "probes", "reminders") counts once the first attempt is reserved, and a retry once its attempt
+        is: a request that the cap or a stop refused never went out, and the stats go into the run
+        manifest."""
         estimate = self.estimate_usd(user, history)
         for attempt in range(1, MAX_ATTEMPTS + 1):
             number = self._reserve(estimate)
+            if attempt > 1:
+                self._count(retries=1)
+            elif count:
+                self._count(**{count: 1})
             try:
                 result = self._provider.complete(
                     system=self.rubric.system, user=user, history=history, model=self.model,
@@ -1252,7 +1260,6 @@ class FrontierJudge:
                     failure = err
                     break
                 delay = _backoff(attempt, err.retry_after)
-                self._count(retries=1)
                 log.info("frontier %s: %s, retry %d/%d in %.1f s", self.judge_id, err.label, attempt,
                          MAX_ATTEMPTS - 1, delay)
                 time.sleep(delay)
@@ -1321,11 +1328,10 @@ class FrontierJudge:
                 if self._answered > after:
                     return
                 pending = Counter(label for _, label in self._unanswered)
-            self._count(probes=1)
             user = self.rubric.render(prompt=PREFLIGHT_PROMPT, response=PREFLIGHT_RESPONSE,
                                       prompt_lang="English")
             try:
-                self._request(self._key(user, ()), user, (), purpose="probe")
+                self._request(self._key(user, ()), user, (), purpose="probe", count="probes")
             except _ItemError as err:
                 stop = self._probe_failed(err, pending)
             else:
