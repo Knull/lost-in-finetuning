@@ -1,10 +1,117 @@
+import json
+import logging
+import sys
+
 import pytest
 
 from lift.cli import build_parser, main
 from lift.commands import run as run_cmd
+from lift.io import sha256_text, write_jsonl
+from lift.paths import generations_dir, judgements_dir, output_dir
+
+GUARD_SHA = "6ec42827da0c1ff11e7a49dc269d2e810d27e108"
 
 
-@pytest.mark.parametrize("command", ["smoke", "generate", "judge", "run-dev", "sync", "remote"])
+def write_generation(set_name, lang, split, *, variant="stock"):
+    """One generations file holding one record (pid "{set[:3]}-0001", prompt text "t", no real output);
+    returns the record's key."""
+    from lift.models.generate import generations_path
+
+    key = sha256_text(f"{variant}:{set_name}:{lang}:{split}")
+    write_jsonl(generations_path(variant, set_name, lang, split), [{
+        "key": key, "variant": variant, "pid": f"{set_name[:3]}-0001", "lang": lang, "set": set_name,
+        "split": split, "prompt_sha": sha256_text("t"), "output": "o", "n_prompt_tokens": 1,
+        "n_new_tokens": 1, "hit_cap": False, "seconds": 0.1, "meta": {"dtype": "bf16"}}])
+    return key
+
+
+def write_judgements(judge_dir, set_name, lang, split, *, variant="stock", n=2):
+    """A judgements file of ``n`` placeholder records (only lift restart reads it here)."""
+    path = judgements_dir() / judge_dir / variant / f"{set_name}_{lang}_{split}.jsonl"
+    write_jsonl(path, [{"key": sha256_text(f"{judge_dir}:{variant}:{set_name}:{lang}:{split}:{i}"),
+                        "pid": f"{set_name[:3]}-{i:04d}", "label": "refusal"} for i in range(n)])
+    return path
+
+
+def pin(judge=False):
+    """Pin models.global (and, with ``judge``, the primary judge) in this test's configs/project.yaml."""
+    from lift import config
+
+    project = config.load("project")
+    project["models"]["global"]["revision"] = "b" * 40
+    if judge:
+        project["judges"]["safety_primary"]["revision"] = GUARD_SHA
+
+
+class StubGuard:
+    """Stands in for lift.judge.qwen3guard.Qwen3GuardJudge (its result contract) with placeholder
+    verdicts. ``die_on_call`` raises like a CUDA out-of-memory error in the middle of a file."""
+
+    model_id = "Qwen/Qwen3Guard-Gen-4B"
+    revision = GUARD_SHA
+    judge_id = f"{model_id}@{revision}"
+
+    def __init__(self, die_on_call=None):
+        self.die_on_call = die_on_call
+        self.calls = 0
+
+    def judge(self, prompts, responses):
+        self.calls += 1
+        if self.calls == self.die_on_call:
+            raise RuntimeError("judge died (simulated out of memory)")
+        return [{"safety": "Safe", "categories": [], "refusal": "Yes", "consistent": True,
+                 "raw": "Safety: Safe\nCategories: None\nRefusal: Yes", "error": None} for _ in prompts]
+
+
+def guard(die_on_call=None):
+    """The real Qwen3Guard adapter (it writes its stack into every judgement) over a StubGuard."""
+    from lift.judge.pipeline import Qwen3GuardAdapter
+
+    return Qwen3GuardAdapter(StubGuard(die_on_call), strict=True, device="cpu", dtype="bf16")
+
+
+class FakeLID:
+    def top(self, text, k=3):
+        return [("eng_Latn", 0.95)]
+
+
+def judged(variant, set_name, lang, split="dev"):
+    """How many judgements the primary judge's file of a cell holds (0 when there is none)."""
+    from lift.judge.pipeline import judgements_path, load_judgements
+
+    if not judgements_path("qwen3guard", variant, set_name, lang, split).exists():
+        return 0
+    return len(load_judgements(variant, set_name, lang, split))
+
+
+def judge_stacks(variant, set_name, lang, split="dev"):
+    from lift.judge.pipeline import load_judgements
+
+    records = load_judgements(variant, set_name, lang, split)
+    return {json.dumps(r.native.get("stack"), sort_keys=True) for r in records}
+
+
+def moved_stack(monkeypatch, **changes):
+    """The next session's runtime (generator and judge alike): a newer transformers or torch."""
+    from lift.models import generate as gen
+
+    real = gen.stack
+    monkeypatch.setattr(gen, "stack", lambda device: {**real(device), **changes})
+
+
+def short_runs(monkeypatch, *, chunk=2, new_tokens=6):
+    """Generation capped at a few tokens, and judging in small chunks so a kill can land mid-file."""
+    from lift.judge import pipeline
+    from lift.models import generate as gen
+
+    real_generate, real_judge_file = gen.generate, pipeline.judge_file
+    monkeypatch.setattr(gen, "generate",
+                        lambda *a, **kw: real_generate(*a, **{**kw, "max_new_tokens": new_tokens}))
+    monkeypatch.setattr(pipeline, "judge_file",
+                        lambda *a, **kw: real_judge_file(*a, **{**kw, "batch_size": chunk}))
+
+
+@pytest.mark.parametrize("command", ["smoke", "generate", "judge", "run-dev", "sync", "remote", "restart"])
 def test_help_works_without_a_gpu_stack(command, capsys):
     with pytest.raises(SystemExit) as exc:
         main([command, "--help"])
@@ -39,6 +146,27 @@ def test_study_commands_refuse_unpinned_revisions():
             args.func(args)
 
 
+def test_the_pin_refusal_says_to_commit_and_push_the_pin():
+    # The GPU job runs a ref (lift remote --ref, Kaggle BRANCH), not the laptop's working tree.
+    with pytest.raises(SystemExit) as exc:
+        run_cmd.require_pinned("models.global")
+    message = str(exc.value)
+    assert "decisions.md" in message and "commit" in message and "push" in message and "--ref" in message
+
+
+@pytest.mark.parametrize("argv", [
+    ["generate", "--variant", "stock", "--split", "dev"],
+    ["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "hi"],
+    ["run-dev", "--variant", "stock"],
+])
+def test_the_pin_refusal_comes_before_torch(argv, monkeypatch):
+    # A laptop install without the GPU stack (.[dev]) gets the pin message, not ModuleNotFoundError.
+    write_generation("harmful", "hi", "dev")              # whatever lift judge checks before the pin
+    monkeypatch.setitem(sys.modules, "torch", None)       # `import torch` raises ImportError
+    with pytest.raises(SystemExit, match="unpinned revisions"):
+        main(argv)
+
+
 def test_require_pinned_accepts_a_full_sha(monkeypatch):
     from lift import config
 
@@ -48,22 +176,81 @@ def test_require_pinned_accepts_a_full_sha(monkeypatch):
     run_cmd.require_pinned("models.global", "judges.safety_primary")
 
 
-def test_judge_keys_listed_in_no_generations_file_fail_loudly(monkeypatch):
-    from lift.io import write_jsonl
-    from lift.paths import generations_dir
+def test_run_dev_pins_the_primary_judge_only_when_it_is_local(monkeypatch):
+    # P04's decision rule can make the frontier judge primary: the safety_primary and safety_second
+    # blocks are swapped as P04 prints them, so the primary block has a provider and model, no revision.
+    from lift import config
+    from lift.judge.pipeline import judge_dir
 
-    path = generations_dir() / "stock" / "harmful_hi_dev.jsonl"
-    rec = {"key": "a" * 64, "variant": "stock", "pid": "p1", "lang": "hi", "set": "harmful", "split": "dev",
-           "prompt_sha": "s", "output": "o", "n_prompt_tokens": 1, "n_new_tokens": 1, "hit_cap": False,
-           "seconds": 0.1, "meta": {}}
-    write_jsonl(path, [rec])
+    project = config.load("project")
+    project["models"]["global"]["revision"] = "b" * 40
+    built = []
+    monkeypatch.setattr("lift.models.variants.build_variant", lambda *a, **k: built.append(a) or object())
+    monkeypatch.setattr("lift.models.variants.get_spec", lambda name: name)
+    monkeypatch.setattr(run_cmd, "run_cells", lambda *a, **k: [])
+    argv = ["run-dev", "--variant", "stock", "--device", "cpu", "--judge-device", "cpu"]
+    with pytest.raises(SystemExit, match=r"judges\.safety_primary\.revision"):     # Qwen3Guard: pinned
+        main(argv)
+    judges = project["judges"]
+    qwen = dict(judges["safety_primary"], revision="c" * 40)
+    judges["safety_primary"] = dict(judges["safety_second"], provider="openai", model="placeholder-model")
+    judges["safety_second"] = qwen
+    assert "revision" not in judges["safety_primary"] and judge_dir("primary") == "frontier"
+    assert main(argv) == 0 and built
+
+
+def test_judge_keys_listed_in_no_generations_file_fail_loudly(monkeypatch):
+    key = write_generation("harmful", "hi", "dev")
     keys = generations_dir().parent / "keys.txt"
-    keys.write_text("a" * 64 + "\n" + "b" * 64 + "\n", encoding="utf-8")
+    keys.write_text(key + "\n" + "b" * 64 + "\n", encoding="utf-8")
     monkeypatch.setattr("lift.judge.pipeline.judge_dir", lambda role: "frontier")
     args = build_parser().parse_args(["judge", "--variant", "stock", "--split", "dev", "--judge", "second",
                                       "--sets", "harmful", "--langs", "hi", "--keys", str(keys)])
     with pytest.raises(SystemExit, match="1 listed keys are in none"):
         args.func(args)
+
+
+@pytest.mark.parametrize("explicit_sets", [False, True])
+def test_judge_with_keys_covers_every_file_holding_one(monkeypatch, caplog, explicit_sets):
+    # P04's key list for a variant and split holds red-team keys too. Without --sets, every file holding a
+    # listed key is judged (the default safety sets would silently skip the red-team keys). With an
+    # explicit --sets, as in P04's one line per group over one list, the keys outside are logged as
+    # counts and left to their own line, and the command still succeeds.
+    from lift.judge.pipeline import JudgeOutcome
+
+    sets = ("harmful", "easy_benign", "hard_benign", "redteam")
+    keys = {s: write_generation(s, "hi", "final") for s in sets}
+    listed = generations_dir().parent / "stock_final.txt"
+    listed.write_text(keys["harmful"] + "\n" + keys["redteam"] + "\n", encoding="utf-8")
+    judged = []
+
+    class Judge:
+        judge_id = "openai/placeholder-model@x"
+        short = "frontier"
+
+        def judge(self, items):
+            judged.extend(i.key for i in items)
+            return [JudgeOutcome("benign", {"label": "BENIGN"}, "") for _ in items]
+
+    class LID:
+        def top(self, text, k=3):
+            return [("hin_Deva", 0.99)]
+
+    monkeypatch.setattr("lift.judge.pipeline.judge_dir", lambda role: "frontier")
+    monkeypatch.setattr("lift.judge.pipeline.make_judge", lambda *a, **k: Judge())
+    monkeypatch.setattr("lift.prompts.texts_by_pid", lambda s, lang: {f"{s[:3]}-0001": "t"})
+    monkeypatch.setattr("lift.lang.LangID", LID)
+    argv = ["judge", "--variant", "stock", "--split", "final", "--judge", "second", "--langs", "hi",
+            "--keys", str(listed)]
+    rc = main(argv + ["--sets", "harmful"] * explicit_sets)
+    assert rc == 0
+    if explicit_sets:
+        assert judged == [keys["harmful"]]
+        assert "1 listed keys" in caplog.text and "'redteam_hi': 1" in caplog.text
+        assert keys["redteam"][:12] not in caplog.text    # counts by set and language only
+    else:
+        assert judged == [keys["harmful"], keys["redteam"]]
+        assert "outside --sets/--langs" not in caplog.text
 
 
 def test_a_refused_auditkit_record_is_reported_not_fatal(monkeypatch, caplog):
@@ -76,6 +263,298 @@ def test_a_refused_auditkit_record_is_reported_not_fatal(monkeypatch, caplog):
     run_cmd._record("stock", "harmful", "hi", "dev", dtype="bf16", refused=refused)
     assert refused == ["harmful_hi_dev"] and "not in bf16" in caplog.text
     assert run_cmd._refused_exit(refused) == 1 and run_cmd._refused_exit([]) == 0
+    assert run_cmd._refused_exit([], {"harmful_hi_dev": "lift restart ..."}) == 1
+
+
+# --- lift restart ---------------------------------------------------------------------------------------
+
+
+RESTART = ["restart", "--variant", "stock", "--split", "dev"]
+
+
+def restart_tree():
+    """The cell harmful_hi_dev (generations, and judgements by both judges) and the files lift restart
+    must leave alone: another language, set, split and variant. Returns {path: bytes} of every file."""
+    cells = (("stock", "harmful", "hi", "dev"), ("stock", "harmful", "en", "dev"),
+             ("stock", "easy_benign", "hi", "dev"), ("stock", "harmful", "hi", "final"),
+             ("other", "harmful", "hi", "dev"))
+    for variant, set_name, lang, split in cells:
+        write_generation(set_name, lang, split, variant=variant)
+        for judge in ("qwen3guard", "frontier"):
+            write_judgements(judge, set_name, lang, split, variant=variant)
+    return {p: p.read_bytes() for p in output_dir().rglob("*.jsonl")}
+
+
+@pytest.mark.parametrize("judge", [None, "primary", "second"])
+def test_restart_sets_exactly_the_cells_files_aside_and_leaves_them_empty(judge, monkeypatch, caplog):
+    from lift.judge.pipeline import judge_dir
+    from lift.models.generate import generations_path
+
+    monkeypatch.setitem(sys.modules, "torch", None)          # a laptop without the GPU stack runs it too
+    caplog.set_level(logging.INFO, logger="lift.run")
+    before = restart_tree()
+    name = "harmful_hi_dev.jsonl"
+    if judge is None:                                        # the cell: generations and every judgements file
+        targets = [generations_path("stock", "harmful", "hi", "dev"),
+                   *(judgements_dir() / j / "stock" / name for j in ("frontier", "qwen3guard"))]
+    else:
+        targets = [judgements_dir() / judge_dir(judge) / "stock" / name]
+    assert main([*RESTART, "--sets", "harmful", "--langs", "hi", *(["--judge", judge] if judge else [])]) == 0
+    stamp, = (output_dir() / ".aside").iterdir()
+    assert sorted(p for p in stamp.rglob("*") if p.is_file()) == sorted(
+        stamp / t.relative_to(output_dir()) for t in targets)
+    for path, data in before.items():
+        if path in targets:                                  # emptied, never removed: sync never deletes
+            assert path.read_bytes() == b"" and (stamp / path.relative_to(output_dir())).read_bytes() == data
+        else:
+            assert path.read_bytes() == data
+    assert caplog.text.count("set aside in") == len(targets)       # one line per file, with its count
+    assert "har-0001" not in caplog.text and "har-0000" not in caplog.text
+
+
+def test_restart_skips_files_that_are_not_here_and_a_second_run_finds_them_empty(caplog):
+    from lift.models.generate import generations_path
+
+    caplog.set_level(logging.INFO, logger="lift.run")
+    frontier = write_judgements("frontier", "redteam", "hi", "dev")        # no generations file
+    assert main([*RESTART, "--sets", "redteam", "--langs", "hi"]) == 0
+    missing = generations_path("stock", "redteam", "hi", "dev")
+    assert frontier.read_bytes() == b"" and not missing.exists() and f"{missing}: not here" in caplog.text
+    qwen = judgements_dir() / "qwen3guard" / "stock" / "redteam_hi_dev.jsonl"
+    assert main([*RESTART, "--sets", "redteam", "--langs", "hi", "--judge", "primary"]) == 0
+    assert not qwen.exists() and f"{qwen}: not here" in caplog.text
+    caplog.clear()
+    assert main([*RESTART, "--sets", "redteam", "--langs", "hi"]) == 0
+    assert f"{frontier}: already empty" in caplog.text
+    assert len(list((output_dir() / ".aside").iterdir())) == 1             # nothing new set aside
+
+
+def test_judge_refuses_a_restarted_cell_before_loading_the_judge(monkeypatch):
+    # lift restart leaves the cell's generations file empty: lift judge needs lift generate first, and says
+    # so before it loads a judge.
+    from lift.judge import pipeline
+
+    write_generation("harmful", "hi", "dev")
+    write_generation("harmful", "en", "dev")
+    assert main([*RESTART, "--sets", "harmful", "--langs", "hi"]) == 0
+    monkeypatch.setattr(pipeline, "make_judge", lambda *a, **kw: pytest.fail("the judge was loaded"))
+    argv = ["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "hi",
+            "--judge", "second"]
+    with pytest.raises(SystemExit, match="1 generations files are missing or empty.*harmful_hi_dev"):
+        main(argv)
+
+
+def test_restart_refuses_an_unknown_variant_and_needs_sets_and_langs():
+    with pytest.raises(SystemExit, match="not in configs/variants.yaml"):
+        main(["restart", "--variant", "stokc", "--split", "dev", "--sets", "harmful", "--langs", "hi"])
+    with pytest.raises(SystemExit) as exc:
+        main([*RESTART, "--sets", "harmful"])
+    assert exc.value.code == 2
+    assert not (output_dir() / ".aside").exists()
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("push_first", [True, False])
+def test_restart_after_the_pull_lets_the_next_session_generate_the_cell_again(tiny_model_dir, tmp_path,
+                                                                              monkeypatch, push_first):
+    # A cell half generated on one stack is refused on another. Moving the file aside by hand is undone
+    # by the job's own `lift sync pull` (sync never deletes). The refusal's lift restart line, right
+    # after the pull, empties it: the next push replaces the runs repo's copy, and the cell is generated
+    # again (in the same job, or in the next session after a push).
+    pytest.importorskip("huggingface_hub")
+    import huggingface_hub.constants as hf_constants
+    from fakes import make_prompt
+    from test_sync import GEN, FakeHub, machine
+
+    from lift import sync
+    from lift.models import generate as gen
+    from lift.models.variants import build_variant, get_spec
+
+    monkeypatch.setattr(hf_constants, "HF_HUB_OFFLINE", True)
+    monkeypatch.setattr(hf_constants, "HF_DEBUG", False)
+    monkeypatch.setenv("HF_TOKEN", "hf_dummy_not_a_real_token")
+    monkeypatch.setenv("LIFT_RUNS_REPO", "tester/lift-runs")
+    hub = FakeHub()
+    variant = build_variant(get_spec("stock"), device="cpu", dtype="bf16", model_id=str(tiny_model_dir))
+    prompts = [make_prompt(f"prh-test-{i:04d}", "en", text=f"placeholder {i}") for i in range(4)]
+
+    def cell():
+        return gen.generations_path("stock", "harmful", "en", "dev")
+
+    machine(tmp_path / "s1", monkeypatch)                  # session 1 ends with the cell half done
+    gen.generate(variant, prompts[:2], out_path=cell(), max_new_tokens=6)
+    assert sync.push(api=hub).ok
+    moved_stack(monkeypatch, torch="2.99.0+cu130")         # session 2: the runtime's torch moved
+    machine(tmp_path / "s2", monkeypatch)
+    assert sync.pull(api=hub).ok                           # the job's first line
+    with pytest.raises(gen.StaleOutputError) as refused:
+        gen.generate(variant, prompts, out_path=cell(), max_new_tokens=6)
+    line = "lift restart --variant stock --split dev --sets harmful --langs en"
+    assert f"run `{line}` as a job line right after `lift sync pull`" in str(refused.value)
+    assert main(line.split()[1:]) == 0
+    assert cell().read_bytes() == b""
+    if push_first:                                         # e.g. the session ends before the cell is redone
+        report = sync.push(api=hub)
+        assert report.ok and report.files[GEN] == sync.UPDATE and hub.files[GEN] == b""
+        machine(tmp_path / "s3", monkeypatch)
+        assert sync.pull(api=hub).ok
+    gen.generate(variant, prompts, out_path=cell(), max_new_tokens=6)        # no StaleOutputError
+    report = sync.push(api=hub)
+    assert report.ok and report.files[GEN] == sync.UPDATE
+    assert not [p for p in hub.files if "/.aside/" in p]   # what was set aside stays on its machine
+    machine(tmp_path / "laptop", monkeypatch)
+    assert sync.pull(api=hub).ok
+    got = gen.read_generations(cell())
+    assert len(got) == 4 and len({r.meta["stack"] for r in got}) == 1
+
+
+# --- stale cells: logged, listed with their restart line, the others go on -----------------------------
+
+
+@pytest.mark.torch
+def test_generate_skips_a_stale_cell_and_exits_1(fake_prompt_files, tiny_model_dir, monkeypatch, caplog):
+    pytest.importorskip("torch")
+    from fakes import make_prompt
+
+    from lift.models import generate as gen
+    from lift.models import variants
+
+    pin()
+    for lang in ("en", "hi"):
+        fake_prompt_files[("harmful", lang)] = [make_prompt(f"har-{i}", lang, "harmful", "dev", text=f"q {i}")
+                                                for i in range(3)]
+    real_build = variants.build_variant
+    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: real_build(
+        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)))
+    short_runs(monkeypatch)
+    part = gen.generations_path("stock", "harmful", "en", "dev")
+    variant = variants.build_variant(variants.get_spec("stock"), device="cpu", dtype="bf16")
+    gen.generate(variant, fake_prompt_files[("harmful", "en")][:2], out_path=part)     # a session cut short
+    before = part.read_bytes()
+    moved_stack(monkeypatch, torch="2.99.0+cu130")
+    argv = ["generate", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "hi",
+            "--device", "cpu", "--dtype", "bf16"]
+    assert main(argv) == 1
+    assert part.read_bytes() == before
+    assert len(gen.read_generations(gen.generations_path("stock", "harmful", "hi", "dev"))) == 3
+    line = "lift restart --variant stock --split dev --sets harmful --langs en"
+    assert f"harmful_en_dev: {line}\n" in caplog.text
+
+
+@pytest.mark.parametrize("role", ["primary", "second"])
+def test_judge_skips_a_stale_cell_and_exits_1(role, monkeypatch, caplog):
+    # judge_file's refusal (a StaleOutputError) names the cell's restart line; lift judge lists it and
+    # judges the other cells.
+    from lift.judge import pipeline
+    from lift.models.generate import generations_path
+
+    pin(judge=True)
+    for lang in ("en", "hi"):
+        write_generation("harmful", lang, "dev")
+    stale_path = generations_path("stock", "harmful", "en", "dev")
+    line = f"lift restart --variant stock --split dev --sets harmful --langs en --judge {role}"
+    judged_paths, recorded = [], []
+
+    def judge_file(path, **kw):
+        if path == stale_path:
+            raise pipeline.StaleJudgementsError(f"{path}: 1 judgements made on another stack", command=line)
+        judged_paths.append(path)
+        return path
+
+    monkeypatch.setattr(pipeline, "judge_file", judge_file)
+    monkeypatch.setattr(pipeline, "make_judge", lambda *a, **kw: object())
+    monkeypatch.setattr(run_cmd, "_record", lambda variant, set_name, lang, *a, **kw: recorded.append(lang))
+    argv = ["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "hi",
+            "--judge", role, "--device", "cpu"]
+    assert main(argv) == 1
+    assert judged_paths == [generations_path("stock", "harmful", "hi", "dev")]
+    assert recorded == (["hi"] if role == "primary" else [])
+    assert f"harmful_en_dev: {line}\n" in caplog.text
+
+
+@pytest.mark.torch
+def test_run_dev_skips_a_stale_cell_exits_1_and_its_restart_line_lets_it_finish(fake_prompt_files,
+                                                                                 tiny_model_dir, monkeypatch,
+                                                                                 caplog):
+    # R2 on the judge side, through lift run-dev with the real Qwen3Guard adapter. Session 1's judge dies in
+    # the middle of easy_benign's judgements (chunks of 2: calls 1-2 judge harmful, call 3 the first two of
+    # easy_benign). Session 2 resolved a newer transformers: easy_benign cannot be finished on it, so it is
+    # skipped and listed with its restart line, hard_benign is still done, and run-dev exits 1.
+    pytest.importorskip("torch")
+    from fakes import make_prompt
+
+    from lift.judge import pipeline
+    from lift.models import variants
+
+    pin(judge=True)
+    sets = ("harmful", "easy_benign", "hard_benign")
+    for s in sets:
+        fake_prompt_files[(s, "en")] = [make_prompt(f"{s[:3]}-{i}", "en", s, "dev", text=f"question {i}")
+                                        for i in range(3)]
+    real_build = variants.build_variant
+    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: real_build(
+        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)))
+    short_runs(monkeypatch)
+    judges = iter([guard(die_on_call=4), guard(), guard()])
+    monkeypatch.setattr(pipeline, "make_judge", lambda role, **kw: next(judges))
+    monkeypatch.setattr("lift.lang.LangID", FakeLID)
+    recorded = []
+    monkeypatch.setattr("lift.audit.record_safety", lambda *a, **kw: recorded.append(a[1]) or "record.json")
+    argv = ["run-dev", "--variant", "stock", "--langs", "en", "--sets", *sets, "--device", "cpu",
+            "--judge-device", "cpu", "--dtype", "bf16"]
+
+    with pytest.raises(RuntimeError, match="judge died"):
+        main(argv)
+    assert [judged("stock", s, "en") for s in sets] == [3, 2, 0]
+    moved_stack(monkeypatch, transformers="5.99.0")
+    caplog.clear()
+    assert main(argv) == 1
+    assert [judged("stock", s, "en") for s in sets] == [3, 2, 3]
+    line = "lift restart --variant stock --split dev --sets easy_benign --langs en --judge primary"
+    assert f"easy_benign_en_dev: {line}\n" in caplog.text
+    assert "question" not in caplog.text                  # cell names and counts, never text
+
+    assert main(line.split()[1:]) == 0                    # the job line right after the pull, then run-dev
+    assert main(argv) == 0
+    assert [judged("stock", s, "en") for s in sets] == [3, 3, 3]
+    assert len(judge_stacks("stock", "easy_benign", "en")) == 1
+    assert recorded.count("easy_benign") == 1             # its AuditKIT record waits for the whole cell
+
+
+# --- lift smoke -------------------------------------------------------------------------------------------
+
+
+@pytest.mark.torch
+def test_smoke_prints_why_a_check_failed(monkeypatch, capsys):
+    torch = pytest.importorskip("torch")
+    from lift import gate0
+
+    failure = "label agreement 0.912 is under 0.95"
+    checks = {"precision": {"pass": True}, "fp16": {"pass": False, "comparable": True, "failure": failure}}
+    result = gate0.decide({"dtype": "fp16", "reference_dtype": "bf16", "device": "cuda:0", "gpu": "Tesla T4",
+                           "gpu_capability": "7.5", "model_id": "x", "revisions": {"global": "a" * 40},
+                           "required": list(gate0.required_checks("fp16")), "skipped": [], "checks": checks})
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(gate0, "run_gate0", lambda **kw: result)
+    assert main(["smoke", "--compare-dtype", "fp16", "--judge-device", "cuda:1"]) == 1
+    assert f"FAIL  fp16  ({failure})" in capsys.readouterr().out
+
+
+@pytest.mark.torch
+def test_smoke_writes_no_report_for_a_refused_configuration(monkeypatch, capsys):
+    # e.g. a bf16 Gate 0 on a GPU without native bf16, or --compare-dtype fp16 on an A100
+    torch = pytest.importorskip("torch")
+    from lift import gate0
+    from lift.paths import metrics_dir
+
+    def refuse(**kw):
+        raise ValueError("compute capability 7.5 has no native bf16: run --compare-dtype fp16 here")
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(gate0, "run_gate0", refuse)
+    assert main(["smoke", "--judge-device", "cuda:1"]) == 2
+    assert "no native bf16" in capsys.readouterr().err
+    assert not metrics_dir().exists() or not list(metrics_dir().glob("gate0*"))
 
 
 @pytest.mark.torch
@@ -106,13 +585,16 @@ class TestRunCells:
         judge_id = "fake/judge@test"
         short = "qwen3guard"
 
-        def __init__(self, explode=False):
+        def __init__(self, explode=False, crash_on_call=None):
             self.explode = explode
+            self.crash_on_call = crash_on_call
+            self.calls = 0
 
         def judge(self, items):
             from lift.judge.pipeline import JudgeOutcome
 
-            if self.explode:
+            self.calls += 1
+            if self.explode or self.calls == self.crash_on_call:
                 raise RuntimeError("judge crashed")
             return [JudgeOutcome("benign", {}, "Safety: Safe") for _ in items]
 
@@ -149,6 +631,90 @@ class TestRunCells:
 
         run_cmd.run_cells(holder, make_judge, cells, concurrent=False, interleave=False, lid=self.LID())
         assert alive_when_judge_loads == [False] and holder == {}
+
+    def test_finished_cells_are_judged_after_the_stack_moved(self, setup, monkeypatch):
+        # Session 1 (one GPU) generates every cell, then its judge dies on the second file. Session 2
+        # resolved a newer transformers: the finished files are reused as they are, the rest is judged.
+        from lift.judge.pipeline import judgements_path, load_judgements
+        from lift.models import generate as gen_mod
+
+        make_holder, cells = setup
+        real_generate, real_stack = gen_mod.generate, gen_mod.stack
+        monkeypatch.setattr(gen_mod, "generate", lambda *a, **kw: real_generate(*a, **kw, max_new_tokens=8))
+
+        def session(judge):
+            run_cmd.run_cells(make_holder(), lambda: judge, cells, concurrent=False, interleave=False,
+                              lid=self.LID())
+
+        with pytest.raises(RuntimeError, match="judge crashed"):
+            session(self.Judge(crash_on_call=2))
+        judged = [judgements_path("qwen3guard", "stock", *c, "dev").exists() for c in cells]
+        assert judged == [True, False, False, False]
+        files = {c: gen_mod.generations_path("stock", *c, "dev").read_bytes() for c in cells}
+        monkeypatch.setattr(gen_mod, "stack", lambda device: {**real_stack(device), "transformers": "5.99.0"})
+        session(self.Judge())
+        assert {c: gen_mod.generations_path("stock", *c, "dev").read_bytes() for c in cells} == files
+        assert all(len(load_judgements("stock", *c, "dev")) == 3 for c in cells)
+
+    def session(self, mode, make_holder, judge, cells, **kw):
+        return run_cmd.run_cells(make_holder(), lambda: judge, cells, concurrent=mode == "concurrent",
+                                 interleave=mode == "interleave", lid=self.LID(), **kw)
+
+    @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
+    def test_a_cell_judged_halfway_on_another_stack_is_listed_and_the_others_are_judged(self, setup,
+                                                                                       monkeypatch, mode):
+        # The verifier's R2 scenario with the real Qwen3Guard adapter. Session 1's judge dies in the middle
+        # of harmful_hi's judgements (chunks of 2: calls 1-2 judge harmful_en, call 3 the first two of
+        # harmful_hi). Session 2 resolved a newer transformers: harmful_hi cannot be finished on it, so it
+        # is skipped with its restart line, and every other cell is judged.
+        make_holder, cells = setup
+        short_runs(monkeypatch)
+        with pytest.raises(RuntimeError, match="judge died"):
+            self.session(mode, make_holder, guard(die_on_call=4), cells)
+        assert [judged("stock", *c) for c in cells[:2]] == [3, 2]
+        moved_stack(monkeypatch, transformers="5.99.0")
+        stale: dict[str, str] = {}
+        self.session(mode, make_holder, guard(), cells, stale=stale)
+        line = "lift restart --variant stock --split dev --sets harmful --langs hi --judge primary"
+        assert stale == {"harmful_hi_dev": line}
+        assert [judged("stock", *c) for c in cells] == [3, 2, 3, 3]
+
+    @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
+    def test_a_cell_generated_halfway_on_another_stack_is_listed_and_the_others_go_on(self, setup,
+                                                                                     monkeypatch, mode):
+        from lift.models import generate as gen_mod
+        from lift.prompts import load
+
+        make_holder, cells = setup
+        short_runs(monkeypatch)
+        part = gen_mod.generations_path("stock", "harmful", "hi", "dev")
+        cut_short = load("harmful", "hi", "dev")[:2]
+        gen_mod.generate(make_holder()["variant"], cut_short, out_path=part)
+        before = part.read_bytes()
+        moved_stack(monkeypatch, torch="2.99.0+cu130")
+        stale: dict[str, str] = {}
+        self.session(mode, make_holder, self.Judge(), cells, stale=stale)
+        line = "lift restart --variant stock --split dev --sets harmful --langs hi"
+        assert stale == {"harmful_hi_dev": line}
+        assert part.read_bytes() == before
+        assert [judged("stock", *c) for c in cells] == [3, 0, 3, 3]
+
+    @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
+    def test_without_a_collector_the_other_cells_go_on_and_the_stale_ones_raise_at_the_end(self, setup,
+                                                                                          monkeypatch, mode):
+        from lift.models import generate as gen_mod
+        from lift.prompts import load
+
+        make_holder, cells = setup
+        short_runs(monkeypatch)
+        part = gen_mod.generations_path("stock", "harmful", "hi", "dev")
+        gen_mod.generate(make_holder()["variant"], load("harmful", "hi", "dev")[:2], out_path=part)
+        moved_stack(monkeypatch, torch="2.99.0+cu130")
+        with pytest.raises(gen_mod.StaleOutputError) as exc:
+            self.session(mode, make_holder, self.Judge(), cells)
+        line = "lift restart --variant stock --split dev --sets harmful --langs hi"
+        assert f"1 cells were skipped as stale: harmful_hi_dev: {line}" in str(exc.value)
+        assert [judged("stock", *c) for c in cells] == [3, 0, 3, 3]
 
     def test_a_judge_crash_in_the_thread_surfaces(self, setup):
         make_holder, cells = setup
