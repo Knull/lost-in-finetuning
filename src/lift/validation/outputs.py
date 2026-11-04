@@ -14,7 +14,11 @@ Codes against lift.schemas and the CLAUDE.md file layout, not against the harnes
 - A pid of the split with no record at all means the run is unfinished. The harness batches by
   length, so a partial run holds only the shortest prompts, and sampling from it would bias the
   sheet. Callers refuse such files.
-- Judgements are found by generation key in every directory under outputs/judgements. The judge
+- Judgements are found by generation key in every directory under outputs/judgements, and one counts
+  only if its ``output_sha`` (P02 records the sha256 of the output it judged; keys name inputs only)
+  is that of the output the caller holds for the key. A judgement of another output (the harness
+  regenerated the file after judging it) or one that does not say is skipped and counted (``stale``),
+  as P02's pipeline and sync refuse to pair it. The judge
   is told apart by the ``judge`` id in each record, not by the directory name or its config role:
   Qwen3Guard is the id (before any "@revision") of whichever judges block names Qwen3Guard, and
   any other judge is the frontier judge. This keeps working after the Nov 6 decision swaps the
@@ -289,7 +293,9 @@ def load_pool(variant: str, set_name: str, lang: str, split: str, prompts: Promp
 
 @dataclass(frozen=True)
 class Target:
-    """A generation the validation needs a judgement for."""
+    """A generation the validation needs a judgement for. ``output_sha`` is sha256_text of the output
+    the judgement must be of: the generation now under ``key`` (or, when its file cannot be read, the
+    output the reader was shown). None when neither is known: no judgement can then be tied to it."""
 
     key: str
     variant: str
@@ -297,6 +303,7 @@ class Target:
     lang: str
     split: str
     pid: str
+    output_sha: str | None = None
 
 
 @dataclass
@@ -307,6 +314,9 @@ class Judged:
     frontier_id: str | None
     qwen3guard: dict[str, JudgementRecord]
     frontier: dict[str, JudgementRecord]
+    # Judgements skipped because they are not of the target's output (``Target.output_sha``), by kind,
+    # counted for the chosen judge of each kind (every judge of the kind when none was found usable).
+    stale: dict[str, int] = field(default_factory=lambda: {"qwen3guard": 0, "frontier": 0})
 
 
 def qwen3guard_id() -> str:
@@ -343,6 +353,7 @@ def load_judgements(targets: Iterable[Target], *, qwen3guard_judge: str | None =
     wanted = {t.key: t for t in targets}
     files = sorted({(t.variant, t.set, t.lang, t.split) for t in wanted.values()})
     found: dict[str, dict[str, dict[str, JudgementRecord]]] = {"qwen3guard": {}, "frontier": {}}
+    stale: dict[str, dict[str, set[str]]] = {"qwen3guard": {}, "frontier": {}}
     root = paths.judgements_dir()
     judge_dirs = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
     for judge_dir in judge_dirs:
@@ -367,6 +378,10 @@ def load_judgements(targets: Iterable[Target], *, qwen3guard_judge: str | None =
                                   frontier_judge=frontier_judge)
                 if kind is None:
                     continue
+                if t.output_sha is None or rec.output_sha != t.output_sha:
+                    # Of another output than the one under the key now, or unsaid: never paired.
+                    stale[kind].setdefault(rec.judge, set()).add(rec.key)
+                    continue
                 by_key = found[kind].setdefault(rec.judge, {})
                 prev = by_key.get(rec.key)
                 if prev is not None and (prev.label, prev.judge_label) != (rec.label, rec.judge_label):
@@ -375,15 +390,20 @@ def load_judgements(targets: Iterable[Target], *, qwen3guard_judge: str | None =
                 by_key.setdefault(rec.key, rec)
     chosen: dict[str, tuple[str | None, dict[str, JudgementRecord]]] = {}
     for pin, kind in ((qwen3guard_judge, "qwen3guard"), (frontier_judge, "frontier")):
-        if pin and wanted and not found[kind]:
+        if pin and wanted and not found[kind] and not stale[kind]:
             raise ValidateError(f"no {kind} judgement matches {pin!r} for these items")
     for kind, flag in (("qwen3guard", "--qwen3guard-judge"), ("frontier", "--frontier-judge")):
         ids = sorted(found[kind])
         if len(ids) > 1:
             raise ValidateError(f"found several {kind} judges ({', '.join(ids)}); pick one with {flag}")
         chosen[kind] = (ids[0], found[kind][ids[0]]) if ids else (None, {})
+    counts = {}
+    for kind in ("qwen3guard", "frontier"):
+        judge_id = chosen[kind][0]
+        skipped = [stale[kind].get(judge_id, set())] if judge_id else list(stale[kind].values())
+        counts[kind] = len(set().union(*skipped)) if skipped else 0
     return Judged(qwen3guard_id=chosen["qwen3guard"][0], frontier_id=chosen["frontier"][0],
-                  qwen3guard=chosen["qwen3guard"][1], frontier=chosen["frontier"][1])
+                  qwen3guard=chosen["qwen3guard"][1], frontier=chosen["frontier"][1], stale=counts)
 
 
 def final_judgements_exist() -> bool:

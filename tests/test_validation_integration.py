@@ -13,6 +13,7 @@ from validation_fakes import (
     build_world,
     fill_sheet,
     make_generation,
+    other_label,
     truth,
     use_world,
     write_generations,
@@ -220,7 +221,8 @@ def test_a_pin_that_matches_no_judgement_is_an_error(tmp_path, monkeypatch):
     world_for(tmp_path, monkeypatch)
     make_sheets(1)
     it = load_round(1)["items"][0]
-    target = outputs.Target(it["key"], it["variant"], it["set"], it["lang"], it["split"], it["pid"])
+    target = outputs.Target(it["key"], it["variant"], it["set"], it["lang"], it["split"], it["pid"],
+                            it["output_sha"])
     assert load_judgements([target]).qwen3guard_id == PRIMARY_ID
     with pytest.raises(ValidateError, match="no qwen3guard judgement matches"):
         load_judgements([target], qwen3guard_judge="Qwen/Qwen3Guard-Gen-4B@nope")
@@ -469,3 +471,53 @@ def test_decide_judge_says_when_the_config_disagrees_with_a_decision_to_keep_qwe
     assert main(["validate", "decide-judge", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "makes the frontier judge primary" in out and "swaps the blocks back" in out
+
+
+def stale_judgement(world, item, dirname, output_sha):
+    """The judgement of ``item`` under outputs/judgements/{dirname}/, made of another output than the one
+    now under its key (a run judged before the harness regenerated the file), with the other label."""
+    path = (world.outputs / "judgements" / dirname / item["variant"]
+            / f"{item['set']}_{item['lang']}_{item['split']}.jsonl")
+    rows = [JudgementRecord.model_validate(r) for r in read_jsonl(path)]
+    write_jsonl(path, [(r.model_copy(update={"output_sha": output_sha, "label": other_label(r.label),
+                                             "judge_label": other_label(r.judge_label)})
+                        if r.key == item["key"] else r).model_dump() for r in rows])
+
+
+@pytest.mark.parametrize("output_sha", [sha256_text("an earlier output"), None], ids=["another", "unsaid"])
+def test_a_judgement_of_another_output_than_the_one_under_its_key_is_never_scored(
+        tmp_path, monkeypatch, output_sha):
+    # R1 post-merge item 1: P02 records the output each judgement judged (output_sha); a judgement of
+    # another output (or one that does not say) is about text the reader never saw, so it is skipped and
+    # counted, and the item waits for its judge like one never judged.
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    import_truth(world)
+    item = next(it for it in load_round(1)["items"] if it["lang"] == "hi")
+    for dirname in ("qwen3guard", "frontier"):
+        stale_judgement(world, item, dirname, output_sha)
+    out = scoring.score(1)
+    for view in ("qwen3guard_strict", "frontier"):
+        hi = out["judges"][view]["langs"]["hi"]
+        assert (hi["status"], hi["n_missing"], hi["agreement"]) == ("pending_judge", 1, 1.0)
+    assert out["checks"]["superseded"] == 0                     # the output itself is still the one shown
+    assert out["checks"]["stale_judgements"] == {"qwen3guard": 1, "frontier": 1}
+
+
+def test_load_judgements_pairs_a_judgement_only_with_the_output_it_judged(tmp_path, monkeypatch):
+    world = world_for(tmp_path, monkeypatch)
+    gens = world.generations[("stock", "harmful", "hi", "dev")][:3]
+    rows = [JudgementRecord.model_validate(r) for r in
+            read_jsonl(world.outputs / "judgements" / "qwen3guard" / "stock" / "harmful_hi_dev.jsonl")]
+    by_key = {r.key: r for r in rows}
+    targets = [outputs.Target(g.key, g.variant, g.set, g.lang, g.split, g.pid, sha256_text(g.output))
+               for g in gens[:2]]
+    targets.append(outputs.Target(gens[2].key, "stock", "harmful", "hi", "dev", gens[2].pid,
+                                  sha256_text("not the output that was judged")))
+    judged = load_judgements(targets)
+    assert set(judged.qwen3guard) == {g.key for g in gens[:2]}
+    assert judged.qwen3guard[gens[0].key] == by_key[gens[0].key]
+    assert judged.stale == {"qwen3guard": 1, "frontier": 1}
+    # A caller that cannot say which output it wants (no generation to compare with) gets no judgement.
+    unknown = load_judgements([outputs.Target(gens[0].key, "stock", "harmful", "hi", "dev", gens[0].pid)])
+    assert unknown.qwen3guard == {} and unknown.stale == {"qwen3guard": 1, "frontier": 1}
