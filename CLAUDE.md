@@ -116,8 +116,9 @@ six languages, so pairing, splitting and clustering all go by pid.
   in another dtype, and every paired comparison loads its two sides with
   `lift.judge.pipeline.paired_labels`, which refuses mismatched dtypes, judges, models, chat
   templates or decoding settings. An fp16 cell is read only while `outputs/metrics/gate0-fp16.json`
-  (at least 200 prompts compared) and the bf16 `gate0.json` both pass for its Global revision
-  (`check_dtype_licence`).
+  (at least 200 prompts compared) and the bf16 `gate0.json` it compared against both pass for its
+  Global revision, and only if it was made under the comparison's harness, decoding and GPU class
+  (`check_dtype_licence`). fp16 runs are refused on a GPU with native bf16.
 - **Claude Code sessions** run in the Claude desktop app on a Windows laptop (PowerShell). They
   have no usable GPU for this project.
   - Write cross-platform Python: `pathlib` everywhere, and files written with `newline="\n"`
@@ -131,6 +132,8 @@ six languages, so pairing, splitting and clustering all go by pid.
   key. One file never holds two stacks (torch, transformers, GPU class): a finished cell is reused
   on any stack, but an unfinished one resumes only on the stack that started it, or is made again
   with the `lift restart` line its refusal prints (a job line right after `lift sync pull`).
+  `lift generate`, `judge` and `run-dev` exit 3 when they finished but skipped cells (each listed
+  with its remedy); the runners go on with the next line.
 - **Secrets.** `HF_TOKEN` (with accepted access to tiny-aya-global and tiny-aya-base),
   `GITHUB_TOKEN` (remote runtimes clone this private repo), the judge API key with its spend cap
   `LIFT_JUDGE_MAX_USD` (per lift process), and `LIFT_RUNS_REPO`.

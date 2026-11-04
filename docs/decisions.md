@@ -31,11 +31,16 @@ time).
       than 200 prompts) is NOT RUN, and the run is INCOMPLETE, written as gate0-partial.json or
       gate0-fp16-partial.json; so is a run with a required check skipped. "fp16 failed: T4 runs
       are never reported" needs a real comparison under 95% or a non-finite fp16 run. The bf16
-      Gate 0 is refused on a GPU without native bf16 (a T4), so it never overwrites the A100's.
+      Gate 0 is refused on a GPU without native bf16 (a T4), so it never overwrites the A100's. A
+      reference run on a reduced sample (under 200 precision prompts, or under 20 dry-run prompts
+      per cell) whose checks pass is INCOMPLETE too; a check that fails on any sample is a FAIL.
     - **The fp16 licence.** An fp16 cell is read for reporting only while gate0-fp16.json passes
       (with its fp16 check, on at least 200 prompts) and the bf16 Gate 0 it compared against
-      (gate0.json) passes, both for the Global revision that made the cell. Its AuditKIT record is
-      named `...-fp16.json`.
+      (gate0.json) passes and is still that run (the digest of its precision outputs and labels),
+      both for the Global revision that made the cell, and only for cells made under the
+      comparison's harness, decoding settings and GPU class. A bf16 re-run or a harness change
+      therefore needs a new comparison. fp16 runs are refused on a GPU with native bf16. Its
+      AuditKIT record is named `...-fp16.json`.
 28. **Counting new tokens.** `n_new_tokens`, which the "fewer than 5 new tokens" unclear rule reads,
     counts the output's content tokens: special tokens such as `<|START_RESPONSE|>` and the
     end-of-turn token are excluded. `hit_cap` means no end-of-turn token within 256 new tokens. Stop
@@ -68,8 +73,13 @@ time).
     class), and one file never holds two stacks: a finished cell is reused under another stack,
     appending to an unfinished one is refused, and sync refuses to merge two stacks into one file.
     A refused cell is made again with `lift restart` (its files go to the unsynced outputs/.aside/
-    and empty ones take their place, so the next push replaces the Hub's copies); the other cells
-    of the run go on.
+    and empty ones take their place, so the next push replaces the Hub's copies; its AuditKIT
+    records are retired the same way, as empty files); the other cells of the run go on, and
+    `lift generate`, `judge` and `run-dev` exit 3 listing each skipped cell with its remedy. A cell
+    made in another precision, or judged by another judge, is skipped without a restart line, and
+    `lift restart` refuses a cell of another precision unless `--force`. Sync pairs judgements and
+    records with their cell by content (key, pid and output hash; the records' key and label
+    hashes): one that does not pair is held back, or reported with exit 3, with its restart line.
     Two arms of a paired comparison may run on different stacks (logged), but their chat template
     and decoding settings must match.
 
