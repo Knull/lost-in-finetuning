@@ -2,14 +2,14 @@
 
 What gets translated, always from the English source (never from another translation), with Google
 Translate through deep-translator, the way PolyRefuse itself was built:
-- hi, 1,571 strings: PolyRefuse harmful test 572 + train 260 + val 39, harmless test 500 + harmless
-  train 200 (PolyRefuse has no Hindi at all).
+- hi, 1,554 strings: PolyRefuse harmful test 572 + train 246 + val 36, harmless test 500 + harmless
+  train 200 (PolyRefuse has no Hindi at all). lift.data.build first drops, in every language, the
+  17 harmful train/val prompts that copy or nearly copy a test prompt (of 260 + 39).
 - zh, 700 strings: harmless test 500 + harmless train 200. PolyRefuse has no zh harmless test, and
   its zh harmless train file is a different, misaligned draw (docs/decisions.md, Nov 3).
 - The OR-Bench-Hard sample, 400 strings, into each of hi zh es ar th (2,000).
-That is 4,271 strings and about 4,260 Google calls: a repeated source is one call (the harmful
-test repeats 10 prompts) and the build drops prh-train-0226 (prh-test-0008 again) before
-translating. No English source comes near the length limit (the longest is 842 characters). At
+That is 4,254 strings and about 4,244 Google calls: a repeated source is one call (the harmful
+test repeats 10 prompts). No English source comes near the length limit (the longest is 842 characters). At
 about one request a second (google_backend spaces request starts by 1 s plus up to 0.5 s of
 jitter) a full run takes roughly 1.5 to 2 hours, and a stopped run resumes from the cache.
 
@@ -26,38 +26,65 @@ English, it is listed (and goes to the native readers' failures sheet):
     identical   the source again, ignoring case and whitespace. deep-translator silently returns the
                 stripped source when Google echoes it.
     wrong_lang  GlotLID does not assign it to the target (detail "top=<label> <prob>"). On
-                PolyRefuse's own Google output this rule fails 15/572 and 11/500 es, 24/572 zh,
-                0/572 and 6/500 ar, 0/572 and 1/500 th (short strings, mostly genuine): still
-                failures, for the readers to accept or fix.
+                PolyRefuse's own Google output this rule fails 15/572 and 11/500 es, 0/572 zh
+                (24 before lift.lang spaced Chinese ideographs, Nov 4), 0/572 and 6/500 ar,
+                0/572 and 1/500 th (short strings, mostly genuine): still failures, for the
+                readers to accept or fix.
     too_long    4,999 characters or more (deep-translator refuses 5,000): never sent.
-    error       every retry raised (detail: exception types and counts), or, with cache_only, the
-                item is not cached (detail "not cached").
+    error       every retry raised a transient error (detail: exception types and counts, e.g.
+                "ConnectionError x5"), or, with cache_only, the item is not cached ("not cached").
+
+Errors (is_transient): only a transient error is retried, 4 times with backoff 5, 10, 20, 40 s (+ up
+to 10%): an OSError (requests' RequestException and its ConnectionError, Timeout, SSLError; socket
+timeouts; the builtin ConnectionError and TimeoutError) that is not also a ValueError or TypeError
+(requests' MissingSchema, InvalidURL, StreamConsumedError: bugs), or deep-translator's RequestError,
+ServerException or TranslationNotFound. MAX_CONSECUTIVE_ERRORS (10) items in a row failing every
+retry trip a circuit breaker: TranslationBlocked kind "streak", a network or service outage, not an
+IP block. Everything else propagates at once, unretried and uncounted, with its traceback (and its
+own type, except deep-translator's BaseError family, below): a missing package (ImportError:
+deep-translator, or torch for the NLLB engine) or a bug stops the run with its real error, never a
+breaker trip that reads like a network outage.
 
 Google (deep-translator 1.11.4, verified from its source): it scrapes translate.google.com/m with
 requests.get and NO timeout, so google_backend patches one into deep_translator.google only. Our code
-"zh" is Google's "zh-CN" (configs/project.yaml languages.google_translate). Transport errors are
-retried 4 times with backoff 5, 10, 20, 40 s (+ up to 10%), and ten items in a row failing every
-retry trip a circuit breaker. HTTP 429 (Google's /sorry CAPTCHA page, no Retry-After) raises
-TranslationBlocked at once with no retry: a blocked call costs ~3 s and extends the block. Then wait
-30 minutes or more and rerun; never solve the CAPTCHA, rotate IPs or user agents, or run two jobs on
-one IP. deep-translator puts the input text in str(e) of several exceptions, so only exception type
-names are logged; logs carry counts, indices, pids, rules and labels, never text.
+"zh" is Google's "zh-CN" (configs/project.yaml languages.google_translate). GoogleTranslator.translate
+raises TooManyRequests on HTTP 429, RequestError on any other non-2xx status (a retry can clear a
+5xx, not a 4xx, and RequestError does not carry the status), TranslationNotFound when a 2xx page
+holds no result div (a glitch, or a consent or changed page, which the breaker stops),
+NotValidPayload or NotValidLength for a non-string or a 5,000-character input (never sent: see
+too_long), and lets requests' exceptions through. It never raises ServerException (deep-translator's
+other engines do, for an API server error by HTTP status). HTTP 429 (Google's /sorry CAPTCHA page,
+no Retry-After) raises TranslationBlocked kind "http_429" at once with no retry: a blocked call
+costs ~3 s and extends the block. Then wait 30 minutes or more and rerun; never solve the CAPTCHA,
+rotate IPs or user agents, or run two jobs on one IP. str(e) of deep-translator's BaseError family
+(TranslationNotFound, NotValidPayload, NotValidLength, ...) starts with the input text, so only
+exception type names are logged or kept in details, and such an error that is not transient is
+re-raised as a RuntimeError naming its type, with its traceback but without its message. Logs
+carry counts, indices, pids, rules and labels, never text.
 
-NLLB-200 distilled 600M (transformers, imported on use, CPU): back_translate turns ar/th prompts
-into English for the judge sensitivity sample (cached under lang "{x}-en"); nllb_backend is an
-opt-in en -> X fallback for OR-Bench items Google failed (lossy for zh: 77 of the Han characters in
-PolyRefuse's zh harmful test are <unk> to it).
+NLLB-200 distilled 600M (transformers, imported on use, CPU): back_translate turns ar/th generated
+outputs into English for the judge sensitivity sample (P07); they are raw model completions, so its
+cache defaults to outputs/backtranslations/{engine}/{x}-en.jsonl (outputs/ is gitignored and goes
+only to the private runs repo: CLAUDE.md rule 6), never the data tree that P02 syncs as data and P08
+publishes. nllb_backend is an opt-in en -> X fallback for OR-Bench items Google failed (lossy for
+zh: 77 of the Han characters in PolyRefuse's zh harmful test are <unk> to it). check_nllb() raises
+ImportError with an install hint unless torch and transformers import, for a caller to run before
+any work. transformers 5.22's cached_files raises OSError for a model it cannot fetch (offline and
+not cached, gated, an unknown repo or revision, a Hub HTTP error); _Nllb re-raises it as
+RuntimeError, so it stops the run at once instead of being retried as a network error.
 """
 
 from __future__ import annotations
 
 import copy
 import functools
+import importlib
 import json
 import logging
 import os
 import random
 import re
+import sys
 import time
 import types
 from collections import Counter
@@ -73,7 +100,7 @@ from lift import config
 from lift.data.text import clean_text, dup_key
 from lift.io import append_jsonl, sha256_obj, sha256_text
 from lift.lang import LangIdentifier, lid_info
-from lift.paths import interim_dir
+from lift.paths import interim_dir, output_dir
 from lift.schemas import PromptRecord, TranslationInfo
 
 log = logging.getLogger(__name__)
@@ -82,10 +109,16 @@ ENGINE_NAMES = {"google": "google", "nllb": "nllb-200-distilled-600M"}   # Trans
 MAX_CHARS = 4999               # sources this long are "too_long" (deep-translator refuses 5,000)
 MAX_CONSECUTIVE_ERRORS = 10    # circuit breaker: items in a row whose every retry raised
 RETRY_JITTER = 0.1             # each backoff delay gets up to 10% more, at random
+BACKTRANSLATION_DIRNAME = "backtranslations"   # back_translate's cache: output_dir() / this
 
-# (english_text, our lang code) -> output, which may be None; raises on transport errors
+# deep-translator 1.11.4 errors a retry can cure (deep_translator.exceptions; see is_transient)
+_DT_TRANSIENT = ("RequestError", "ServerException", "TranslationNotFound")
+
+# (english_text, our lang code) -> output, which may be None; raises on errors (is_transient ones
+# are retried)
 Backend = Callable[[str, str], str | None]
 Rule = Literal["empty", "identical", "wrong_lang", "error", "too_long"]
+BlockKind = Literal["http_429", "streak"]
 
 _ROW_FIELDS = ("key", "engine", "lang", "source_sha", "source", "output", "date")
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -127,11 +160,23 @@ class TranslationError(RuntimeError):
 
 
 class TranslationBlocked(RuntimeError):
-    """Google is refusing this IP (HTTP 429), or ten items in a row failed every retry. Raised at
-    once. ``done`` items were handled before the stop and their outputs are cached: rerun later."""
+    """Translation stops for this run, at once. ``done`` items were handled before the stop and
+    their outputs are cached: rerun later to resume.
 
-    def __init__(self, message: str = "translation blocked", *, done: int = 0) -> None:
+    ``kind`` says why. "http_429": Google answered HTTP 429 (its /sorry CAPTCHA page), so this IP is
+    blocked; wait 30 minutes or more. "streak": MAX_CONSECUTIVE_ERRORS items in a row failed every
+    retry with transient errors (is_transient), so the network or the service is down; not an IP
+    block, rerun once it is back. The message holds counts and exception type names, never text.
+    """
+
+    KINDS: tuple[str, ...] = ("http_429", "streak")
+
+    def __init__(self, message: str = "translation blocked", *, done: int = 0,
+                 kind: BlockKind = "http_429") -> None:
+        if kind not in self.KINDS:
+            raise ValueError(f"unknown TranslationBlocked kind {kind!r}; one of {self.KINDS}")
         self.done = done
+        self.kind: BlockKind = kind
         super().__init__(message)
 
 
@@ -337,19 +382,42 @@ class _Google:
         except self._too_many:
             raise TranslationBlocked("Google Translate answered HTTP 429 (its /sorry CAPTCHA page): this "
                                      "IP is blocked. Stop, wait 30 minutes or more, then rerun; the "
-                                     "cache keeps everything done") from None
+                                     "cache keeps everything done", kind="http_429") from None
 
 
 def google_backend(cfg: Mapping[str, Any] | None = None, *, min_interval: float = 1.0,
                    jitter: float = 0.5, timeout: tuple[float, float] = (10, 30),
                    sleep: Callable[[float], Any] = time.sleep,
                    clock: Callable[[], float] = time.monotonic) -> Backend:
-    """Google Translate through deep-translator (imported here). Returns the raw output, which may be
-    None or the echoed source (validate catches both). HTTP 429 raises TranslationBlocked at once,
-    never retried. Every other error propagates for translate_texts to retry."""
+    """Google Translate through deep-translator (imported here: ImportError if it is missing).
+    Returns the raw output, which may be None or the echoed source (validate catches both). HTTP 429
+    raises TranslationBlocked kind "http_429" at once, never retried. Every other error propagates:
+    translate_texts retries the transient ones (is_transient) and stops on the rest."""
     cfg = cfg if cfg is not None else config.load("project")
     return _Google(cfg["languages"]["google_translate"], min_interval=min_interval, jitter=jitter,
                    timeout=timeout, sleep=sleep, clock=clock)
+
+
+def check_nllb() -> None:
+    """Raise ImportError with an install hint unless torch and transformers import, with the two
+    classes the NLLB engine loads. Cheap once they are imported; nothing is downloaded.
+
+    The NLLB engine (``engine="nllb"``, --fallback-engine nllb, back_translate) needs both, and the
+    laptop venv has neither. Call it before any work, so a missing package stops the run at once;
+    _Nllb calls it again on its first load, so the error is the same either way. An OSError while
+    importing (a torch DLL that fails to load on Windows) becomes the same ImportError, never an
+    error the retry loop would take for a network failure.
+    """
+    for name, attrs in (("torch", ()), ("transformers", ("AutoModelForSeq2SeqLM", "AutoTokenizer"))):
+        try:
+            module = importlib.import_module(name)
+            for attr in attrs:                  # transformers imports these on first access
+                getattr(module, attr)
+        except Exception as e:
+            raise ImportError(f"--fallback-engine nllb needs torch and transformers, and {name} does not "
+                              f"import ({type(e).__name__}). Install both at the versions of "
+                              "pyproject.toml's gpu extra (pip install -e \".[gpu]\" brings everything)",
+                              name=name) from e
 
 
 class _Nllb:
@@ -358,7 +426,9 @@ class _Nllb:
     transformers 5.x: the source language is set with the ``tok.src_lang`` setter (``src_lang=`` in
     the tokenizer call is silently ignored), the target with ``forced_bos_token_id`` (there is no
     ``lang_code_to_id`` any more); greedy; inputs truncated at 512 tokens. The repo ships only a
-    .bin, so the background safetensors conversion is switched off.
+    .bin, so the background safetensors conversion is switched off. Loading runs check_nllb first;
+    an OSError from transformers (offline and not cached, gated, an unknown revision) is re-raised
+    as RuntimeError (the OSError as its cause), so the retry loop never takes it for a network blip.
     """
 
     def __init__(self, cfg: Mapping[str, Any], *, device: str = "cpu", batch_size: int = 16) -> None:
@@ -372,22 +442,27 @@ class _Nllb:
 
     def _load(self) -> tuple[Any, Any]:
         if self._model is None:
+            check_nllb()
             os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
             import torch
             from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-            self._tok = AutoTokenizer.from_pretrained(self.repo, revision=self.revision)
-            model = AutoModelForSeq2SeqLM.from_pretrained(self.repo, revision=self.revision,
-                                                          dtype=torch.float32)
-            self._model = model.to(self.device).eval()
+            try:
+                tok = AutoTokenizer.from_pretrained(self.repo, revision=self.revision)
+                model = AutoModelForSeq2SeqLM.from_pretrained(self.repo, revision=self.revision,
+                                                              dtype=torch.float32)
+            except OSError as e:
+                raise RuntimeError(f"cannot load {self.repo} at revision {self.revision} "
+                                   f"({type(e).__name__}, the cause above)") from e
+            self._tok, self._model = tok, model.to(self.device).eval()
         return self._tok, self._model
 
     def __call__(self, texts: Sequence[str], src: str, tgt: str, *, factor: float = 1.5) -> list[str]:
         """Translate ``texts`` from NLLB code ``src`` to ``tgt``, longest first in batches;
         max_new_tokens = int(factor * input length) + 10."""
+        tok, model = self._load()               # first: check_nllb's ImportError if torch is missing
         import torch
 
-        tok, model = self._load()
         tok.src_lang = src
         bos = tok.convert_tokens_to_ids(tgt)
         if tok.convert_tokens_to_ids(src) == tok.unk_token_id or bos == tok.unk_token_id:
@@ -409,7 +484,9 @@ class _Nllb:
 def nllb_backend(*, cfg: Mapping[str, Any] | None = None, device: str = "cpu",
                  batch_size: int = 16) -> Backend:
     """NLLB-200 as an en -> X Backend: the opt-in fallback (``engine="nllb"``), loaded on the first
-    call. Target text takes more tokens than English, so max_new_tokens = 2 x input + 10."""
+    call (check_nllb's ImportError, or RuntimeError for a model that does not load, both raised at
+    once by translate_texts). Target text takes more tokens than English, so max_new_tokens =
+    2 x input + 10."""
     cfg = cfg if cfg is not None else config.load("project")
     codes = dict(cfg["languages"]["belebele"])
     model = _Nllb(cfg, device=device, batch_size=batch_size)
@@ -447,10 +524,42 @@ class _Run:
     failures: list[TranslationFailure]
 
 
+def _dt_errors(*names: str) -> tuple[type[BaseException], ...]:
+    """deep_translator.exceptions classes by name, once deep_translator is imported. Before that none
+    of them can have been raised, so this module never imports it."""
+    module = sys.modules.get("deep_translator.exceptions")
+    found = [getattr(module, name, None) for name in names] if module is not None else []
+    return tuple(c for c in found if isinstance(c, type) and issubclass(c, BaseException))
+
+
+def is_transient(error: BaseException) -> bool:
+    """True if a retry can cure ``error``, so translate_texts retries it.
+
+    Transient: an OSError (requests' RequestException and its ConnectionError, Timeout, SSLError,
+    ChunkedEncodingError; socket timeouts; the builtin ConnectionError and TimeoutError) unless it is
+    also a ValueError or TypeError (requests' MissingSchema, InvalidSchema, InvalidURL,
+    InvalidHeader, StreamConsumedError: a bad argument, not an outage); and deep-translator 1.11.4's
+    RequestError (Google answered a non-2xx status other than 429), TranslationNotFound (a 2xx page
+    with no translation in it) and ServerException (an API server error; only deep-translator's
+    other engines raise it). Anything else (ImportError, ValueError, TypeError, KeyError,
+    RuntimeError, ...) is a missing package or a bug, which no retry cures.
+    """
+    if isinstance(error, OSError):
+        return not isinstance(error, ValueError | TypeError)
+    return isinstance(error, _dt_errors(*_DT_TRANSIENT))
+
+
 def _call(backend: Backend, source: str, target: str, *, max_retries: int, base_delay: float,
           sleep: Callable[[float], Any], label: str) -> tuple[bool, str | None, str]:
-    """One item through the backend, retrying transient errors with exponential backoff. Returns
-    (ok, output, error detail). Only exception type names are kept: str(e) may hold the text."""
+    """One item through the backend, retrying transient errors (is_transient) with exponential
+    backoff. Returns (ok, output, error detail). Only exception type names are kept: str(e) may hold
+    the text.
+
+    TranslationBlocked and every error that is not transient propagate at once, unretried: the
+    original exception, except deep-translator's BaseError family (str(e) starts with the input
+    text), re-raised as a RuntimeError naming its type, with its traceback but neither its message
+    nor a __context__ that holds it.
+    """
     errors: list[str] = []
     for attempt in range(max_retries + 1):
         if errors:
@@ -464,7 +573,17 @@ def _call(backend: Backend, source: str, target: str, *, max_retries: int, base_
         except TranslationBlocked:
             raise
         except Exception as e:
-            errors.append(type(e).__name__)
+            if is_transient(e):
+                errors.append(type(e).__name__)
+                continue
+            log.error("%s: %s is not a transient error; stopping without a retry", label, type(e).__name__)
+            if not isinstance(e, _dt_errors("BaseError")):
+                raise
+            withheld, trace = type(e).__name__, e.__traceback__
+        # deep-translator's own error holds the text: raised here, outside the handler, so the new
+        # error has no __context__ either
+        raise RuntimeError(f"{label}: deep-translator raised {withheld}, not a transient error (its "
+                           "message is withheld: it holds the text)").with_traceback(trace)
     return False, None, ", ".join(f"{name} x{n}" for name, n in Counter(errors).items())
 
 
@@ -528,8 +647,8 @@ def _translate(texts: Sequence[str], target: str, *, engine: str = "google",
                 ok, out, detail = _call(backend, source, target, max_retries=max_retries,
                                         base_delay=base_delay, sleep=sleep, label=label)
             except TranslationBlocked as e:
-                log.error("%s: blocked; stopping with %d of %d items handled", label, i, n)
-                raise TranslationBlocked(f"{e} [stopped at item {i} of {n}]", done=i) from None
+                log.error("%s: blocked (%s); stopping with %d of %d items handled", label, e.kind, i, n)
+                raise TranslationBlocked(f"{e} [stopped at item {i} of {n}]", done=i, kind=e.kind) from None
             counts["called"] += 1
             if ok:
                 streak = 0
@@ -550,10 +669,12 @@ def _translate(texts: Sequence[str], target: str, *, engine: str = "google",
                                                output=kept))
             log.warning("%s failed: %s %s", label, rule, detail)
             if streak >= MAX_CONSECUTIVE_ERRORS:
-                log.error("%s: %d items in a row failed every retry; stopping", label, streak)
-                raise TranslationBlocked(f"{streak} items in a row failed every retry ({detail}); stopped "
-                                         f"after item {i} of {n}. Check the network, wait, then rerun",
-                                         done=i + 1)
+                log.error("%s: %d items in a row failed every retry with transient errors; stopping",
+                          label, streak)
+                raise TranslationBlocked(f"{streak} items in a row failed every retry with transient "
+                                         f"(network or service) errors ({detail}): an outage, not an IP "
+                                         f"block. Stopped after item {i} of {n}; check the network, then "
+                                         "rerun to resume from the cache", done=i + 1, kind="streak")
         if progress_every > 0 and (i + 1) % progress_every == 0 and i + 1 < n:
             log.info("%s -> %s: %d/%d (%d cached, %d called, %d failed)", name, target, i + 1, n,
                      counts["cached"], counts["called"], len(failures))
@@ -574,10 +695,12 @@ def translate_texts(texts: Sequence[str], target: str, *, engine: str = "google"
     Per item: a source of MAX_CHARS or more is "too_long" and never sent. A cached output is
     validated; with ``retranslate_failed`` a cached output that fails is requested again (the new
     row wins). Otherwise, unless ``cache_only`` (then: "error", "not cached"), the backend is called,
-    retrying any exception but TranslationBlocked ``max_retries`` times after delays of
-    ``base_delay`` * 2**attempt (+ jitter); a non-blank output is cached, then validated. A source
-    repeated in ``texts`` is requested once. ``MAX_CONSECUTIVE_ERRORS`` items in a row whose every
-    retry raised raise TranslationBlocked (so does the backend on HTTP 429).
+    retrying a transient error (is_transient) ``max_retries`` times after delays of ``base_delay`` *
+    2**attempt (+ jitter); a non-blank output is cached, then validated. A source repeated in
+    ``texts`` is requested once. ``MAX_CONSECUTIVE_ERRORS`` items in a row whose every retry raised
+    raise TranslationBlocked kind "streak"; the Google backend raises kind "http_429" on HTTP 429.
+    Any other error propagates at once, unretried (deep-translator's text-bearing errors as a
+    RuntimeError naming their type): the items before it are cached, nothing after it is called.
 
     Failures are collected and raised as one TranslationError after every item; its ``outputs``
     hold None for the failed items. ``pids`` (optional) label failures and logs. ``lid`` None loads
@@ -631,9 +754,13 @@ def back_translate(texts: Sequence[str], source_lang: str, *,
                    cfg: Mapping[str, Any] | None = None, cache_dir: Path | None = None,
                    batch_size: int = 32) -> list[str]:
     """Translate ``texts`` from ``source_lang`` (our code) back into English with NLLB-200 on CPU,
-    for the ar/th judge sensitivity sample.
+    for the ar/th judge sensitivity sample (P07: the inputs are generated outputs).
 
-    Cached in the TranslationCache under engine "nllb-200-distilled-600M", lang "{source_lang}-en".
+    Cached in a TranslationCache under engine "nllb-200-distilled-600M", lang "{source_lang}-en",
+    rooted at ``cache_dir``, by default output_dir() / BACKTRANSLATION_DIRNAME, i.e.
+    outputs/backtranslations/nllb-200-distilled-600M/{source_lang}-en.jsonl: the rows hold raw
+    model completions, which live only in outputs/ and the private runs repo (CLAUDE.md rule 6),
+    never under data/ next to the prompt translations that get published.
     ``translator(texts, lang) -> outputs`` replaces NLLB (tests); it gets the uncached distinct
     texts in one call. Raises BackTranslationError if any output is empty or identical to its input;
     never returns input text.
@@ -647,7 +774,8 @@ def back_translate(texts: Sequence[str], source_lang: str, *,
         if not isinstance(text, str) or not clean_text(text):
             raise ValueError(f"texts[{i}] is not a non-empty string")
     name, lang = ENGINE_NAMES["nllb"], f"{source_lang}-en"
-    cache = TranslationCache(cache_dir)
+    cache = TranslationCache(Path(cache_dir) if cache_dir is not None else
+                             output_dir() / BACKTRANSLATION_DIRNAME)
     found: dict[str, str | None] = {}
     for text in texts:
         row = cache.get(name, lang, text)

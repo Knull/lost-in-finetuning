@@ -340,7 +340,11 @@ def test_de_decoy_and_back_translations_are_never_read(tree):
 
 
 ZH_TRAIN_1 = FIX["translate"](FIX["HARMFUL_TRAIN"][1], "zh")
-# name -> (file changed, change, (file, check, row) problems it must produce)
+AR_TRAIN_0 = FIX["translate"](FIX["HARMFUL_TRAIN"][0], "ar")         # 22 characters for 27 of English
+TH_HARMLESS_2 = FIX["translate"](FIX["HARMLESS_TRAIN"][2], "th")     # 163 characters for 181
+# name -> (file changed, change, (file, check, row) problems it must produce). On the changed file
+# these are all the problems: the two length_ratio files keep their log-length correlation above
+# MIN_CORRELATION (0.91 and 0.95) and their script (FakeLID), so the ratio rule is the one that fires.
 FAILURES = {
     "test row English differs": (
         "PolyRefuse/harmful_test_translated_es.json",
@@ -357,7 +361,8 @@ FAILURES = {
     "shuffled train file": (
         "PolyRefuse/harmless_train_translated_es.json",
         lambda rows: rows[::-1],
-        [("PolyRefuse/harmless_train_translated_es.json", "length_correlation", None)]),
+        [("PolyRefuse/harmless_train_translated_es.json", "length_correlation", None),
+         ("PolyRefuse/harmless_train_translated_es.json", "length_ratio", 0)]),   # 208 of 27 characters
     "val category mismatch": (
         "PolyRefuse/harmful_val_translated_zh.json",
         lambda rows: [{**row, "category": cat} for row, cat in zip(rows, VAL_CATS[::-1], strict=True)],
@@ -368,6 +373,14 @@ FAILURES = {
         set_field(1, "Placeholder question 1 rewritten.", "instruction", "instruction_translated"),
         [("PolyRefuse/harmless_test_translated_en.json", "harmless_test_source", 1),
          ("PolyRefuse/harmless_test_translated_es.json", "english_instruction", 1)]),
+    "train spot row shortened below the ratio range": (            # 2 of 27 characters: 0.07 < 0.1
+        "PolyRefuse/harmful_train_translated_ar.json",
+        set_field(0, AR_TRAIN_0[:2], "instruction"),
+        [("PolyRefuse/harmful_train_translated_ar.json", "length_ratio", 0)]),
+    "train spot row lengthened above the ratio range": (           # 819 of 181 characters: 4.52 > 4.0
+        "PolyRefuse/harmless_train_translated_th.json",
+        set_field(2, " ".join([TH_HARMLESS_2] * 5), "instruction"),
+        [("PolyRefuse/harmless_train_translated_th.json", "length_ratio", 2)]),
 }
 LID_FAILURE = ("PolyRefuse/harmful_train_translated_zh.json", "lid_spot", 1)
 
@@ -384,7 +397,23 @@ def test_each_alignment_failure_is_caught(tree, name):
         pr.check_alignment(tree, LANGS, lid=FakeLID(), cfg=CFG)
     found = {(p["file"], p["check"], p["row"]) for p in exc.value.problems}
     assert set(expected) <= found
+    assert {p for p in found if p[0] == rel} == {p for p in expected if p[0] == rel}   # nothing else
     assert_no_row_text(str(exc.value), tree)
+
+
+@pytest.mark.parametrize(("name", "ratio"), [("train spot row shortened below the ratio range", "0.07"),
+                                             ("train spot row lengthened above the ratio range", "4.52")])
+def test_the_length_ratio_rule_fires_on_its_own(tree, name, ratio):
+    rel, change, [(_, _, row)] = FAILURES[name]
+    mutate(tree, rel, change)
+    kind = "harmful" if "harmful" in rel else "harmless"
+    texts = [clean_text(r["instruction"]) for r in read(tree, rel)]
+    english = pr.english_sources(tree, kind, "train", cfg=CFG)
+    assert pr._log_length_correlation(english, texts) > pr.MIN_CORRELATION + 0.3
+    with pytest.raises(AlignmentError) as exc:
+        pr.check_alignment(tree, LANGS, lid=FakeLID(), cfg=CFG)
+    assert exc.value.problems == [{"file": rel, "check": "length_ratio", "row": row,
+                                   "detail": f"ratio {ratio} outside [0.1, 4.0]"}]
 
 
 def test_lid_spot_failure_is_caught():
