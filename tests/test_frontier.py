@@ -7,6 +7,7 @@ URLs point at a closed local port in case anything ever tried to send a request.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -1110,7 +1111,8 @@ def test_a_probe_failing_otherwise_follows_that_errors_rules(offline, answer, st
 
 def test_a_probe_counts_toward_the_spend_cap(monkeypatch):
     """The probe is a paid call like the preflight. Here the item fits under the cap and the probe does
-    not, so the run stops before the probe and records nothing."""
+    not, so the run stops before the probe is sent: nothing is recorded, and no probe is counted (the
+    stats go into the run manifest's cost section)."""
     sizer, _ = make_judge(provider="openai", model="gpt-test")
     pair = sizer.rubric.render(prompt=frontier.PREFLIGHT_PROMPT, response=frontier.PREFLIGHT_RESPONSE,
                                prompt_lang="English")
@@ -1124,6 +1126,57 @@ def test_a_probe_counts_toward_the_spend_cap(monkeypatch):
         judge.safety(["p"], ["r"], ["en"])
     assert exc.value.partial == [None] and judge.stats["failures"] == 0
     assert [c["preflight"] for c in fake.calls] == [True, False]   # the probe never started
+    assert judge.stats["probes"] == 0
+
+
+def test_a_retry_or_reminder_the_cap_refuses_is_not_counted(monkeypatch):
+    """W14's rule for every counter: a retry or a reminder turn whose reservation the cap refuses never
+    went out, so the run manifest must not count it."""
+    sizer, _ = make_judge(provider="openai", model="gpt-test")
+    item = sizer.estimate_usd(sizer.render("p", "r", "en"))
+    reply = 110e-6                                           # usage (100, 10) at $1 per million tokens
+    monkeypatch.setenv("LIFT_JUDGE_MAX_USD", repr(reply + 1.5 * item))   # a timeout keeps its reservation
+    judge, fake = make_judge(FakeProvider([FakeProvider.error(None)], usage=(100, 10)), provider="openai",
+                             model="gpt-test")
+    with pytest.raises(SpendCapExceeded):
+        judge.safety(["p"], ["r"], ["en"])
+    assert [c["preflight"] for c in fake.calls] == [True, False] and judge.stats["retries"] == 0
+
+    monkeypatch.setenv("LIFT_JUDGE_MAX_USD", repr(2 * reply + item))     # the item fits, its reminder not
+    judge, fake = make_judge(FakeProvider(["not json"], usage=(100, 10)), provider="openai", model="gpt-test")
+    with pytest.raises(SpendCapExceeded):
+        judge.safety(["p"], ["r"], ["en"])
+    assert [c["preflight"] for c in fake.calls] == [True, False] and judge.stats["reminders"] == 0
+
+
+def test_a_probe_stopped_before_it_is_sent_is_not_counted(monkeypatch):
+    """Another caller can stop the judge after a probe passed its own halt check and before its request
+    is reserved. The reservation then raises that stop, so the probe never went out and is not counted."""
+    def respond(call):
+        return FakeProvider.error(401 if "other prompt" in call["user"] else 400)
+
+    judge, fake = make_judge(FakeProvider(respond))
+    estimate, benign = judge.estimate_usd, []
+
+    def stop_judge():                                        # an auth error in another thread's call
+        with contextlib.suppress(FrontierConfigError):
+            judge.safety(["other prompt"], ["other response"], ["en"])
+
+    def estimate_then_stop(user, history=()):
+        if frontier.PREFLIGHT_PROMPT in user:
+            benign.append(user)
+            if len(benign) == 2:                             # the probe, right before its reservation
+                other = threading.Thread(target=stop_judge)
+                other.start()
+                other.join(5)
+        return estimate(user, history)
+
+    monkeypatch.setattr(judge, "estimate_usd", estimate_then_stop)
+    with pytest.raises(FrontierConfigError, match="fatal API error: AuthenticationError 401") as exc:
+        judge.safety(["p"], ["r"], ["en"])                   # the 400 is unanswered: the call probes
+    assert exc.value.partial == [None] and judge.stats["failures"] == 0
+    assert [c["preflight"] for c in fake.calls] == [True, False, False]   # no probe went out
+    assert judge.stats["probes"] == 0
 
 
 FLAGGED = ProviderError("BadRequestError", status=400, code="invalid_prompt",
