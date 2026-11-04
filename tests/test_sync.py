@@ -63,6 +63,19 @@ def hub_error(cls_name: str, status: int, method: str = "GET") -> Exception:
     return getattr(errors, cls_name)(f"{status} test error", response=response)
 
 
+def whoami_answer(**access_token) -> dict:
+    """HfApi.whoami()'s answer (the Hub's /api/whoami-v2) for a token with these accessToken fields."""
+    return {"type": "user", "id": "0", "name": "tester", "orgs": [],
+            "auth": {"type": "access_token", "accessToken": {"displayName": "test", **access_token}}}
+
+
+def fine_grained(*scopes: tuple[str, str, list[str]]) -> dict:
+    """A fine-grained token's accessToken fields; each scope is (entity type, entity name, permissions)."""
+    scoped = [{"entity": {"_id": str(i), "type": kind, "name": name}, "permissions": perms}
+              for i, (kind, name, perms) in enumerate(scopes)]
+    return {"role": "fineGrained", "fineGrained": {"canReadGatedRepos": True, "global": [], "scoped": scoped}}
+
+
 class FakeHub:
     """Stand-in for the HfApi methods lift.sync calls. Every commit is a snapshot keyed by its sha, so a
     read pinned to a revision sees exactly that commit. ``*.safetensors`` files are LFS entries.
@@ -76,6 +89,7 @@ class FakeHub:
 
     def __init__(self, files: dict[str, bytes] | None = None, *, private: bool | None = True):
         self.private = private
+        self.me: dict | None = whoami_answer(role="write")   # what whoami answers; None: HTTP 401
         self.snapshots: dict[str, dict[str, bytes]] = {}
         self.head = self._commit(dict(files or {}))
         self.calls: list[tuple[str, dict]] = []
@@ -130,6 +144,12 @@ class FakeHub:
     def dataset_info(self, repo_id, *, expand=None, **kwargs):
         self.calls.append(("dataset_info", {"repo_id": repo_id, "expand": expand, **kwargs}))
         return SimpleNamespace(id=repo_id, private=self.private, sha=self.head)
+
+    def whoami(self, token=None, **kwargs):
+        self.calls.append(("whoami", {}))
+        if self.me is None:
+            raise hub_error("HfHubHTTPError", 401)
+        return self.me
 
     def list_repo_tree(self, repo_id, path_in_repo=None, *, recursive=False, revision=None, repo_type=None,
                        **kwargs):
@@ -196,6 +216,8 @@ class HttpFront:
         self.hub = hub
         self.commits: list[dict] = []     # every commit request: summary, parent, paths, status
         self.before_preupload: Callable[[FakeHub], None] | None = None   # runs once
+        self.refuse_writes: int | None = None   # preupload and commit answer this (403: a read-only token)
+        self.down = False                       # every request fails to connect
 
     def _sha(self, rev: str) -> str:
         return self.hub.head if rev == "main" else rev
@@ -215,6 +237,15 @@ class HttpFront:
 
         hub, method, path = self.hub, request.method, request.url.path
         api, resolve = f"/api/datasets/{REPO}", f"/datasets/{REPO}/resolve/"
+        if self.down:
+            raise httpx2.ConnectError("connection refused", request=request)
+        if method == "GET" and path == "/api/whoami-v2":
+            if hub.me is None:
+                return self._error(request, 401, "Invalid credentials in Authorization header")
+            return httpx2.Response(200, json=hub.me, request=request)
+        writes = (f"{api}/preupload/", f"{api}/commit/")
+        if self.refuse_writes and method == "POST" and path.startswith(writes):
+            return self._error(request, self.refuse_writes, "You don't have the rights to write to this repo")
         if path.startswith(resolve):
             rev, _, filename = path[len(resolve):].partition("/")
             data = hub.snapshots[self._sha(rev)].get(filename)
@@ -355,6 +386,44 @@ def state_file() -> Path:
     return paths.output_dir() / sync.STATE_FILE
 
 
+def judged(gens: list[dict], label: str = "refusal", **fields) -> bytes:
+    """One judgement per generation, each labelled ``label``, as lift.judge.pipeline writes them."""
+    return lines(*(jud_row(g["key"], g["pid"], label, **fields) for g in gens))
+
+
+def record_path(*, judge: str = "qwen3guard", dtype: str | None = None, text: str = "redacted") -> str:
+    """The canonical repo path of the stock harmful_en_dev cell's AuditKIT record, as lift.audit names it."""
+    from lift.audit import auditkit_path
+
+    path = auditkit_path(judge, "stock", "harmful", "en", "dev", text=text, dtype=dtype)
+    return "outputs/" + path.relative_to(paths.output_dir()).as_posix()
+
+
+def audit_record(gens: list[dict], refusal_rate: float) -> bytes:
+    """Stands in for audit.record_safety's record of a cell: its keys and a rate, no text."""
+    return (json.dumps({"metadata": {"lift": {"refusal_rate": refusal_rate,
+                                              "keys": [g["key"] for g in gens]}}}) + "\n").encode()
+
+
+REAL_MAKE_API = sync.make_api
+
+
+def serve(monkeypatch, hub: FakeHub) -> None:
+    """Commands called without ``api`` (the CLI) get ``hub``, after the token check make_api makes."""
+    def make_api():
+        sync._require_token()
+        return hub
+
+    monkeypatch.setattr(sync, "make_api", make_api)
+
+
+def raising(error: Callable[[], Exception]) -> Callable:
+    def fail(*args, **kwargs):
+        raise error()
+
+    return fail
+
+
 # ---------------------------------------------------------------------------- refusals and errors
 
 
@@ -376,9 +445,12 @@ def test_needs_the_runs_repo_env(monkeypatch):
     for command in (sync.push, sync.pull, sync.status):
         with pytest.raises(sync.SyncError, match="LIFT_RUNS_REPO is not set"):
             command(api=hub)
-    monkeypatch.setenv("LIFT_RUNS_REPO", "lift-runs")
-    with pytest.raises(sync.SyncError, match="<owner>/<name>"):
-        sync.pull(api=hub)
+    for value, problem in (("lift-runs", "has no '/'"), ("tester/lift/runs", "has more than one '/'"),
+                           ("/lift-runs", "an empty owner or name"), ("tester/", "an empty owner or name")):
+        monkeypatch.setenv("LIFT_RUNS_REPO", value)
+        with pytest.raises(sync.SyncError, match="<owner>/<name>") as info:
+            sync.pull(api=hub)
+        assert problem in str(info.value) and value not in str(info.value) and info.value.permanent
     assert hub.calls == []
 
 
@@ -396,24 +468,23 @@ def test_needs_a_token(monkeypatch, tmp_path):
     assert hub.calls == []
 
 
-@pytest.mark.parametrize("cls_name,status,message", [
-    ("RepositoryNotFoundError", 404, "not found or is not readable"),
-    ("RepositoryNotFoundError", 401, "not found or is not readable"),
-    ("GatedRepoError", 403, "not found or is not readable"),
-    ("HfHubHTTPError", 401, "token was rejected"),
-    ("HfHubHTTPError", 403, "WRITE token"),
-    ("HfHubHTTPError", 503, "HTTP 503"),
+@pytest.mark.parametrize("cls_name,status,message,permanent", [
+    ("RepositoryNotFoundError", 404, "not found or is not readable", True),
+    ("RepositoryNotFoundError", 401, "not found or is not readable", True),
+    ("GatedRepoError", 403, "not found or is not readable", True),
+    ("HfHubHTTPError", 401, "token was rejected", True),
+    ("HfHubHTTPError", 403, "WRITE token", True),
+    ("DisabledRepoError", 403, "disabled on the Hub", True),
+    ("HfHubHTTPError", 503, "HTTP 503", False),
+    ("HfHubHTTPError", 429, "HTTP 429", False),
+    ("HfHubHTTPError", 412, "changed meanwhile", False),     # outside a push, a rerun plans again
 ])
-def test_hub_errors_become_actionable_sync_errors(cls_name, status, message):
+def test_hub_errors_become_actionable_sync_errors(cls_name, status, message, permanent):
     hub = FakeHub()
-
-    def fail(*args, **kwargs):
-        raise hub_error(cls_name, status)
-
-    hub.dataset_info = fail
+    hub.dataset_info = raising(lambda: hub_error(cls_name, status))
     with pytest.raises(sync.SyncError, match=message) as info:
         sync.pull(api=hub)
-    assert "hf_dummy" not in str(info.value)
+    assert info.value.permanent is permanent and "hf_dummy" not in str(info.value)
 
 
 def test_an_unmocked_call_cannot_reach_the_hub():
@@ -429,6 +500,223 @@ def test_refuses_to_run_with_hf_debug(monkeypatch):
     with pytest.raises(sync.SyncError, match="HF_DEBUG"):
         sync.push(api=hub)
     assert hub.calls == []
+
+
+# ---------------------------------------------------------------------------- permanent errors and preflight
+
+
+def test_a_sync_error_is_transient_unless_marked_permanent():
+    assert sync.SyncError("rerun").permanent is False
+    assert sync.SyncError("fix it", permanent=True).permanent is True
+
+
+def _token_unset(hub, monkeypatch, tmp_path):
+    import huggingface_hub.constants as hf_constants
+
+    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_OIDC_RESOURCE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))   # hide the token file
+
+
+def _hf_debug(hub, monkeypatch, tmp_path):
+    import huggingface_hub.constants as hf_constants
+
+    monkeypatch.setattr(hf_constants, "HF_DEBUG", True)
+
+
+def _real_client(hub, monkeypatch, tmp_path):
+    """The CLI gets the real HfApi (offline here) instead of ``hub``."""
+    monkeypatch.setattr(sync, "make_api", REAL_MAKE_API)
+
+
+def _keeps_moving(hub, monkeypatch, tmp_path):
+    commit = hub.create_commit
+
+    def overtaken(*args, **kwargs):
+        hub.put({"outputs/other.jsonl": records(str(len(hub.snapshots)))})
+        return commit(*args, **kwargs)
+
+    hub.create_commit = overtaken
+
+
+def _answer(method: str, error: Callable[[], Exception]) -> Callable:
+    return lambda hub, monkeypatch, tmp_path: setattr(hub, method, raising(error))
+
+
+def _http(cls_name: str, status: int, method: str = "GET") -> Callable[[], Exception]:
+    return lambda: hub_error(cls_name, status, method)
+
+
+def _network(name: str) -> Callable[[], Exception]:
+    return lambda: getattr(pytest.importorskip("httpx2"), name)("placeholder network error")
+
+
+def _unreachable() -> Exception:
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    return LocalEntryNotFoundError("An error happened while trying to locate the file on the Hub")
+
+
+PERMANENT, TRANSIENT = 2, 1
+EXIT_CASES = [
+    pytest.param(["pull"], _answer("dataset_info", _http("RepositoryNotFoundError", 404)), PERMANENT,
+                 id="repo-missing-404"),
+    pytest.param(["status"], _answer("dataset_info", _http("RepositoryNotFoundError", 401)), PERMANENT,
+                 id="repo-unseen-401"),
+    pytest.param(["pull"], _answer("dataset_info", _http("GatedRepoError", 403)), PERMANENT, id="gated-403"),
+    pytest.param(["pull"], _answer("dataset_info", _http("HfHubHTTPError", 401)), PERMANENT,
+                 id="token-rejected-401"),
+    pytest.param(["push"], _answer("create_commit", _http("HfHubHTTPError", 403, "POST")), PERMANENT,
+                 id="read-only-token-403"),
+    pytest.param(["push"], lambda hub, *_: setattr(hub, "private", False), PERMANENT, id="public"),
+    pytest.param(["pull"], lambda hub, *_: setattr(hub, "private", None), PERMANENT, id="privacy-unknown"),
+    pytest.param(["push"], _token_unset, PERMANENT, id="token-unset"),
+    pytest.param(["pull"], lambda hub, mp, _: mp.delenv("LIFT_RUNS_REPO"), PERMANENT, id="runs-repo-unset"),
+    pytest.param(["pull"], lambda hub, mp, _: mp.setenv("LIFT_RUNS_REPO", "lift-runs"), PERMANENT,
+                 id="runs-repo-malformed"),
+    pytest.param(["push"], _hf_debug, PERMANENT, id="hf-debug"),
+    pytest.param(["pull"], _real_client, PERMANENT, id="offline-mode"),
+    pytest.param(["pull", "--only", "outputs/../src"], None, PERMANENT, id="bad-path"),
+    pytest.param(["push", "--only", "outputs/.sync-backup"], None, PERMANENT, id="never-synced-path"),
+    pytest.param(["pull"], lambda *_: write(state_file(), "{not json"), PERMANENT, id="unreadable-state"),
+    pytest.param(["pull"], lambda hub, *_: hub.put({"outputs/../evil.txt": b"x"}), PERMANENT,
+                 id="unsafe-remote-path"),
+    pytest.param(["push"], _answer("dataset_info", _http("HfHubHTTPError", 503)), TRANSIENT,
+                 id="hub-down-503"),
+    pytest.param(["pull"], _answer("list_repo_tree", _http("HfHubHTTPError", 429)), TRANSIENT,
+                 id="rate-limited-429"),
+    pytest.param(["pull"], _answer("list_repo_tree", _http("HfHubHTTPError", 412)), TRANSIENT,
+                 id="moved-412-outside-push"),
+    pytest.param(["pull"], _answer("dataset_info", _network("ConnectError")), TRANSIENT,
+                 id="connection-refused"),
+    pytest.param(["push"], _answer("create_commit", _network("ReadTimeout")), TRANSIENT, id="read-timeout"),
+    pytest.param(["pull"], _answer("hf_hub_download", _unreachable), TRANSIENT, id="download-unreachable"),
+    pytest.param(["pull"], lambda hub, *_: setattr(hub, "corrupt", {LABELS}), TRANSIENT, id="download-stale"),
+    pytest.param(["push"], _keeps_moving, TRANSIENT, id="keeps-moving-412"),
+    pytest.param(["push"], lambda hub, *_: setattr(hub, "create_commit", lambda *a, **k: SimpleNamespace()),
+                 TRANSIENT, id="no-commit-sha"),
+]
+
+
+@pytest.mark.parametrize("argv,setup,code", EXIT_CASES)
+def test_the_exit_code_says_whether_a_rerun_can_help(argv, setup, code, monkeypatch, tmp_path, capsys):
+    """2 for what no rerun fixes, so runners stop at once instead of idling the GPU on retries; 1 for
+    a transient or unknown error, which a rerun resumes."""
+    hub = FakeHub({LABELS: b"v1\n"})
+    write(local(GEN), records("a"))
+    serve(monkeypatch, hub)
+    if setup is not None:
+        setup(hub, monkeypatch, tmp_path)
+    assert run_cli(["sync", *argv]) == code
+    err = capsys.readouterr().err
+    assert err.startswith(f"lift sync {argv[0]}: ") and "Traceback" not in err and "hf_dummy" not in err
+
+
+CAN_WRITE = [
+    pytest.param(whoami_answer(role="write"), id="write-token"),
+    pytest.param(whoami_answer(**fine_grained(("user", "tester", ["repo.content.read", "repo.write"]))),
+                 id="fine-grained-owner"),
+    pytest.param(whoami_answer(**fine_grained(("dataset", REPO, ["repo.content.read", "repo.write"]))),
+                 id="fine-grained-repo"),
+    pytest.param(whoami_answer(**fine_grained(("dataset", REPO.title(), ["repo.write"]))), id="other-case"),
+    pytest.param(whoami_answer(**fine_grained(("org", "tester", ["repo.write"]))), id="fine-grained-org"),
+    pytest.param(whoami_answer(**fine_grained(("resource-group", "rg", ["repo.write"]))),
+                 id="scope-it-cannot-place"),
+    pytest.param(whoami_answer(role="fineGrained"), id="no-permissions-shown"),
+    pytest.param(whoami_answer(role="fineGrained", fineGrained={"scoped": [], "global": 7}), id="odd-global"),
+    pytest.param(whoami_answer(role="fineGrained", fineGrained={"scoped": [{"entity": "x"}]}),
+                 id="odd-scope"),
+    pytest.param(whoami_answer(role="fineGrained", fineGrained={"scoped": [], "global": ["repo.write"]}),
+                 id="global-write"),
+    pytest.param(whoami_answer(), id="no-role"),
+    pytest.param({}, id="empty-answer"),
+]
+CANNOT_WRITE = [
+    pytest.param(whoami_answer(role="read"), id="read-token"),
+    pytest.param(whoami_answer(**fine_grained(("user", "tester", ["repo.content.read"]))),
+                 id="read-only-scope"),
+    pytest.param(whoami_answer(**fine_grained(("dataset", "tester/other-runs", ["repo.write"]),
+                                              ("model", REPO, ["repo.write"]),
+                                              ("user", "someone-else", ["repo.write"]))),
+                 id="write-elsewhere"),
+    pytest.param(whoami_answer(**fine_grained()), id="no-scopes"),
+]
+
+
+@pytest.mark.parametrize("answer", CAN_WRITE)
+def test_preflight_passes_a_token_whoami_does_not_show_as_read_only(answer):
+    hub = FakeHub()
+    hub.me = answer
+    sync.preflight(api=hub)
+    assert [name for name, _ in hub.calls] == ["dataset_info", "whoami"]     # nothing listed, fetched or sent
+
+
+@pytest.mark.parametrize("answer", CANNOT_WRITE)
+def test_preflight_refuses_a_token_that_cannot_write(answer):
+    """A read token is enough for the gated models and for `lift sync pull`, so a job starts normally and
+    fails only at its first push, hours of GPU later. The preflight stops it before any GPU line."""
+    hub = FakeHub()
+    hub.me = answer
+    with pytest.raises(sync.SyncError, match="WRITE token") as info:
+        sync.preflight(api=hub)
+    assert info.value.permanent and "hf_dummy" not in str(info.value)
+    sync.preflight(write=False, api=hub)                  # reading is all a pull needs
+    assert [name for name, _ in hub.calls] == ["dataset_info", "whoami", "dataset_info"]
+
+
+@pytest.mark.parametrize("setup,permanent", [
+    pytest.param(lambda hub, *_: setattr(hub, "private", False), True, id="public"),
+    pytest.param(lambda hub, *_: setattr(hub, "private", None), True, id="privacy-unknown"),
+    pytest.param(_answer("dataset_info", _http("RepositoryNotFoundError", 404)), True, id="repo-missing"),
+    pytest.param(lambda hub, *_: setattr(hub, "me", None), True, id="token-rejected"),
+    pytest.param(_token_unset, True, id="token-unset"),
+    pytest.param(lambda hub, mp, _: mp.delenv("LIFT_RUNS_REPO"), True, id="runs-repo-unset"),
+    pytest.param(_hf_debug, True, id="hf-debug"),
+    pytest.param(_answer("whoami", _http("HfHubHTTPError", 429)), False, id="whoami-rate-limited"),
+    pytest.param(_answer("whoami", _network("ConnectError")), False, id="whoami-unreachable"),
+    pytest.param(_answer("dataset_info", _http("HfHubHTTPError", 502)), False, id="hub-down"),
+])
+def test_preflight_errors_say_whether_a_rerun_can_help(setup, permanent, monkeypatch, tmp_path):
+    hub = FakeHub()
+    setup(hub, monkeypatch, tmp_path)
+    with pytest.raises(sync.SyncError) as info:
+        sync.preflight(api=hub)
+    assert info.value.permanent is permanent and "hf_dummy" not in str(info.value)
+    assert {name for name, _ in hub.calls} <= {"dataset_info", "whoami"}
+
+
+PASTED_TOKEN = "hf_" + "Q" * 34       # shaped like a user access token; not a real one
+PASTED = [
+    pytest.param(PASTED_TOKEN, None, id="the-token"),
+    pytest.param(f"tester/lift-runs/{PASTED_TOKEN}", None, id="two-slashes"),
+    pytest.param(f"{PASTED_TOKEN}/lift-runs", _answer("dataset_info", _http("RepositoryNotFoundError", 404)),
+                 id="token-as-owner-404"),
+    pytest.param(f"tester/{PASTED_TOKEN}", _answer("dataset_info", _http("GatedRepoError", 403)),
+                 id="token-as-name-403"),
+    pytest.param(f"tester/{PASTED_TOKEN} lift-runs", _real_client,     # HFValidationError, the value inside
+                 id="invalid-repo-id"),
+]
+
+
+@pytest.mark.parametrize("argv", [["push"], ["pull"], ["status"], ["check"], ["check", "--write"]])
+@pytest.mark.parametrize("value,setup", PASTED)
+def test_a_token_pasted_into_lift_runs_repo_is_never_shown(argv, value, setup, monkeypatch, tmp_path, capsys,
+                                                           caplog):
+    """Kaggle reads HF_TOKEN and LIFT_RUNS_REPO from its secrets, so a token can land in the wrong slot.
+    Its runner masks nothing and Kaggle keeps every printed line with the notebook version. No sync
+    command shows the value: errors say what is wrong with it instead, and a value is named only once
+    the Hub has answered for it as a repo."""
+    hub = FakeHub()
+    serve(monkeypatch, hub)
+    monkeypatch.setenv("LIFT_RUNS_REPO", value)
+    if setup is not None:
+        setup(hub, monkeypatch, tmp_path)
+    with caplog.at_level(logging.DEBUG):
+        assert run_cli(["sync", *argv]) == 2
+    out, err = capsys.readouterr()
+    shown = out + err + caplog.text
+    assert PASTED_TOKEN[:12] not in shown and "QQQQ" not in shown
+    assert err.startswith(f"lift sync {argv[0]}: ") and "LIFT_RUNS_REPO" in err and "Traceback" not in err
 
 
 # ---------------------------------------------------------------------------- selection
@@ -448,7 +736,8 @@ def test_select_maps_repo_paths_to_local_dirs():
 
 @pytest.mark.parametrize("bad", ["outputs/../src", "..", "outputs/./x", "outputs//x", "", "/", "src/lift",
                                  "data/raw", "data/interim/curator", "Outputs", "outputs/.sync-backup",
-                                 "outputs/.sync-backup/20260101T000000Z", "outputs/.cache"])
+                                 "outputs/.sync-backup/20260101T000000Z", "outputs/.cache", "outputs/.aside",
+                                 "outputs/.aside/20260101T000000Z/generations"])
 def test_select_refuses_paths_outside_the_synced_trees(bad):
     with pytest.raises(sync.SyncError):
         sync.select([bad])
@@ -495,13 +784,37 @@ def test_push_leaves_caches_temp_files_and_the_state_file_behind():
     write(out / "artifacts" / "v.json", "{}")
     for junk in (".cache/huggingface/download/x.metadata", "artifacts/.cache/torch/k.bin", ".git/HEAD",
                  "generations/stock/a.jsonl123.tmp", "x.lock", "y.incomplete", "pkg/__pycache__/m.pyc",
-                 ".DS_Store", "metrics/.DS_Store", ".sync-backup/20260101T000000Z/validation/labels/x.csv"):
+                 ".DS_Store", "metrics/.DS_Store", ".sync-backup/20260101T000000Z/validation/labels/x.csv",
+                 ".aside/20260101T000000Z/generations/stock/harmful_en_dev.jsonl"):
         write(out / junk, "junk")
     hub = FakeHub()
     assert sync.push(api=hub).files == {"outputs/artifacts/v.json": "new"}
     assert sorted(hub.files) == ["outputs/artifacts/v.json"] and state_file().is_file()
     assert sync.push(api=hub).files == {"outputs/artifacts/v.json": "same"}   # the state file stays local
     assert len(hub.called("create_commit")) == 1                              # nothing new: no call
+
+
+def test_files_lift_restart_set_aside_are_never_synced():
+    """lift restart moves a stale cell's files to outputs/.aside/<stamp>/<path> and leaves each one empty
+    in place. The next push replaces the Hub's copies with the emptied files (a change made here only);
+    the files set aside stay on this machine, both ways."""
+    from lift.models.generate import ASIDE_DIR
+
+    assert sync.ASIDE_DIR == ASIDE_DIR == ".aside"
+    hub = FakeHub({GEN: records("a"), JUD: records("a")})
+    sync.pull(api=hub)
+    aside = paths.output_dir() / ".aside" / "20261104T000000Z"
+    for path in (GEN, JUD):
+        write(aside.joinpath(*path.split("/")[1:]), local(path).read_bytes())
+        write(local(path), b"")
+    assert sync.status(api=hub)["push"].files == {GEN: "update", JUD: "update"}
+    assert sync.push(api=hub).files == {GEN: "update", JUD: "update"}
+    assert hub.files[GEN] == hub.files[JUD] == b"" and not [p for p in hub.files if ".aside" in p]
+    hub.put({"outputs/.aside/20261104T000000Z/generations/stock/x.jsonl": records("b")})
+    assert sync.pull(api=hub).files == {GEN: "same", JUD: "same"}
+    assert not aside.joinpath("generations", "stock", "x.jsonl").exists()
+    with pytest.raises(sync.SyncError, match="never synced"):
+        sync.select(["outputs/.aside"])
 
 
 def test_push_skips_missing_and_empty_dirs():
@@ -755,6 +1068,255 @@ def test_real_client_part_with_nothing_new_does_not_end_the_guard(http_front, mo
     assert [c["paths"] for c in http_front.commits] == [[copy]]        # nothing else was ever sent
 
 
+def test_real_client_errors_say_whether_a_rerun_can_help(http_front):
+    from huggingface_hub import HfApi
+
+    hub = http_front.hub
+    write(local(GEN), records("a"))
+    http_front.refuse_writes = 403                                     # a read-only token
+    with pytest.raises(sync.SyncError, match="WRITE token") as info:
+        sync.push(api=HfApi())
+    assert info.value.permanent and GEN not in hub.files
+    http_front.refuse_writes, http_front.down = None, True            # the connection drops
+    with pytest.raises(sync.SyncError, match="could not reach the Hub") as info:
+        sync.push(api=HfApi())
+    assert not info.value.permanent
+
+
+def test_real_client_preflight_reads_whoami(http_front):
+    from huggingface_hub import HfApi
+
+    hub = http_front.hub
+    hub.me = whoami_answer(role="read")
+    with pytest.raises(sync.SyncError, match="WRITE token") as info:
+        sync.preflight(api=HfApi())
+    assert info.value.permanent
+    hub.me = whoami_answer(**fine_grained(("dataset", REPO, ["repo.content.read", "repo.write"])))
+    sync.preflight(api=HfApi())
+    hub.me = None                                                      # the Hub rejects the token
+    with pytest.raises(sync.SyncError, match="HTTP 401") as info:
+        sync.preflight(api=HfApi())
+    assert info.value.permanent
+
+
+# ---------------------------------------------------------------------------- judgements follow generations
+
+
+FP16_JUDGE = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40 + "#fp16#strict"
+
+
+def test_judgements_never_go_up_without_their_generations(tmp_path, monkeypatch):
+    """A Colab bf16 job and a Kaggle fp16 job of one variant write the same paths. Kaggle's generations
+    conflict with the ones Colab pushed first, so its judgements of them must not go up either: the Hub
+    would pair Colab's generations with Kaggle's judgements, a cell every reader rejects and no sync can
+    repair. They are a conflict too (kept under conflicts/), and Colab's own judgements then go up."""
+    hub = FakeHub()
+    machine(tmp_path / "colab", monkeypatch)
+    g_bf16 = [gen_row("kb1", "p1"), gen_row("kb2", "p2")]
+    write(local(GEN), lines(*g_bf16))
+    assert sync.push(api=hub).files == {GEN: "new"}
+    machine(tmp_path / "kaggle", monkeypatch)                          # pulled before Colab's push
+    g_fp16 = [gen_row("kf1", "p1", dtype="fp16"), gen_row("kf2", "p2", dtype="fp16")]
+    write(local(GEN), lines(*g_fp16))
+    write(local(JUD), judged(g_fp16, judge=FP16_JUDGE))
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "conflict", JUD: "conflict"} and not report.ok
+    assert report.held == {JUD: GEN} and JUD not in hub.files
+    assert hub.files[report.conflict_copies[JUD]] == local(JUD).read_bytes()
+    assert f"  CONFLICT {JUD} (held back with {GEN}; local copy on the Hub at " \
+           f"{report.conflict_copies[JUD]})" in report.summary()
+    assert any("1 judgements file(s) held back" in line for line in report.summary())
+    machine(tmp_path / "colab", monkeypatch)
+    write(local(JUD), judged(g_bf16))
+    assert sync.push(api=hub).files == {GEN: "same", JUD: "new"}
+    assert keys_of_bytes(hub.files[JUD]) == keys_of_bytes(hub.files[GEN]) == ["kb1", "kb2"]
+
+
+def test_judgements_held_back_are_not_merged_here_either(tmp_path, monkeypatch):
+    """Held back, a judgements file is not merged with the Hub's either: that would put judgements of
+    generations this machine does not have into its own cell, and upload them."""
+    first = gen_row("k1", "p1")
+    hub = FakeHub({GEN: lines(first), JUD: judged([first])})
+    a, b = tmp_path / "A", tmp_path / "B"
+    machine(a, monkeypatch)
+    sync.pull(api=hub)
+    machine(b, monkeypatch)
+    sync.pull(api=hub)
+    append(local(GEN), lines(gen_row("k2", "p2")))
+    append(local(JUD), judged([gen_row("k2", "p2")]))
+    assert sync.push(api=hub).files == {GEN: "update", JUD: "update"}
+    machine(a, monkeypatch)
+    other = gen_row("k3", "p3", dtype="fp16")          # another run configuration: generations cannot merge
+    append(local(GEN), lines(other))
+    append(local(JUD), judged([other]))                # same judge, new prompt: these alone would merge
+    before = local(JUD).read_bytes()
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "conflict", JUD: "conflict"} and report.held == {JUD: GEN}
+    assert local(JUD).read_bytes() == before and keys_of_bytes(hub.files[JUD]) == ["k1", "k2"]
+
+
+def test_judgements_wait_for_generations_that_are_newer_on_the_hub(tmp_path, monkeypatch):
+    first = gen_row("k1", "p1")
+    hub = FakeHub({GEN: lines(first)})
+    a, b = tmp_path / "A", tmp_path / "B"
+    machine(b, monkeypatch)
+    sync.pull(api=hub)
+    machine(a, monkeypatch)
+    sync.pull(api=hub)
+    write(local(JUD), judged([first]))
+    machine(b, monkeypatch)
+    append(local(GEN), lines(gen_row("k2", "p2")))
+    sync.push(api=hub)
+    machine(a, monkeypatch)
+    planned = sync.status(api=hub)["push"]
+    assert planned.files == {GEN: "stale", JUD: "conflict"} and planned.held == {JUD: GEN}
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "stale", JUD: "conflict"} and JUD not in hub.files
+    assert sync.pull(api=hub).files == {GEN: "update"}
+    assert sync.push(api=hub).files == {GEN: "same", JUD: "new"}
+    assert keys_of_bytes(hub.files[JUD]) == ["k1"] and keys_of_bytes(hub.files[GEN]) == ["k1", "k2"]
+
+
+def test_judgements_pushed_alone_need_the_same_generations_on_the_hub():
+    first = gen_row("k1", "p1")
+    hub = FakeHub({GEN: lines(first)})
+    sync.pull(api=hub)
+    write(local(JUD), judged([first]))
+    append(local(GEN), lines(gen_row("k2", "p2")))                   # generated more, not pushed yet
+    report = sync.push(["outputs/judgements"], api=hub)
+    assert report.files == {JUD: "conflict"} and report.held == {JUD: GEN} and JUD not in hub.files
+    write(local(GEN), lines(first))                                    # the Hub's copy again
+    assert sync.push(["outputs/judgements"], api=hub).files == {JUD: "new"}
+    append(local(JUD), judged([gen_row("k2", "p2")]))
+    local(GEN).unlink()                                     # the Hub has generations, this machine none
+    assert sync.push(["outputs/judgements"], api=hub).files == {JUD: "conflict"}
+    lone = "outputs/judgements/qwen3guard/adapter-hi/harmful_en_dev.jsonl"
+    write(local(lone), judged([gen_row("k9", "p9")]))      # no generations anywhere: nothing to pair
+    assert sync.push(["outputs/judgements/qwen3guard/adapter-hi"], api=hub).files == {lone: "new"}
+
+
+# ---------------------------------------------------------------------------- AuditKIT records follow a cell
+
+
+def test_auditkit_records_never_go_up_without_their_cell(tmp_path, monkeypatch):
+    """lift judge and lift run-dev write an AuditKIT record of every judged cell. VM A pushed a cell's
+    generations (job.py's checkpoint); VM B, on another GPU class, generated, judged and recorded the
+    same cell. B's generations conflict and its judgements are held back, so its record must be too:
+    the Hub would otherwise hold B's numbers beside A's cell, and P08 publishes those records. A's own
+    record then goes up with A's judgements."""
+    hub = FakeHub()
+    rec = record_path()
+    machine(tmp_path / "A", monkeypatch)
+    g_a = [gen_row("k1", "p1", output="A1"), gen_row("k2", "p2", output="A2")]
+    write(local(GEN), lines(*g_a))
+    assert sync.push(api=hub).files == {GEN: "new"}
+    machine(tmp_path / "B", monkeypatch)
+    g_b = [gen_row("k1", "p1", output="B1"), gen_row("k2", "p2", output="B2")]
+    write(local(GEN), lines(*g_b))
+    write(local(JUD), judged(g_b, "harmful"))
+    write(local(rec), audit_record(g_b, 0.0))
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "conflict", JUD: "conflict", rec: "conflict"}
+    assert report.held == {JUD: GEN, rec: GEN} and rec not in hub.files
+    copy = report.conflict_copies[rec]
+    assert hub.files[copy] == local(rec).read_bytes()
+    assert f"  CONFLICT {rec} (held back with {GEN}; local copy on the Hub at {copy})" in report.summary()
+    assert any("1 AuditKIT record(s) held back" in line for line in report.summary())
+    assert any("1 judgements file(s) held back" in line for line in report.summary())
+    machine(tmp_path / "A", monkeypatch)
+    write(local(JUD), judged(g_a))
+    write(local(rec), audit_record(g_a, 1.0))
+    assert sync.push(api=hub).files == {GEN: "same", JUD: "new", rec: "new"}
+    assert hub.files[rec] == local(rec).read_bytes()
+
+
+def test_a_precision_record_follows_its_cell(tmp_path, monkeypatch):
+    """Kaggle's fp16 cell conflicts with Colab's bf16 one: its licensed -fp16 record, and the private
+    .full one beside it, stay off the canonical paths with the cell."""
+    hub = FakeHub()
+    machine(tmp_path / "colab", monkeypatch)
+    write(local(GEN), lines(gen_row("kb1", "p1"), gen_row("kb2", "p2")))
+    sync.push(api=hub)
+    machine(tmp_path / "kaggle", monkeypatch)
+    g_fp16 = [gen_row("kf1", "p1", dtype="fp16"), gen_row("kf2", "p2", dtype="fp16")]
+    recs = [record_path(dtype="fp16"), record_path(dtype="fp16", text="full")]
+    assert [r.rsplit("/", 1)[1] for r in recs] == ["harmful_en_dev-fp16.json",
+                                                   "harmful_en_dev-fp16.full.json"]
+    write(local(GEN), lines(*g_fp16))
+    write(local(JUD), judged(g_fp16, judge=FP16_JUDGE))
+    for rec in recs:
+        write(local(rec), audit_record(g_fp16, 1.0))
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "conflict", JUD: "conflict", **{rec: "conflict" for rec in recs}}
+    assert report.held == {JUD: GEN, **{rec: GEN for rec in recs}}
+    assert sorted(p for p in hub.files if p.startswith("outputs/")) == [GEN]
+
+
+def test_auditkit_records_never_go_up_beside_other_judgements(tmp_path, monkeypatch):
+    """Both machines hold the same generations. A pushed its judgements before its record was written;
+    B judged the same cell on another judge stack and recorded it. B's judgements cannot merge with
+    A's (one key, two records), which push finds out only when it tries, after judgements were held
+    back: B's record must still stay off the Hub, which holds A's judgements."""
+    g = [gen_row("k1", "p1"), gen_row("k2", "p2")]
+    hub = FakeHub({GEN: lines(*g)})
+    rec = record_path()
+    a, b = tmp_path / "A", tmp_path / "B"
+    machine(b, monkeypatch)
+    sync.pull(api=hub)
+    machine(a, monkeypatch)
+    sync.pull(api=hub)
+    write(local(JUD), judged(g))
+    assert sync.push(api=hub).files == {GEN: "same", JUD: "new"}
+    machine(b, monkeypatch)
+    write(local(JUD), judged(g, "harmful"))
+    write(local(rec), audit_record(g, 0.0))
+    assert sync.status(api=hub)["push"].files == {GEN: "same", JUD: "merge", rec: "new"}   # not tried yet
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "same", JUD: "conflict", rec: "conflict"} and report.held == {rec: JUD}
+    assert rec not in hub.files and hub.files[report.conflict_copies[rec]] == local(rec).read_bytes()
+
+
+def test_auditkit_records_pushed_alone_need_their_cell_on_the_hub():
+    g = [gen_row("k1", "p1")]
+    hub = FakeHub({GEN: lines(*g)})
+    sync.pull(api=hub)
+    rec, full = record_path(), record_path(text="full")
+    write(local(JUD), judged(g))
+    for path in (rec, full):
+        write(local(path), audit_record(g, 1.0))
+    planned = sync.status(["outputs/metrics"], api=hub)["push"]
+    assert planned.files == {rec: "conflict", full: "conflict"} and planned.held == {rec: JUD, full: JUD}
+    report = sync.push(["outputs/metrics"], api=hub)
+    assert report.held == {rec: JUD, full: JUD} and rec not in hub.files and full not in hub.files
+    assert sync.push(["outputs/judgements"], api=hub).files == {JUD: "new"}
+    assert sync.push(["outputs/metrics"], api=hub).files == {rec: "new", full: "new"}
+    hub.put({JUD: judged(g, "harmful")})                      # another machine re-judged the cell
+    write(local(rec), audit_record(g, 0.5))                   # a record of the old judgements, rewritten
+    report = sync.push(api=hub)
+    assert report.files[JUD] == "stale" and report.files[rec] == "conflict" and report.held == {rec: JUD}
+    other = record_path(judge="frontier")                     # the second judge's: no judgements anywhere
+    write(local(other), audit_record(g, 1.0))
+    assert sync.push(["outputs/metrics/auditkit/frontier"], api=hub).files == {other: "new"}
+
+
+@pytest.mark.parametrize("path,made_from", [
+    ("outputs/metrics/auditkit/qwen3guard/stock/harmful_en_dev.json", (GEN, JUD)),
+    ("outputs/metrics/auditkit/qwen3guard/stock/harmful_en_dev.full.json", (GEN, JUD)),
+    ("outputs/metrics/auditkit/qwen3guard/stock/harmful_en_dev-fp16.json", (GEN, JUD)),
+    ("outputs/metrics/auditkit/qwen3guard/stock/harmful_en_dev-fp16.full.json", (GEN, JUD)),
+    ("outputs/metrics/auditkit/frontier/adapter-hi/harmless_zh_final.json",
+     ("outputs/generations/adapter-hi/harmless_zh_final.jsonl",
+      "outputs/judgements/frontier/adapter-hi/harmless_zh_final.jsonl")),
+    ("outputs/metrics/auditkit/qwen3guard/stock/notes.json", ()),
+    ("outputs/metrics/auditkit/qwen3guard/stock/harmful_en_dev.md", ()),
+    ("outputs/metrics/gate0.json", ()),
+    (JUD, ()),
+])
+def test_an_auditkit_record_maps_to_its_cell(path, made_from):
+    """Every name lift.audit.auditkit_path gives ({set}_{lang}_{split}, then -{dtype} and .full)."""
+    assert sync._recorded_from(path) == made_from
+
+
 # ---------------------------------------------------------------------------- pull
 
 
@@ -995,6 +1557,84 @@ def test_install_copies_across_filesystems(tmp_path, monkeypatch):
     assert [p.name for p in dest.parent.iterdir()] == ["f.jsonl"]          # no temp file left behind
 
 
+# ---------------------------------------------------------------------------- files written while sync runs
+
+
+def while_downloading(hub: FakeHub, then: Callable[[], None]) -> None:
+    """Run ``then`` after every download, as a process on this machine writing meanwhile would."""
+    download = hub.hf_hub_download
+
+    def download_then(*args, **kwargs):
+        result = download(*args, **kwargs)
+        then()
+        return result
+
+    hub.hf_hub_download = download_then
+
+
+def test_pull_never_replaces_a_file_written_while_it_downloads():
+    """Pull plans "update" because nobody edited the local copy, then downloads. Rows a judge on this
+    machine appends meanwhile must not be lost to the replace: the file stays as it is, reported as a
+    conflict, and the next pull merges it."""
+    hub = FakeHub()
+    first = jud_row("k1", "p1", "refusal")
+    write(local(JUD), lines(first))
+    sync.push(api=hub)
+    hub.put({JUD: lines(first, jud_row("k2", "p2", "benign"))})       # another machine judged k2
+    while_downloading(hub, lambda: append(local(JUD), lines(jud_row("k3", "p3", "harmful"))))
+    report = sync.pull(api=hub)
+    assert report.files == {JUD: "conflict"} and report.busy == [JUD] and not report.ok
+    assert keys_of(local(JUD)) == ["k1", "k3"]
+    assert f"  CONFLICT {JUD} (changed here while sync ran)" in report.summary()
+    assert any("1 file(s) changed on this machine while sync ran" in line for line in report.summary())
+    assert sync.pull(api=FakeHub(hub.files)).files == {JUD: "merge"}  # nothing writes now
+    assert keys_of(local(JUD)) == ["k1", "k3", "k2"]
+
+
+def test_pull_never_replaces_a_file_created_while_it_downloads():
+    hub = FakeHub({LABELS: b"from the hub\n"})
+    while_downloading(hub, lambda: write(local(LABELS), "saved here meanwhile\n"))
+    report = sync.pull(api=hub)
+    assert report.files == {LABELS: "conflict"} and report.busy == [LABELS]
+    assert local(LABELS).read_text() == "saved here meanwhile\n"
+    assert sync.pull(api=FakeHub(hub.files)).files == {LABELS: "conflict"}   # nothing was recorded as synced
+
+
+def test_pull_force_leaves_a_file_written_while_it_downloads():
+    hub = FakeHub({LABELS: b"v1\n"})
+    sync.pull(api=hub)
+    write(local(LABELS), "edited here\n")
+    hub.put({LABELS: b"v2\n"})
+    while_downloading(hub, lambda: append(local(LABELS), b"more\n"))
+    forced = sync.pull(api=hub, force=True)
+    assert forced.files == {LABELS: "conflict"} and forced.busy == [LABELS] and not forced.backups
+    assert local(LABELS).read_text() == "edited here\nmore\n"
+
+
+@pytest.mark.parametrize("direction", ["pull", "push"])
+def test_a_merge_is_never_written_over_lines_added_meanwhile(direction, monkeypatch):
+    hub = FakeHub({JUD: lines(jud_row("k1", "p1", "refusal"))})
+    sync.pull(api=hub)
+    hub.put({JUD: lines(jud_row("k1", "p1", "refusal"), jud_row("k2", "p2", "benign"))})
+    append(local(JUD), lines(jud_row("k3", "p3", "harmful")))
+    merge = sync.merge_jsonl_by_key
+
+    def merge_while_the_judge_appends(mine, theirs, *, kind):
+        merged = merge(mine, theirs, kind=kind)
+        append(mine, lines(jud_row("k4", "p4", "benign")))            # after the read, before the write
+        return merged
+
+    monkeypatch.setattr(sync, "merge_jsonl_by_key", merge_while_the_judge_appends)
+    on_the_hub = hub.files[JUD]
+    report = getattr(sync, direction)(api=hub)
+    assert report.files == {JUD: "conflict"} and report.busy == [JUD]
+    assert keys_of(local(JUD)) == ["k1", "k3", "k4"] and hub.files[JUD] == on_the_hub
+    assert not report.conflict_copies and not [p for p in hub.files if p.startswith("conflicts/")]
+    monkeypatch.setattr(sync, "merge_jsonl_by_key", merge)
+    assert getattr(sync, direction)(api=hub).files == {JUD: "merge"}
+    assert keys_of(local(JUD)) == ["k1", "k3", "k4", "k2"]
+
+
 # ---------------------------------------------------------------------------- merge rules
 
 
@@ -1075,6 +1715,46 @@ def test_merge_refuses_a_file_its_readers_would_reject(tmp_path, kind, mine, the
     right = write(tmp_path / "remote.jsonl", lines(*theirs))
     with pytest.raises(ValueError, match=re.escape(problem)):
         sync.merge_jsonl_by_key(left, right, kind=kind)
+
+
+A100 = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}
+L4 = {**A100, "gpu_capability": "8.9"}
+
+
+def on(stack: dict, row: dict) -> dict:
+    """``row`` as generated on ``stack`` (meta carries the fields and their digest, as generate writes)."""
+    from lift.models.generate import stack_digest
+
+    return {**row, "meta": {**row["meta"], **stack, "stack": stack_digest(stack)}}
+
+
+def test_merge_never_mixes_two_stacks_in_one_cell(tmp_path):
+    """run_config holds only the inputs, so two halves of a cell generated on an A100 and an L4 share it;
+    readers refuse a cell on two stacks, so the merge is a conflict, not a wedged cell on the Hub. The
+    same record of one key from two stacks is still one record."""
+    mine = write(tmp_path / "local.jsonl", lines(on(A100, gen_row("k1", "p1"))))
+    theirs = write(tmp_path / "remote.jsonl", lines(on(L4, gen_row("k2", "p2"))))
+    with pytest.raises(ValueError, match="2 different stack values"):
+        sync.merge_jsonl_by_key(mine, theirs, kind="generations")
+    same = write(tmp_path / "same.jsonl", lines(on(L4, gen_row("k1", "p1"))))
+    merged = sync.merge_jsonl_by_key(mine, same, kind="generations")
+    assert merged.added == 0 and merged.rows == [on(A100, gen_row("k1", "p1"))]
+
+
+def test_merge_never_mixes_two_judge_stacks_in_one_file(tmp_path):
+    mine = write(tmp_path / "local.jsonl", lines(jud_row("k1", "p1", "refusal", native={"stack": A100})))
+    theirs = write(tmp_path / "remote.jsonl", lines(jud_row("k2", "p2", "refusal", native={"stack": L4})))
+    with pytest.raises(ValueError, match="2 different judge stack values"):
+        sync.merge_jsonl_by_key(mine, theirs, kind="judgements")
+    api = write(tmp_path / "api.jsonl", lines(jud_row("k3", "p3", "refusal")))       # an API judge: no stack
+    assert sync.merge_jsonl_by_key(api, api, kind="judgements").added == 0
+
+
+@pytest.mark.parametrize("meta", [{**A100}, {**A100, "stack": "f" * 16}, {"dtype": "bf16"}])
+def test_sync_reads_a_stack_as_generate_does(meta):
+    from lift.models.generate import STACK_FIELDS, record_stack
+
+    assert sync.STACK_FIELDS == STACK_FIELDS and sync.record_stack(meta) == record_stack(meta)
 
 
 def test_judge_cache_keeps_the_local_row_for_a_key_on_both_sides():
@@ -1171,17 +1851,22 @@ def run_cli(argv: list[str]) -> int:
 
 
 @pytest.mark.parametrize("argv", [["sync", "--help"], ["sync", "push", "--help"], ["sync", "pull", "--help"],
-                                  ["sync", "status", "--help"]])
+                                  ["sync", "status", "--help"], ["sync", "check", "--help"]])
 def test_cli_help(argv, capsys):
     with pytest.raises(SystemExit) as exit_info:
         run_cli(argv)
     assert exit_info.value.code == 0
     out = " ".join(capsys.readouterr().out.split())
+    if argv[1] == "check":
+        assert "--write" in out and "--only" not in out and "--force" not in out
+        assert "exit codes: 0 ok; 1 a transient" in out and "2 a problem no rerun fixes" in out
+        return
     if len(argv) == 2:
-        assert all(word in out for word in ("push", "pull", "status"))
+        assert all(word in out for word in ("push", "pull", "status", "check"))
     else:
         assert "--only" in out and ("--force" in out) == (argv[1] != "status")
-    assert "exit codes: 0 done; 3 done, but some files conflicted" in out and "1 error" in out
+    assert "exit codes: 0 done; 3 done, but some files conflicted" in out
+    assert "1 a transient or unknown error" in out and "2 a problem no rerun fixes" in out
 
 
 def test_lift_cli_registers_sync(capsys):
@@ -1193,10 +1878,10 @@ def test_lift_cli_registers_sync(capsys):
 
 
 def test_cli_exit_codes(monkeypatch, capsys):
-    """0 done; 3 done, but some files conflicted (runners report it and never retry); 1 an error, so
-    not everything was transferred and a rerun is safe."""
+    """0 done; 3 done, but some files conflicted (runners report it and never retry); 1 a transient
+    error, so not everything was transferred and a rerun is safe; 2 a problem no rerun fixes."""
     hub = FakeHub({LABELS: b"v1\n", GEN: records("a")})
-    monkeypatch.setattr(sync, "make_api", lambda: hub)
+    serve(monkeypatch, hub)
     assert run_cli(["sync", "pull"]) == 0
     assert "outputs: 1 new" in capsys.readouterr().out
     write(local(LABELS), "edited here\n")
@@ -1213,7 +1898,26 @@ def test_cli_exit_codes(monkeypatch, capsys):
     assert run_cli(["sync", "pull"]) == 1                             # not everything arrived: retry
     assert "does not match" in capsys.readouterr().err
     hub.private = False
-    assert run_cli(["sync", "push"]) == 1
+    assert run_cli(["sync", "push"]) == 2                             # no rerun fixes it
     err = capsys.readouterr().err
     assert "not private" in err and "Traceback" not in err
-    assert run_cli(["sync", "pull", "--only", "outputs/../src"]) == 1
+    assert run_cli(["sync", "pull", "--only", "outputs/../src"]) == 2
+
+
+def test_cli_check_runs_the_preflight(monkeypatch, capsys):
+    """`lift sync check [--write]`: 0 ok, 1 transient, 2 permanent. It only asks; nothing moves."""
+    hub = FakeHub({LABELS: b"v1\n"})
+    serve(monkeypatch, hub)
+    hub.me = whoami_answer(role="read")
+    assert run_cli(["sync", "check"]) == 0                            # reading is all a pull needs
+    assert REPO in capsys.readouterr().out
+    assert run_cli(["sync", "check", "--write"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("lift sync check: ") and "WRITE token" in err and "hf_dummy" not in err
+    hub.me = whoami_answer(role="write")
+    assert run_cli(["sync", "check", "--write"]) == 0
+    hub.whoami = raising(_http("HfHubHTTPError", 503))
+    assert run_cli(["sync", "check", "--write"]) == 1
+    hub.private = False
+    assert run_cli(["sync", "check"]) == 2
+    assert {name for name, _ in hub.calls} == {"dataset_info", "whoami"} and not local(LABELS).exists()
