@@ -12,8 +12,9 @@ outputs/judgements/{judge_dir}/{variant}/{set}_{lang}_{split}.jsonl after each c
   ``lift restart`` leaves) is judged from the start. Duplicate keys raise.
 - A judge on local hardware judges a cell only in the precision of its generations (``meta.dtype``):
   judgements in another could never be reported. Another raises ``OtherPrecisionError`` (from
-  lift.models.generate) before anything is judged; its remedy is the file's ``--dtype`` or leaving the
-  cell out, never a restart.
+  lift.models.generate) before any other check of the cell; its remedy is the file's ``--dtype`` or
+  leaving the cell out, never a restart, also for a cell that is stale as well (a restart line run where
+  the other precision runs would make that cell again in its precision).
 - Judges are never mixed in one file: a file another judge began (another model, revision, precision or
   Controversial mode) raises ``MixedJudgesError``, whose remedies are that judge or the role's ``lift
   restart --judge ROLE`` line (``command``).
@@ -54,7 +55,10 @@ Reading:
   defaults to ``generation.dtype`` (one precision for every reported number); any other needs Gate
   0's licence (``check_dtype_licence``), because every ``--dtype`` run names its dtype: a comparison
   that paired with the bf16 Gate 0 run gate0.json records now, and a cell made under the harness and
-  decoding settings, and on the GPU class, of that comparison.
+  decoding settings of that comparison, generated and judged (Qwen3Guard) on its GPU class. A refusal
+  names the remedy for the side that is out of date: after a harness fix, the bf16 Gate 0 and then the
+  comparison; for a cell of another harness or GPU class, its restart line (judged elsewhere: its
+  judge's).
   ``complete=True`` (every reported number) also needs a generation for every prompt of the split
   and a judgement of every generation; ``complete=False`` is for the second judge's sample and runs
   in progress.
@@ -762,8 +766,9 @@ def judge_file(generations_path: str | Path, *, judge: str | Judge = "primary", 
     ``sample=``) and the judge's cost counters, also when the run fails. The judgements file is
     written only once something has been judged (an empty one is judged from the start), and is
     extended only by the same judge on the same stack. Before anything is judged, a judge on local hardware
-    in another precision than the generations raises ``OtherPrecisionError``, a file another judge began
-    ``MixedJudgesError``, and a stale cell ``StaleJudgementsError``.
+    in another precision than the generations raises ``OtherPrecisionError``, checked before anything else
+    of the cell, so a cell of another precision is never offered a restart line, also when it is stale
+    too. A file another judge began raises ``MixedJudgesError``, and a stale cell ``StaleJudgementsError``.
     """
     from lift.manifest import finish_run, start_run
     from lift.models.generate import read_generations
@@ -777,18 +782,18 @@ def judge_file(generations_path: str | Path, *, judge: str | Judge = "primary", 
                          "(`lift generate` or `lift run-dev`; `lift restart` leaves an empty file)")
     cell = _one_cell(gens, generations_path)
     variant, set_name, lang, split = cell
-    made = _file_dtype(gens)
-    texts = dict(prompts_by_pid) if prompts_by_pid is not None else prompts.texts_by_pid(set_name, lang)
-    _check_prompt_texts(gens, texts, generations_path, _cell_restart(cell, generations_path, dtype=made))
-    selected, selection = _select(gens, sample=sample, keys=keys, seed=seed, set_name=set_name, split=split)
-
     if isinstance(judge, str):
         judge = make_judge(judge, device=device, dtype=dtype)
     elif device is not None or dtype is not None:
         raise ValueError("device and dtype apply only when judge_file builds the judge from a role")
     if not _DIR_NAME.fullmatch(str(judge.short)):
         raise ValueError(f"judge.short must be a plain directory name, got {judge.short!r}")
-    _check_precision(judge, gens, generations_path)
+    _check_precision(judge, gens, generations_path)         # first: such a cell is never offered a restart
+    made = _file_dtype(gens)
+    texts = dict(prompts_by_pid) if prompts_by_pid is not None else prompts.texts_by_pid(set_name, lang)
+    _check_prompt_texts(gens, texts, generations_path, _cell_restart(cell, generations_path, dtype=made))
+    selected, selection = _select(gens, sample=sample, keys=keys, seed=seed, set_name=set_name, split=split)
+
     out_path = (Path(out_path) if out_path is not None
                 else judgements_path(judge.short, variant, set_name, lang, split))
     role = _role_of(out_path, cell)
@@ -915,7 +920,8 @@ def check_dtype_licence(dtype: str, model_rev: str | None) -> None:
     reference. The error lists every problem of both reports, a missing or unreadable one included, so a
     failed fp16 verdict shows although gate0.json is missing too. Every ``--dtype`` run names its dtype, so
     naming one licenses nothing. ``load_records`` asks whenever the requested dtype is not
-    ``generation.dtype``, and also checks that the cell was made as the comparison was (``LICENCE_COVERS``).
+    ``generation.dtype``, and also checks that the cell was made as the comparison was (``LICENCE_COVERS``)
+    and judged on its GPU class (``_coverage_problems``).
     """
     licence, reference = metrics_dir() / f"gate0-{dtype}.json", metrics_dir() / "gate0.json"
     rerun = f"`lift smoke --compare-dtype {dtype}` on the T4"
@@ -954,17 +960,27 @@ def _gate0_report(path: Path, writer: str, model_rev: str | None, *, fp16: bool)
 
 def _reference_problems(licence: Any, reference: Any, name: str, rerun: str) -> list[str]:
     """Why gate0.json is not the bf16 Gate 0 run the licence's comparison paired with: its
-    checks.precision.digest must be the licence's checks.fp16.reference_digest. A bf16 Gate 0 re-run (after
-    a harness fix) replaces both its verdict and its run, which no comparison has seen yet."""
+    checks.precision.digest must be the licence's checks.fp16.reference_digest. Two stored digests that
+    differ mean that this machine holds an old copy of one report (a pull settles it), or that the bf16
+    Gate 0 was re-run since (after a harness fix, say): that replaces both its verdict and its run, which
+    no comparison has seen yet. A comparison against a gate0.json that does not pass would not run, so
+    then the remedy is the bf16 Gate 0, not a comparison."""
     compared = _field(licence, "checks", "fp16", "reference_digest")
     current = _field(reference, "checks", "precision", "digest")
+    if _field(reference, "pass") is True:
+        new = f"re-run {rerun} against the current bf16 Gate 0"
+    else:
+        new = ("the bf16 Gate 0 comes first, as gate0.json does not pass (`lift smoke` on an A100; a "
+               "comparison against a failed one would not run)")
     if not isinstance(compared, str) or not compared:
         return [f"{name} checks.fp16.reference_digest is {compared!r}: it does not say which bf16 Gate 0 run "
-                f"it compared with, so re-run {rerun} against the current bf16 Gate 0"]
+                f"it compared with, so {new}"]
     if current != compared:
         shown = current[:12] if isinstance(current, str) else repr(current)
         return [f"gate0.json checks.precision.digest is {shown}, not the {compared[:12]} {name} compared "
-                f"with: the bf16 Gate 0 was re-run since, so re-run {rerun} against the current bf16 Gate 0"]
+                f"with: gate0.json and {name} name different bf16 Gate 0 runs. Pull both (`lift sync pull`), "
+                "as this machine may hold an old copy of one; if the runs repo's copies differ too, the bf16 "
+                f"Gate 0 was re-run since the comparison, so {new}"]
     return []
 
 
@@ -975,9 +991,11 @@ def _field(node: Any, *keys: str) -> Any:
     return node
 
 
-def _licence_problems(dtype: str, gens: Sequence[GenerationRecord]) -> list[str]:
-    """Why Gate 0's licence for ``dtype`` does not cover these generations: their revision of Global
-    (``check_dtype_licence``) or how they were made (``_coverage_problems``)."""
+def _licence_problems(dtype: str, gens: Sequence[GenerationRecord], records: Sequence[JudgementRecord],
+                      cell: tuple[str, str, str, str], role: str) -> list[str]:
+    """Why Gate 0's licence for ``dtype`` does not cover the cell of ``role``'s ``records``: its
+    generations' revision of Global (``check_dtype_licence``), or how they and the judgements were made
+    (``_coverage_problems``)."""
     problems = []
     unnamed = sum(not g.meta.get("model_rev") for g in gens)
     if unnamed:
@@ -987,20 +1005,25 @@ def _licence_problems(dtype: str, gens: Sequence[GenerationRecord]) -> list[str]
             check_dtype_licence(dtype, rev)
         except ValueError as exc:
             problems.append(str(exc))
-    return list(dict.fromkeys(problems + _coverage_problems(dtype, gens)))
+    return list(dict.fromkeys(problems + _coverage_problems(dtype, gens, records, cell, role)))
 
 
-def _coverage_problems(dtype: str, gens: Sequence[GenerationRecord]) -> list[str]:
-    """Why Gate 0's comparison for ``dtype`` says nothing about these generations: each ``LICENCE_COVERS``
-    field (harness, decoding settings, GPU class) must equal what the licence records of its paired runs. A
-    cell made on another GPU class (an A100 job given --dtype fp16) or under another harness never had its
-    precision compared. Empty when the licence cannot be read (``check_dtype_licence`` says so)."""
+def _coverage_problems(dtype: str, gens: Sequence[GenerationRecord], records: Sequence[JudgementRecord],
+                       cell: tuple[str, str, str, str], role: str) -> list[str]:
+    """Why Gate 0's comparison for ``dtype`` says nothing about the cell, and the remedy
+    (``_coverage_remedies``). Each ``LICENCE_COVERS`` field of the generations (harness, decoding settings,
+    GPU class) must equal what the licence records of its paired runs: a cell made on another GPU class (an
+    A100 job given --dtype fp16) or under another harness never had its precision compared. So must the GPU
+    class of every judgement with a ``stack`` (Qwen3Guard; an API judge runs on no GPU of ours): the
+    comparison ran generator and judge both on the T4 (decisions.md 27), while an fp16 judge may also run on
+    a CPU or on another GPU below compute 8. Empty when the licence cannot be read (``check_dtype_licence``
+    says so)."""
     path = metrics_dir() / f"gate0-{dtype}.json"
     try:
         licence = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    problems = []
+    problems, moved = [], set()
     for name, keys in LICENCE_COVERS.items():
         where, covered = f"{path.name} {'.'.join(keys)}", _field(licence, *keys)
         if covered is None:
@@ -1009,16 +1032,60 @@ def _coverage_problems(dtype: str, gens: Sequence[GenerationRecord]) -> list[str
             continue
         off = sorted(g.pid for g in gens if g.meta.get(name) != covered)
         if off:
+            moved.add(name)
             made = sorted({str(g.meta.get(name)) for g in gens})
             problems.append(f"{len(off)} generations were made with {name} {made}, not {where} "
                             f"{covered!r}, e.g. {off[:5]}")
+    gpu = _field(licence, *LICENCE_COVERS["gpu_capability"])
+    judged_on = {r.pid: _field(r.native["stack"], "gpu_capability") for r in records
+                 if r.native.get("stack") is not None}
+    off = sorted(pid for pid, on in judged_on.items() if on != gpu)
+    if gpu is not None and off:
+        moved.add("judge")
+        classes = sorted({str(on) for on in judged_on.values()})
+        problems.append(f"{len(off)} judgements were made on GPU class {classes}, not {path.name} "
+                        f"gpu_capability {gpu!r}, e.g. {off[:5]}")
     if problems:
-        problems.append(f"a cell in {dtype} counts only when made under the harness and decoding settings, "
-                        "and on the GPU class, of Gate 0's comparison: re-run "
-                        f"`lift smoke --compare-dtype {dtype}` on the T4 against the current bf16 Gate 0 "
-                        f"after a harness change, or make the cell again on the T4 ({dtype} runs on a GPU "
-                        "with native bf16 are never reported)")
+        problems.append(f"a cell in {dtype} counts only when generated under the harness and decoding "
+                        "settings of Gate 0's comparison, and generated and judged on its GPU class: "
+                        + "; ".join(_coverage_remedies(dtype, licence, gens, moved, cell, role)))
     return problems
+
+
+def _coverage_remedies(dtype: str, licence: Any, gens: Sequence[GenerationRecord], moved: Collection[str],
+                       cell: tuple[str, str, str, str], role: str) -> list[str]:
+    """What makes Gate 0's comparison cover the cell, by the side of each mismatch in ``moved`` that is out
+    of date. The code knows its harness (``HARNESS_VERSION``): a licence of another one predates a harness
+    fix, and a new comparison pairs only with a bf16 Gate 0 of this harness, so that is re-run first (a T4
+    comparison against the old one would not run); a cell of another one is made again. Decoding settings
+    can also move without a harness bump (a stop set or cap), so for them both remedies are named. A cell
+    made on another GPU class is made again on the T4, and one only judged elsewhere is judged again
+    there."""
+    from lift.models.generate import HARNESS_VERSION
+
+    made, version = _file_dtype(gens), HARNESS_VERSION
+    gate0 = ("re-run the full bf16 Gate 0 on an A100 (`lift smoke`), then "
+             f"`lift smoke --compare-dtype {dtype}` on the T4 (a comparison pairs only with a bf16 Gate 0 of "
+             "the same harness and decoding settings)")
+    remake = (f"make the cell again on the T4: run `{restart_command(*cell, dtype=made)}` as a job line "
+              "right after `lift sync pull`, then generate and judge it there")
+    harness = "harness" in moved
+    old_cell = harness and any(g.meta.get("harness") != version for g in gens)
+    out = []
+    if harness and _field(licence, *LICENCE_COVERS["harness"]) != version:
+        out.append(f"the bf16 Gate 0 and its T4 comparison predate this harness (version {version}): {gate0}")
+    if old_cell:
+        out.append(f"the cell was made under another harness than this code's (version {version}): {remake}")
+    if "decoding" in moved and not harness:
+        out.append(f"if the decoding settings changed since the comparison (a stop set or cap), {gate0}; "
+                   f"if the cell is the older one, {remake}")
+    if "gpu_capability" in moved:
+        out.append(f"the cell was made on another GPU class than the comparison's: {remake}")
+    if "judge" in moved and not old_cell and "gpu_capability" not in moved:
+        rejudge = restart_command(*cell, judge=role, dtype=made)
+        out.append(f"judge the cell again on the T4: run `{rejudge}` as a job line right after "
+                   f"`lift sync pull`, then judge it there with --dtype {dtype} (the generations are kept)")
+    return out or [f"re-run `lift smoke --compare-dtype {dtype}` on the T4 against the current bf16 Gate 0"]
 
 
 def _generation_stack(meta: Mapping[str, Any]) -> str:
@@ -1029,8 +1096,9 @@ def _generation_stack(meta: Mapping[str, Any]) -> str:
 
 def _one_configuration(gens: Sequence[GenerationRecord], records: Sequence[JudgementRecord],
                        dtype: str) -> list[str]:
-    """Why a cell is not one precision (licensed by Gate 0 unless ``generation.dtype``), one run
-    configuration and one stack for its generations, and one judge stack for its judgements."""
+    """Why a cell is not one precision (``dtype``; Gate 0's licence for another than ``generation.dtype`` is
+    ``_licence_problems``), one run configuration and one stack for its generations, and one judge stack
+    for its judgements."""
     problems = []
     off = sorted(g.pid for g in gens if g.meta.get("dtype") != dtype)
     if off:
@@ -1038,8 +1106,6 @@ def _one_configuration(gens: Sequence[GenerationRecord], records: Sequence[Judge
         problems.append(f"{len(off)} generations are not in {dtype} (the cell has {dtypes}), e.g. {off[:5]}; "
                         "every reported number uses one precision, another only when named with dtype= "
                         "and licensed by Gate 0")
-    if dtype != str(config.get("generation.dtype")):
-        problems += _licence_problems(dtype, gens)
     run_configs = sorted({str(g.meta.get("run_config")) for g in gens})
     if len(run_configs) > 1:
         problems.append(f"generations mix {len(run_configs)} run configurations {run_configs[:4]}")
@@ -1087,6 +1153,8 @@ def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRec
         ]
     problems = [f"{len(pids)} {what}, e.g. {sorted(pids)[:5]}" for pids, what in checks if pids]
     problems += _one_configuration(gens, records, dtype)
+    if dtype != str(config.get("generation.dtype")):
+        problems += _licence_problems(dtype, gens, records, cell, role)
     rule, shown = _expected_judge(role, dtype)
     others = sorted({r.judge for r in records if not rule.fullmatch(r.judge)})
     if others:

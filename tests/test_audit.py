@@ -47,10 +47,12 @@ def xdg(tmp_path, monkeypatch):
     return dirs
 
 
-def write_cell(dtype: str = "bf16") -> None:
-    """Generations (written in reverse pid order) and primary-judge judgements of one cell, in ``dtype``."""
+def write_cell(dtype: str = "bf16", judged_on: str | None = None) -> None:
+    """Generations (written in reverse pid order) and primary-judge judgements of one cell, in ``dtype``,
+    both on that precision's GPU class (``GPU_CLASS``) unless the judge ran on ``judged_on``."""
     variant, set_name, lang, split = CELL
     gens, judgements = [], []
+    stack = {**STACK, "gpu_capability": judged_on or GPU_CLASS[dtype]}
     for i, pid in enumerate(PIDS):
         key = sha256_text(f"{variant}|{pid}")
         gens.append(GenerationRecord(
@@ -60,7 +62,7 @@ def write_cell(dtype: str = "bf16") -> None:
             meta={"dtype": dtype, **META, "gpu_capability": GPU_CLASS[dtype]}))
         flags = UnclearFlags(too_short=False, repetitive=False, garbled=False, wrong_lang=WRONG_LANG[i],
                              lid_top=[("hin_Deva", 0.9)])
-        native = {"label_loose": LOOSE[i], "stack": STACK,
+        native = {"label_loose": LOOSE[i], "stack": stack,
                   **({"judge_failure": "unparseable"} if FAILED[i] else {})}
         judgements.append(JudgementRecord(
             key=key, variant=variant, pid=pid, lang=lang, set=set_name, split=split,
@@ -195,6 +197,27 @@ def test_no_fp16_record_after_the_bf16_gate0_is_re_run(cell):
     assert list(refused) == ["harmful_hi_dev"] and "checks.precision.digest" in refused["harmful_hi_dev"]
     assert not (metrics_dir() / "auditkit").exists()
     write_licence()
+    assert audit.record_safety(*CELL, dtype="fp16").name == "harmful_hi_dev-fp16.json"
+
+
+@pytest.mark.parametrize("judged_on", ["cpu", "6.0", "8.0"])
+def test_no_fp16_record_from_a_judge_off_the_t4(cell, judged_on):
+    """Review 5, X19: the T4's licence compared generator and judge both in fp16 on the T4. An fp16 judge on a
+    CPU, on another GPU below compute 8 (Kaggle's P100) or on an A100 never had its labels compared, so its
+    judgements of a T4 cell get no -fp16 record, through record_safety or a command's record step."""
+    from lift.commands import run as run_cmd
+
+    write_cell("fp16", judged_on=judged_on)
+    write_licence()
+    with pytest.raises(ValueError, match=rf"6 judgements were made on GPU class \['{judged_on}'\], not "
+                                         r"gate0-fp16\.json gpu_capability '7\.5'"):
+        audit.record_safety(*CELL, dtype="fp16")
+    refused: dict[str, str] = {}
+    run_cmd._record(*CELL, dtype="fp16", refused=refused)            # lift judge / run-dev --dtype fp16
+    assert list(refused) == ["harmful_hi_dev"]
+    assert "judge the cell again on the T4" in refused["harmful_hi_dev"]
+    assert not (metrics_dir() / "auditkit").exists()
+    write_cell("fp16")                                                # judged again on the T4
     assert audit.record_safety(*CELL, dtype="fp16").name == "harmful_hi_dev-fp16.json"
 
 

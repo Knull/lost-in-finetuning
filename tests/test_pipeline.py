@@ -31,6 +31,7 @@ SECOND = "openai/placeholder-model@safety_v1:0123456789ab+t0+max1024"
 REV = "c" * 40                                  # Global's commit sha, as generate records it in meta
 STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}      # an A100
 L4 = {**STACK, "gpu_capability": "8.9"}
+T4_STACK = {**STACK, "gpu_capability": "7.5"}               # the T4 the fp16 licence was compared on
 DIGEST = "e" * 64          # gate0.json's checks.precision.digest: the bf16 run the comparison paired with
 DECODING = "d" * 16
 COMPARED = {"reference_digest": DIGEST, "harness": 1, "decoding": DECODING}     # what the comparison ran with
@@ -601,9 +602,14 @@ def test_load_records_refuses_generations_made_on_two_stacks(fake_prompt_files):
         pipeline.load_records(*CELL, complete=False)
 
 
-def guard(*, dtype="bf16", strict=True, results=None):
-    return pipeline.Qwen3GuardAdapter(FakeGuard(results or GUARD), strict=strict, device="cuda:0",
-                                      dtype=dtype)
+def guard(*, dtype="bf16", strict=True, results=None, stack=None):
+    """The Qwen3Guard adapter over FakeGuard, on the ``judge_stack`` fixture's stack unless ``stack`` (a
+    judge on another GPU, the T4's say) is given."""
+    judge = pipeline.Qwen3GuardAdapter(FakeGuard(results or GUARD), strict=strict, device="cuda:0",
+                                       dtype=dtype)
+    if stack is not None:
+        judge._stack = dict(stack)                  # what the adapter reads from its device on first use
+    return judge
 
 
 def safe_outputs(n):
@@ -651,6 +657,38 @@ def test_a_judge_in_another_precision_than_the_generations_is_refused_before_jud
         pipeline.judge_file(path, judge=t4, lid=FakeLID(), out_path=out.with_name("other.jsonl"))
 
 
+def test_a_cell_of_another_precision_is_refused_as_such_before_any_other_check(fake_prompt_files, judge_stack,
+                                                                              monkeypatch):
+    """Review 5, X7 (contract M): Colab judged half a bf16 cell, then a translation was fixed (decision 9). A
+    T4 job's `lift judge --dtype fp16` reaches the cell. Listed as stale, it got the whole-cell restart line,
+    which names no --dtype for a bf16 cell: run on the T4 it is not refused, and the T4's next fp16 line makes
+    Colab's cell again in fp16. The precision check comes before every other check of the cell (the prompt
+    texts, the judgements file's judge and stack), also for a judge built from its role: an
+    OtherPrecisionError naming the file's --dtype, never a restart line. Colab's own bf16 line still gets
+    the stale cell's restart line."""
+    pids, gens, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4))
+    out = pipeline.judge_file(path, judge=guard(), lid=FakeLID(), keys=[g.key for g in gens[:2]])
+    half = out.read_bytes()
+    fake_prompt_files[("harmful", "en")][1] = make_prompt(pids[1], text="a corrected translation")
+
+    def refused_as_made_in_bf16(**kw):
+        with pytest.raises(OtherPrecisionError) as refused:
+            pipeline.judge_file(path, lid=FakeLID(), **kw)
+        err = refused.value
+        assert err.dtype == "bf16" and err.command is None and "--dtype bf16" in str(err)
+        assert "restart" not in str(err) and out.read_bytes() == half
+
+    refused_as_made_in_bf16(judge=guard(dtype="fp16", stack=T4_STACK))        # the T4's judge
+    refused_as_made_in_bf16(judge=guard(dtype="fp16", strict=False, stack=T4_STACK))   # another judge's file
+    monkeypatch.setattr(pipeline, "make_judge", lambda role, device=None, dtype=None: guard(dtype=dtype))
+    refused_as_made_in_bf16(judge="primary", dtype="fp16")                    # built from the role
+    with pytest.raises(StaleOutputError) as refused:                          # Colab's line: a stale cell
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    assert_restart(refused.value, RESTART)
+    judge_stack["stack"] = L4
+    refused_as_made_in_bf16(judge="primary", dtype="fp16")                    # on another stack too
+
+
 def test_every_restart_line_of_an_fp16_cell_names_its_precision(fake_prompt_files, judge_stack):
     """Contract H: lift restart refuses (without --force) a cell whose generations were made in another dtype
     than its --dtype, so each restart line the pipeline names for an fp16 cell carries --dtype fp16
@@ -683,12 +721,20 @@ def test_every_restart_line_of_an_fp16_cell_names_its_precision(fake_prompt_file
     assert refused.value.command == remake and out.exists()
 
 
-def t4_cell(store, n=4, **meta):
+def t4_cell(store, n=4, judged_on="7.5", **meta):
     """A T4 run: fp16 generations of Global at REV (``T4_META``; ``meta`` overrides), judged by the primary
-    judge in fp16."""
+    judge in fp16 on GPU class ``judged_on`` (the T4's unless said)."""
     pids, gens, path = setup_cell(store, n=n, outputs=safe_outputs(n), dtype="fp16", meta={**T4_META, **meta})
-    pipeline.judge_file(path, judge=guard(dtype="fp16"), lid=FakeLID())
+    judge = guard(dtype="fp16", stack={**T4_STACK, "gpu_capability": judged_on})
+    pipeline.judge_file(path, judge=judge, lid=FakeLID())
     return pids, gens
+
+
+def fp16_refusal(**kw):
+    """Why ``load_labels(*CELL, dtype="fp16")`` refuses the cell (``kw``: complete, judge)."""
+    with pytest.raises(ValueError, match="cannot be reported") as refused:
+        pipeline.load_labels(*CELL, dtype="fp16", **kw)
+    return str(refused.value)
 
 
 def test_load_labels_refuses_generations_in_another_precision_unless_named_and_licensed(fake_prompt_files):
@@ -741,7 +787,7 @@ def test_gate0s_licence_admits_its_precision_for_its_revision_only(fake_prompt_f
 
     path = write_gens([gen(p, variant="adapter", output=g.output, dtype="fp16", meta=T4_META)
                        for p, g in zip(pids, gens, strict=True)])
-    pipeline.judge_file(path, judge=guard(dtype="fp16"), lid=FakeLID())
+    pipeline.judge_file(path, judge=guard(dtype="fp16", stack=T4_STACK), lid=FakeLID())
     a, b = pipeline.paired_labels("stock", "adapter", *CELL[1:], dtype="fp16")
     assert a == b == {p: "refusal" for p in pids}
     write_gens([gen(p, output=g.output, dtype="fp16") for p, g in zip(pids, gens, strict=True)])
@@ -824,23 +870,109 @@ def test_a_licence_counts_only_against_the_bf16_gate0_it_compared_with(fake_prom
     assert "reference_digest is None" in licence_problems()          # two missing digests never match
 
 
-@pytest.mark.parametrize("field, made", [("harness", 2), ("decoding", "0" * 16), ("gpu_capability", "8.0")],
-                         ids=["harness", "decoding", "gpu-class"])
-def test_a_licence_covers_only_cells_made_as_its_comparison_was(fake_prompt_files, field, made):
+def test_two_reports_of_different_bf16_runs_are_pulled_before_any_new_comparison(fake_prompt_files):
+    """Review 5, X16: gate0.json and gate0-fp16.json naming different bf16 Gate 0 runs means either that this
+    machine holds an old copy of one (it pulled only the licence, or a pull stopped half way), which a pull
+    settles, or that the bf16 Gate 0 was re-run since the comparison, which needs a new one on the T4. The
+    refusal names both, the pull first. A comparison against a gate0.json that does not pass would not run,
+    so then the remedy is the bf16 Gate 0, and no T4 comparison is advised."""
+    pids, _ = t4_cell(fake_prompt_files)
+    write_licence(digest="9" * 64)
+    message = licence_problems()
+    assert "gate0.json and gate0-fp16.json name different bf16 Gate 0 runs" in message
+    assert "Pull both (`lift sync pull`), as this machine may hold an old copy of one" in message
+    assert ("if the runs repo's copies differ too, the bf16 Gate 0 was re-run since the comparison, so "
+            "re-run `lift smoke --compare-dtype fp16` on the T4 against the current bf16 Gate 0") in message
+    write_licence()                                                  # the pull brought the matching pair
+    assert pipeline.load_labels(*CELL, dtype="fp16") == {p: "refusal" for p in pids}
+
+    for licence in ({}, {"fp16": {"pass": True, "comparable": True, "n": 200, "reference_digest": None}}):
+        write_licence(digest="9" * 64, reference=False, **licence)  # this gate0.json is a FAIL
+        message = licence_problems()
+        assert 'gate0.json "pass" is False' in message and "--compare-dtype" not in message
+        assert "the bf16 Gate 0 comes first, as gate0.json does not pass (`lift smoke` on an A100" in message
+    write_licence(digest="9" * 64, reference=False)
+    assert "Pull both (`lift sync pull`)" in licence_problems()      # an old FAIL copy: a pull settles it
+
+
+REMAKE = (f"make the cell again on the T4: run `{RESTART} --dtype fp16` as a job line right after "
+          "`lift sync pull`, then generate and judge it there")
+NEW_GATE0 = ("re-run the full bf16 Gate 0 on an A100 (`lift smoke`), then `lift smoke --compare-dtype fp16` "
+             "on the T4")
+
+
+@pytest.mark.parametrize("field, made, remedies", [
+    ("harness", 2, ("the bf16 Gate 0 and its T4 comparison predate this harness (version 2)", NEW_GATE0)),
+    ("decoding", "0" * 16, ("if the decoding settings changed since the comparison (a stop set or cap), "
+                            + NEW_GATE0, f"if the cell is the older one, {REMAKE}")),
+    ("gpu_capability", "8.0", (f"the cell was made on another GPU class than the comparison's: {REMAKE}",)),
+], ids=["harness", "decoding", "gpu-class"])
+def test_a_licence_covers_only_cells_made_as_its_comparison_was(fake_prompt_files, monkeypatch, field, made,
+                                                                 remedies):
     """Review 4, W6 and W15 (contract J): the comparison says nothing about a cell made under another harness
     or other decoding settings, or on another GPU class (an A100 job given --dtype fp16, a Kaggle line pasted
     into lift remote): every generation's meta.harness, meta.decoding and meta.gpu_capability must be the
-    licence's checks.fp16.harness, checks.fp16.decoding and gpu_capability."""
+    licence's checks.fp16.harness, checks.fp16.decoding and gpu_capability. Review 5, X6: each names the
+    remedy that works (here a cell made after a harness fix, by the code now at version 2)."""
+    if field == "harness":
+        monkeypatch.setattr("lift.models.generate.HARNESS_VERSION", 2)
     t4_cell(fake_prompt_files, **{field: made})
     write_licence()
     pipeline.check_dtype_licence("fp16", REV)                        # the reports themselves are fine
-    with pytest.raises(ValueError, match=r"cannot be reported") as refused:
-        pipeline.load_labels(*CELL, dtype="fp16")
-    message = str(refused.value)
+    message = fp16_refusal()
     assert f"4 generations were made with {field} ['{made}'], not gate0-fp16.json " in message
-    assert "re-run `lift smoke --compare-dtype fp16` on the T4 against the current bf16 Gate 0" in message
+    assert all(remedy in message for remedy in remedies), message
+    assert "against the current bf16 Gate 0" not in message
     with pytest.raises(ValueError, match=f"generations were made with {field}"):
         pipeline.load_records(*CELL, complete=False, dtype="fp16")
+
+
+def test_after_a_harness_change_the_licence_names_the_stale_side(fake_prompt_files, monkeypatch):
+    """Review 5, X6: a harness fix lands (HARNESS_VERSION 2) and the T4 makes its cells under it. Against the
+    licence of harness 1, a T4 comparison with the current bf16 Gate 0 (still harness 1's) would not run
+    (pairs made from other inputs), and making the cell again on the T4 changes nothing: the bf16 Gate 0 is
+    re-run first, then the comparison. Once the licence is the new harness's, a cell made under the old one
+    is the stale side, and its own restart line (with --dtype fp16) makes it again."""
+    monkeypatch.setattr("lift.models.generate.HARNESS_VERSION", 2)
+    t4_cell(fake_prompt_files, harness=2, decoding="2" * 16)          # the fix moves the decoding digest too
+    write_licence()                                                    # compared under harness 1
+    message = fp16_refusal()
+    assert f"the bf16 Gate 0 and its T4 comparison predate this harness (version 2): {NEW_GATE0}" in message
+    assert "lift restart" not in message and "make the cell again" not in message
+    assert "if the decoding settings changed" not in message           # the harness says which side moved
+
+    t4_cell(fake_prompt_files)                                        # made under harness 1
+    write_licence(fp16={"pass": True, "comparable": True, "n": 200, "harness": 2})
+    message = fp16_refusal()
+    assert f"the cell was made under another harness than this code's (version 2): {REMAKE}" in message
+    assert "lift smoke" not in message
+    t4_cell(fake_prompt_files, harness=2)                             # made again under harness 2
+    assert len(pipeline.load_labels(*CELL, dtype="fp16")) == 4
+
+
+@pytest.mark.parametrize("judged_on", ["cpu", "6.0", "8.0"], ids=["cpu", "p100", "a100"])
+def test_a_licence_covers_only_cells_judged_on_its_gpu_class(fake_prompt_files, second_judge, judged_on):
+    """Review 5, X19: decisions.md 27's comparison ran generator and judge both in fp16 on the T4, but an fp16
+    judge may run on a CPU or on a GPU below compute 8 that is not a T4 (contract L allows both: Kaggle's P100
+    is 6.0). Every Qwen3Guard judgement's stack must be on the licence's GPU class too. Its remedy judges the
+    cell again on the T4, keeping the T4's generations. An API judge runs on no GPU of ours: exempt."""
+    pids, gens = t4_cell(fake_prompt_files, judged_on=judged_on)
+    write_licence()
+    message = fp16_refusal()
+    assert f"4 judgements were made on GPU class ['{judged_on}'], not gate0-fp16.json gpu_capability '7.5'" \
+        in message
+    assert (f"judge the cell again on the T4: run `{RESTART} --judge primary --dtype fp16` as a job line "
+            "right after `lift sync pull`") in message
+    assert "generations were made with" not in message and "make the cell again" not in message
+    with pytest.raises(ValueError, match="judgements were made on GPU class"):
+        pipeline.load_records(*CELL, complete=False, dtype="fp16")
+    pipeline.judgements_path("qwen3guard", *CELL).unlink()            # set aside, judged again on the T4
+    t4_cell(fake_prompt_files)
+    assert pipeline.load_labels(*CELL, dtype="fp16") == {p: "refusal" for p in pids}
+
+    second = FakeJudge(second_judge, short=pipeline.judge_dir("second"))          # no stack
+    pipeline.judge_file(generations_path(*CELL), judge=second, lid=FakeLID(), keys=[gens[0].key])
+    assert pipeline.load_labels(*CELL, judge="second", complete=False, dtype="fp16") == {pids[0]: "benign"}
 
 
 def test_a_licence_that_records_no_harness_decoding_or_gpu_class_covers_no_cell(fake_prompt_files):

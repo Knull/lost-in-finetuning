@@ -294,11 +294,12 @@ def record_safety(variant: str, set_name: str, lang: str, split: str, *, judge: 
     """Write the AuditKIT RunResult of one variant/set/lang/split from our final labels and return its
     path (``auditkit_path``). The labels are ``load_records(complete=True, dtype=dtype)`` of the
     ``judge`` role: ``dtype`` defaults to ``generation.dtype``, and a cell in another precision is
-    refused unless named and licensed by Gate 0 (``pipeline.check_dtype_licence``); its record then
-    carries the dtype in its file name. The lift metadata adds the cell's provenance, the loose harmful
-    rate and the judge-failure count. Raises instead of writing if the labels cannot be reported or
-    AuditKIT's numbers differ from ``lift.stats.paired.rates`` in any way. A retired (empty) record at
-    the path is replaced like any other.
+    refused unless named and licensed by Gate 0 (``pipeline.check_dtype_licence``) for a cell generated
+    and judged as its comparison was; its record then carries the dtype in its file name. The lift
+    metadata adds the cell's provenance, the loose harmful rate and the judge-failure count. Raises
+    instead of writing if the labels cannot be reported or AuditKIT's numbers differ from
+    ``lift.stats.paired.rates`` in any way. A retired (empty) record at the path is replaced like any
+    other.
     """
     from lift.judge.pipeline import PROVENANCE_META, judge_dir, provenance
 
