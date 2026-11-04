@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import csv
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -47,9 +48,10 @@ def fixture_train_cfg(rows: int = 5) -> dict[str, Any]:
     return cfg
 
 
-def fixture_hub() -> FakeHub:
-    """orbench, aya_redteaming and belebele (every language) plus the three SFT sources."""
-    return fake_hub(extra=SftHub().sources)
+def fixture_hub(sft_sources: Mapping[str, list[dict]] | None = None) -> FakeHub:
+    """orbench, aya_redteaming and belebele (every language) plus the three SFT sources, any of them
+    ("aya_dataset", "indicalign", "dolly") replaced by ``sft_sources``."""
+    return fake_hub(extra={**SftHub().sources, **(sft_sources or {})})
 
 
 def fixture_ctx(**overrides: Any) -> build.BuildContext:

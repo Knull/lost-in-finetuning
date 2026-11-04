@@ -28,11 +28,13 @@ from fake_sft import (
     IND_HAD_CONTEXT,
     IND_NEAR_PAIR,
     IND_NO_MATCH,
+    QUIRK_DRAW,
     FakeCurate,
     SftHub,
     aya_dataset_rows,
     dolly_rows,
     indicalign_rows,
+    near,
 )
 
 from lift import config, splits
@@ -57,17 +59,7 @@ def training_cfg(rows=5):
 
 CFG = project_cfg()
 SEED = CFG["split_seed"]
-ND = CFG["sources"]["sft"]["heldout"]["near_dup"]
 VARIANTS = ("aya/dedup", "indicalign/dedup", "aya/raw")
-
-
-def near(a_ins, a_res, b_ins, b_res, nd=ND):
-    """The near-duplicate rule written out pair by pair (the reference for the indexed join)."""
-    ins = (bool(dup_key(a_ins)) and bool(dup_key(b_ins))
-           and jaccard(char_ngrams(a_ins, nd["ngram"]), char_ngrams(b_ins, nd["ngram"])) >= nd["instruction"])
-    long = len(dup_key(a_res)) >= nd["response_min_chars"] and len(dup_key(b_res)) >= nd["response_min_chars"]
-    res = long and jaccard(char_ngrams(a_res, nd["ngram"]), char_ngrams(b_res, nd["ngram"])) >= nd["response"]
-    return ins or res
 
 
 @pytest.fixture
@@ -358,6 +350,38 @@ def test_exclude_heldout_removes_near_duplicates_from_both_pools(pools):
         sft.exclude_heldout(pools, [stray], cfg=CFG)
 
 
+def test_a_draw_that_hits_every_near_duplicate_quirk(data_dir):
+    """The project-seed draw of 2 per source meets no quirk; 10 per source is forced to meet them all
+    (fake_sft.QUIRK_DRAW), so the avoid rule and the exclusion both have something to remove."""
+    cfg = project_cfg(per_source=QUIRK_DRAW["per_source"], utility=QUIRK_DRAW["utility"])
+    pools = sft.load_pools(cfg=cfg, hub=SftHub(), lid=FakeLID())
+    heldout = sft.build_utility_heldout(pools, cfg=cfg)
+    ids = {r.pid for r in heldout}
+    a, b = IND_NEAR_PAIR
+    assert len(ids) == 20 and {f"utl-aya-{AYA_CROSS:05d}", "utl-aya-00003", f"utl-ind-{a:05d}"} <= ids
+    assert ids.isdisjoint({f"utl-aya-{AYA_NEAR_DUP:05d}", f"utl-ind-{IND_CROSS:05d}", f"utl-ind-{b:05d}"})
+    # without avoid the indicalign draw would take ind 12, a near-duplicate of the aya draw's 17
+    alone = sft.select_heldout(pools["indicalign"][0], 10, seed=SEED, tag="utility:indicalign", cfg=cfg)
+    assert IND_CROSS in {r.idx for r in alone}
+    for i, a in enumerate(heldout):
+        for b in heldout[i + 1:]:
+            assert not near(a.text, a.extra["reference"], b.text, b.extra["reference"]), (a.pid, b.pid)
+
+    train = sft.exclude_heldout(pools, heldout, cfg=cfg)
+    report = sft.build_candidates(train, pool_counts={k: c for k, (_, c) in pools.items()}, cfg=cfg,
+                                  train_cfg=training_cfg(5), curate=FakeCurate())
+    aya, ind = report["sources"]["aya"], report["sources"]["indicalign"]
+    assert (aya["near_dup_excluded"], aya["near_dup_of"]) == (1, {"aya": 1, "indicalign": 0})
+    assert (ind["near_dup_excluded"], ind["near_dup_of"]) == (2, {"aya": 1, "indicalign": 1})
+    assert report["decision"] == {"rows_target": 5, "rows": 1, "limited_by": "indicalign"}
+    for key in VARIANTS:
+        rows = list(read_jsonl(data_dir / "sft" / key / "sft_messages.jsonl"))
+        assert rows
+        for row in rows:
+            user, assistant = (m["content"] for m in row["messages"])
+            assert not [r.pid for r in heldout if near(user, assistant, r.text, r.extra["reference"])]
+
+
 # ---------------------------------------------------------------- candidates
 
 
@@ -484,6 +508,21 @@ def test_build_candidate_does_one_candidate_end_to_end(data_dir, pools):
     assert not (data_dir / "sft" / "report.json").exists()
     with pytest.raises(ValueError, match="unknown candidate"):
         sft.build_candidate("dolly", cfg=CFG, train_cfg=training_cfg(), curate=FakeCurate(), pools=pools)
+
+
+def test_build_candidate_follows_a_frozen_utility_split(data_dir, pools):
+    heldout = sft.build_utility_heldout(pools, cfg=CFG)
+    sizes = CFG["sizes"]["utility"]
+    frozen = splits.assign_splits([r.pid for r in heldout], sizes, SEED)
+    stale = {("utl-aya-00099" if pid == heldout[0].pid else pid): s for pid, s in frozen.items()}
+    splits.save_split("utility", stale, seed=SEED, sizes=sizes)        # frozen from another draw
+    with pytest.raises(ValueError, match=r"utility.json holds 4 utility pids but the held-out draw gives 4: "
+                                         r"1 frozen pids not drawn \(e.g. \['utl-aya-00099'\]\)"):
+        sft.build_candidate("aya", cfg=CFG, train_cfg=training_cfg(), curate=FakeCurate(), pools=pools)
+    assert not data_dir.exists()                                        # nothing written
+    splits.save_split("utility", frozen, seed=SEED, sizes=sizes, overwrite=True)
+    out = sft.build_candidate("aya", cfg=CFG, train_cfg=training_cfg(), curate=FakeCurate(), pools=pools)
+    assert {"utl-" + r["id"] for r in read_jsonl(out / "sft_messages.jsonl")}.isdisjoint(frozen)
 
 
 # ---------------------------------------------------------------- the real CuratorKIT

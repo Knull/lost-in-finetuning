@@ -10,7 +10,13 @@ English "Placeholder request N about TOPIC" instructions. Built-in quirks, by de
   instruction has two Dolly records, one with a context), row 6 matches no Dolly record; row 4
   matches only after whitespace is collapsed, row 5 only after NFC, row 8's context is blank. Row 9
   has an English response, 14's response near-duplicates 13's, 15 repeats 11's Hindi exactly.
-With sources.sft.heldout.per_source = 2 both pools keep at least 8 deduplicated training rows.
+With sources.sft.heldout.per_source = 2 both pools keep at least 8 deduplicated training rows, but
+that draw (the project seed) hits none of the near-duplicate quirks. With per_source = 10
+(``QUIRK_DRAW``) the draw is forced to hit them all: aya has 11 eligible rows and may take only one
+of the near pair 3/8, so it takes the other ten (3 by rank, and 17); indicalign has 12 and may take
+neither ind 12 (a near-duplicate of aya 17) nor both of 13/14, so it takes the other ten (13 by
+rank). The exclusion then removes aya 8, ind 14 and, across sources, ind 12, leaving aya 1, 6, 13
+and ind 11, 15 to train on.
 Not a conftest (P02 owns tests/conftest.py): import with ``from fake_sft import ...``.
 """
 
@@ -18,9 +24,26 @@ from __future__ import annotations
 
 import json
 import unicodedata
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
-from lift.data.text import dup_key
+from lift import config
+from lift.data.text import char_ngrams, dup_key, jaccard
+
+# sources.sft.heldout.per_source and sizes.utility for the draw that hits every near-duplicate quirk.
+QUIRK_DRAW: dict[str, Any] = {"per_source": 10, "utility": {"dev": 5, "final": 15}}
+
+
+def near(a_ins: str, a_res: str, b_ins: str, b_res: str, nd: Mapping[str, Any] | None = None) -> bool:
+    """The held-out near-duplicate rule written out pair by pair (the reference for sft's indexed
+    join). ``nd``: sources.sft.heldout.near_dup, the project config's by default."""
+    nd = nd if nd is not None else config.load("project")["sources"]["sft"]["heldout"]["near_dup"]
+    ins = (bool(dup_key(a_ins)) and bool(dup_key(b_ins))
+           and jaccard(char_ngrams(a_ins, nd["ngram"]), char_ngrams(b_ins, nd["ngram"])) >= nd["instruction"])
+    long = len(dup_key(a_res)) >= nd["response_min_chars"] and len(dup_key(b_res)) >= nd["response_min_chars"]
+    res = long and jaccard(char_ngrams(a_res, nd["ngram"]), char_ngrams(b_res, nd["ngram"])) >= nd["response"]
+    return ins or res
 
 # (instruction, response) pairs, Hindi, invented.
 _AYA = [

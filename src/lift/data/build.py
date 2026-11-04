@@ -20,13 +20,38 @@ Where each file comes from (``build_all``; sets in SETS order, languages in conf
 A PolyRefuse family comes from PolyRefuse iff ``polyrefuse.has_file``; otherwise en reads the
 English source and every other language is translated from the English records, never from another
 translation. redteam, utility and sft are Hindi: a build whose --langs leave out hi skips them.
+Whatever --only and --langs say, a build of harmful or easy_benign reads the English of all five
+PolyRefuse families and every translation of languages.all that has_file lists (both kinds), so the
+links below, and the splits and exclusions they make, never depend on the build's options.
+
+Links (``_links``; configs/project.yaml split_near_dup, the held-out instruction rule): two prompts
+are linked if their English (text_en; utility: its Hindi text) is equal by dup_key or has a character
+3-gram Jaccard >= 0.7 (exact fractions, one self-join on an inverted index), or if their PolyRefuse
+translations into one language are equal by dup_key. On the pinned data the 1,571 PolyRefuse prompts
+(both kinds, test train val; harmless val is unused) give 43 linked pairs, all harmful and all by
+their English: 11 equal (the 10 test repeats and prh-train-0226) and 32 near (0.707-0.946); 21 join
+two test prompts, 18 a train/val and a test prompt, 4 two train/val prompts. 14 are also equal in a
+translation (th 12, zh 11, es 10, ar 7) and none in a translation alone, so that rule is a guard
+today. No harmful-harmless link.
 
 Per (set, lang), in order: the base records (English; Hindi for redteam and utility) -> pid
 exclusions -> PolyRefuse load or translation -> readers' spot-check verdicts -> split stamp ->
-GlotLID -> the file, its excluded file and its report.
-- Exclusions, in every language and before anything is translated: a train/val prompt whose
-  English dup_key equals a harmful or harmless test prompt's is ``duplicate_of:<test pid>``
-  (prh-train-0226 is prh-test-0008); Aya Red-teaming's repeats (sources.redteam_records) likewise.
+same-text check -> GlotLID -> the file, its excluded file and its report.
+- Exclusions, in every language and before anything is translated (``_test_links``): a train/val
+  prompt of either kind with a direct link to a test prompt of either kind is out, as
+  ``duplicate_of:<pid>`` naming the smallest test pid with the same English, else
+  ``near_duplicate_of:<pid>`` naming the smallest linked test pid, with a ``detail`` giving the
+  evidence for that pair and the other linked test pids ("en 0.946; th same text", "en 0.819; also
+  prh-test-0251"). One linked only to train/val prompts stays. On the pinned data 17, all harmful:
+  14 train, 3 val; prh-train-0226 is the one duplicate_of (prh-test-0008); prh-train-0009 and
+  prh-train-0252 are also prh-test-0050 and prh-test-0079 word for word in th. Aya Red-teaming's
+  repeats (sources.redteam_records) are ``duplicate_of`` too.
+- Same text after the split stamp (``_same_text``, every PromptRecord file): a train/val record whose
+  text (dup_key) a dev/final record of the file also has is left out of that file alone, listed as
+  ``same_text_as:<the smallest such pid>``. One text in two split-file splits (fit, dev, final)
+  cannot be regrouped once the split is frozen: listed as ``cross_split_duplicates`` (pids and splits)
+  in the report and counted in build.json's files, with a WARNING. The links make this a no-op in
+  PolyRefuse's own languages; it guards hi, our zh harmless translations and hard_benign's.
 - Translation failures (translate.py's rules) are listed in the report and the pid is left out of
   that file, never replaced by English. TranslationBlocked (HTTP 429, or ten items in a row failing
   every retry) stops all translation for the rest of the run: every file that still needs one is
@@ -43,9 +68,17 @@ Splits (``freeze_split``): data/splits/{harmful,easy_benign,hard_benign,utility,
 the test pids of harmful and easy_benign and every pid of the others. A committed file is loaded and
 must cover exactly the set's pids and only the configured split names (ValueError otherwise: the
 sources changed); it is never rewritten, and a fresh assignment that differs only logs a warning. A
-missing file is assigned once from the sorted pids, cfg sizes and split_seed, with prompts whose
-English repeats grouped so they share a split (harmful repeats 10), and saved. Train and val pids
-keep "train" and "val"; redteam is "final". save_split stamps the creation date into a new file.
+missing file is assigned once from the sorted pids, cfg sizes and split_seed and saved, with a
+WARNING to commit it. Groups share a split (assign_splits ``groups``): the connected components of
+the links among a set's split pids (a train prompt never joins two test prompts; hard_benign and
+utility get the English rule too), and Belebele's questions on one passage (one ``link``). On the
+pinned data: harmful 21 groups of two (the 10 repeats and 11 near pairs at 0.715-0.890; prh-test-0000
+and prh-test-0142 are also one zh text); belebele 412 passages with two questions (76 have one); no
+group in easy_benign, hard_benign (closest pair 0.584) or utility (0.692). Train and val pids keep
+"train" and "val"; redteam is "final". save_split stamps the creation date into a new file. A build
+of utility or sft freezes (or checks) the utility split first and every training pool must be
+disjoint from its pids, so a held-out draw that changed (lift.data.sft) stops it with ValueError
+before a training row is written.
 
 Spot checks: ``write_spotcheck_sheets`` writes, per language (default hi zh es), n unchecked
 dev/final machine translations per set by sha256 rank (ours and PolyRefuse's) and a failures sheet
@@ -59,14 +92,21 @@ and bad moves it to prompts/excluded/ if the reader saw the current text; a verd
 builds the record from the English one (ok accepts the engine's output). A verdict that no longer
 fits is logged and listed, never applied.
 
-Files under the data dir (lift.paths). Everything but build.json is byte-identical on a rebuild:
+Files under the data dir (lift.paths). A rebuild reproduces every file byte for byte except build.json
+(run id, timings) and CuratorKIT's run records (lift.data.sft): interim/sft/ and the
+sft/{cand}/{variant}/curatorkit/ copies of manifest.json and lexsi_provenance.json carry
+run_timestamp, wall_clock_seconds and created_at.
     prompts/{set}_{lang}.jsonl           PromptRecord lines (belebele: dicts), sorted by pid
     prompts/excluded/{set}_{lang}.jsonl  records readers marked bad (extra.excluded, excluded_reason)
     prompts/reports/{set}_{lang}.json    counts by split and engine; lid_failures, translation
-                                         failures (and how each was resolved), exclusions, spot-check
-                                         counts, the file's sha256; no text
-    prompts/reports/build.json           the last build: options, sources, splits, files, skipped,
-                                         the SFT row decision, PolyRefuse alignment, timings
+                                         failures (and how each was resolved), exclusions (reason;
+                                         detail for links), spot-check counts, the file's sha256;
+                                         PromptRecord files also list cross_split_duplicates
+                                         (belebele reports have no such key); no text
+    prompts/reports/build.json           the last build: options, sources, splits (status, counts,
+                                         groups and their sizes), files (PromptRecord files also
+                                         count cross_split_duplicates), skipped, the SFT row
+                                         decision, PolyRefuse alignment, timings
     interim/translations/                the translation cache and spotchecks.jsonl
     sft/...                              the candidates and sft/report.json (lift.data.sft)
 Logs, reports and exception messages carry counts, pids, labels and hashes, never prompt text.
@@ -78,21 +118,24 @@ import copy
 import csv
 import json
 import logging
+import math
 import os
 import re
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from fractions import Fraction
+from itertools import combinations
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from lift import config, manifest, splits
 from lift.data import polyrefuse, sft, sources, translate
 from lift.data.sources import Hub
-from lift.data.text import clean_text, dup_key
+from lift.data.text import char_ngrams, clean_text, dup_key
 from lift.data.translate import (
     Backend,
     TranslationBlocked,
@@ -238,6 +281,7 @@ class _Sources:
     base: dict[str, list[PromptRecord]] = field(default_factory=dict)       # set -> records, exclusions out
     families: dict[str, dict[tuple[str, str], list[PromptRecord]]] = field(default_factory=dict)
     exclusions: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    links: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)   # (pid, pid) -> how (_links)
     splits: dict[str, dict[str, str]] = field(default_factory=dict)
     root: Path | None = None
     alignment: dict[str, Any] | None = None
@@ -353,12 +397,30 @@ def _count(values: Iterable[str]) -> dict[str, int]:
 # ---------------------------------------------------------------------------- sources and splits
 
 
+class _Near(NamedTuple):
+    """split_near_dup: the character n-gram size and the Jaccard threshold (exact: 0.7 -> 7/10)."""
+
+    ngram: int
+    jaccard: Fraction
+
+
+def _split_near(cfg: Mapping[str, Any]) -> _Near:
+    nd = cfg["split_near_dup"]
+    near = _Near(int(nd["ngram"]), Fraction(str(nd["jaccard"])))
+    if near.ngram < 1 or not 0 < near.jaccard <= 1:
+        raise ValueError(f"split_near_dup needs ngram >= 1 and jaccard in (0, 1], got {dict(nd)}")
+    return near
+
+
 def _prepare(run: _Run, sets: set[str]) -> _Sources:
-    """Load what the sets are built from (exclusions applied), then freeze their splits."""
+    """Load what the sets are built from (exclusions applied), link their prompts, then freeze their
+    splits. "sft" freezes (or checks) the utility split as well, so a held-out draw that no longer
+    matches a frozen utility split stops the build before any training row is written."""
     ctx, cfg = run.ctx, run.cfg
+    near = _split_near(cfg)
     src = _Sources()
     if sets & {"harmful", "easy_benign"}:
-        _prepare_polyrefuse(run, src)
+        _prepare_polyrefuse(run, src, near)
     if "hard_benign" in sets:
         src.base["hard_benign"] = sources.load_orbench_hard_sample(cfg=cfg, hub=ctx.load_hub())
     if "redteam" in sets:
@@ -373,57 +435,146 @@ def _prepare(run: _Run, sets: set[str]) -> _Sources:
             src.train_pools = sft.exclude_heldout(src.pools, src.base["utility"], cfg=cfg)
     if "belebele" in sets:
         src.belebele_en = sources.load_belebele("en", cfg=cfg, hub=ctx.load_hub())
+    for name in ("hard_benign", "utility"):
+        if name in src.base:
+            links = _links(src.base[name], {}, near)
+            src.links.update(links)
+            log.info("%s: %d linked pairs of prompts", name, len(links))
     for name in SPLIT_SETS:
-        if name in sets:
+        if name in sets or (name == "utility" and "sft" in sets):
             pids, groups = _split_pids(src, name)
             mapping, status = _freeze(name, pids, cfg=cfg, groups=groups, create=run.create_splits)
             src.splits[name] = mapping
-            run.splits[name] = {"status": status, "n": len(mapping),
-                                "by_split": _count(mapping.values()), "grouped": len(groups or {})}
+            sizes = Counter(Counter(groups.values()).values())
+            run.splits[name] = {"status": status, "n": len(mapping), "by_split": _count(mapping.values()),
+                                "grouped": len(groups), "groups": sum(sizes.values()),
+                                "group_sizes": {str(n): sizes[n] for n in sorted(sizes)}}
     return src
 
 
-def _prepare_polyrefuse(run: _Run, src: _Sources) -> None:
-    """The PolyRefuse English records per family, with train/val repeats of a test prompt excluded."""
+def _prepare_polyrefuse(run: _Run, src: _Sources, near: _Near) -> None:
+    """The PolyRefuse English records per family, their links, and the train/val prompts linked to a
+    test prompt excluded. Every translation polyrefuse.has_file lists for languages.all is loaded,
+    whatever --only and --langs say, so the links, and with them the splits, never depend on the
+    build's options."""
     cfg = run.cfg
     root = src.root = run.ctx.load_root()
-    src.alignment = polyrefuse.check_alignment(root, cfg["languages"]["all"], lid=run.ctx.load_lid(), cfg=cfg)
+    langs = list(cfg["languages"]["all"])
+    src.alignment = polyrefuse.check_alignment(root, langs, lid=run.ctx.load_lid(), cfg=cfg)
     english = {(kind, split): polyrefuse.load_polyrefuse(root, kind, split, "en", cfg=cfg)
                for kind, split in polyrefuse.BUILD_FILES}
-    tests: dict[str, str] = {}                        # dup_key -> the smallest test pid, harmful or harmless
-    for (_, split), records in english.items():
-        if split == "test":
-            for rec in records:
-                key = dup_key(rec.text)
-                tests[key] = min(tests.get(key, rec.pid), rec.pid)
+    translated = {lang: [rec for kind, split in polyrefuse.BUILD_FILES
+                         if polyrefuse.has_file(root, kind, split, lang, cfg=cfg)
+                         for rec in polyrefuse.load_polyrefuse(root, kind, split, lang, cfg=cfg)]
+                  for lang in langs if lang != "en"}
+    records = [rec for recs in english.values() for rec in recs]
+    links = _links(records, translated, near)
+    src.links.update(links)
+    excluded = {e["pid"]: e for e in _test_links(records, links, near)}
+    by = Counter(how for hows in links.values() for how in hows)
+    log.info("PolyRefuse: %d linked pairs of prompts (%s), %d of them between test prompts; %d train/val "
+             "prompts linked to a test prompt", len(links), ", ".join(f"{k} {v}" for k, v in by.items()),
+             sum(_is_test(a) and _is_test(b) for a, b in links), len(excluded))
     for kind, set_name in polyrefuse.SET_NAMES.items():
-        families: dict[tuple[str, str], list[PromptRecord]] = {}
-        excluded: list[dict[str, str]] = []
-        for (k, split), records in english.items():
-            if k != kind:
-                continue
-            kept = []
-            for rec in records:
-                first = None if split == "test" else tests.get(dup_key(rec.text))
-                if first is None:
-                    kept.append(rec)
-                else:
-                    excluded.append({"pid": rec.pid, "reason": f"duplicate_of:{first}"})
-            families[(k, split)] = kept
+        families = {(k, split): [r for r in recs if r.pid not in excluded]
+                    for (k, split), recs in english.items() if k == kind}
         src.families[set_name] = families
         src.base[set_name] = sorted((r for recs in families.values() for r in recs), key=_pid)
-        src.exclusions[set_name] = sorted(excluded, key=lambda e: e["pid"])
-        if excluded:
-            log.info("%s: excluded in every language %s", set_name,
-                     ", ".join(f"{e['pid']} ({e['reason']})" for e in src.exclusions[set_name]))
+        prefix = f"{polyrefuse.PID_PREFIX[kind]}-"
+        src.exclusions[set_name] = [e for pid, e in sorted(excluded.items()) if pid.startswith(prefix)]
+        for e in src.exclusions[set_name]:
+            log.info("%s: %s excluded in every language: %s (%s)", set_name, e["pid"], e["reason"],
+                     e["detail"])
 
 
-def _split_pids(src: _Sources, name: str) -> tuple[list[str], dict[str, str] | None]:
-    """The pids a split file covers, and the groups of repeated prompts that must share a split."""
+def _english(rec: PromptRecord) -> str:
+    """The text links compare: the English source (text_en), else the text itself (utility: Hindi)."""
+    return rec.text_en if rec.text_en is not None else rec.text
+
+
+def _pair(a: str, b: str) -> tuple[str, str]:
+    return (a, b) if a <= b else (b, a)
+
+
+def _is_test(pid: str) -> bool:
+    """A PolyRefuse test pid (prh-test-*, prb-test-*)."""
+    return any(pid.startswith(f"{prefix}-test-") for prefix in polyrefuse.PID_PREFIX.values())
+
+
+def _links(records: Sequence[PromptRecord], translated: Mapping[str, Sequence[PromptRecord]],
+           near: _Near) -> dict[tuple[str, str], tuple[str, ...]]:
+    """Every linked pair of prompts (smaller pid first) -> what links it: "en" if their English
+    (``_english``) is equal by dup_key or has a character n-gram Jaccard >= near.jaccard, then each
+    language of ``translated`` (lang -> records, same pids) in which their texts are equal by dup_key.
+    One self-join on an inverted n-gram index (sft.jaccard_pairs): 1,571 prompts take well under a
+    second."""
+    found: dict[tuple[str, str], list[str]] = defaultdict(list)
+    pids = [rec.pid for rec in records]
+    grams = [char_ngrams(_english(rec), near.ngram) for rec in records]
+    for i, j in sft.jaccard_pairs(grams, grams, near.jaccard):          # equal dup_keys have Jaccard 1
+        if i < j:
+            found[_pair(pids[i], pids[j])].append("en")
+    for lang, recs in translated.items():
+        same: dict[str, set[str]] = defaultdict(set)
+        for rec in recs:
+            if key := dup_key(rec.text):
+                same[key].add(rec.pid)
+        for group in same.values():
+            for a, b in combinations(sorted(group), 2):
+                found[(a, b)].append(lang)
+    return {pair: tuple(found[pair]) for pair in sorted(found)}
+
+
+def _evidence(a: PromptRecord, b: PromptRecord, how: Iterable[str], near: _Near) -> str:
+    """Why two prompts are linked, for a report: "en same text" or their English character n-gram
+    Jaccard (rounded down to 3 places, so a pair under the threshold never shows as reaching it), then
+    the languages whose texts are equal, e.g. "en 0.947; th same text"."""
+    ga, gb = char_ngrams(_english(a), near.ngram), char_ngrams(_english(b), near.ngram)
+    if dup_key(_english(a)) == dup_key(_english(b)):
+        en = "en same text"
+    else:
+        score = Fraction(len(ga & gb), len(ga | gb)) if ga | gb else Fraction(0)
+        en = f"en {math.floor(score * 1000) / 1000:.3f}"
+    same = [lang for lang in how if lang != "en"]
+    return "; ".join([en, *([" ".join(same) + " same text"] if same else [])])
+
+
+def _test_links(records: Sequence[PromptRecord], links: Mapping[tuple[str, str], Sequence[str]],
+                near: _Near) -> list[dict[str, str]]:
+    """The exclusion {"pid", "reason", "detail"} of every train/val prompt with a direct link to a test
+    prompt of either kind, by pid: ``duplicate_of:<pid>`` naming the smallest test pid with the same
+    English dup_key (prh-train-0226 is prh-test-0008), else ``near_duplicate_of:<pid>`` naming the
+    smallest linked test pid. ``detail`` is the evidence for that pair (``_evidence``) and the other
+    linked test pids ("also ..."). A train/val prompt linked only to train/val prompts stays."""
+    by_pid = {rec.pid: rec for rec in records}
+    linked: dict[str, set[str]] = defaultdict(set)
+    for a, b in links:
+        if _is_test(a) != _is_test(b):
+            test, other = (a, b) if _is_test(a) else (b, a)
+            linked[other].add(test)
+    out = []
+    for pid, tests in sorted(linked.items()):
+        key = dup_key(_english(by_pid[pid]))
+        same = sorted(t for t in tests if dup_key(_english(by_pid[t])) == key)
+        first = (same or sorted(tests))[0]
+        detail = _evidence(by_pid[pid], by_pid[first], links[_pair(pid, first)], near)
+        if len(tests) > 1:
+            detail += "; also " + " ".join(sorted(tests - {first}))
+        out.append({"pid": pid, "reason": f"{'duplicate_of' if same else 'near_duplicate_of'}:{first}",
+                    "detail": detail})
+    return out
+
+
+def _split_pids(src: _Sources, name: str) -> tuple[list[str], dict[str, str]]:
+    """The pids a split file covers, and the groups that must share a split (``_groups``): the
+    connected components of src.links among them; Belebele's questions on one passage (one link)."""
     if name == "belebele":
-        return [d["pid"] for d in src.belebele_en], None
-    records = [r for r in src.base[name] if _in_scope(name, r.pid)]
-    return [r.pid for r in records], _groups(records)
+        pids = [d["pid"] for d in src.belebele_en]
+        first: dict[str, str] = {}
+        links = [(first.setdefault(d["link"], d["pid"]), d["pid"]) for d in src.belebele_en]
+        return pids, _groups(pids, links)
+    pids = [r.pid for r in src.base[name] if _in_scope(name, r.pid)]
+    return pids, _groups(pids, src.links)
 
 
 def _in_scope(set_name: str, pid: str) -> bool:
@@ -433,13 +584,32 @@ def _in_scope(set_name: str, pid: str) -> bool:
     return set_name in SPLIT_SETS
 
 
-def _groups(records: Iterable[PromptRecord]) -> dict[str, str]:
-    """pid -> the smallest pid with the same dup_key text (the English one when there is one), for
-    prompts that repeat; prompts that occur once are left out (a plain assignment for them)."""
-    members: dict[str, list[str]] = {}
-    for rec in sorted(records, key=_pid):
-        members.setdefault(dup_key(rec.text_en if rec.text_en is not None else rec.text), []).append(rec.pid)
-    return {pid: pids[0] for pids in members.values() if len(pids) > 1 for pid in pids}
+def _groups(pids: Iterable[str], links: Iterable[tuple[str, str]]) -> dict[str, str]:
+    """pid -> the smallest pid of its group: the connected components of ``links`` among ``pids``.
+    A link with an end outside ``pids`` is ignored, so a train prompt never joins two test prompts.
+    Pids in no link are left out (assign_splits gives each its own slot)."""
+    inside = set(pids)
+    parent: dict[str, str] = {}
+
+    def root(pid: str) -> str:
+        while parent[pid] != pid:
+            pid = parent[pid]
+        return pid
+
+    for a, b in links:
+        if a == b or a not in inside or b not in inside:
+            continue
+        ra, rb = root(parent.setdefault(a, a)), root(parent.setdefault(b, b))
+        parent[max(ra, rb)] = min(ra, rb)              # the root stays the component's smallest pid
+    return {pid: root(pid) for pid in sorted(parent)}
+
+
+def _shown(path: Path) -> str:
+    """A path for a message: relative to the repo (data/splits/harmful.json) when inside it."""
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def freeze_split(name: str, pids: Iterable[str], *, cfg: Mapping[str, Any],
@@ -448,9 +618,10 @@ def freeze_split(name: str, pids: Iterable[str], *, cfg: Mapping[str, Any],
 
     If data/splits/{name}.json exists it is the truth: it must cover exactly ``pids`` and use only the
     split names of cfg sizes (ValueError naming counts and example pids otherwise: the sources
-    changed). It is never rewritten; a fresh assignment that differs only logs a warning. If it is
-    missing (and ``create``): assign_splits(sorted pids, cfg sizes, cfg split_seed, groups), saved
-    with save_split. ``create=False`` raises FileNotFoundError instead.
+    changed). It is never rewritten; a fresh assignment that differs only logs a warning, and so do
+    groups the file splits. If it is missing (and ``create``): assign_splits(sorted pids, cfg sizes,
+    cfg split_seed, groups), saved with save_split, and a WARNING says to commit it. ``create=False``
+    raises FileNotFoundError instead.
     """
     return _freeze(name, pids, cfg=cfg, groups=groups, create=create)[0]
 
@@ -467,15 +638,18 @@ def _freeze(name: str, pids: Iterable[str], *, cfg: Mapping[str, Any], groups: M
             raise FileNotFoundError(f"{path} does not exist: run `lift data build --only {name}` first")
         mapping = splits.assign_splits(pids, sizes, seed, groups)
         splits.save_split(name, mapping, seed=seed, sizes=sizes)
-        log.info("split %s: created %s %s", name, path.name, _count(mapping.values()))
+        log.warning("split %s: created %s: commit it; split files are frozen once committed (%s)", name,
+                    _shown(path), ", ".join(f"{k} {v}" for k, v in _count(mapping.values()).items()))
         return mapping, "created"
     mapping = splits.load_split(name)
     missing, extra = sorted(set(pids) - mapping.keys()), sorted(mapping.keys() - set(pids))
     if missing or extra:
+        why = ("The utility held-out draw changed (the SFT pools, their cleaning or sources.sft.heldout), "
+               "so nothing is trained on" if name == "utility" else "The sources changed")
         raise ValueError(f"{path} covers {len(mapping)} pids but the sources give {len(pids)}: "
                          f"{len(missing)} missing (e.g. {missing[:5]}), {len(extra)} not in the sources "
-                         f"(e.g. {extra[:5]}). The sources changed; split files are frozen and never "
-                         "rewritten (a new split needs a docs/decisions.md entry)")
+                         f"(e.g. {extra[:5]}). {why}; split files are frozen and never rewritten (a new "
+                         "split needs a docs/decisions.md entry)")
     unknown = sorted(pid for pid, split in mapping.items() if split not in sizes)
     if unknown:
         raise ValueError(f"{path} assigns {len(unknown)} pids to splits not in sizes.{name} {list(sizes)}, "
@@ -496,7 +670,7 @@ def _freeze(name: str, pids: Iterable[str], *, cfg: Mapping[str, Any], groups: M
         members.setdefault(key, set()).add(mapping[pid])
     straddle = sorted(key for key, found in members.items() if len(found) > 1)
     if straddle:
-        log.warning("split %s: %d groups of repeated prompts straddle splits in %s, e.g. %s", name,
+        log.warning("split %s: %d groups of linked prompts straddle splits in %s, e.g. %s", name,
                     len(straddle), path.name, straddle[:5])
     return mapping, status
 
@@ -719,13 +893,49 @@ def _stamp(set_name: str, rec: PromptRecord, mapping: Mapping[str, str] | None) 
     return rec
 
 
+def _same_text(records: Sequence[PromptRecord]) -> tuple[list[PromptRecord], list[dict[str, str]],
+                                                         list[list[dict[str, str]]]]:
+    """Texts one file holds more than once (dup_key), after the split stamp. A train/val record whose
+    text a dev/final record also has is dropped (``same_text_as:<the smallest such pid>``). Records of
+    one text in different split-file splits (fit, dev, final) cannot be regrouped once the split is
+    frozen: they come back as cross-split groups [{"pid", "split"}, ...]. Returns (the records kept,
+    the exclusions, the cross-split groups)."""
+    by_text: dict[str, list[PromptRecord]] = defaultdict(list)
+    for rec in records:
+        by_text[dup_key(rec.text)].append(rec)
+    dropped: dict[str, str] = {}
+    cross: list[list[dict[str, str]]] = []
+    for recs in by_text.values():
+        if len(recs) < 2:
+            continue
+        held = sorted(r.pid for r in recs if r.split in ("dev", "final"))
+        if held:
+            dropped.update((r.pid, held[0]) for r in recs if r.split in ("train", "val"))
+        framed = sorted((r for r in recs if r.split not in ("train", "val")), key=_pid)
+        if len({r.split for r in framed}) > 1:
+            cross.append([{"pid": r.pid, "split": r.split} for r in framed])
+    same = [{"pid": pid, "reason": f"same_text_as:{first}"} for pid, first in sorted(dropped.items())]
+    return [r for r in records if r.pid not in dropped], same, sorted(cross, key=lambda g: g[0]["pid"])
+
+
 def _write_prompts(run: _Run, src: _Sources, f: _File) -> None:
-    """Stamp splits, run GlotLID, write the file, its excluded file and its report."""
+    """Stamp splits, drop the train/val records whose text a dev/final record shares and list the
+    texts that straddle splits (``_same_text``: it matters for our own translations, hi, zh harmless
+    and hard_benign; PolyRefuse's languages are linked before), run GlotLID, write the file, its
+    excluded file and its report."""
+    name = f"{f.set_name}_{f.lang}"
     mapping = src.splits.get(f.set_name)
+    kept, same, cross = _same_text([_stamp(f.set_name, rec, mapping) for rec in sorted(f.records, key=_pid)])
+    if same:
+        log.info("%s: dropped %d train/val records whose text a dev/final record has: %s", name, len(same),
+                 ", ".join(f"{e['pid']} ({e['reason']})" for e in same))
+    if cross:
+        log.warning("%s: %d texts repeat across splits of the frozen %s split, which cannot regroup them: %s",
+                    name, len(cross), f.set_name,
+                    "; ".join(" ".join(f"{x['pid']} {x['split']}" for x in group) for group in cross))
     lid = run.ctx.load_lid()
     records, lid_failures = [], []
-    for rec in sorted(f.records, key=_pid):
-        rec = _stamp(f.set_name, rec, mapping)
+    for rec in kept:
         info = lid_info(lid, rec.text)
         if not lid.is_lang(rec.text, f.lang):
             lid_failures.append({"pid": rec.pid, "label": info.label, "prob": info.prob})
@@ -741,7 +951,8 @@ def _write_prompts(run: _Run, src: _Sources, f: _File) -> None:
         "engines": _count(rec.translation.engine if rec.translation else "original" for rec in records),
         "lid_failures": lid_failures,
         "translation_failures": sorted(f.failures, key=lambda x: (x["pid"], x["engine"])),
-        "exclusions": sorted(f.exclusions, key=lambda x: x["pid"]),
+        "exclusions": sorted([*f.exclusions, *same], key=lambda x: x["pid"]),
+        "cross_split_duplicates": cross,
         "spotchecks": {"applied": {v: f.applied[v] for v in VERDICTS},
                        "checked": sum(bool(r.translation and r.translation.checked) for r in records),
                        "edited": sum(bool(r.translation and r.translation.edited) for r in records),
@@ -751,6 +962,7 @@ def _write_prompts(run: _Run, src: _Sources, f: _File) -> None:
         report["fallback"] = f.fallback
     _write_file(run, f.set_name, f.lang, [rec.model_dump(mode="json") for rec in records],
                 [rec.model_dump(mode="json") for rec in excluded], report)
+    run.files[name]["cross_split_duplicates"] = len(cross)
 
 
 def _build_belebele(run: _Run, src: _Sources, lang: str) -> None:
@@ -801,15 +1013,17 @@ def _write_file(run: _Run, set_name: str, lang: str, rows: list[dict], excluded:
 
 
 def _build_sft(run: _Run, src: _Sources) -> dict[str, Any]:
-    """The CuratorKIT candidates from the training pools the held-out set was removed from."""
+    """The CuratorKIT candidates from the training pools the held-out set was removed from. _prepare
+    froze or checked the utility split; every training pool must be disjoint from its pids before
+    anything is written."""
     if src.pools is None or src.train_pools is None:
         raise RuntimeError("the SFT pools were not prepared")
-    report = sft.build_candidates(src.train_pools, pool_counts={k: c for k, (_, c) in src.pools.items()},
-                                  cfg=run.cfg, train_cfg=run.ctx.train_cfg, curate=run.ctx.curate)
-    held = {rec.pid for rec in src.base["utility"]}
+    held = set(src.splits["utility"])
     for name, (rows, _) in src.train_pools.items():
         splits.check_disjoint(held, ("utl-" + r.row_id() for r in rows),
-                              what=f"the utility held-out set and the {name} training pool")
+                              what=f"the frozen utility split and the {name} training pool")
+    report = sft.build_candidates(src.train_pools, pool_counts={k: c for k, (_, c) in src.pools.items()},
+                                  cfg=run.cfg, train_cfg=run.ctx.train_cfg, curate=run.ctx.curate)
     return {"decision": report["decision"],
             "variants": {k: v["rows"] for k, v in sorted(report["variants"].items())},
             "report": "sft/report.json"}

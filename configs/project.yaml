@@ -72,6 +72,11 @@ unclear:
 
 seeds: [1, 2, 3]
 split_seed: 20261028
+# Which prompts must share a split, and which train/val prompts are dropped as copies of a test
+# prompt (lift.data.build): two prompts are linked if their English is equal (dup_key) or has a
+# character 3-gram Jaccard >= 0.7 (the instruction rule of sources.sft.heldout.near_dup), or if their
+# PolyRefuse translations into one language are equal. Added Nov 3 (P01).
+split_near_dup: {ngram: 3, jaccard: 0.7}
 
 sizes:
   harmful: {dev: 172, final: 400}            # PolyRefuse harmful test, 572 per language
