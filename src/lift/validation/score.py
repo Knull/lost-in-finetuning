@@ -43,9 +43,13 @@ pending while any Hindi round 1 row has no label and no 'skipped' note.
 
 Each labelled item's output is looked up in its generations file. The harness regenerates a whole
 file when one of its prompts is fixed, and the other prompts come back under the same keys but
-maybe with other text, while a judgement carries no hash of the text it judged. So an item whose
-text changed under its key, or whose key is gone and lacks a judgement, is left out as
-``superseded`` and counted. A missing or half-regenerated file proves nothing: the item stays.
+maybe with other text. So an item whose text changed under its key, or whose key is gone and lacks a
+judgement, is left out as ``superseded`` and counted. A missing or half-regenerated file proves
+nothing: the item stays. A judgement counts only if its ``output_sha`` (the sha256 of the output it
+judged, which P02 records) is that of the output now under the item's key, or of the output the
+reader was shown when the generations file cannot be read (``output_sha`` in the round's keys); any
+other judgement is skipped and counted (``checks.stale_judgements``), and the item waits for its
+judge.
 
 ``decide_primary_judge()`` applies ``judges.decision_rule`` to round 1, pooled over the four
 languages: the frontier judge becomes primary only if it agrees with the readers at least 5 points
@@ -292,9 +296,6 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
         inputs[labels_path(name).name] = sha256_file(labels_path(name))
 
     main = [it for name, its in entries.items() if sheets[name]["slot"] == "a" for it in its]
-    judged = load_judgements(
-        [Target(it["key"], it["variant"], it["set"], it["lang"], it["split"], it["pid"]) for it in main],
-        qwen3guard_judge=qwen3guard_judge, frontier_judge=frontier_judge)
     checks: dict = {"judge_failures": {"qwen3guard": 0, "frontier": 0},
                     "failure_reasons": {"qwen3guard": Counter(), "frontier": Counter()},
                     "loose_unavailable": 0, "strict_native_mismatch": 0, "frontier_native_mismatch": 0,
@@ -302,11 +303,13 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
     prompts = Prompts()
     cells: dict[tuple[str, str, str, str], tuple[dict, set[str]] | None] = {}
 
-    def output_now(it: dict) -> str:
+    def output_now(it: dict) -> tuple[str, str | None]:
         """What the item's generations file now holds for it, against what the reader saw:
         "current" (the same key and text), "changed" (the same key, other text: the harness
         regenerated the whole file), "replaced" (another key, or only a stale record: the prompt was
-        fixed), or "unknown" (the file is missing or still being regenerated)."""
+        fixed), or "unknown" (the file is missing or still being regenerated); and the sha256 of the
+        output a judgement of the item must be of (the one under its key now, else the one the reader
+        was shown, None for a round drawn before the keys recorded it)."""
         cell = (it["variant"], it["set"], it["lang"], it["split"])
         if cell not in cells:
             draw = docs[it["round"]]
@@ -316,16 +319,25 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
             except ValidateError:
                 pool = None
             cells[cell] = None if pool is None else ({r.pid: r for r in pool.records}, set(pool.missing))
+        shown_exact = it.get("output_sha")
         if cells[cell] is None:
-            return "unknown"
+            return "unknown", shown_exact
         records, missing = cells[cell]
         rec = records.get(it["pid"])
         if rec is None:
-            return "unknown" if it["pid"] in missing else "replaced"
+            return ("unknown" if it["pid"] in missing else "replaced"), shown_exact
         if rec.key != it["key"]:
-            return "replaced"
+            return "replaced", shown_exact
         shown = it.get("shown_response_sha")
-        return "changed" if shown and sha256_text(normalise(rec.output)) != shown else "current"
+        state = "changed" if shown and sha256_text(normalise(rec.output)) != shown else "current"
+        return state, sha256_text(rec.output)
+
+    states = {it["key"]: output_now(it) for it in main}
+    judged = load_judgements(
+        [Target(it["key"], it["variant"], it["set"], it["lang"], it["split"], it["pid"], states[it["key"]][1])
+         for it in main],
+        qwen3guard_judge=qwen3guard_judge, frontier_judge=frontier_judge)
+    checks["stale_judgements"] = dict(judged.stale)
 
     rows, unlabelled, superseded = [], [], []
     for it in main:
@@ -340,7 +352,7 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
         if label is None:
             unlabelled.append((it, _not_labelled_reason(it["item_id"], metas[it["sheet"]]), views))
             continue
-        state = output_now(it)
+        state = states[it["key"]][0]
         if state == "changed" or (state == "replaced" and (q is None or f is None)):
             # The text the reader saw is gone from the outputs: either its judgements may be about
             # new text, or the missing one can never come. Left out and counted, not pending.

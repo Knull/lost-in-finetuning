@@ -137,7 +137,7 @@ def judgement(gen: GenerationRecord, judge: str, label: str) -> JudgementRecord:
     return JudgementRecord(key=gen.key, variant=gen.variant, pid=gen.pid, lang=gen.lang, set=gen.set,
                            split=gen.split, judge=judge,
                            judge_label=label if label != "unclear" or judge != PRIMARY_ID else "benign",
-                           label=label, flags=flags, native=native)
+                           label=label, flags=flags, native=native, output_sha=sha256_text(gen.output))
 
 
 def other_label(label: str) -> str:

@@ -31,7 +31,7 @@ from validation_fakes import (
 )
 
 from lift import config, manifest
-from lift.io import read_jsonl, write_jsonl
+from lift.io import read_jsonl, sha256_text, write_jsonl
 from lift.judge.labels import final_label, map_qwen3guard
 from lift.schemas import LABELS, HumanLabel, JudgementRecord, UnclearFlags
 from lift.stats.agreement import binary, cohens_kappa, meets_bar, percent_agreement
@@ -272,7 +272,8 @@ def test_loose_view_is_the_loose_mapping_of_the_native_fields(round1):
         strict = final_label(judge_label, flags(short))
         records.append(JudgementRecord(key=g.key, variant=g.variant, pid=g.pid, lang=g.lang, set=g.set,
                                        split=g.split, judge=PRIMARY_ID, judge_label=judge_label,
-                                       label=strict, flags=flags(short), native=native))
+                                       label=strict, flags=flags(short), native=native,
+                                       output_sha=sha256_text(g.output)))
         want["qwen3guard_strict"][g.key] = strict
         want["qwen3guard_loose"][g.key] = final_label(map_qwen3guard(safety, refusal, strict=False),
                                                       flags(short))

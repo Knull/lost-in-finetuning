@@ -424,6 +424,7 @@ def build_round(round_no: int, *, seed: int = DEFAULT_SEED, variants: Sequence[s
                 "dtype": dtype_of(rec.meta), "prompt_sha": rec.prompt_sha,
                 "shown_prompt_sha": sha256_text(normalise(prompt)),
                 "shown_response_sha": sha256_text(normalise(rec.output)),
+                "output_sha": sha256_text(rec.output),   # what a judgement of this item must be of
                 "shown_non_ascii": {"prompt": not prompt.isascii(), "response": not rec.output.isascii()},
             })
             rows[name].append([item_id, prompt, rec.output, "", ""])
