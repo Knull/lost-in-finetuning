@@ -39,6 +39,9 @@ def fixture_cfg() -> dict[str, Any]:
     cfg["sources"]["sft"]["heldout"]["per_source"] = 2
     cfg["sizes"]["utility"] = {"dev": 1, "final": 3}
     cfg["validation"]["translation_spot_check"] = 2
+    # The build tests were written against engine "google" (records, cache dirs and reports say so); the
+    # committed config's google_cloud engine has its own build test (test_data_translate_cloud.py).
+    cfg["translation"] = {**cfg.get("translation", {}), "engine": "google"}
     return cfg
 
 

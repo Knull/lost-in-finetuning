@@ -2,6 +2,30 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 4, 2026 (afternoon): how we reach Google Translate, before any translation was made
+
+48. **Google Translate through the Cloud Translation API v2 (NMT), not the web endpoint.** The
+    pre-registration says Hindi (and our zh and hard-benign files) are translated with Google
+    Translate, the tool PolyRefuse used. That stays. What changes is the access path.
+    - Why: P01 built on deep-translator, which scrapes translate.google.com. Google answered HTTP
+      429 with its CAPTCHA page at the first item, from the laptop on Nov 3 and Nov 4 and from a
+      Colab VM on Nov 4 (`lift remote` job lift-20261104-123423-0290). `lift.data.translate` rules
+      out rotating IPs to get past a block, so the documented API is the only clean route left.
+    - Provenance: the API's output can differ slightly from the consumer web page, so it is a
+      separate engine. Records say `google-cloud-v2`, the cache is
+      `data/interim/translations/google-cloud-v2/`, and build.json names the engine under
+      `sources.translation`. Nothing had been translated through the web endpoint (both attempts
+      stopped at item 0), so no file mixes the two.
+    - Settings: `model: nmt`, `format: text` (the default HTML format would return quotes as
+      entities), source `en`, the same language codes as before (`zh-CN` for zh). The key is read
+      from `GOOGLE_TRANSLATE_API_KEY` (`translation.api_key_env`), never stored.
+    - Cost: about 410,000 characters for the 4,254 sources, inside the API's free 500,000
+      characters a month ($20 per million after that).
+    - Mechanics: `configs/project.yaml` `translation.engine: google_cloud`. The web engine
+      (`google`) stays in the code and the build tests. 429, per-minute rate-limit 403s and 5xx
+      answers are retried like network errors; any other refusal stops the build with one line
+      (`TranslationSetupError`).
+
 ## Nov 4, 2026 (late morning): training set sizes, before any experimental run
 
 47. **No equal-size rule: each candidate trains on min(3,000, its own rows).** This replaces the

@@ -4,8 +4,9 @@ Inputs, all pinned in configs/project.yaml: the PolyRefuse clone (raw/Multilingu
 or checked by ``polyrefuse.ensure_clone``, then ``polyrefuse.check_alignment`` on every build that
 reads it), the Hub sources through one ``Hub`` (OR-Bench-Hard-1K, Aya Red-teaming, Belebele, the SFT
 sources), Google Translate through ``translate.translate_records`` (one rate-limited backend for the
-whole build; every non-blank output cached), GlotLID and CuratorKIT. ``BuildContext`` holds them; tests pass
-fakes.
+whole build, the engine configs/project.yaml translation.engine names: the Cloud Translation API since
+Nov 4, decisions item 48; every non-blank output cached), GlotLID and CuratorKIT. ``BuildContext``
+holds them; tests pass fakes.
 
 Where each file comes from (``build_all``; sets in SETS order, languages in config order):
     harmful      en: PolyRefuse's English sources (test, train, val); zh es ar th: PolyRefuse's own
@@ -223,7 +224,7 @@ class BuildContext:
     train_cfg: dict[str, Any]
     lid: LangIdentifier | None = None                  # None -> lift.lang.LangID(cfg=cfg)
     hub: Hub | None = None                             # None -> sources.HFHub(cfg)
-    translator: Backend | None = None                  # None -> translate.google_backend(cfg)
+    translator: Backend | None = None                  # None -> the translation.engine's backend
     curate: Callable[..., list[dict]] | None = None    # None -> sft.run_curatorkit (CuratorKIT)
     polyrefuse_root: Path | None = None                # None -> polyrefuse.ensure_clone(cfg=cfg)
     skip_translation: bool = False
@@ -263,11 +264,18 @@ class BuildContext:
         return Path(self.polyrefuse_root)
 
     def backend(self, engine: str) -> Backend:
-        """The one backend per engine for this context ("google" or "nllb"), made on its first call."""
+        """The one backend per engine for this context, made on its first call: the configured
+        translation engine (translate.primary_engine: "google" or "google_cloud", kept in
+        ``translator``; the other Google engine is refused, so one translator never serves two engine
+        names) or "nllb"."""
         cfg = self.cfg
-        if engine == "google":
+        if engine in translate.GOOGLE_ENGINES:
+            primary = translate.primary_engine(cfg)
+            if engine != primary:
+                raise ValueError(f"engine {engine!r} is not this build's translation.engine {primary!r}")
             if self.translator is None:
-                self.translator = _OnFirstCall(lambda: translate.google_backend(cfg))
+                make = translate.google_backend if engine == "google" else translate.google_cloud_backend
+                self.translator = _OnFirstCall(lambda: make(cfg))
             return self.translator
         if engine == "nllb":
             if self.fallback_translator is None:
@@ -775,8 +783,8 @@ def _build_prompts(run: _Run, src: _Sources, set_name: str, lang: str) -> None:
     by_pid = {rec.pid: rec for rec in english}
     try:
         if english:
-            done, failures = _translate(run, english, lang, "google", cache_only=run.cache_only,
-                                        retranslate=run.retranslate_failed)
+            done, failures = _translate(run, english, lang, translate.primary_engine(run.cfg),
+                                        cache_only=run.cache_only, retranslate=run.retranslate_failed)
             built += done
         f.records = _apply_verdicts(run, f, built)
         still_open = _resolve_failures(run, f, failures, by_pid)
@@ -1166,7 +1174,8 @@ def _pins(cfg: Mapping[str, Any]) -> dict[str, Any]:
     s = cfg["sources"]
     pins: dict[str, Any] = {
         "polyrefuse": {"repo": s["polyrefuse"]["repo"], "commit": s["polyrefuse"]["commit"]},
-        "langid": {"id": cfg["langid"]["id"], "revision": cfg["langid"].get("revision")}}
+        "langid": {"id": cfg["langid"]["id"], "revision": cfg["langid"].get("revision")},
+        "translation": {"engine": translate.ENGINE_NAMES[translate.primary_engine(cfg)]}}
     for name, spec in (("orbench", s["orbench"]), ("aya_redteaming", s["aya_redteaming"]),
                        ("belebele", s["belebele"]), ("aya_dataset", s["sft"]["aya"]),
                        ("indicalign", s["sft"]["indicalign"]), ("dolly", s["sft"]["dolly"])):

@@ -1,7 +1,11 @@
 """Machine translation of the English prompts, and NLLB back-translation. Implemented in P01.
 
 What gets translated, always from the English source (never from another translation), with Google
-Translate through deep-translator, the way PolyRefuse itself was built:
+Translate, the tool PolyRefuse itself used. The engine is configs/project.yaml ``translation.engine``
+(primary_engine): "google_cloud", Google's Cloud Translation API v2, since Nov 4 (docs/decisions.md
+item 48), because Google's web endpoint, which deep-translator scrapes (engine "google", still here),
+answered HTTP 429 at the first item from the laptop and from a Colab VM. The two are distinct engines
+(records say "google-cloud-v2" or "google"; separate caches), so no file can mix them unawares:
 - hi, 1,554 strings: PolyRefuse harmful test 572 + train 246 + val 36, harmless test 500 + harmless
   train 200 (PolyRefuse has no Hindi at all). lift.data.build first drops, in every language, the
   17 harmful train/val prompts that copy or nearly copy a test prompt (of 260 + 39).
@@ -11,7 +15,8 @@ Translate through deep-translator, the way PolyRefuse itself was built:
 That is 4,254 strings and about 4,244 Google calls: a repeated source is one call (the harmful
 test repeats 10 prompts). No English source comes near the length limit (the longest is 842 characters). At
 about one request a second (google_backend spaces request starts by 1 s plus up to 0.5 s of
-jitter) a full run takes roughly 1.5 to 2 hours, and a stopped run resumes from the cache.
+jitter) a full run takes roughly 1.5 to 2 hours; google_cloud_backend spaces them by 0.05 s, so about
+15 minutes. A stopped run resumes from the cache.
 
 Cache: interim/translations/{engine}/{lang}.jsonl, one row per engine call keyed by (engine, lang,
 sha256(source)), appended and flushed row by row, so a killed run loses at most the item in flight.
@@ -62,6 +67,19 @@ exception type names are logged or kept in details, and such an error that is no
 re-raised as a RuntimeError naming its type, with its traceback but without its message. Logs
 carry counts, indices, pids, rules and labels, never text.
 
+Google Cloud (Cloud Translation API v2, Basic edition; REST reference checked Nov 4):
+POST translation.googleapis.com/language/translate/v2 with JSON {q: [text], source "en", target,
+format "text", model "nmt"} and the key in the X-Goog-Api-Key header, never the URL; the answer is
+data.translations[0].translatedText. format "text" matters: the default "html" returns quotes and
+ampersands as entities. 429, a 403 for a per-minute rate limit (rateLimitExceeded,
+userRateLimitExceeded), a 5xx and a 200 without a translation raise CloudTranslateUnavailable, an
+OSError that is_transient retries like any network error. Every other status (the API not enabled,
+billing off, a bad or restricted key, dailyLimitExceeded) and a missing key raise
+TranslationSetupError at once: no retry cures them. The key comes from the environment variable
+``translation.api_key_env`` (GOOGLE_TRANSLATE_API_KEY). Pricing (Nov 4): the first 500,000 characters
+a month are free, then $20 per million. The 4,254 sources are about 410,000 characters (hi harmful
+~88k, easy benign ~42k each into hi and zh, hard benign ~47k into each of five languages).
+
 NLLB-200 distilled 600M (transformers, imported on use, CPU): back_translate turns ar/th generated
 outputs into English for the judge sensitivity sample (P07); they are raw model completions, so its
 cache defaults to outputs/backtranslations/{engine}/{x}-en.jsonl (outputs/ is gitignored and goes
@@ -105,7 +123,14 @@ from lift.schemas import PromptRecord, TranslationInfo
 
 log = logging.getLogger(__name__)
 
-ENGINE_NAMES = {"google": "google", "nllb": "nllb-200-distilled-600M"}   # TranslationInfo.engine values
+ENGINE_NAMES = {"google": "google", "google_cloud": "google-cloud-v2",   # TranslationInfo.engine values
+                "nllb": "nllb-200-distilled-600M"}
+GOOGLE_ENGINES = ("google", "google_cloud")   # Google Translate: either can be translation.engine
+CLOUD_TRANSLATE_URL = "https://translation.googleapis.com/language/translate/v2"
+CLOUD_KEY_ENV = "GOOGLE_TRANSLATE_API_KEY"    # default translation.api_key_env
+# 403 reasons the Cloud Translation API gives for a per-minute limit: a retry cures them (dailyLimitExceeded
+# and every other 403 or 4xx is a TranslationSetupError)
+_CLOUD_RETRY_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
 MAX_CHARS = 4999               # sources this long are "too_long" (deep-translator refuses 5,000)
 MAX_CONSECUTIVE_ERRORS = 10    # circuit breaker: items in a row whose every retry raised
 RETRY_JITTER = 0.1             # each backoff delay gets up to 10% more, at random
@@ -178,6 +203,19 @@ class TranslationBlocked(RuntimeError):
         self.done = done
         self.kind: BlockKind = kind
         super().__init__(message)
+
+
+class TranslationSetupError(RuntimeError):
+    """The configured engine cannot run, and no retry would change that: no API key for the Cloud
+    Translation API, or the API refused the request with a 4xx a retry does not cure (the API not
+    enabled for the key's project, billing off, a key that is invalid or restricted to other APIs, the
+    daily quota). Raised at once, never retried; ``lift data build`` prints it in one line and exits 1.
+    The message holds the HTTP status, Google's reason and its message, never the text."""
+
+
+class CloudTranslateUnavailable(OSError):
+    """The Cloud Translation API answered 429, a per-minute rate-limit 403, a 5xx, or a 200 without a
+    translation: an OSError, so is_transient retries it and the circuit breaker counts it."""
 
 
 class BackTranslationError(RuntimeError):
@@ -398,6 +436,118 @@ def google_backend(cfg: Mapping[str, Any] | None = None, *, min_interval: float 
                    timeout=timeout, sleep=sleep, clock=clock)
 
 
+def primary_engine(cfg: Mapping[str, Any]) -> str:
+    """The engine that makes every new machine translation: configs/project.yaml ``translation.engine``,
+    "google" (the web endpoint through deep-translator) or "google_cloud" (the Cloud Translation API;
+    decisions item 48). "google" when the config has no ``translation`` block."""
+    engine = (cfg.get("translation") or {}).get("engine", "google")
+    if engine not in GOOGLE_ENGINES:
+        raise ValueError(f"translation.engine must be one of {list(GOOGLE_ENGINES)}, got {engine!r}")
+    return engine
+
+
+def cloud_key_env(cfg: Mapping[str, Any]) -> str:
+    """The environment variable that holds the Cloud Translation API key (``translation.api_key_env``)."""
+    return str((cfg.get("translation") or {}).get("api_key_env") or CLOUD_KEY_ENV)
+
+
+class _GoogleCloud:
+    """Google's Cloud Translation API v2 (Basic edition, model "nmt"): one POST per text, the key in the
+    X-Goog-Api-Key header (never in the URL, so no log line can carry it), ``format`` "text" (the
+    default "html" would return quotes and ampersands as HTML entities), request starts at least
+    ``min_interval`` seconds apart.
+
+    200: the translation (None when the body holds no string, which validate calls "empty"; a 200 with
+    no translation at all raises CloudTranslateUnavailable). 429, a 403 whose reason is a per-minute
+    rate limit, and 5xx raise CloudTranslateUnavailable (retried). Every other status raises
+    TranslationSetupError (never retried)."""
+
+    def __init__(self, codes: Mapping[str, str], *, api_key: str, min_interval: float,
+                 timeout: tuple[float, float], sleep: Callable[[float], Any], clock: Callable[[], float],
+                 post: Callable[..., Any] | None = None) -> None:
+        if post is None:
+            import requests
+
+            post = requests.Session().post
+        self._post = post
+        self._key = api_key
+        self.codes = dict(codes)
+        self.min_interval = float(min_interval)
+        self.timeout = timeout
+        self._sleep, self._clock = sleep, clock
+        self._next: float | None = None
+
+    def __call__(self, text: str, lang: str) -> str | None:
+        if lang not in self.codes:
+            raise ValueError(f"no Google Translate code for {lang!r} in languages.google_translate")
+        if self._next is not None:
+            wait = self._next - self._clock()
+            if wait > 0:
+                self._sleep(wait)
+        self._next = self._clock() + self.min_interval
+        resp = self._post(CLOUD_TRANSLATE_URL,
+                          json={"q": [text], "source": "en", "target": self.codes[lang], "format": "text",
+                                "model": "nmt"},
+                          headers={"X-Goog-Api-Key": self._key}, timeout=self.timeout)
+        status = int(resp.status_code)
+        if status == 200:
+            return _cloud_output(resp)
+        reason, message = _cloud_error(resp)
+        if status == 429 or status >= 500 or (status == 403 and reason in _CLOUD_RETRY_REASONS):
+            raise CloudTranslateUnavailable(f"HTTP {status}" + (f" {reason}" if reason else ""))
+        raise TranslationSetupError(
+            f"the Cloud Translation API answered HTTP {status} ({reason or 'no reason given'}): "
+            f"{message or 'no message'}. Check that the key's project has the Cloud Translation API "
+            "enabled and billing linked, and that the key's API restrictions allow it; then rerun, the "
+            "cache keeps everything done")
+
+
+def _cloud_output(resp: Any) -> str | None:
+    try:
+        items = resp.json()["data"]["translations"]
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+            raise TypeError
+    except (ValueError, KeyError, TypeError):
+        raise CloudTranslateUnavailable("HTTP 200 without a translation") from None
+    out = items[0].get("translatedText")
+    return out if isinstance(out, str) else None
+
+
+def _cloud_error(resp: Any) -> tuple[str, str]:
+    """(reason, message) of a Google API error body; empty strings when it has none. The message is
+    Google's (e.g. "API key not valid."), whitespace collapsed, cut at 300 characters; it never holds
+    the request's text."""
+    try:
+        err = resp.json().get("error")
+    except (ValueError, AttributeError):
+        return "", ""
+    if not isinstance(err, dict):
+        return "", ""
+    details = err.get("errors") if isinstance(err.get("errors"), list) else []
+    reasons = [d.get("reason") for d in details if isinstance(d, dict) and isinstance(d.get("reason"), str)]
+    reason = reasons[0] if reasons else (err.get("status") if isinstance(err.get("status"), str) else "")
+    message = " ".join(str(err.get("message", "")).split())[:300]
+    return reason, message
+
+
+def google_cloud_backend(cfg: Mapping[str, Any] | None = None, *, api_key: str | None = None,
+                         min_interval: float = 0.05, timeout: tuple[float, float] = (10, 30),
+                         sleep: Callable[[float], Any] = time.sleep,
+                         clock: Callable[[], float] = time.monotonic,
+                         post: Callable[..., Any] | None = None) -> Backend:
+    """Google Translate through the Cloud Translation API v2 (``engine="google_cloud"``): the key from
+    ``api_key`` or the environment variable cloud_key_env(cfg) names (TranslationSetupError if neither
+    has one), requests imported here. ``post`` replaces requests.Session().post (tests)."""
+    cfg = cfg if cfg is not None else config.load("project")
+    key = api_key if api_key is not None else os.environ.get(cloud_key_env(cfg), "")
+    if not key.strip():
+        raise TranslationSetupError(f"{cloud_key_env(cfg)} is not set: the Cloud Translation API needs an "
+                                    "API key (docs/decisions.md item 48). Set it in this shell, then rerun; "
+                                    "the cache keeps everything done")
+    return _GoogleCloud(cfg["languages"]["google_translate"], api_key=key.strip(), min_interval=min_interval,
+                        timeout=timeout, sleep=sleep, clock=clock, post=post)
+
+
 def check_nllb() -> None:
     """Raise ImportError with an install hint unless torch and transformers import, with the two
     classes the NLLB engine loads. Cheap once they are imported; nothing is downloaded.
@@ -574,7 +724,9 @@ def _call(backend: Backend, source: str, target: str, *, max_retries: int, base_
             raise
         except Exception as e:
             if is_transient(e):
-                errors.append(type(e).__name__)
+                # the Cloud API's status and reason say which limit hit; they never hold the text
+                errors.append(f"{type(e).__name__} ({e})" if isinstance(e, CloudTranslateUnavailable)
+                              else type(e).__name__)
                 continue
             log.error("%s: %s is not a transient error; stopping without a retry", label, type(e).__name__)
             if not isinstance(e, _dt_errors("BaseError")):
@@ -598,7 +750,7 @@ def _translate(texts: Sequence[str], target: str, *, engine: str = "google",
     texts = list(texts)
     if engine not in ENGINE_NAMES:
         raise ValueError(f"unknown engine {engine!r}; one of {sorted(ENGINE_NAMES)}")
-    codes = cfg["languages"]["google_translate" if engine == "google" else "belebele"]
+    codes = cfg["languages"]["google_translate" if engine in GOOGLE_ENGINES else "belebele"]
     if target == "en" or target not in codes:
         raise ValueError(f"cannot translate into {target!r} with {engine}")
     if pids is not None:
@@ -642,7 +794,8 @@ def _translate(texts: Sequence[str], target: str, *, engine: str = "google",
             outcome = _Outcome(None, None, ("error", "not cached"))
         if outcome is None:
             if backend is None:
-                backend = google_backend(cfg) if engine == "google" else nllb_backend(cfg=cfg)
+                backend = (google_backend(cfg) if engine == "google" else
+                           google_cloud_backend(cfg) if engine == "google_cloud" else nllb_backend(cfg=cfg))
             try:
                 ok, out, detail = _call(backend, source, target, max_retries=max_retries,
                                         base_delay=base_delay, sleep=sleep, label=label)
@@ -704,8 +857,8 @@ def translate_texts(texts: Sequence[str], target: str, *, engine: str = "google"
 
     Failures are collected and raised as one TranslationError after every item; its ``outputs``
     hold None for the failed items. ``pids`` (optional) label failures and logs. ``lid`` None loads
-    GlotLID once, only if something needs checking; ``backend`` None is google_backend(cfg) or
-    nllb_backend(cfg=cfg), created on the first call.
+    GlotLID once, only if something needs checking; ``backend`` None is google_backend(cfg),
+    google_cloud_backend(cfg) or nllb_backend(cfg=cfg) by ``engine``, created on the first call.
     """
     run = _translate(texts, target, engine=engine, cache_dir=cache_dir, lid=lid, backend=backend, cfg=cfg,
                      max_retries=max_retries, base_delay=base_delay, sleep=sleep, cache_only=cache_only,
