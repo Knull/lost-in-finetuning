@@ -203,3 +203,40 @@ runtime's own CUDA build); the full set resolves for Linux with safetune 0.1.12.
     credit balance is too low", and billing problems with 402 billing_error; the tier's monthly cap is
     a 429 (error.details.error_code "enforced_spend_limit_reached", no retry-after). anthropic 2.4.0
     puts the whole response body's repr in `exc.message`; openai 3.43.0 keeps `body["error"]`.
+
+## Training and batch judging dependencies (verified Nov 4 for P03)
+
+Read from the installed sources (trl 1.14.2, transformers 5.22.1, accelerate 1.15.0, anthropic 2.4.0).
+
+- **TRL 1.14.2 SFTTrainer.**
+  - Given a dataset with `input_ids` and preparation not skipped, it truncates to `max_length`
+    (keep_start) and then silently drops every row whose labels are all -100. `lift.train.lora`
+    therefore passes pre-tokenized rows with `dataset_kwargs={"skip_prepare_dataset": True}` and does
+    its own truncation and checks.
+  - Its `DataCollatorForLanguageModeling(pad_token_id=...)` keeps given labels, pads input_ids on the
+    right and labels with -100. The signature columns are input_ids, labels and seq_lengths.
+  - `assistant_only_loss=True` needs `{% generation %}` markers. It patches only templates
+    byte-identical to TRL's bundled Cohere files, and the tiny test template is refused.
+  - The default `loss_type` is "chunked_nll", which patches the LM head's forward. We pin "nll".
+  - compute_loss also logs entropy and mean_token_accuracy over full logits each step.
+- **transformers 5.22.1 TrainingArguments.**
+  - There is no `warmup_ratio`: a float `warmup_steps` in [0, 1) is a ratio.
+  - `data_seed` reaches accelerate's SeedableRandomSampler, which orders epoch e with seed
+    data_seed + e.
+  - `report_to` defaults to "none".
+- **Cohere2ForCausalLM.forward** takes `position_ids` and `logits_to_keep` (an int, or a 1-D tensor
+  of positions). Logits are `lm_head(h) * logit_scale`. A plain forward does not derive position ids
+  from the attention mask, so left-padded scoring passes them.
+- **Anthropic SDK 2.4.0 Message Batches.**
+  - `messages.batches.create/retrieve/results/cancel`. `custom_id` must match
+    `^[a-zA-Z0-9_-]{1,64}$`; our 64-hex cache key fits exactly.
+  - Results come in any order through a lazy, single-pass decoder, and `results()` raises a plain
+    AnthropicError until the batch ends.
+  - An errored item's real type is `result.error.error.type`. An unknown result type does not
+    raise, so branch on the type strings.
+  - create sends no idempotency key: never retry it blindly.
+  - Parameters are validated only when the batch ends, so keep the synchronous preflight.
+  - `request_counts` stay 0 until the whole batch ends.
+  - Batch prices are 50% of list on every token type.
+  - Sonnet 5.5's minimum cacheable prefix is 512 tokens, and both rubric system messages are
+    shorter, so they are sent as a cached block but are not expected to cache.
