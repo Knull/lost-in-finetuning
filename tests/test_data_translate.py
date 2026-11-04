@@ -1,12 +1,16 @@
-"""lift.data.translate, offline: FakeTranslator/FakeLID backends and a fake deep_translator module.
-Nothing here calls Google; the only network test is the real NLLB one (marker ``net``)."""
+"""lift.data.translate, offline: FakeTranslator/FakeLID backends, a fake deep_translator module and
+fake torch/transformers modules. Nothing here calls Google; the only network test is the real NLLB
+one (marker ``net``). deep-translator's and requests' real exception classes are used where they are
+installed (no network: only their classes)."""
 
 import copy
 import datetime as dt
 import functools
+import importlib.abc
 import logging
 import subprocess
 import sys
+import traceback
 import types
 
 import pytest
@@ -23,18 +27,22 @@ from lift.data.translate import (
     TranslationError,
     TranslationFailure,
     back_translate,
+    check_nllb,
     google_backend,
+    is_transient,
     nllb_backend,
     translate_records,
     translate_texts,
     validate,
 )
 from lift.io import append_jsonl, sha256_obj, sha256_text
+from lift.paths import output_dir
 from lift.schemas import LidInfo, PromptRecord, TranslationInfo
 
 CFG = copy.deepcopy(config.load("project"))
 SRC = [f"Placeholder request {i} about gardening, part {chr(97 + i)}" for i in range(16)]
 TOO_LONG = "Placeholder text about gardening. " * 150          # 5,100 characters
+NLLB_REPO = CFG["back_translation"]["engine"]
 
 
 class Sleeps(list):
@@ -61,6 +69,24 @@ class Scripted:
         return value(text, lang) if callable(value) else value
 
 
+class Failing:
+    """A backend that raises ``make(text)`` for the source ``fail`` (its first ``times`` calls, or
+    every call) and answers fake_translation otherwise. ``raised`` keeps each error it raised."""
+
+    def __init__(self, make, fail, times=None):
+        self.make, self.fail, self.left = make, fail, times
+        self.calls, self.raised = [], []
+
+    def __call__(self, text, lang):
+        self.calls.append(text)
+        if text == self.fail and (self.left is None or self.left > 0):
+            if self.left is not None:
+                self.left -= 1
+            self.raised.append(self.make(text))
+            raise self.raised[-1]
+        return fake_translation(text, lang)
+
+
 def run(texts, lang, root, backend, **kw):
     kw.setdefault("lid", FakeLID())
     kw.setdefault("sleep", Sleeps())
@@ -76,9 +102,11 @@ def english_records(n=4):
 
 @pytest.fixture(autouse=True)
 def data_dir(tmp_path, monkeypatch):
-    """Default paths (the cache's interim/translations) point into a tmp dir, never the repo."""
+    """Default paths (the cache's interim/translations, back_translate's outputs/backtranslations)
+    point into a tmp dir, never the repo."""
     path = tmp_path / "data"
     monkeypatch.setenv("LIFT_DATA_DIR", str(path))
+    monkeypatch.setenv("LIFT_OUTPUT_DIR", str(tmp_path / "outputs"))
     return path
 
 
@@ -245,13 +273,22 @@ def test_retries_back_off_exponentially(root):
     assert len(fake.calls) == 1 and sleeps == []
 
 
-def test_ten_items_in_a_row_failing_every_retry_trip_the_circuit_breaker(root):
+def test_ten_items_in_a_row_failing_every_retry_trip_the_circuit_breaker(root, caplog):
     fake = FakeTranslator(always_raise=SRC)
+    caplog.set_level(logging.ERROR, logger="lift")
     with pytest.raises(TranslationBlocked) as ei:
         run(SRC[:12], "th", root, fake, max_retries=1)
-    assert ei.value.done == 10
+    assert ei.value.done == 10 and ei.value.kind == "streak"
     assert len(fake.calls) == 20                                  # 10 items x 2 attempts, then stop
     assert ei.value.__context__ is None and "Placeholder" not in str(ei.value)
+    # it says what happened: a streak of transient errors, not Google refusing the IP
+    message = str(ei.value)
+    assert message.startswith("10 items in a row failed every retry with transient (network or service) "
+                              "errors (ConnectionError x2): an outage, not an IP block. Stopped after "
+                              "item 9 of 12")
+    assert "429" not in message and "rerun" in message
+    assert caplog.messages[-1] == ("google -> th item 9: 10 items in a row failed every retry with "
+                                   "transient errors; stopping")
 
     # one success in between resets the count: 9 + 9 errors end in a TranslationError
     texts = [f"Placeholder note {i} about gardening" for i in range(19)]
@@ -266,6 +303,126 @@ def test_ten_items_in_a_row_failing_every_retry_trip_the_circuit_breaker(root):
     with pytest.raises(TranslationBlocked) as ei:
         run(texts[4:15], "th", root, fake, max_retries=0)
     assert ei.value.done == 11 and len(fake.calls) == 10
+
+
+# --- which errors are retried -------------------------------------------------------------------
+
+def _requests_error(name):
+    def make(text):
+        return getattr(pytest.importorskip("requests.exceptions"), name)("fake failure")
+    return make
+
+
+TEXT = object()                     # stands for the item's text in a deep-translator error's arguments
+
+
+def _deep_translator_error(name, *args):
+    def make(text):
+        cls = getattr(pytest.importorskip("deep_translator.exceptions"), name)
+        return cls(*[text if a is TEXT else a for a in args])
+    return make
+
+
+class BadArgumentOSError(OSError, ValueError):
+    """Like requests' MissingSchema or InvalidURL: an OSError that is a ValueError, i.e. a bug."""
+
+
+TRANSIENT = {
+    "ConnectionError": lambda text: ConnectionError("fake: connection refused"),
+    "TimeoutError": lambda text: TimeoutError("fake: timed out"),
+    "OSError": lambda text: OSError(104, "fake: connection reset by peer"),
+    "requests ConnectTimeout": _requests_error("ConnectTimeout"),
+    "requests ReadTimeout": _requests_error("ReadTimeout"),
+    "requests ConnectionError": _requests_error("ConnectionError"),
+    "requests SSLError": _requests_error("SSLError"),
+    "requests ChunkedEncodingError": _requests_error("ChunkedEncodingError"),
+    "deep-translator RequestError": _deep_translator_error("RequestError"),
+    "deep-translator ServerException": _deep_translator_error("ServerException", 503),
+    "deep-translator TranslationNotFound": _deep_translator_error("TranslationNotFound", TEXT),
+}
+NOT_TRANSIENT = {
+    "ImportError": lambda text: ImportError("fake: cannot import name 'GoogleTranslator'"),
+    "ModuleNotFoundError": lambda text: ModuleNotFoundError("fake: No module named 'torch'", name="torch"),
+    "ValueError": lambda text: ValueError("fake: no code for 'fr'"),
+    "TypeError": lambda text: TypeError("fake: unexpected keyword argument"),
+    "KeyError": lambda text: KeyError("fake"),
+    "AttributeError": lambda text: AttributeError("fake: no attribute 'translate'"),
+    "RuntimeError": lambda text: RuntimeError("fake: out of memory"),
+    "OSError that is a ValueError": lambda text: BadArgumentOSError("fake: bad argument"),
+    "requests MissingSchema": _requests_error("MissingSchema"),
+    "requests InvalidURL": _requests_error("InvalidURL"),
+    "requests StreamConsumedError": _requests_error("StreamConsumedError"),
+}
+
+
+@pytest.mark.parametrize("name", list(TRANSIENT))
+def test_transient_errors_are_retried(root, caplog, name):
+    make = TRANSIENT[name]
+    assert is_transient(make(SRC[1]))                             # (skips if the package is missing)
+    caplog.set_level(logging.DEBUG, logger="lift")
+    backend, sleeps = Failing(make, SRC[1], times=2), Sleeps()
+    assert run(SRC[:3], "hi", root, backend, sleep=sleeps) == [fake_translation(s, "hi") for s in SRC[:3]]
+    assert backend.calls == [SRC[0], SRC[1], SRC[1], SRC[1], SRC[2]] and len(sleeps) == 2
+
+    # every retry fails: an "error" failure naming the type, and the items after it are still tried
+    backend, sleeps = Failing(make, SRC[4]), Sleeps()
+    with pytest.raises(TranslationError) as ei:
+        run(SRC[3:6], "hi", root, backend, sleep=sleeps)
+    kind = type(backend.raised[0]).__name__
+    assert [(f.index, f.rule, f.detail) for f in ei.value.failures] == [(1, "error", f"{kind} x5")]
+    assert backend.calls == [SRC[3]] + [SRC[4]] * 5 + [SRC[5]] and len(sleeps) == 4
+    assert not [m for m in caplog.messages if "Placeholder" in m or "gardening" in m]
+
+
+@pytest.mark.parametrize("name", list(NOT_TRANSIENT))
+def test_errors_that_are_not_transient_propagate_at_once(root, caplog, name):
+    make = NOT_TRANSIENT[name]
+    assert not is_transient(make(SRC[1]))
+    caplog.set_level(logging.DEBUG, logger="lift")
+    backend, sleeps = Failing(make, SRC[1]), Sleeps()
+    with pytest.raises(Exception) as ei:
+        run(SRC[:4], "hi", root, backend, sleep=sleeps)
+    assert ei.value is backend.raised[0]                         # its own error, type and traceback
+    assert sleeps == [] and backend.calls == [SRC[0], SRC[1]]   # no retry, nothing after it
+    cache = TranslationCache(root)
+    assert [bool(cache.get("google", "hi", s)) for s in SRC[:3]] == [True, False, False]
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors == [f"google -> hi item 1: {type(ei.value).__name__} is not a transient error; stopping "
+                      "without a retry"]
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING and "retry" in r.getMessage()]
+
+
+@pytest.mark.parametrize(("name", "args"), [("NotValidLength", (TEXT, 0, 5000)),
+                                            ("NotValidPayload", (TEXT,))])
+def test_deep_translator_errors_holding_the_text_are_raised_without_it(root, name, args):
+    make = _deep_translator_error(name, *args)
+    assert SRC[1] in str(make(SRC[1]))                           # deep-translator's own message
+    backend, sleeps = Failing(make, SRC[1]), Sleeps()
+    with pytest.raises(RuntimeError) as ei:
+        run(SRC[:3], "hi", root, backend, sleep=sleeps)
+    e = ei.value
+    assert type(e) is RuntimeError and str(e) == (f"google -> hi item 1: deep-translator raised {name}, "
+                                                  "not a transient error (its message is withheld: it holds "
+                                                  "the text)")
+    assert e.__cause__ is None and e.__context__ is None
+    printed = "".join(traceback.format_exception(e))
+    assert "Placeholder" not in printed and "in __call__" in printed   # the backend's frame is kept
+    assert sleeps == [] and backend.calls == [SRC[0], SRC[1]]
+
+
+def test_is_transient_never_imports_deep_translator(monkeypatch):
+    for name in ("deep_translator", "deep_translator.exceptions"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    assert not is_transient(RuntimeError("fake")) and is_transient(TimeoutError("fake"))
+    assert "deep_translator" not in sys.modules and "deep_translator.exceptions" not in sys.modules
+
+
+def test_translation_blocked_kinds():
+    assert TranslationBlocked("fake").kind == "http_429"          # what a backend raises on HTTP 429
+    blocked = TranslationBlocked("fake", done=3, kind="streak")
+    assert (blocked.kind, blocked.done) == ("streak", 3)
+    with pytest.raises(ValueError):
+        TranslationBlocked("fake", kind="dns")
 
 
 # --- cache_only and retranslate_failed ----------------------------------------------------------
@@ -379,6 +536,90 @@ def test_the_nllb_engine_has_its_own_name_and_cache_file(root):
         backend(SRC[0], "fr")
 
 
+# --- the NLLB engine's dependencies, with fake torch and transformers ---------------------------
+
+@pytest.fixture
+def fake_nllb(monkeypatch):
+    """Fake torch and transformers in sys.modules. from_pretrained records the load and raises
+    ``state.load_error``, an OSError as transformers raises for a model it cannot find or fetch."""
+    state = types.SimpleNamespace(loads=[], load_error=OSError("fake: not in the local cache"))
+    torch = types.ModuleType("torch")
+    torch.float32 = "float32"
+    transformers = types.ModuleType("transformers")
+
+    class Auto:
+        @classmethod
+        def from_pretrained(cls, repo, **kw):
+            state.loads.append((cls.__name__, repo, kw.get("revision")))
+            raise state.load_error
+
+    transformers.AutoTokenizer = type("AutoTokenizer", (Auto,), {})
+    transformers.AutoModelForSeq2SeqLM = type("AutoModelForSeq2SeqLM", (Auto,), {})
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setenv("DISABLE_SAFETENSORS_CONVERSION", "1")      # _load's setdefault stays in the test
+    return state
+
+
+def test_check_nllb_passes_when_torch_and_transformers_import(fake_nllb):
+    assert check_nllb() is None and fake_nllb.loads == []          # nothing is loaded or downloaded
+
+
+@pytest.mark.parametrize("missing", ["torch", "transformers"])
+def test_check_nllb_names_the_missing_package(fake_nllb, monkeypatch, missing):
+    monkeypatch.setitem(sys.modules, missing, None)               # its import raises ModuleNotFoundError
+    with pytest.raises(ImportError, match="^--fallback-engine nllb needs torch and transformers") as ei:
+        check_nllb()
+    assert ei.value.name == missing and f"{missing} does not import (ModuleNotFoundError)" in str(ei.value)
+    assert 'pip install -e ".[gpu]"' in str(ei.value) and isinstance(ei.value.__cause__, ModuleNotFoundError)
+
+
+def test_check_nllb_turns_a_broken_torch_into_import_error(fake_nllb, monkeypatch):
+    class BrokenTorch(importlib.abc.MetaPathFinder):              # a torch DLL that fails to load
+        def find_spec(self, name, path=None, target=None):
+            if name == "torch":
+                raise OSError("[WinError 126] fake: a DLL failed to load")
+            return None
+
+    monkeypatch.delitem(sys.modules, "torch")
+    monkeypatch.setattr(sys, "meta_path", [BrokenTorch(), *sys.meta_path])
+    with pytest.raises(ImportError, match=r"torch does not import \(OSError\)") as ei:
+        check_nllb()
+    assert not is_transient(ei.value)                             # never retried as a network error
+
+
+def test_a_missing_torch_stops_the_nllb_engine_at_once(root, monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", None)
+    sleeps = Sleeps()
+    with pytest.raises(ImportError, match="^--fallback-engine nllb needs torch and transformers"):
+        run(SRC[:3], "hi", root, nllb_backend(cfg=CFG), engine="nllb", sleep=sleeps)
+    assert sleeps == [] and not root.exists()
+
+
+def test_a_model_that_does_not_load_stops_the_nllb_engine_at_once(root, fake_nllb):
+    sleeps = Sleeps()
+    with pytest.raises(RuntimeError, match=f"^cannot load {NLLB_REPO} at revision ") as ei:
+        run(SRC[:3], "hi", root, nllb_backend(cfg=CFG), engine="nllb", sleep=sleeps)
+    assert ei.value.__cause__ is fake_nllb.load_error               # transformers' error, kept as the cause
+    assert fake_nllb.loads == [("AutoTokenizer", NLLB_REPO, CFG["back_translation"]["revision"])]
+    assert sleeps == [] and not root.exists()
+
+
+def test_a_missing_deep_translator_stops_at_once(root, monkeypatch):
+    for name in ("deep_translator", "deep_translator.google", "deep_translator.exceptions"):
+        monkeypatch.setitem(sys.modules, name, None)
+    made = []
+
+    def on_first_call(text, lang):                               # build.py makes the backend in the call
+        made.append(text)
+        return google_backend(CFG)(text, lang)
+
+    sleeps = Sleeps()
+    with pytest.raises(ModuleNotFoundError, match="deep_translator"):
+        run(SRC[:3], "hi", root, on_first_call, sleep=sleeps)
+    assert made == [SRC[0]] and sleeps == []
+
+
 def test_glotlid_is_loaded_once_and_only_when_needed(root, monkeypatch):
     made = []
 
@@ -412,18 +653,43 @@ class FakeClock:
 
 @pytest.fixture
 def fake_dt(monkeypatch):
-    """A fake deep_translator package in sys.modules: GoogleTranslator, exceptions.TooManyRequests."""
+    """A fake deep_translator package in sys.modules: GoogleTranslator, and the exceptions module
+    with 1.11.4's classes the code looks up by name. ``raise_for`` maps a text to the errors its
+    next calls raise; a text in ``block`` raises TooManyRequests."""
     requests = pytest.importorskip("requests")
     try:
         import deep_translator.google as real_google
     except ImportError:
         real_google = None
-    state = types.SimpleNamespace(made=[], calls=[], block=set(), clock=FakeClock(),
+    state = types.SimpleNamespace(made=[], calls=[], block=set(), raise_for={}, clock=FakeClock(),
                                   real_get=requests.get, real_google=real_google, requests=requests,
                                   real_google_requests=getattr(real_google, "requests", None))
 
     class TooManyRequests(Exception):
         pass
+
+    class RequestError(Exception):
+        pass
+
+    class ServerException(Exception):
+        def __init__(self, status_code, *args):
+            super().__init__("API server error", *args)
+
+    class BaseError(Exception):                     # as in 1.11.4: str(e) starts with the input text
+        def __init__(self, val, message):
+            self.val, self.message = val, message
+            super().__init__()
+
+        def __str__(self):
+            return f"{self.val} --> {self.message}"
+
+    class TranslationNotFound(BaseError):
+        def __init__(self, val, message="No translation was found using the current translator."):
+            super().__init__(val, message)
+
+    class NotValidLength(BaseError):
+        def __init__(self, val, min_chars, max_chars):
+            super().__init__(val, f"Text length need to be between {min_chars} and {max_chars} characters")
 
     class GoogleTranslator:
         def __init__(self, source="auto", target="en", proxies=None, **kwargs):
@@ -434,6 +700,8 @@ def fake_dt(monkeypatch):
             state.calls.append((state.clock.now, self.target, text))
             if text in state.block:
                 raise TooManyRequests()
+            if state.raise_for.get(text):
+                raise state.raise_for[text].pop(0)
             return fake_translation(text, {"zh-CN": "zh"}.get(self.target, self.target))
 
     pkg = types.ModuleType("deep_translator")
@@ -441,8 +709,11 @@ def fake_dt(monkeypatch):
     google = types.ModuleType("deep_translator.google")
     google.GoogleTranslator, google.requests = GoogleTranslator, requests
     exceptions = types.ModuleType("deep_translator.exceptions")
-    exceptions.TooManyRequests = TooManyRequests
+    for cls in (TooManyRequests, RequestError, ServerException, BaseError, TranslationNotFound,
+                NotValidLength):
+        setattr(exceptions, cls.__name__, cls)
     pkg.google, pkg.exceptions = google, exceptions
+    state.exceptions = exceptions
     for name, module in (("deep_translator", pkg), ("deep_translator.google", google),
                          ("deep_translator.exceptions", exceptions)):
         monkeypatch.setitem(sys.modules, name, module)
@@ -498,22 +769,45 @@ def test_google_backend_turns_429_into_translation_blocked_without_retrying(fake
     retry_sleeps = Sleeps()
     with pytest.raises(TranslationBlocked) as ei:
         run(SRC[:5], "hi", root, backend, sleep=retry_sleeps)
-    assert ei.value.done == 2 and "429" in str(ei.value)
+    assert ei.value.done == 2 and ei.value.kind == "http_429" and "429" in str(ei.value)
     assert [text for _, _, text in fake_dt.calls] == SRC[:3]      # called once, nothing after it
     assert retry_sleeps == []
     cache = TranslationCache(root)
     assert [bool(cache.get("google", "hi", s)) for s in SRC[:3]] == [True, True, False]
 
-    with pytest.raises(TranslationBlocked):
+    with pytest.raises(TranslationBlocked) as ei:
         backend(SRC[2], "hi")
+    assert ei.value.kind == "http_429"
+
+
+def test_google_backend_errors_a_retry_can_cure_are_retried(fake_dt, root, caplog):
+    exc = fake_dt.exceptions
+    backend = google_backend(CFG, jitter=0.0, sleep=fake_dt.clock.sleep, clock=fake_dt.clock)
+    fake_dt.raise_for = {SRC[1]: [exc.RequestError(), exc.TranslationNotFound(SRC[1]),
+                                  exc.ServerException(503)]}
+    sleeps = Sleeps()
+    caplog.set_level(logging.DEBUG, logger="lift")
+    assert run(SRC[:3], "hi", root, backend, sleep=sleeps) == [fake_translation(s, "hi") for s in SRC[:3]]
+    assert [text for _, _, text in fake_dt.calls] == [SRC[0]] + [SRC[1]] * 4 + [SRC[2]] and len(sleeps) == 3
+    retries = [m for m in caplog.messages if "retry" in m]
+    assert [m.split(": ")[1].split(";")[0] for m in retries] == ["RequestError", "TranslationNotFound",
+                                                                  "ServerException"]
+
+    # one that holds the text and no retry cures: raised at once, without its message
+    fake_dt.raise_for = {SRC[4]: [exc.NotValidLength(SRC[4], 0, 5000)]}
+    with pytest.raises(RuntimeError, match="deep-translator raised NotValidLength, not a transient") as ei:
+        run(SRC[3:6], "hi", root, backend, sleep=sleeps)
+    assert "Placeholder" not in str(ei.value) and len(sleeps) == 3
+    assert [text for _, _, text in fake_dt.calls][-2:] == [SRC[3], SRC[4]]
+    assert not [m for m in caplog.messages if "Placeholder" in m]
 
 
 # --- logging hygiene ----------------------------------------------------------------------------
 
 def test_no_log_line_or_message_carries_text(root, caplog):
-    class LeakyError(Exception):                                   # deep-translator's str(e) starts
-        def __str__(self):                                         # with the input text
-            return f"{self.args[0]} --> No translation was found"
+    class LeakyError(ConnectionError):                             # transient, so retried; its str(e)
+        def __str__(self):                                         # starts with the input text, like
+            return f"{self.args[0]} --> No translation was found"  # deep-translator's
 
     def leaky(text, lang):
         if text == SRC[3]:
@@ -546,6 +840,26 @@ def test_no_log_line_or_message_carries_text(root, caplog):
 
 
 # --- back-translation ---------------------------------------------------------------------------
+
+def test_back_translate_caches_under_outputs_by_default(tmp_path, data_dir):
+    """Its inputs are generated outputs (raw completions): outputs/, never the data tree."""
+    src = [fake_translation(SRC[0], "ar")]
+    answer = [f"English for {sha256_text(src[0])[:6]}"]
+    assert back_translate(src, "ar", translator=lambda texts, lang: list(answer), cfg=CFG) == answer
+    outputs = tmp_path.resolve() / "outputs"
+    assert output_dir() == outputs                                # LIFT_OUTPUT_DIR (the autouse fixture)
+    path = outputs / "backtranslations" / "nllb-200-distilled-600M" / "ar-en.jsonl"
+    assert path.is_file() and [p.resolve() for p in tmp_path.rglob("*.jsonl")] == [path]
+    assert not data_dir.exists()
+
+    def forbidden(texts, lang):
+        raise AssertionError("translator called")
+
+    assert back_translate(src, "ar", translator=forbidden, cfg=CFG) == answer     # served from there
+    assert back_translate(src, "ar", translator=lambda texts, lang: ["Another"], cfg=CFG,
+                          cache_dir=tmp_path / "elsewhere") == ["Another"]           # cache_dir overrides
+    assert (tmp_path / "elsewhere" / "nllb-200-distilled-600M" / "ar-en.jsonl").is_file()
+
 
 def test_back_translate_raises_on_empty_or_identical_and_caches(root):
     src = [fake_translation(s, "ar") for s in SRC[:3]]
