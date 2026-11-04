@@ -117,8 +117,8 @@ six languages, so pairing, splitting and clustering all go by pid.
   `lift.judge.pipeline.paired_labels`, which refuses mismatched dtypes, judges, models, chat
   templates or decoding settings. An fp16 cell is read only while `outputs/metrics/gate0-fp16.json`
   (at least 200 prompts compared) and the bf16 `gate0.json` it compared against both pass for its
-  Global revision, and only if it was made under the comparison's harness, decoding and GPU class
-  (`check_dtype_licence`). fp16 runs are refused on a GPU with native bf16.
+  Global revision, and only if it was made (and judged) under the comparison's harness, decoding
+  and GPU class (`check_dtype_licence`). fp16 runs are refused on a GPU with native bf16.
 - **Claude Code sessions** run in the Claude desktop app on a Windows laptop (PowerShell). They
   have no usable GPU for this project.
   - Write cross-platform Python: `pathlib` everywhere, and files written with `newline="\n"`
