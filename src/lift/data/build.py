@@ -90,7 +90,9 @@ of utility or sft freezes (or checks) the utility split first and every training
 disjoint from its pids, so a held-out draw that changed (lift.data.sft) stops it with ValueError
 before a training row is written.
 
-Spot checks: ``write_spotcheck_sheets`` writes, per language (default hi zh es), n unchecked
+Spot checks: ``write_spotcheck_sheets`` writes into ``sheets_dir()`` (validation/sheets under
+``lift.paths.validation_dir()``, which LIFT_VALIDATION_DIR moves on a remote runtime, as it moves P04's
+sheets and what lift sync carries), per language (default hi zh es), n unchecked
 dev/final machine translations per set by sha256 rank (ours and PolyRefuse's; blind: no note) and a
 failures sheet with every open translation failure (with its cached engine output: a cache that
 lacks one is refused) plus every unchecked machine translation GlotLID rejected that the sample did
@@ -167,7 +169,7 @@ from lift.data.translate import (
 )
 from lift.io import append_jsonl, read_jsonl, sha256_file, sha256_text, write_jsonl
 from lift.lang import LangIdentifier, lid_info
-from lift.paths import REPO_ROOT, interim_dir, prompts_dir, sft_dir
+from lift.paths import REPO_ROOT, interim_dir, prompts_dir, sft_dir, validation_dir
 from lift.schemas import PromptRecord, TranslationInfo
 
 log = logging.getLogger(__name__)
@@ -178,7 +180,6 @@ TRANSLATED_SETS: tuple[str, ...] = ("harmful", "easy_benign", "hard_benign")   #
 HINDI_SETS: tuple[str, ...] = ("redteam", "utility", "sft")
 SHEET_COLUMNS: tuple[str, ...] = ("item_id", "set", "english", "translation", "verdict", "corrected", "note")
 VERDICTS: tuple[str, ...] = ("ok", "fixed", "bad")
-SHEETS_DIR = REPO_ROOT / "validation" / "sheets"          # gitignored
 
 _KIND = {set_name: kind for kind, set_name in polyrefuse.SET_NAMES.items()}   # easy_benign -> harmless
 _SPLIT_NAMES = ("train", "val", "fit", "dev", "final")
@@ -1263,10 +1264,39 @@ def _append_verdicts(rows: Sequence[dict[str, Any]]) -> None:
     append_jsonl(path, rows)
 
 
+def sheets_dir() -> Path:
+    """The spot-check sheets' folder: validation/sheets in ``lift.paths.validation_dir()``, resolved at
+    call time so LIFT_VALIDATION_DIR moves it, as it moves P04's sheets (lift.validation.store) and the
+    tree lift sync carries. Gitignored."""
+    return validation_dir() / "sheets"
+
+
+def resolve_sheet(path: str | Path) -> Path:
+    """The filled sheet a command names. The path as given when it exists; otherwise a relative one is
+    looked up in the validation tree, where lift sync puts a sheet on a remote runtime: a path that starts
+    with validation/ (as a job line run from the clone names it) under ``validation_dir()``, and a bare
+    name or any other relative path under ``sheets_dir()``. FileNotFoundError names every place looked
+    in."""
+    given = Path(path)
+    if given.exists() or given.is_absolute():
+        return given
+    parts = [p for p in str(path).replace("\\", "/").split("/") if p not in ("", ".")]
+    tried = [given]
+    if parts and parts[0] == "validation" and len(parts) > 1:
+        tried.append(validation_dir().joinpath(*parts[1:]))
+    tried.append(sheets_dir().joinpath(*parts))
+    for candidate in tried[1:]:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"no sheet {str(path)!r}: looked for "
+                            + ", ".join(str(p) for p in dict.fromkeys(tried)))
+
+
 def write_spotcheck_sheets(*, langs: Iterable[str] | None = None, n: int | None = None,
                            overwrite: bool = False, ctx: BuildContext | None = None,
                            out_dir: Path | None = None) -> list[Path]:
-    """Write the native readers' sheets into ``out_dir`` (default SHEETS_DIR, validation/sheets).
+    """Write the native readers' sheets into ``out_dir`` (default ``sheets_dir()``: validation/sheets
+    in the validation tree, which LIFT_VALIDATION_DIR moves).
 
     Per language (default languages.primary + transfer_validated, minus en): spotcheck_{lang}.csv
     with, for each translated set, the ``n`` (default validation.translation_spot_check) unchecked
@@ -1294,7 +1324,7 @@ def write_spotcheck_sheets(*, langs: Iterable[str] | None = None, n: int | None 
     n = int(cfg["validation"]["translation_spot_check"]) if n is None else int(n)
     if n < 0:
         raise ValueError("n must be >= 0")
-    out_dir = Path(out_dir) if out_dir is not None else SHEETS_DIR
+    out_dir = Path(out_dir) if out_dir is not None else sheets_dir()
     seed = int(cfg["split_seed"])
     sheets: dict[Path, list[list[str]]] = {}
     for lang in langs:
@@ -1499,7 +1529,8 @@ class _Items:
 
 def apply_spotchecks(path: str | Path, *, ctx: BuildContext | None = None,
                      dry_run: bool = False) -> dict[str, Any]:
-    """Apply a returned spot-check sheet (UTF-8 CSV; commas, semicolons or tabs: _read_sheet).
+    """Apply a returned spot-check sheet (UTF-8 CSV; commas, semicolons or tabs: _read_sheet), found by
+    ``resolve_sheet`` (as given, else in the validation tree).
 
     The translation cache first: the files the sheet has verdicts on (ok, fixed, bad) must have in it
     every engine output they hold (_uncached_items: the records made from the cache, the failures whose
@@ -1538,7 +1569,7 @@ def apply_spotchecks(path: str | Path, *, ctx: BuildContext | None = None,
     """
     ctx = ctx if ctx is not None else BuildContext.default()
     cfg = ctx.cfg
-    path = Path(path)
+    path = resolve_sheet(path)
     rows, problems = _read_sheet(path)
     langs = [lang for lang in cfg["languages"]["all"] if lang != "en"]
     items = _Items()
