@@ -10,7 +10,8 @@ colab/README.md has the operator's view):
   whose ``--env`` carries only the job spec.
 - Before ``colab new``, lift.sync.preflight checks from here that the runs repo exists, is private
   and takes this token's writes: a read-only token would otherwise be found by the job's first push,
-  after the GPU work.
+  after the GPU work. Its Hub calls have no timeout, so it runs in a daemon thread that gets
+  RUNS_REPO_CHECK_WAIT: no answer by then is a transient error.
 - ``colab exec`` exits 0 even when the code fails, so the job's status comes from the
   "@@LIFT_DONE {json}" line that job.py appends to /content/lift_job.log, fetched every ``--poll``
   seconds with ``colab download`` (the contents API needs no long-lived websocket). When the log
@@ -79,6 +80,7 @@ REMOTE_STOP = "content/lift_job.stop"
 DONE_MARKER = "@@LIFT_DONE "
 TIMEOUT_CAP = 4_294_967  # threading.TIMEOUT_MAX on Windows: a larger --timeout overflows
 TIMEOUTS = {"new": 900.0, "upload": 300.0, "download": 300.0, "stop": 180.0, "sessions": 120.0}
+RUNS_REPO_CHECK_WAIT = 120.0  # the runs repo check's bound: huggingface_hub's client sets no timeout
 SECRET_VARS = ("HF_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
 OPTIONAL_VARS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LIFT_JUDGE_MAX_USD")
 MIN_SECRET_LEN = 8  # as in colab/job.py: shorter values (a spend cap) are settings, not secrets
@@ -581,6 +583,31 @@ def iso(t: float) -> str:
 def hms(seconds: float) -> str:
     s = int(seconds)
     return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+def ended_within(seconds: float, call: Callable[[], Any]) -> bool:
+    """Run ``call`` in a daemon thread and wait up to ``seconds`` for it: True when it returned, its error
+    raised here, False when it still runs. It is then left behind: a socket read with no timeout cannot be
+    cut short, and a daemon thread never holds the process at its exit. The wait goes in short slices, as
+    on Windows a Ctrl+C reaches the waiting thread only between them."""
+    ended: list[BaseException | None] = []
+
+    def run() -> None:
+        try:
+            call()
+        except BaseException as e:  # raised again in the waiting thread
+            ended.append(e)
+        else:
+            ended.append(None)
+
+    thread = threading.Thread(target=run, name="lift-remote-wait", daemon=True)
+    thread.start()
+    end = time.monotonic() + seconds
+    while not ended and time.monotonic() < end:
+        thread.join(min(0.5, end - time.monotonic()))
+    if ended and ended[0] is not None:
+        raise ended[0]
+    return bool(ended)
 
 
 def log_path(name: str) -> Path:
@@ -1597,14 +1624,17 @@ def parse_line(line: str) -> argparse.Namespace | None:
 
 
 def check_runs_repo(ctx: Context, masker: Masker) -> None:
-    """lift.sync.preflight(write=True), from here and before any VM exists: the runs repo exists, is
-    private and takes this token's writes. A problem no retry can fix refuses (2); a transient error
-    exits 1. The message is lift sync's, which never holds a token, masked all the same."""
+    """lift.sync.preflight(write=True), from here: the runs repo exists, is private and takes this token's
+    writes. launch runs it before any VM exists, watch before its push retry, while the VM bills. A problem
+    no retry can fix refuses (2); a transient error exits 1, and so does no answer within
+    RUNS_REPO_CHECK_WAIT: huggingface_hub's client sets no timeout, and a stalled reply would otherwise hold
+    watch for ever, with no code and no banner. The message is lift sync's, which never holds a token,
+    masked all the same."""
     from lift import sync
 
     say(ctx, "checking the runs repo: it exists, is private and takes this token's writes")
     try:
-        sync.preflight(write=True)
+        answered = ended_within(RUNS_REPO_CHECK_WAIT, lambda: sync.preflight(write=True))
     except ImportError as e:
         raise RemoteError(f"cannot check the runs repo: {e.name or 'huggingface_hub'} is not installed in "
                           "this venv (pip install -e \".[sync]\")") from None
@@ -1613,6 +1643,9 @@ def check_runs_repo(ctx: Context, masker: Masker) -> None:
         what = "the runs repo check failed" + ("" if permanent else " (a transient error: try again)")
         code = EXIT_REFUSED if permanent else EXIT_FAILED
         raise RemoteError(f"{what}: {masker(str(e))}", code=code) from None
+    if not answered:
+        raise RemoteError("the runs repo check failed (a transient error: try again): no answer within "
+                          f"{RUNS_REPO_CHECK_WAIT:g} s", code=EXIT_FAILED)
 
 
 def print_plan(ctx: Context, colab: Colab, opts: Launch, gpu: str, spec: JobSpec, secrets: Mapping[str, str],
