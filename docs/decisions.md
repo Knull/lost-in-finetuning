@@ -2,6 +2,25 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 4, 2026 (late morning): training set sizes, before any experimental run
+
+47. **No equal-size rule: each candidate trains on min(3,000, its own rows).** This replaces the
+    rule in item 23.
+    - Effect: Aya trains on its 679 usable rows; IndicAlign (Dolly_T) trains on 3,000.
+    - Why: the equal-size rule came from the Nov 3 P01 prompt, not from the Oct 28 lock, which said
+      "about 3,000 deduplicated rows". At 679 rows, two epochs at an effective batch of 16 come to
+      about 85 optimizer steps. That is likely too few for a measurable gain over stock (Gate 1)
+      or for drift (Gate 2), and without either the repair comparison has nothing to repair.
+    - The candidates are still chosen by dev utility win rate only. The size difference is
+      reported with the choice, and the comparison only has to pick the more useful adapter.
+    - The stress recipe's raw sample moves from Aya (788 undeduplicated rows) to IndicAlign:
+      3,000 of its undeduplicated rows (`stress.candidate: indicalign`).
+    - Mechanics: `configs/train.yaml` `equal_size: false`. `lift.data.sft.build_candidates`
+      records `rows_by_variant` in `data/sft/report.json`. The Nov 3 rule stays available
+      (`equal_size: true`). The utility held-out draw and every split are unchanged; only the
+      training files change, rebuilt with `lift data build --only sft`.
+    - Approved by Arnav, Nov 4.
+
 ## Nov 4, 2026: P01 review fixes, before any experimental run
 
 A review of the P01 build, verified on the pinned data. No model output existed yet and no split

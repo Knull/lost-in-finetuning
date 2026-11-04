@@ -211,8 +211,9 @@ six languages, so pairing, splitting and clustering all go by pid.
   - Each module's docstring holds the verified facts about its source.
   - The splits are frozen in `data/splits/` (Nov 4). The 8 files that need Google Translate
     (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) wait for the
-    translation job. The SFT candidates have 679 rows each
-    (`data/sft/{cand}/{variant}/sft_messages.jsonl`; N is `decision.rows` in `data/sft/report.json`).
+    translation job. The SFT variants are aya/dedup (679 rows), indicalign/dedup (3,000) and
+    indicalign/raw (3,000, the stress recipe), in `data/sft/{cand}/{variant}/sft_messages.jsonl`;
+    the counts are `decision.rows_by_variant` in `data/sft/report.json` (decisions item 47).
 - **P02 (harness).** models.load/generate/variants (stock, adapter), train.merge, prompts,
   judge.qwen3guard, judge.frontier (safety), judge.pipeline, audit.record_safety, sync, gate0, and
   `lift smoke|generate|judge|run-dev|restart|sync|remote`, with colab/job.py and kaggle/runner.ipynb.

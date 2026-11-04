@@ -51,15 +51,25 @@ def project_cfg(per_source=2, utility=None):
     return cfg
 
 
-def training_cfg(rows=5):
+def training_cfg(rows=5, *, equal_size=True, stress="aya"):
+    """The mechanics tests run under the Nov 3 equal-size rule with the aya raw sample; the Nov 4
+    switch (equal_size false, indicalign raw, decisions item 47) has its own tests below."""
     cfg = copy.deepcopy(config.load("train"))
     cfg["rows"] = rows
+    cfg["equal_size"] = equal_size
+    cfg["stress"]["candidate"] = stress
     return cfg
 
 
 CFG = project_cfg()
 SEED = CFG["split_seed"]
 VARIANTS = ("aya/dedup", "indicalign/dedup", "aya/raw")
+
+
+def equal_decision(target, n, limited_by):
+    """report["decision"] under the equal-size rule (training_cfg's default)."""
+    return {"rows_target": target, "equal_size": True, "rows": n,
+            "rows_by_variant": {key: n for key in VARIANTS}, "limited_by": limited_by}
 
 
 @pytest.fixture
@@ -373,7 +383,7 @@ def test_a_draw_that_hits_every_near_duplicate_quirk(data_dir):
     aya, ind = report["sources"]["aya"], report["sources"]["indicalign"]
     assert (aya["near_dup_excluded"], aya["near_dup_of"]) == (1, {"aya": 1, "indicalign": 0})
     assert (ind["near_dup_excluded"], ind["near_dup_of"]) == (2, {"aya": 1, "indicalign": 1})
-    assert report["decision"] == {"rows_target": 5, "rows": 1, "limited_by": "indicalign"}
+    assert report["decision"] == equal_decision(5, 1, "indicalign")
     for key in VARIANTS:
         rows = list(read_jsonl(data_dir / "sft" / key / "sft_messages.jsonl"))
         assert rows
@@ -388,7 +398,7 @@ def test_a_draw_that_hits_every_near_duplicate_quirk(data_dir):
 def test_build_candidates_takes_the_target_when_both_pools_have_enough(data_dir, pools):
     curate = FakeCurate()
     report, train, _ = build(pools, curate=curate)
-    assert report["decision"] == {"rows_target": 5, "rows": 5, "limited_by": None}
+    assert report["decision"] == equal_decision(5, 5, None)
     assert [(p.relative_to(data_dir).as_posix(), d) for _, p, d in curate.calls] == [
         ("interim/sft/aya/dedup", True), ("interim/sft/indicalign/dedup", True),
         ("interim/sft/aya/raw", False)]
@@ -411,12 +421,43 @@ def test_build_candidates_equal_size_rule_follows_the_smaller_pool(data_dir, poo
     train[small] = (distinct, excluded)
     with caplog.at_level(logging.WARNING, logger="lift.data.sft"):
         report = sft.build_candidates(train, cfg=CFG, train_cfg=training_cfg(5), curate=FakeCurate())
-    assert report["decision"] == {"rows_target": 5, "rows": 3, "limited_by": small}
+    assert report["decision"] == equal_decision(5, 3, small)
     for key in VARIANTS:
         assert report["variants"][key]["rows"] == 3
         assert len(list(read_jsonl(data_dir / "sft" / key / "sft_messages.jsonl"))) == 3
     assert any("equal-size rule" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
     assert report["sources"][small]["loaded"] is None          # no pool_counts given
+
+
+def test_build_candidates_without_equal_size_each_variant_keeps_its_own_count(data_dir, pools, caplog):
+    """Nov 4 (decisions item 47): a small aya pool no longer shrinks indicalign, and the stress
+    recipe's raw sample comes from indicalign."""
+    heldout = sft.build_utility_heldout(pools, cfg=CFG)
+    train = sft.exclude_heldout(pools, heldout, cfg=CFG)
+    rows, excluded = train["aya"]
+    train["aya"] = (list({dup_key(r.instruction): r for r in rows}.values())[:3], excluded)
+    curate = FakeCurate()
+    with caplog.at_level(logging.WARNING, logger="lift.data.sft"):
+        report = sft.build_candidates(train, cfg=CFG, curate=curate,
+                                      train_cfg=training_cfg(5, equal_size=False, stress="indicalign"))
+    assert report["decision"] == {
+        "rows_target": 5, "equal_size": False, "rows": None,
+        "rows_by_variant": {"aya/dedup": 3, "indicalign/dedup": 5, "indicalign/raw": 5},
+        "limited_by": ["aya/dedup"]}
+    assert [(p.relative_to(data_dir).as_posix(), d) for _, p, d in curate.calls] == [
+        ("interim/sft/aya/dedup", True), ("interim/sft/indicalign/dedup", True),
+        ("interim/sft/indicalign/raw", False)]
+    for key, n in report["decision"]["rows_by_variant"].items():
+        assert report["variants"][key]["rows"] == n
+        assert len(list(read_jsonl(data_dir / "sft" / key / "sft_messages.jsonl"))) == n
+    assert not (data_dir / "sft" / "aya" / "raw").exists()
+    assert any("no equal-size rule" in r.getMessage() for r in caplog.records)
+
+
+def test_the_committed_training_config_drops_the_equal_size_rule():
+    cfg = config.load("train")
+    assert cfg["equal_size"] is False and cfg["stress"]["candidate"] == "indicalign"
+    assert cfg["rows"] == 3000
 
 
 def test_build_candidates_files_and_reports(data_dir, pools):

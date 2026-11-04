@@ -1,7 +1,8 @@
 # Adapter recipes, locked Oct 28. The data candidate is chosen by dev utility win rate only.
 
 candidates: [aya, indicalign]
-rows: 3000                     # deduplicated rows per candidate after CuratorKIT
+rows: 3000                     # target rows per candidate after CuratorKIT
+equal_size: false              # Nov 4 (decisions item 47): each variant takes min(rows, its own curated rows)
 
 standard:
   lora:
@@ -27,5 +28,5 @@ stress:                        # bundled stress test, used only if the standard 
   lr: 4.0e-4
   epochs: 3
   dedup: false
-  candidate: aya
+  candidate: indicalign        # Nov 4 (item 47): Aya's raw pool (788 rows) is too small to stress anything
   seeds: [1]

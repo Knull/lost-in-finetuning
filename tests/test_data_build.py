@@ -43,7 +43,9 @@ NEEDS_TRANSLATION = {"harmful_hi", "easy_benign_hi", "easy_benign_zh", *(f"hard_
                                                                           if x != "en")}
 EVERY_FILE = {f"{s}_{x}" for s in ("harmful", "easy_benign", "hard_benign", "belebele") for x in LANGS} | {
     "redteam_hi", "utility_hi"}
-VARIANTS = ("aya/dedup", "indicalign/dedup", "aya/raw")
+VARIANTS = ("aya/dedup", "indicalign/dedup", "indicalign/raw")      # the committed train.yaml (item 47)
+FULL = {"rows_target": 5, "equal_size": False, "rows": None,
+        "rows_by_variant": {key: 5 for key in VARIANTS}, "limited_by": None}
 ES_HARMLESS_2 = polyrefuse.load_polyrefuse(POLYREFUSE_FIXTURE, "harmless", "test", "es", cfg=CFG)[2].text
 CALLS_PER_LANG = {"hi": 9 + 7 + 6, "zh": 7 + 6, "es": 6, "ar": 6, "th": 6}   # distinct English texts
 
@@ -179,7 +181,7 @@ def test_fixture_build_without_translation(dirs, caplog):
     for variant in VARIANTS:
         assert len(list(read_jsonl(dirs.data / "sft" / variant / "sft_messages.jsonl"))) == 5
     decision = json.loads((dirs.data / "sft" / "report.json").read_text(encoding="utf-8"))["decision"]
-    assert summary["sft"]["decision"] == decision == {"rows_target": 5, "rows": 5, "limited_by": None}
+    assert summary["sft"]["decision"] == decision == FULL
 
     # GlotLID on every record; a report per file that matches it; no text in reports or logs
     for name in built_files(dirs):
@@ -265,7 +267,7 @@ def test_training_rows_never_near_duplicate_a_utility_record(dirs):
     assert pools["aya"]["near_dup_excluded"] > 0 and pools["indicalign"]["near_dup_excluded"] > 0
     assert pools["indicalign"]["near_dup_of"]["aya"] > 0                          # across sources too
     util = list(by_pid("utility", "hi").values())
-    assert len(util) == 20 and summary["sft"]["decision"]["rows"] >= 1
+    assert len(util) == 20 and min(summary["sft"]["decision"]["rows_by_variant"].values()) >= 1
     for variant in VARIANTS:
         rows = list(read_jsonl(dirs.data / "sft" / variant / "sft_messages.jsonl"))
         assert rows
@@ -289,7 +291,7 @@ def test_sft_checks_the_frozen_utility_split_before_writing(dirs, caplog):
     assert snapshot(dirs.data) == before and not (dirs.data / "sft").exists()
     assert split_file(dirs, "utility")["assignments"] == frozen
     summary = build.build_all(ctx=fixture_ctx(), only=["sft"], langs=["hi"])       # the same pool passes
-    assert summary["splits"]["utility"]["status"] == "loaded" and summary["sft"]["decision"]["rows"] == 5
+    assert summary["splits"]["utility"]["status"] == "loaded" and summary["sft"]["decision"] == FULL
 
 
 class CollidingTranslator(FakeTranslator):
@@ -541,7 +543,7 @@ def test_a_blocked_translator_stops_all_translation_and_the_rest_is_built(dirs):
     reasons = {f"{x['set']}_{x['lang']}": x["reason"] for x in summary["skipped"]}
     assert set(reasons) == NEEDS_TRANSLATION and reasons["harmful_hi"] == "translation blocked"
     assert not any(x["requested"] for x in summary["skipped"])
-    assert built_files(dirs) == EVERY_FILE - NEEDS_TRANSLATION and summary["sft"]["decision"]["rows"] == 5
+    assert built_files(dirs) == EVERY_FILE - NEEDS_TRANSLATION and summary["sft"]["decision"] == FULL
     assert report(dirs, "build")["blocked"] and report(dirs, "build")["blocked_kind"] == "http_429"
     text = build.format_stats(build.stats(cfg=CFG))
     assert f"last build {summary['run_id']}: INCOMPLETE: rerun to resume from the cache" in text
@@ -1432,14 +1434,16 @@ def test_stats_count_files_failures_and_exclusions(dirs, spot):
     assert st["files"]["harmful_en"]["excluded"] == ["prh-train-0001"]
     assert st["files"]["easy_benign_es"]["lid_failures"] == ["prb-test-0002"]
     assert st["files"]["redteam_hi"]["by_split"] == {"final": 4}
-    assert st["sft"]["decision"]["rows"] == 5 and set(st["sft"]["variants"]) == set(VARIANTS)
+    assert st["sft"]["decision"] == FULL and set(st["sft"]["variants"]) == set(VARIANTS)
     assert st["build"]["complete"] is True
     b = st["build"]
     assert (b["rerun_needed"], b["blocked"], b["blocked_kind"]) == (False, False, None)
     assert st["files"]["harmful_hi"]["cross_split_duplicates"] == 0
     assert all("cross_split_duplicates" not in st["files"][f"belebele_{lang}"] for lang in LANGS)
     text = build.format_stats(st)
-    assert "hard_benign_hi" in text and "N = 5 rows" in text and "failures empty 1, wrong_lang 1" in text
+    sft_line = ("sft: rows per variant, target 5, no equal-size rule: "
+                "aya/dedup 5, indicalign/dedup 5, indicalign/raw 5")
+    assert "hard_benign_hi" in text and sft_line in text and "failures empty 1, wrong_lang 1" in text
     assert ("excluded = copies of a test prompt or a red-teaming repeat (duplicate_of, near_duplicate_of), "
             "train/val/fit texts a dev/final record has (same_text_as) and spot-check bad") in text
     assert f"last build {st['build']['run_id']}: complete" in text.splitlines()

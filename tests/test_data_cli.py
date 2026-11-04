@@ -92,7 +92,8 @@ def test_build_exits_0_when_built_including_files_skip_translation_left_out(dirs
     use_fixtures(monkeypatch)
     assert main(["data", "build"]) == 0
     out = capsys.readouterr().out
-    assert out.splitlines()[-1].startswith("complete; summary in ") and "sft: 5 rows per candidate" in out
+    assert out.splitlines()[-1].startswith("complete; summary in ")
+    assert "sft: rows per variant (target 5, no equal-size rule)" in out
     # the laptop path while Google is blocked: nothing a rerun could add is missing
     assert main(["data", "build", "--only", "hard_benign", "--skip-translation"]) == 0
     out = capsys.readouterr().out

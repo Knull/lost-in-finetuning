@@ -72,8 +72,12 @@ def _build(args: argparse.Namespace) -> int:
         print("items a rerun can translate are missing from: " + ", ".join(summary["incomplete"]))
     if summary["sft"]:
         d = summary["sft"]["decision"]
-        print(f"sft: {d['rows']} rows per candidate (target {d['rows_target']}, "
-              f"limited by {d['limited_by']})")
+        if d.get("rows") is not None:
+            print(f"sft: {d['rows']} rows per candidate (target {d['rows_target']}, "
+                  f"limited by {d['limited_by']})")
+        else:
+            print(f"sft: rows per variant (target {d['rows_target']}, no equal-size rule): "
+                  + ", ".join(f"{k} {v}" for k, v in sorted(d["rows_by_variant"].items())))
     if summary["blocked"]:
         print(blocked_advice(summary["blocked_kind"]))
         print(f"blocked: {summary['blocked_reason']}")
