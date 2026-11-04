@@ -1,5 +1,7 @@
 import dataclasses
 import json
+import logging
+import re
 
 import pytest
 
@@ -91,7 +93,8 @@ def test_records_carry_hashes_counts_and_meta(stock, tmp_path, isolated_dirs):
     assert r.meta["dtype"] == "fp32" and r.meta["gpu"] == "cpu" and r.meta["batch_size"] in (1, 2)
     assert all(not x.hit_cap or x.meta["n_generated"] == CAP for x in recs.values())
     assert all(x.meta["n_generated"] <= CAP for x in recs.values())
-    provenance = ("model_rev", "harness", "template", "torch", "transformers", "gpu_capability", "run_config")
+    provenance = ("model_rev", "harness", "template", "torch", "transformers", "gpu_capability", "stack",
+                  "decoding", "run_config")
     for field in provenance:
         assert r.meta[field]
     assert r.meta["model_rev"] == stock.model_rev and r.meta["harness"] == gen.HARNESS_VERSION
@@ -100,6 +103,7 @@ def test_records_carry_hashes_counts_and_meta(stock, tmp_path, isolated_dirs):
     doc = json.loads(manifests[0].read_text(encoding="utf-8"))
     assert doc["n_written"] == len(TEXTS) and doc["prompts_per_sec"] > 0 and doc["tokens_per_sec"] > 0
     assert doc["gen_cfg"]["dtype"] == "fp32" and doc["gen_cfg"]["max_new_tokens"] == CAP
+    assert {f: doc[f] for f in provenance} == {f: r.meta[f] for f in provenance}     # the run's own fields
 
 
 def test_hit_cap_and_stop(stock):
@@ -180,14 +184,108 @@ def test_a_file_never_mixes_configurations_even_outside_the_current_prompts(stoc
                for r in gen.read_generations(path))
 
 
-def test_a_resume_under_another_stack_is_refused(stock, tmp_path, monkeypatch):
-    # The runtime upgraded transformers (or moved to another GPU class) between two sessions.
-    path = tmp_path / "g.jsonl"
-    run(stock, path, ps=prompts()[:2])
+def moved_stack(monkeypatch, **changes):
+    """The next session's runtime: a newer transformers or torch, or another GPU class."""
     real = gen.stack
-    monkeypatch.setattr(gen, "stack", lambda device: {**real(device), "transformers": "5.99.0"})
-    with pytest.raises(gen.StaleOutputError, match="transformers"):
-        run(stock, path, ps=prompts()[2:])
+    monkeypatch.setattr(gen, "stack", lambda device: {**real(device), **changes})
+
+
+# The cell every prompts() record belongs to, and the job line that starts it over.
+RESTART = "lift restart --variant stock --split dev --sets harmful --langs en"
+
+
+def cell_path():
+    return gen.generations_path("stock", "harmful", "en", "dev")
+
+
+@pytest.mark.parametrize("change", [{"transformers": "5.99.0"}, {"torch": "2.99.0+cu130"},
+                                    {"gpu_capability": "8.9"}, {"transformers": "5.99.0", "torch": "2.99.0"}])
+def test_appending_under_another_stack_is_refused(stock, monkeypatch, change):
+    # A job line can follow the refusal: moving the file aside by hand is undone by the job's own
+    # `lift sync pull`. constraints.txt pins transformers only; torch is each runtime's own build.
+    path = cell_path()
+    run(stock, path, ps=prompts()[:2])
+    before = path.read_bytes()
+    moved_stack(monkeypatch, **change)
+    with pytest.raises(gen.StaleOutputError) as exc:
+        run(stock, path)
+    message = str(exc.value)
+    for field, value in change.items():
+        assert f"{field} " in message and f"-> {value}" in message           # names what moved
+    assert f"run `{RESTART}` as a job line right after `lift sync pull`, followed by the line that failed" \
+        in message
+    assert ("constraints.txt" in message) == ("transformers" in change)
+    runtime = bool({"torch", "gpu_capability"} & set(change))
+    assert ("torch is the runtime's own CUDA build" in message) == runtime
+    assert not re.search(r"\bmove\b", message.replace(str(path), ""))      # by hand, the pull would undo it
+    assert exc.value.command == RESTART and path.read_bytes() == before
+
+
+def test_changed_inputs_name_the_restart_line(stock, tmp_path):
+    path = cell_path()
+    run(stock, path)
+    fixed = prompts()
+    fixed[0] = make_prompt(fixed[0].pid, text=fixed[0].text + " (fixed translation)")
+    with pytest.raises(gen.StaleOutputError, match="a fixed prompt text") as exc:
+        run(stock, path, ps=fixed)
+    assert f"run `{RESTART}` as a job line right after `lift sync pull`" in str(exc.value)
+    assert exc.value.command == RESTART
+    with pytest.raises(gen.StaleOutputError, match="another configuration") as exc:
+        run(dataclasses.replace(stock, dtype="fp16"), path)
+    assert f"run `{RESTART}` as a job line right after `lift sync pull`" in str(exc.value)
+    assert exc.value.command == RESTART
+    other = tmp_path / "elsewhere.jsonl"                    # not a cell's file: no lift restart line for it
+    run(stock, other)
+    with pytest.raises(gen.StaleOutputError, match=f"move {re.escape(str(other))} aside") as exc:
+        run(stock, other, ps=fixed)
+    assert "`lift restart" not in str(exc.value) and exc.value.command is None
+
+
+def test_restart_command_names_the_cell_and_the_judge():
+    assert gen.restart_command("stock", "easy_benign", "hi", "final") == (
+        "lift restart --variant stock --split final --sets easy_benign --langs hi")
+    assert gen.restart_command("stock", "harmful", "hi", "dev", judge="second").endswith(" --judge second")
+
+
+def test_a_finished_file_is_reused_under_another_stack(stock, tmp_path, monkeypatch, caplog):
+    # A session died while judging; the next one resolved a newer transformers. Nothing would be
+    # appended, so the finished file is returned as it is (the judge goes on) and the move is logged.
+    path = tmp_path / "g.jsonl"
+    run(stock, path)
+    before = path.read_bytes()
+    moved_stack(monkeypatch, transformers="5.99.0")
+    with caplog.at_level(logging.INFO, logger=gen.__name__):
+        assert gen.generate(stock, prompts(), out_path=path, max_new_tokens=CAP) == path
+    assert path.read_bytes() == before
+    assert "another stack" in caplog.text and "-> 5.99.0" in caplog.text
+
+
+def test_run_config_is_the_inputs_and_the_stack_and_decoding_have_their_own_digests(stock, tmp_path,
+                                                                                   monkeypatch):
+    from lift.io import sha256_obj
+
+    first = run(stock, tmp_path / "a.jsonl", ps=prompts()[:1])["p-000"].meta
+    moved_stack(monkeypatch, gpu_capability="8.9")
+    moved = run(stock, tmp_path / "b.jsonl", ps=prompts()[:1])["p-000"].meta
+    fp16 = run(dataclasses.replace(stock, dtype="fp16"), tmp_path / "c.jsonl", ps=prompts()[:1])["p-000"].meta
+    assert first["run_config"] == moved["run_config"] != fp16["run_config"]
+    assert first["stack"] != moved["stack"] == fp16["stack"]
+    for meta in (first, moved):
+        fields = {f: meta[f] for f in ("torch", "transformers", "gpu_capability")}       # exactly these
+        assert meta["stack"] == sha256_obj(fields)[:16]
+    cfg = gen.gen_config(stock, max_new_tokens=CAP)
+    decoding = sha256_obj({k: v for k, v in cfg.items() if k != "dtype"})[:16]      # every setting but dtype
+    assert first["decoding"] == fp16["decoding"] == decoding
+
+
+def test_changed_inputs_are_refused_under_any_stack(stock, tmp_path, monkeypatch):
+    path = tmp_path / "g.jsonl"
+    run(stock, path)
+    moved_stack(monkeypatch, transformers="5.99.0")
+    with pytest.raises(gen.StaleOutputError, match="another configuration"):
+        run(dataclasses.replace(stock, dtype="fp16"), path)
+    with pytest.raises(gen.StaleOutputError, match="another configuration"):
+        run(stock, path, ps=prompts()[:2], max_new_tokens=CAP - 1)
 
 
 class _GenerateOnly:
