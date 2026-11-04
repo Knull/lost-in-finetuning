@@ -80,21 +80,29 @@ def fp32_configured(monkeypatch):
 
 @pytest.fixture
 def reference_passed(tiny_model_dir):
-    """The reference Gate 0's own PASS for the tiny model's revision (outputs/metrics/gate0.json, as
-    `lift sync pull` brings it from the A100): a comparison counts only against it (contract E)."""
+    """vouch(): the reference Gate 0's own PASS (outputs/metrics/gate0.json, as `lift sync pull` brings it
+    from the A100) for the tiny model's revision and the fp32 precision outputs now on disk (their digest).
+    A comparison counts only against it (contracts E and J), so call it once the reference run is there."""
     from lift.models.load import resolved_revision
     from lift.paths import ensure, metrics_dir
 
-    path = ensure(metrics_dir()) / "gate0.json"
-    rev = resolved_revision(str(tiny_model_dir), "local")
-    path.write_text(json.dumps({"pass": True, "revisions": {"global": rev}}), encoding="utf-8")
-    return path
+    def vouch():
+        path = ensure(metrics_dir()) / "gate0.json"
+        rev = resolved_revision(str(tiny_model_dir), "local")
+        digest = gate0.precision_digest(gate0.gate0_dir("fp32") / "precision")
+        doc = {"pass": True, "revisions": {"global": rev}, "checks": {"precision": {"digest": digest}}}
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return path
+
+    return vouch
 
 
 @pytest.fixture
 def cpu_sized(monkeypatch):
-    """A licence's minimum sample (decisions.md 27: 200 prompts) lowered to the CPU tests' 18."""
+    """decisions.md 27's samples (precision and the licence on 200 prompts, the dry run on 20 per set and
+    language) lowered to the CPU tests' 18 prompts and 1 per set and language."""
     monkeypatch.setattr(gate0, "N_PRECISION", 18)
+    monkeypatch.setattr(gate0, "N_DRY", 1)
 
 
 @pytest.fixture
@@ -293,34 +301,42 @@ def test_a_licence_needs_the_full_sample_and_a_passing_reference():
 
 
 def test_reference_gate_problem_names_what_is_wrong():
-    """The bf16 Gate 0's own verdict, as check_dtype_licence reads it: present, readable, "pass" true
-    and for this revision of Global."""
+    """The bf16 Gate 0's own verdict, as check_dtype_licence reads it: present, readable, "pass" true,
+    for this revision of Global, and about the precision outputs on disk (its digest, contract J)."""
     from lift.paths import ensure, metrics_dir
 
-    rev = "a" * 40
+    rev, digest = "a" * 40, "f" * 64
     path = ensure(metrics_dir()) / "gate0.json"
-    assert gate0.reference_gate_problem(rev, "bf16") == "the bf16 Gate 0 (gate0.json) is missing"
-    for doc, why in [({"pass": True, "revisions": {"global": rev}}, None),
-                     ({"pass": False, "revisions": {"global": rev}}, "did not pass"),
-                     ({"pass": "true", "revisions": {"global": rev}}, "did not pass"),
+    missing = gate0.reference_gate_problem(rev, "bf16", digest=digest)
+    assert missing == "the bf16 Gate 0 (gate0.json) is missing"
+    ok = {"pass": True, "revisions": {"global": rev}, "checks": {"precision": {"digest": digest}}}
+    for doc, why in [(ok, None),
+                     ({**ok, "pass": False}, "did not pass"),
+                     ({**ok, "pass": "true"}, "did not pass"),
                      ([True], "did not pass"),
-                     ({"pass": True, "revisions": {"global": "e" * 40}}, f"revision {'e' * 40}, not {rev}"),
-                     ({"pass": True, "revisions": "x"}, f"revision None, not {rev}")]:
+                     ({**ok, "revisions": {"global": "e" * 40}}, f"revision {'e' * 40}, not {rev}"),
+                     ({**ok, "revisions": "x"}, f"revision None, not {rev}"),
+                     ({**ok, "checks": {"precision": {"pass": True, "digest": "0" * 64}}},
+                      "the bf16 precision outputs here are not the ones gate0.json passed"),
+                     ({**ok, "checks": {"precision": {"pass": True}}}, "records no checks.precision.digest"),
+                     ({**ok, "checks": ["precision"]}, "records no checks.precision.digest")]:
         path.write_text(json.dumps(doc), encoding="utf-8")
-        got = gate0.reference_gate_problem(rev, "bf16")
+        got = gate0.reference_gate_problem(rev, "bf16", digest=digest)
         assert (got is None) if why is None else (why in got), (doc, got)
     path.write_text('{"pass": tr', encoding="utf-8")                  # a truncated download
-    assert gate0.reference_gate_problem(rev, "bf16") == \
+    assert gate0.reference_gate_problem(rev, "bf16", digest=digest) == \
         "the bf16 Gate 0 (gate0.json) cannot be read (JSONDecodeError)"
 
 
-def test_run_gate0_end_to_end_on_cpu(stock, prompt_store, tiny_model_dir, isolated_dirs):
+def test_run_gate0_end_to_end_on_cpu(stock, prompt_store, tiny_model_dir, isolated_dirs, cpu_sized):
     result = gate0.run_gate0(device="cpu", model_id=str(tiny_model_dir), revision="local", judge=FakeJudge(),
                              lid=FakeLID(), n_precision=18, n_dry=1, batch_sizes=(2,), n_throughput=4,
                              max_new_tokens=6, resolve_pins=False)
     assert set(result["checks"]) == {"preamble", "precision", "throughput", "dry_run", "parity"}
     assert result["pass"], {k: v.get("pass") for k, v in result["checks"].items()}
     assert result["checks"]["parity"]["all_match"]
+    digest = gate0.precision_digest(gate0.gate0_dir("bf16") / "precision")
+    assert result["checks"]["precision"]["digest"] == digest
     json_path, md_path = gate0.write_report(result)
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert doc["pass"] and doc["revisions"]["global"].startswith("local-")
@@ -363,11 +379,13 @@ def test_fp16_compare_reads_the_reference_run(stock, prompt_store, tiny_model_di
               skip=["preamble", "throughput", "dry_run", "parity"], resolve_pins=False, max_new_tokens=6)
     reference = gate0.run_gate0(judge=FakeJudge(), **kw)
     assert reference["checks"]["precision"]["pass"]
+    reference_passed()
     # The candidate run: same prompts in another dtype (bf16 on CPU here), compared against fp32.
     cand = gate0.run_gate0(judge=FakeJudge(), compare_dtype="bf16", **kw)
     fp = cand["checks"]["fp16"]
     assert fp["n"] == 18 and fp["n_reference"] == 18 and 0.0 <= fp["label_agreement"] <= 1.0
-    assert fp["invalid"] == {}                        # same prompts, model, template, harness and judge
+    assert fp["invalid"] == {} and fp["comparable"]   # same prompts, model, template, harness and judge
+    assert fp["reference_digest"] == reference["checks"]["precision"]["digest"]
     assert cand["reference_dtype"] == "fp32" and cand["dtype"] == "bf16"
     assert cand["required"] == ["precision", "fp16"] and gate0.report_name(cand) == "gate0-bf16"
 
@@ -483,6 +501,7 @@ def test_fp16_without_a_valid_comparison_decides_nothing(prompt_store, tiny_mode
         reference = gate0.run_gate0(model_id=str(tiny_model_dir), judge=FakeJudge(), **CANDIDATE)
         assert reference["checks"]["precision"]["pass"]
         damage()
+    reference_passed()                                # gate0.json vouches for what is there, damage and all
     licence = metrics_dir() / "gate0-bf16.json"
     licence.parent.mkdir(parents=True, exist_ok=True)
     licence.write_text(json.dumps({"pass": True, "checks": {"fp16": {"pass": True}}}), encoding="utf-8")
@@ -504,6 +523,7 @@ def test_a_valid_comparison_under_95_percent_is_the_fp16_verdict(prompt_store, t
                                                                  cpu_sized):
     reference = gate0.run_gate0(model_id=str(tiny_model_dir), judge=FakeJudge(), **CANDIDATE)
     assert reference["checks"]["precision"]["pass"]
+    reference_passed()
     cand = gate0.run_gate0(model_id=str(tiny_model_dir), judge=HarmfulJudge(), compare_dtype="bf16",
                            **CANDIDATE)
     fp = cand["checks"]["fp16"]
@@ -632,6 +652,7 @@ def test_a_quick_comparison_on_fewer_prompts_is_no_licence(prompt_store, tiny_mo
     seeded permutation, so all 50 pair, and every label agrees. Agreement on 50 prompts is not
     decisions.md 27's 200, so it is no licence (V15)."""
     gate0.run_gate0(model_id=str(tiny_model_dir), judge=HarmfulJudge(), **{**CANDIDATE, "n_precision": 72})
+    reference_passed()
     cand = gate0.run_gate0(model_id=str(tiny_model_dir), judge=HarmfulJudge(), compare_dtype="bf16",
                            **{**CANDIDATE, "n_precision": 50})
     fp = cand["checks"]["fp16"]
@@ -640,6 +661,7 @@ def test_a_quick_comparison_on_fewer_prompts_is_no_licence(prompt_store, tiny_mo
     assert fp["not_run"] and fp["comparable"] is False
     assert fp["reason"] == "50 prompts, under the 200 decisions.md 27 requires"
     assert cand["incomplete"] == ["fp16"] and gate0.report_name(cand) == "gate0-bf16-partial"
+    assert cand["checks"]["precision"]["pass"]       # contract K is the reference run's: here fp16 decides
 
 
 def test_runs_with_other_decoding_are_not_comparable(prompt_store, tiny_model_dir, fp32_configured,
@@ -647,6 +669,7 @@ def test_runs_with_other_decoding_are_not_comparable(prompt_store, tiny_model_di
     """Another cap (or stop set) changes outputs and labels for reasons other than precision: the pairs
     are made from other inputs (meta.decoding), never 'fp16 failed' (V17)."""
     gate0.run_gate0(model_id=str(tiny_model_dir), judge=FakeJudge(), **{**CANDIDATE, "max_new_tokens": 4})
+    reference_passed()
     cand = gate0.run_gate0(model_id=str(tiny_model_dir), judge=FakeJudge(), compare_dtype="bf16", **CANDIDATE)
     fp = cand["checks"]["fp16"]
     assert fp["invalid"] == {"decoding": 18} and fp["not_run"] and fp["comparable"] is False
@@ -654,12 +677,149 @@ def test_runs_with_other_decoding_are_not_comparable(prompt_store, tiny_model_di
     assert gate0.report_name(cand) == "gate0-bf16-partial"
 
 
+# --- the comparison pairs with the outputs gate0.json passed; a reduced reference decides nothing ---------
+# (review 4: W2, W6, W7; contracts J and K)
+
+NON_REQUIRED = ["preamble", "throughput", "dry_run", "parity"]
+
+
+def _gate(tiny_model_dir, **kw):
+    """One Gate 0 run written the way `lift smoke` writes it: (result, report name, the written record).
+    The judge calls every output harmful, so labels agree across precisions and a valid comparison passes."""
+    result = gate0.run_gate0(model_id=str(tiny_model_dir), **{**GATE, "judge": HarmfulJudge(), **kw})
+    name = gate0.report_name(result)
+    json_path, _ = gate0.write_report(result, name=name)
+    return result, name, json.loads(json_path.read_text(encoding="utf-8"))
+
+
+def _harness_fix(monkeypatch):
+    """A harness fix: HARNESS_VERSION + 1 (new cache keys, meta.harness and meta.decoding)."""
+    from lift.models import generate
+
+    monkeypatch.setattr(generate, "HARNESS_VERSION", generate.HARNESS_VERSION + 1)
+
+
+def _stopped_in_the_dry_run(monkeypatch, tiny_model_dir):
+    """A reference re-run stopped after its precision check (watchdog, --max-hours, Ctrl+C): no report."""
+    real = gate0.generate_and_judge
+
+    def run(variant, judge, prompts, root, **kw):
+        if root.name == "dry_run":
+            raise KeyboardInterrupt
+        return real(variant, judge, prompts, root, **kw)
+
+    monkeypatch.setattr(gate0, "generate_and_judge", run)
+    with pytest.raises(KeyboardInterrupt):
+        _gate(tiny_model_dir)
+    monkeypatch.setattr(gate0, "generate_and_judge", real)
+
+
+@pytest.mark.parametrize("skip, fixed", [(["dry_run", "parity"], True), (None, True),
+                                         (["throughput", "dry_run", "parity"], False)],
+                         ids=["skip-dry-run", "stopped", "same-code"])
+def test_a_comparison_pairs_only_with_the_outputs_gate0_json_passed(prompt_store, tiny_model_dir,
+                                                                     fp32_configured, cpu_sized, monkeypatch,
+                                                                     skip, fixed):
+    """W2: gate0.json passed. After a harness fix the reference Gate 0 is re-run with checks skipped
+    (gate0-partial.json; the skipped dry run could have failed), or is stopped after its precision check
+    (no report; the job's push still sends its outputs). Its precision outputs replace the ones gate0.json
+    passed, which still says PASS. The comparison pairs fine with them, but nothing vouches for them: NOT
+    RUN, INCOMPLETE, -partial. A re-run of the same code makes the very outputs gate0.json passed, so the
+    comparison stands."""
+    from lift.paths import metrics_dir
+
+    _, name, passed = _gate(tiny_model_dir)
+    assert name == "gate0" and passed["pass"]
+    if fixed:
+        _harness_fix(monkeypatch)
+    if skip is None:
+        _stopped_in_the_dry_run(monkeypatch, tiny_model_dir)
+    else:
+        _, name, _ = _gate(tiny_model_dir, skip=skip)
+        assert name == "gate0-partial"
+    assert json.loads((metrics_dir() / "gate0.json").read_text(encoding="utf-8")) == passed
+    cand, name, _ = _gate(tiny_model_dir, compare_dtype="bf16", skip=NON_REQUIRED)
+    fp = cand["checks"]["fp16"]
+    assert fp["n"] == 18 and fp["invalid"] == {} and fp["label_agreement"] == 1.0     # the pairs are fine
+    if not fixed:
+        assert fp["comparable"] and name == "gate0-bf16" and cand["decision"] == gate0.DECISION["pass"]
+        return
+    assert fp.get("not_run") and fp["comparable"] is False, (name, fp.get("reason"))
+    assert "the fp32 precision outputs here are not the ones gate0.json passed" in fp["reason"]
+    assert cand["failed"] == [] and cand["incomplete"] == ["fp16"] and name == "gate0-bf16-partial"
+    assert gate0.DECISION["pass"] not in cand["decision"] and "re-run the fp32 Gate 0" in cand["decision"]
+    assert fp["reference_digest"] != passed["checks"]["precision"]["digest"]
+
+
+def test_the_licence_names_the_reference_run_and_the_settings_it_compared(prompt_store, tiny_model_dir,
+                                                                          fp32_configured, cpu_sized,
+                                                                          monkeypatch):
+    """W6 (Gate 0's side of contract J), on the full flow: the reference Gate 0 passes with the digest of
+    its precision outputs; the comparison pairs with them and passes, recording that digest
+    (reference_digest), the pairs' harness and decoding, and the GPU class it ran on (gpu_capability).
+    check_dtype_licence compares them with gate0.json and with every fp16 cell, so a bf16 re-run under a
+    harness fix (another digest) or a cell made under other settings needs a new comparison."""
+    from lift.io import read_jsonl
+    from lift.models import generate
+
+    harness = generate.HARNESS_VERSION
+    _, name, reference = _gate(tiny_model_dir)
+    assert name == "gate0" and reference["pass"]
+    cand, name, licence = _gate(tiny_model_dir, compare_dtype="bf16", skip=NON_REQUIRED)
+    assert name == "gate0-bf16" and licence["pass"] and cand["decision"] == gate0.DECISION["pass"]
+    fp = licence["checks"]["fp16"]
+    assert {"reference_digest", "harness", "decoding"} <= set(fp), sorted(fp)
+    assert fp["reference_digest"] == reference["checks"]["precision"]["digest"] == \
+        gate0.precision_digest(gate0.gate0_dir("fp32") / "precision")
+    metas = {dtype: [r["meta"] for p in (gate0.gate0_dir(dtype) / "precision" / "generations").glob("*.jsonl")
+                     for r in read_jsonl(p)] for dtype in ("fp32", "bf16")}
+    assert len(metas["fp32"]) == len(metas["bf16"]) == 18
+    assert {m["harness"] for m in metas["fp32"] + metas["bf16"]} == {fp["harness"]} == {harness}
+    assert {m["decoding"] for m in metas["fp32"] + metas["bf16"]} == {fp["decoding"]}
+    assert {m["gpu_capability"] for m in metas["bf16"]} == {licence["gpu_capability"]} == {"cpu"}
+    _harness_fix(monkeypatch)
+    _, name, rerun = _gate(tiny_model_dir)                       # the reference passes again, on new code
+    assert name == "gate0" and rerun["pass"]
+    assert rerun["checks"]["precision"]["digest"] != fp["reference_digest"]
+
+
+def test_a_reduced_reference_run_is_incomplete_and_leaves_gate0_json(prompt_store, tiny_model_dir):
+    """W7, contract K: decisions.md 27 pins the reference checks' samples (precision on 200 prompts, the dry
+    run on 20 per set and language: 360). A quick `lift smoke --n-precision 18 --n-dry 1` that finds nothing
+    wrong decides nothing: those checks are NOT RUN, their numbers kept, the run INCOMPLETE and written as
+    gate0-partial.json, so the FAIL in gate0.json stands and no fp16 licence comes back. A failure found on a
+    reduced sample is real, though: a full verdict that replaces gate0.json."""
+    from lift.paths import ensure, metrics_dir
+
+    record = ensure(metrics_dir()) / "gate0.json"
+    failed = {"pass": False, "failed": ["dry_run"], "revisions": {"global": "a" * 40}}
+    record.write_text(json.dumps(failed), encoding="utf-8")
+    result, name, _ = _gate(tiny_model_dir)                      # 18 and 18 prompts, the real 200 and 360
+    for check, sizes in (("precision", "18 of the 200"), ("dry_run", "18 of the 360")):
+        c = result["checks"][check]
+        assert gate0.check_status(c) == "NOT RUN", (check, c)
+        assert c["reason"] == f"reduced sample: {sizes} decisions.md 27 requires"
+        assert c["counts"]["prompts"] == 18 and c["counts"]["judge_failures"] == 0
+    assert result["failed"] == [] and result["incomplete"] == ["precision", "dry_run"] and not result["pass"]
+    assert name == "gate0-partial" and gate0.verdict(result) == "INCOMPLETE"
+    assert gate0.DECISION["pass"] not in result["decision"]
+    assert "Not run: reduced sample: 18 of the 200 decisions.md 27 requires." in result["decision"]
+    assert json.loads(record.read_text(encoding="utf-8")) == failed
+    md = (metrics_dir() / "gate0-partial.md").read_text(encoding="utf-8")
+    row = "| precision | NOT RUN | reduced sample: 18 of the 200 decisions.md 27 requires; non-finite hidden"
+    assert row + " 0" in md                                      # the reduced run's numbers stay readable
+    result, name, doc = _gate(tiny_model_dir, judge=FakeJudge(fail_every=5),       # unparseable answers
+                              skip=["preamble", "throughput", "parity"])
+    assert result["failed"] == ["dry_run"] and result["checks"]["precision"]["not_run"] and name == "gate0"
+    assert doc["pass"] is False and json.loads(record.read_text(encoding="utf-8")) == doc
+
+
 # --- judge identity in the fp16 comparison (R28) ----------------------------------------------------------
 
 GUARD = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
 
 
-def _write_run(root, judge_id, n=4):
+def _write_run(root, judge_id, n=4, harness=1):
     """A judged precision run of ``n`` English harmful prompts, written directly (placeholder outputs)."""
     from lift.io import sha256_text, write_jsonl
     from lift.schemas import GenerationRecord, JudgementRecord, UnclearFlags
@@ -672,7 +832,7 @@ def _write_run(root, judge_id, n=4):
         g = GenerationRecord(key=sha256_text(f"{root.name}:{pid}"), variant="stock", pid=pid, lang="en",
                              set="harmful", split="dev", prompt_sha=sha256_text(pid),
                              output=f"placeholder {i}", n_prompt_tokens=5, n_new_tokens=5, hit_cap=False,
-                             seconds=0.1, meta={"model_rev": "b" * 40, "harness": 1, "template": "t",
+                             seconds=0.1, meta={"model_rev": "b" * 40, "harness": harness, "template": "t",
                                                 "decoding": "d" * 16})
         gens.append(g.model_dump())
         juds.append(JudgementRecord(key=g.key, variant="stock", pid=pid, lang="en", set="harmful",
@@ -694,6 +854,42 @@ def test_compare_runs_lets_only_the_judge_precision_differ(tmp_path, tiny_tokeni
     cmp = gate0.compare_runs(tmp_path / "ref", tmp_path / "cand", tiny_tokenizer)
     assert cmp["n"] == 4 and cmp["label_agreement"] == 1.0
     assert (cmp["invalid"] == {}) if same else (cmp["invalid"] == {"judge": 4})
+    assert (cmp["harness"], cmp["decoding"]) == (1, "d" * 16)          # what the pairs were made with
+
+
+def test_compare_runs_names_no_setting_its_pairs_do_not_share(tmp_path, tiny_tokenizer):
+    """Contract J: the comparison records the one harness and decoding of its pairs (the licence pins them);
+    pairs made under different ones are invalid and name none."""
+    _write_run(tmp_path / "ref", f"{GUARD}#bf16#strict", harness=0)
+    _write_run(tmp_path / "cand", f"{GUARD}#fp16#strict")
+    cmp = gate0.compare_runs(tmp_path / "ref", tmp_path / "cand", tiny_tokenizer)
+    assert cmp["invalid"] == {"harness": 4} and cmp["harness"] is None and cmp["decoding"] == "d" * 16
+
+
+def test_precision_digest_names_the_outputs_and_labels_of_a_run(tmp_path):
+    """Contract J: sha256_obj of the sorted (set, lang, pid, key, sha256(output), label) of a run's
+    generations and judgements. The same records give the same digest in any order; another output or
+    label, or an unjudged output, gives another."""
+    from lift.io import read_jsonl, sha256_obj, sha256_text, write_jsonl
+
+    root = tmp_path / "run"
+    _write_run(root, f"{GUARD}#bf16#strict")
+    gpath, jpath = (root / sub / "harmful_en_dev.jsonl" for sub in ("generations", "judgements"))
+    gens, juds = list(read_jsonl(gpath)), list(read_jsonl(jpath))
+    digest = gate0.precision_digest(root)
+    assert digest == sha256_obj(sorted((g["set"], g["lang"], g["pid"], g["key"], sha256_text(g["output"]),
+                                        j["label"]) for g, j in zip(gens, juds, strict=True)))
+    write_jsonl(gpath, gens[::-1])
+    write_jsonl(jpath, juds[::-1])
+    assert gate0.precision_digest(root) == digest
+    for path, rows, field, value in [(jpath, juds, "label", "harmful"), (gpath, gens, "output", "another")]:
+        write_jsonl(path, [{**rows[0], field: value}, *rows[1:]])
+        assert gate0.precision_digest(root) != digest, field
+        write_jsonl(path, rows)
+    assert gate0.precision_digest(root) == digest
+    jpath.unlink()
+    assert gate0.precision_digest(root) != digest
+    assert gate0.precision_digest(tmp_path / "nothing") == sha256_obj([])
 
 
 # --- the pin list (R3) -----------------------------------------------------------------------------------
@@ -756,7 +952,7 @@ def test_pins_name_the_local_primary_judge_and_never_paste_an_unresolved_one(tin
 
 
 def test_a_frontier_primary_needs_no_room_on_the_gpu(prompt_store, tiny_model_dir, frontier_primary,
-                                                     monkeypatch):
+                                                     cpu_sized, monkeypatch):
     """The one-GPU memory refusal is for a judge that loads beside the generator, not an API judge."""
     monkeypatch.setattr(gate0, "_judge_memory_problem", lambda device, judge_device: "no room for the judge")
     monkeypatch.setattr("lift.judge.pipeline.make_judge", lambda role, **kw: FakeJudge())
