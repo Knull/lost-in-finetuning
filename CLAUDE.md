@@ -188,5 +188,8 @@ six languages, so pairing, splitting and clustering all go by pid.
   data.build, data.text and `lift data build|stats|spotcheck-sheets|apply-spotchecks`.
   - Read prompts with `lift.data.build.load_prompts(set, lang, split)`.
   - Each module's docstring holds the verified facts about its source.
+  - The splits are frozen in `data/splits/` (Nov 4). The 8 files that need Google Translate
+    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) wait for the
+    translation job. The SFT candidates have 679 rows each.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.
