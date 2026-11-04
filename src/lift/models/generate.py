@@ -25,7 +25,9 @@ Behaviour:
   newer patch release), but records are never appended under another stack than the file's.
 - Every such refusal is a StaleOutputError naming the ``lift restart`` line that starts the cell over
   (``restart_cell``): a job line right after ``lift sync pull``. Moving the file aside by hand does not
-  work: sync never deletes, so the job's pull brings the runs repo's copy back.
+  work: sync never deletes, so the job's pull brings the runs repo's copy back. A file made in another
+  precision than the run's is not stale and is never started over (that would discard it): it raises
+  OtherPrecisionError, whose remedy is the file's ``--dtype`` or leaving the cell out.
 - ``meta`` carries dtype, GPU name, device, batch size, the provenance (model revision, harness,
   template, the stack, ``decoding``: the decoding settings without the dtype, ``run_config``) and, for
   CAST wrappers, ``gate_fired``.
@@ -34,7 +36,9 @@ Behaviour:
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -44,8 +48,9 @@ from typing import Any, NamedTuple
 from lift import config
 from lift.cachekey import generation_key
 from lift.io import append_jsonl, read_jsonl, sha256_obj, sha256_text
+from lift.models.load import DTYPES
 from lift.models.variants import LoadedVariant
-from lift.paths import generations_dir, judgements_dir, output_dir
+from lift.paths import generations_dir, judgements_dir, metrics_dir, output_dir
 from lift.schemas import GenerationRecord, PromptRecord
 
 log = logging.getLogger(__name__)
@@ -56,25 +61,39 @@ ASIDE_DIR = ".aside"       # in paths.output_dir(): what `lift restart` set asid
 
 
 class StaleOutputError(RuntimeError):
-    """A cell's file holds records this run must not extend (made from other inputs, or under another
-    stack). ``command`` is the ``lift restart`` line that starts the cell over (None for a file no such
-    line covers); the message names it. The judge pipeline's refusals subclass it, so a command can skip
-    the cell and go on with the others."""
+    """A cell's file holds records this run must not extend (made from other inputs, under another
+    stack, or in another precision: ``OtherPrecisionError``). ``command`` is the ``lift restart`` line
+    that starts the cell over (None for a file no such line covers, or that must not be started over);
+    the message names it. The judge pipeline's refusals subclass it, so a command can skip the cell and
+    go on with the others."""
 
     def __init__(self, message: str, *, command: str | None = None) -> None:
         super().__init__(message)
         self.command = command
 
 
+class OtherPrecisionError(StaleOutputError):
+    """A cell's generations were made in another precision than this run's (``dtype``: the file's). Not
+    stale, and never started over: a restart would discard the other precision's outputs. Run with
+    ``--dtype`` of the file, or leave the cell out (``--sets``/``--langs``). ``command`` is always None."""
+
+    def __init__(self, message: str, *, dtype: str) -> None:
+        super().__init__(message, command=None)
+        self.dtype = dtype
+
+
 def generations_path(variant_name: str, set_name: str, lang: str, split: str) -> Path:
     return generations_dir() / variant_name / f"{set_name}_{lang}_{split}.jsonl"
 
 
-def restart_command(variant: str, set_name: str, lang: str, split: str, *, judge: str | None = None) -> str:
+def restart_command(variant: str, set_name: str, lang: str, split: str, *, judge: str | None = None,
+                    dtype: str | None = None) -> str:
     """The job line that starts one cell over (``restart_cell``); ``judge`` (a role) limits it to that
-    judge's judgements file."""
+    judge's judgements file. ``dtype``, the precision the cell is made in, is named when it is not
+    ``generation.dtype``: ``lift restart`` refuses a cell made in another precision than its --dtype."""
     line = f"lift restart --variant {variant} --split {split} --sets {set_name} --langs {lang}"
-    return line + (f" --judge {judge}" if judge else "")
+    line += f" --judge {judge}" if judge else ""
+    return line + (f" --dtype {dtype}" if dtype and dtype != config.get("generation.dtype") else "")
 
 
 def aside_root() -> Path:
@@ -93,27 +112,50 @@ class SetAside(NamedTuple):
     """What ``restart_cell`` did with one file of the cell."""
 
     path: Path                 # the cell's file, now empty
-    records: int | None        # records set aside; None: the file is not here (nothing done)
+    records: int | None        # records set aside (an AuditKIT record file is one); None: not here
     copy: Path | None          # where they went; None when the file held nothing
+
+
+def _subdirs(top: Path) -> list[Path]:
+    return sorted(p for p in top.iterdir() if p.is_dir()) if top.is_dir() else []
+
+
+def cell_judgements(variant: str, set_name: str, lang: str, split: str) -> list[Path]:
+    """The judgements files of one cell that exist, one per judge dir."""
+    name = f"{set_name}_{lang}_{split}.jsonl"
+    return [p for root in _subdirs(judgements_dir()) if (p := root / variant / name).is_file()]
+
+
+def auditkit_records(variant: str, set_name: str, lang: str, split: str, *,
+                     judge_dir: str | None = None) -> list[Path]:
+    """The AuditKIT records of one cell under every judge dir (or ``judge_dir``'s): {cell}.json,
+    {cell}-{dtype}.json and their .full.json forms (lift.audit.auditkit_path names them)."""
+    tags = "|".join(DTYPES)
+    name = re.compile(re.escape(f"{set_name}_{lang}_{split}") + rf"(?:-(?:{tags}))?(?:\.full)?\.json")
+    top = metrics_dir() / "auditkit"
+    dirs = [top / judge_dir] if judge_dir is not None else _subdirs(top)
+    return [p for d in dirs if (d / variant).is_dir()
+            for p in sorted((d / variant).iterdir()) if p.is_file() and name.fullmatch(p.name)]
 
 
 def restart_cell(variant: str, set_name: str, lang: str, split: str, *, aside: Path,
                  judge_dir: str | None = None) -> list[SetAside]:
-    """Start one cell over (``lift restart``): its generations file and every judgements file of it, or
-    only ``judge_dir``'s judgements file, are copied to the same path under ``aside`` and left empty.
+    """Start one cell over (``lift restart``): its generations file, every judgements file of it and
+    every AuditKIT record of it, or only ``judge_dir``'s judgements file and records, are copied to the
+    same path under ``aside`` and left empty.
 
     Emptied, never removed: sync never deletes, so a removed file comes back from the runs repo at the
     next pull, while an emptied one is a local edit the next push sends (an update), replacing the runs
-    repo's copy. generate and judge_file then fill it again (an empty file has no stack). The copy is
-    written before the file is emptied, so a kill in between loses nothing."""
-    name = f"{set_name}_{lang}_{split}.jsonl"
+    repo's copy. generate and judge_file then fill it again (an empty file has no stack). An empty
+    record is retired (readers skip it): a record must not outlive the outputs it describes, and the
+    record of another precision's cell is never rewritten. The copy is written before the file is
+    emptied, so a kill in between loses nothing."""
     if judge_dir is not None:
-        files = [judgements_dir() / judge_dir / variant / name]
+        files = [judgements_dir() / judge_dir / variant / f"{set_name}_{lang}_{split}.jsonl"]
     else:
-        top = judgements_dir()
-        roots = sorted(p for p in top.iterdir() if p.is_dir()) if top.is_dir() else []
         files = [generations_path(variant, set_name, lang, split),
-                 *(p for root in roots if (p := root / variant / name).is_file())]
+                 *cell_judgements(variant, set_name, lang, split)]
+    files += auditkit_records(variant, set_name, lang, split, judge_dir=judge_dir)
     out = []
     for path in files:
         if not path.is_file():
@@ -126,17 +168,35 @@ def restart_cell(variant: str, set_name: str, lang: str, split: str, *, aside: P
             copy.parent.mkdir(parents=True, exist_ok=True)
             copy.write_bytes(data)
             path.write_bytes(b"")
-        out.append(SetAside(path, sum(1 for line in data.splitlines() if line.strip()), copy))
+        jsonl = path.suffix == ".jsonl"
+        n = sum(1 for line in data.splitlines() if line.strip()) if jsonl else int(bool(data))
+        out.append(SetAside(path, n, copy))
     return out
 
 
-def _cell_restart(out_path: Path, variant: str) -> str | None:
+def made_in(variant: str, set_name: str, lang: str, split: str) -> set[str]:
+    """The precisions (``meta.dtype``) the cell's generations were made in, read line by line (a line
+    cut by a kill, or a record without one, is passed over): ``lift restart`` must read any file it
+    may set aside, a corrupt one included."""
+    path = generations_path(variant, set_name, lang, split)
+    found: set[str] = set()
+    for line in path.read_bytes().splitlines() if path.is_file() else []:
+        try:
+            dtype = json.loads(line)["meta"]["dtype"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if dtype:
+            found.add(str(dtype))
+    return found
+
+
+def _cell_restart(out_path: Path, variant: str, dtype: str) -> str | None:
     """The ``lift restart`` line of the cell whose generations file is ``out_path`` (every lift command
-    writes there), None for any other file (a test's, Gate 0's)."""
+    writes there) made in ``dtype``, None for any other file (a test's, Gate 0's)."""
     cell = out_path.stem.rsplit("_", 2)
     if len(cell) != 3 or out_path.resolve() != generations_path(variant, *cell).resolve():
         return None
-    return restart_command(variant, *cell)
+    return restart_command(variant, *cell, dtype=dtype)
 
 
 def _start_over(restart: str | None, out_path: Path) -> str:
@@ -401,6 +461,20 @@ class _Row:
     ids: list[int]
 
 
+def _check_precision(existing: Sequence[GenerationRecord], dtype: str, out_path: Path) -> None:
+    """One file is one precision, and a cell made in another one is not stale: starting it over would
+    discard it (and the next push would replace the runs repo's copy). Its remedies are its own
+    ``--dtype``, where that precision runs, or leaving it out of this run."""
+    made = sorted({str(r.meta["dtype"]) for r in existing if r.meta.get("dtype")} - {dtype})
+    if made:
+        was = "/".join(made)
+        raise OtherPrecisionError(
+            f"{out_path} holds generations made in {was}, and this run is {dtype}: one file is one "
+            f"precision, so nothing is appended. Run this cell with --dtype {was} where {was} runs, or leave "
+            f"it out of this run with --sets/--langs; starting it over would discard its {was} outputs.",
+            dtype=was)
+
+
 def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_path: Path,
              batch_size: int | None = None, resume: bool = True, max_new_tokens: int | None = None,
              manifest: bool = True) -> Path:
@@ -431,20 +505,21 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
 
     env = stack(variant.device)
     run_config = run_config_digest(variant, gen_cfg)
-    restart = _cell_restart(out_path, variant.spec.name)
+    restart = _cell_restart(out_path, variant.spec.name, variant.dtype)
     existing: list[GenerationRecord] = []
     if out_path.exists():
         if not resume:
             raise FileExistsError(f"{out_path} exists; pass resume=True or move it aside")
         repair_tail(out_path)
         existing = read_generations(out_path)
+        _check_precision(existing, variant.dtype, out_path)
         other = sorted({r.pid for r in existing if r.meta.get("run_config") != run_config})
         if any(r.variant != variant.spec.name for r in existing) or other:
             raise StaleOutputError(
-                f"{out_path} holds records made under another configuration (variant, dtype, template, "
-                f"model, adapter or harness version), e.g. {other[:5]}; one file is one configuration and "
-                "outputs are never mixed. Run with the file's configuration, or start the cell over: "
-                f"{_start_over(restart, out_path)}.", command=restart)
+                f"{out_path} holds records made under another configuration (variant, template, model, "
+                f"adapter, decoding settings or harness version), e.g. {other[:5]}; one file is one "
+                "configuration and outputs are never mixed. Run with the file's configuration, or start the "
+                f"cell over: {_start_over(restart, out_path)}.", command=restart)
     done = {prompt_id(r.set, r.lang, r.pid): r.key for r in existing}
 
     def ident(row: _Row) -> tuple[str, str, str]:

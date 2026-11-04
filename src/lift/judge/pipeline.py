@@ -9,15 +9,23 @@ outputs/judgements/{judge_dir}/{variant}/{set}_{lang}_{split}.jsonl after each c
 - Exactly one judgement per selected generation, naming the output it judged (``output_sha``: the
   generation key identifies the inputs, and a regenerated output under the same key can differ). A
   rerun skips the keys already judged (a truncated last line is repaired first); an empty file (what
-  ``lift restart`` leaves) is judged from the start. A judgements file holding another judge's records
-  or duplicate keys raises: judges are never mixed.
-- A stale cell raises ``StaleJudgementsError``, a ``lift.models.generate.StaleOutputError``, so ``lift
-  run-dev`` and ``lift judge`` set the cell aside and go on with the others. Its message (and
-  ``command``) names the ``lift restart`` line to run right after the job's ``lift sync pull``: a file
-  moved aside by hand comes back with that pull. Judgements of generations no longer in the
-  generations file or of another output than the one now under their key, and generations of changed
-  prompts, name the restart of the whole cell (generations and every judge's judgements); judgements on
-  another stack name ``--judge ROLE`` (only that role's judgements).
+  ``lift restart`` leaves) is judged from the start. Duplicate keys raise.
+- A judge on local hardware judges a cell only in the precision of its generations (``meta.dtype``):
+  judgements in another could never be reported. Another raises ``OtherPrecisionError`` (from
+  lift.models.generate) before anything is judged; its remedy is the file's ``--dtype`` or leaving the
+  cell out, never a restart.
+- Judges are never mixed in one file: a file another judge began (another model, revision, precision or
+  Controversial mode) raises ``MixedJudgesError``, whose remedies are that judge or the role's ``lift
+  restart --judge ROLE`` line (``command``).
+- A stale cell raises ``StaleJudgementsError``. It and both refusals above are
+  ``lift.models.generate.StaleOutputError``s, so ``lift run-dev`` and ``lift judge`` set the cell aside
+  and go on with the others. A message (and ``command``) names the ``lift restart`` line to run right
+  after the job's ``lift sync pull``: a file moved aside by hand comes back with that pull. Judgements of
+  generations no longer in the generations file or of another output than the one now under their key,
+  and generations of changed prompts, name the restart of the whole cell (generations and every judge's
+  judgements); judgements on another stack name ``--judge ROLE`` (only that role's judgements). Each
+  line names the cell's precision when it is not ``generation.dtype`` (``lift restart`` refuses
+  another).
 - Every prompt stays in the denominator: a judge failure is written as label "unclear" with
   ``native.judge_failure`` set, and counted in the run manifest.
 - Selection: every generation (the primary judge); ``keys=`` exactly the listed keys present in the
@@ -44,7 +52,9 @@ Reading:
   every judgement on one judge stack; and the judge must be the role's configured judge (model,
   revision when pinned to a sha, and for Qwen3Guard the precision and Controversial mode). ``dtype``
   defaults to ``generation.dtype`` (one precision for every reported number); any other needs Gate
-  0's licence (``check_dtype_licence``), because every ``--dtype`` run names its dtype.
+  0's licence (``check_dtype_licence``), because every ``--dtype`` run names its dtype: a comparison
+  that paired with the bf16 Gate 0 run gate0.json records now, and a cell made under the harness and
+  decoding settings, and on the GPU class, of that comparison.
   ``complete=True`` (every reported number) also needs a generation for every prompt of the split
   and a judgement of every generation; ``complete=False`` is for the second judge's sample and runs
   in progress.
@@ -72,13 +82,17 @@ from typing import Any, Protocol
 from lift import config, prompts
 from lift.io import append_jsonl, read_jsonl, sha256_obj, sha256_text, stable_json
 from lift.judge import labels
-from lift.models.generate import StaleOutputError, restart_command
+from lift.models.generate import OtherPrecisionError, StaleOutputError, restart_command
 from lift.paths import REPO_ROOT, judgements_dir, metrics_dir, validation_dir
 from lift.schemas import GenerationRecord, JudgementRecord, UnclearFlags
 
 log = logging.getLogger(__name__)
 
 LICENCE_MIN_PROMPTS = 200       # decisions.md 27: fp16 agrees with bf16 on 95% of the same 200 prompts
+# What a licensed cell's generations must have been made with (meta field -> where gate0-{dtype}.json records
+# it): Gate 0's comparison says nothing about another harness, other decoding settings or another GPU class.
+LICENCE_COVERS = {"harness": ("checks", "fp16", "harness"), "decoding": ("checks", "fp16", "decoding"),
+                  "gpu_capability": ("gpu_capability",)}
 ROLES: tuple[str, ...] = ("primary", "second")
 _ROLE_ENTRIES = {"primary": "safety_primary", "second": "safety_second"}     # under judges: in project.yaml
 CONTROVERSIAL_MODES = ("strict", "loose")
@@ -92,6 +106,7 @@ _STACK_FIELDS = ("torch", "transformers", "gpu_capability")     # a generation w
 _KEY = re.compile(r"[0-9a-f]{64}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIR_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_JUDGE_PRECISION = re.compile(r"#([^#@]+)#(?:strict|loose)$")       # a Qwen3Guard judge id's #{dtype}#{mode}
 
 
 @dataclass(frozen=True)
@@ -121,6 +136,13 @@ class StaleJudgementsError(StaleOutputError):
     def __init__(self, message: str, *, command: str | None = None) -> None:
         super().__init__(message)
         self.command = command
+
+
+class MixedJudgesError(StaleOutputError):
+    """``judge_file`` refuses a judgements file another judge began (another model, revision, precision or
+    Controversial mode): judges are never mixed in one file. A StaleOutputError, so a run lists the cell and
+    goes on. ``command`` is the role's ``lift restart ... --judge ROLE`` line (None for a file no role owns);
+    the message also names the other remedy, finishing the file with its own judge."""
 
 
 class Judge(Protocol):
@@ -375,15 +397,24 @@ def _role_of(out_path: Path, cell: tuple[str, str, str, str]) -> str | None:
     return None
 
 
-def _cell_restart(cell: tuple[str, str, str, str], gens_path: Path,
-                  out_path: Path | None = None) -> str | None:
-    """The ``lift restart`` line of the whole cell (its generations and every judge's judgements), when
-    ``gens_path`` and ``out_path`` are the cell's own files; else None (a test's or Gate 0's files)."""
+def _cell_restart(cell: tuple[str, str, str, str], gens_path: Path, out_path: Path | None = None, *,
+                  dtype: str | None = None) -> str | None:
+    """The ``lift restart`` line of the whole cell (its generations and every judge's judgements; ``dtype``
+    the precision they were made in), when ``gens_path`` and ``out_path`` are the cell's own files; else
+    None (a test's or Gate 0's files)."""
     from lift.models.generate import generations_path
 
     own = _same_file(gens_path, generations_path(*cell)) and (
         out_path is None or _same_file(out_path, judgements_path(Path(out_path).parent.parent.name, *cell)))
-    return restart_command(*cell) if own else None
+    return restart_command(*cell, dtype=dtype) if own else None
+
+
+def _file_dtype(gens: Sequence[GenerationRecord]) -> str | None:
+    """The one precision ``gens`` were made in (None: none recorded, or a mix), which every restart line of
+    the cell names: ``lift restart`` refuses a cell made in another precision than its --dtype."""
+    made = {g.meta.get("dtype") for g in gens}
+    only = made.pop() if len(made) == 1 else None
+    return str(only) if only else None
 
 
 def _rejudge(restart: str | None, path: Path, *, judge_only: bool) -> str:
@@ -543,9 +574,10 @@ def _resume_state(out_path: Path, judge_id: str, gens: Sequence[GenerationRecord
                   cell: tuple[str, str, str, str], *, resume: bool,
                   restart: str | None, judge_only: bool = False) -> dict[str, JudgementRecord]:
     """{key: record} already in ``out_path``, after checking it holds this judge's judgements of
-    these generations' current outputs only (a record without ``output_sha`` is not trusted). Judgements
-    of generations that changed since are stale: ``restart`` judges the cell again (``judge_only``: the
-    role's ``--judge`` line, which keeps the current generations; else the whole cell's)."""
+    these generations' current outputs only (a record without ``output_sha`` is not trusted). Another
+    judge's records raise ``MixedJudgesError``. Judgements of generations that changed since are stale:
+    ``restart`` judges the cell again (``judge_only``: the role's ``--judge`` line, which keeps the current
+    generations; else the whole cell's)."""
     from lift.models.generate import repair_tail
 
     if not out_path.exists():
@@ -556,8 +588,7 @@ def _resume_state(out_path: Path, judge_id: str, gens: Sequence[GenerationRecord
     records = _read_judgements(out_path)
     others = sorted({r.judge for r in records} - {judge_id})
     if others:
-        raise ValueError(f"{out_path} holds judgements by {others}, not {judge_id}; judges are never mixed "
-                         "in one file")
+        raise _mixed_judges(out_path, others, judge_id, _file_dtype(gens), restart if judge_only else None)
     gen_of = {g.key: g for g in gens}
     stale = sorted(r.pid for r in records if (r.variant, r.set, r.lang, r.split) != cell
                    or r.key not in gen_of or gen_of[r.key].pid != r.pid)
@@ -573,6 +604,48 @@ def _resume_state(out_path: Path, judge_id: str, gens: Sequence[GenerationRecord
             f"their key, e.g. pids {changed[:5]}: generations changed since judging; "
             + _rejudge(restart, out_path, judge_only=judge_only), command=restart)
     return {r.key: r for r in records}
+
+
+def _mixed_judges(out_path: Path, others: Sequence[str], judge_id: str, made: str | None,
+                  restart: str | None) -> MixedJudgesError:
+    """The refusal of a file another judge began. Its remedies: finish it with that judge, or ``restart``
+    (the role's ``--judge`` line) to judge the cell again with this one. Only the second when the file's
+    judge worked in another precision than the generations (``made``: a file from before judge_file refused
+    that), as those judgements can never be reported."""
+    if restart:
+        again = (f"set its judgements aside and judge the cell again with this judge: run `{restart}` as a "
+                 "job line right after `lift sync pull`, followed by the line that failed (the generations "
+                 "are kept)")
+    else:
+        again = f"set {out_path} aside by hand and judge the cell again (no restart line covers that file)"
+    head = (f"{out_path} holds judgements by {list(others)}, not {judge_id}; judges are never mixed in one "
+            "file. ")
+    precisions = sorted({m.group(1) for judge in others if (m := _JUDGE_PRECISION.search(judge))})
+    if made and set(precisions) - {made}:
+        why = f"They were judged in {precisions} of generations made in {made}, so they can never be reported"
+        return MixedJudgesError(f"{head}{why}: {again}.", command=restart)
+    own = ("Either finish the file with its own judge (its id names its revision, and for Qwen3Guard its "
+           "precision and Controversial mode), or")
+    return MixedJudgesError(f"{head}{own} {again}.", command=restart)
+
+
+def _check_precision(judge: Any, gens: Sequence[GenerationRecord], path: Path) -> None:
+    """A judge on local hardware (one with a ``dtype``: Qwen3Guard) judges a cell only in the precision its
+    generations were made in: ``load_records`` reports a cell only with the judge of its generations' dtype,
+    so other judgements would never count. The remedy is the file's ``--dtype`` or leaving the cell out,
+    never a restart (it would discard the other precision's outputs)."""
+    mine = getattr(judge, "dtype", None)
+    made = sorted({str(g.meta["dtype"]) for g in gens if g.meta.get("dtype")})
+    if mine is None or not made or made == [str(mine)]:
+        return
+    if len(made) > 1:
+        raise ValueError(f"{path}: generations mix precisions {made}; one cell is one precision (sync never "
+                         "merges two), so the file was edited by hand: set it aside by hand")
+    raise OtherPrecisionError(
+        f"{path} was generated in {made[0]}, and this judge ({judge.judge_id}) runs in {mine}: a cell is "
+        "judged in the precision it was generated in, as no other judgements can be reported. Judge it with "
+        f"--dtype {made[0]} where that precision runs (bf16 on an A100 or L4, fp16 only on the T4), or leave "
+        "the cell out with --sets/--langs.", dtype=made[0])
 
 
 def _stack_id(stack: Any) -> str:
@@ -688,7 +761,9 @@ def judge_file(generations_path: str | Path, *, judge: str | Judge = "primary", 
     counts (``selection.n_keys_not_in_file`` for ``keys=``, ``selection.n_pids_drawn`` for
     ``sample=``) and the judge's cost counters, also when the run fails. The judgements file is
     written only once something has been judged (an empty one is judged from the start), and is
-    extended only by the same judge on the same stack. A stale cell raises ``StaleJudgementsError``.
+    extended only by the same judge on the same stack. Before anything is judged, a judge on local hardware
+    in another precision than the generations raises ``OtherPrecisionError``, a file another judge began
+    ``MixedJudgesError``, and a stale cell ``StaleJudgementsError``.
     """
     from lift.manifest import finish_run, start_run
     from lift.models.generate import read_generations
@@ -702,8 +777,9 @@ def judge_file(generations_path: str | Path, *, judge: str | Judge = "primary", 
                          "(`lift generate` or `lift run-dev`; `lift restart` leaves an empty file)")
     cell = _one_cell(gens, generations_path)
     variant, set_name, lang, split = cell
+    made = _file_dtype(gens)
     texts = dict(prompts_by_pid) if prompts_by_pid is not None else prompts.texts_by_pid(set_name, lang)
-    _check_prompt_texts(gens, texts, generations_path, _cell_restart(cell, generations_path))
+    _check_prompt_texts(gens, texts, generations_path, _cell_restart(cell, generations_path, dtype=made))
     selected, selection = _select(gens, sample=sample, keys=keys, seed=seed, set_name=set_name, split=split)
 
     if isinstance(judge, str):
@@ -712,12 +788,13 @@ def judge_file(generations_path: str | Path, *, judge: str | Judge = "primary", 
         raise ValueError("device and dtype apply only when judge_file builds the judge from a role")
     if not _DIR_NAME.fullmatch(str(judge.short)):
         raise ValueError(f"judge.short must be a plain directory name, got {judge.short!r}")
+    _check_precision(judge, gens, generations_path)
     out_path = (Path(out_path) if out_path is not None
                 else judgements_path(judge.short, variant, set_name, lang, split))
     role = _role_of(out_path, cell)
-    rejudge = restart_command(*cell, judge=role) if role else None
+    rejudge = restart_command(*cell, judge=role, dtype=made) if role else None
     existing = _resume_state(out_path, judge.judge_id, gens, cell, resume=resume, judge_only=role is not None,
-                             restart=rejudge or _cell_restart(cell, generations_path, out_path))
+                             restart=rejudge or _cell_restart(cell, generations_path, out_path, dtype=made))
     todo = sorted((g for g in selected if g.key not in existing), key=lambda g: g.pid)
     n_resumed = len(selected) - len(todo)
     if existing:
@@ -830,31 +907,38 @@ def check_dtype_licence(dtype: str, model_rev: str | None) -> None:
     T4) with "pass" true, checks.fp16.pass true and checks.fp16.n at least ``LICENCE_MIN_PROMPTS`` (the
     95% rule is on 200 prompts, so a quick ``--n-precision`` run licenses nothing), and the reference
     run's own Gate 0 (gate0.json, bf16 on the A100) with "pass" true, both with revisions.global equal to
-    ``model_rev`` when it is given. A T4 fp16 run counts only if Gate 0's fp16-vs-bf16 check passed
-    (CLAUDE.md), and nothing counts before Gate 0 itself passed; a comparison run with --skip could
-    otherwise pass against a failed reference. The error lists every problem of both reports, a missing
-    or unreadable one included, so a failed fp16 verdict shows although gate0.json is missing too. Every
-    ``--dtype`` run names its dtype, so naming one licenses nothing. ``load_records`` asks whenever the
-    requested dtype is not ``generation.dtype``."""
+    ``model_rev`` when it is given. gate0.json must still be the run the comparison paired with: its
+    checks.precision.digest (that run's outputs and labels) equal to the licence's
+    checks.fp16.reference_digest, so a bf16 Gate 0 re-run since (after a harness fix, say) needs a new
+    comparison. A T4 fp16 run counts only if Gate 0's fp16-vs-bf16 check passed (CLAUDE.md), and nothing
+    counts before Gate 0 itself passed; a comparison run with --skip could otherwise pass against a failed
+    reference. The error lists every problem of both reports, a missing or unreadable one included, so a
+    failed fp16 verdict shows although gate0.json is missing too. Every ``--dtype`` run names its dtype, so
+    naming one licenses nothing. ``load_records`` asks whenever the requested dtype is not
+    ``generation.dtype``, and also checks that the cell was made as the comparison was (``LICENCE_COVERS``).
+    """
     licence, reference = metrics_dir() / f"gate0-{dtype}.json", metrics_dir() / "gate0.json"
-    writer = f"`lift smoke --compare-dtype {dtype}` on the T4"
-    problems = (_gate0_problems(licence, writer, model_rev, fp16=True)
-                + _gate0_problems(reference, "`lift smoke` on the A100", model_rev, fp16=False))
+    rerun = f"`lift smoke --compare-dtype {dtype}` on the T4"
+    compared, problems = _gate0_report(licence, rerun, model_rev, fp16=True)
+    current, more = _gate0_report(reference, "`lift smoke` on the A100", model_rev, fp16=False)
+    problems += more
+    if compared is not None and current is not None:
+        problems += _reference_problems(compared, current, licence.name, rerun)
     if problems:
         raise ValueError(f"Gate 0's licence {licence} (with its bf16 reference {reference.name}) does not "
                          f"license {dtype}: " + "; ".join(problems))
 
 
-def _gate0_problems(path: Path, writer: str, model_rev: str | None, *, fp16: bool) -> list[str]:
-    """Why one Gate 0 report does not count toward the licence: missing or unreadable, "pass" not true,
-    revisions.global not ``model_rev``, and with ``fp16`` an fp16 check that did not pass on at least
-    ``LICENCE_MIN_PROMPTS`` prompts."""
+def _gate0_report(path: Path, writer: str, model_rev: str | None, *, fp16: bool) -> tuple[Any, list[str]]:
+    """One Gate 0 report (None when missing or unreadable) and why it does not count toward the licence:
+    missing or unreadable, "pass" not true, revisions.global not ``model_rev``, and with ``fp16`` an fp16
+    check that did not pass on at least ``LICENCE_MIN_PROMPTS`` prompts."""
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return [f"{path.name} does not exist ({writer} writes it, `lift sync pull` fetches it)"]
+        return None, [f"{path.name} does not exist ({writer} writes it, `lift sync pull` fetches it)"]
     except (OSError, ValueError) as exc:          # unreadable, or not JSON
-        return [f"{path.name} cannot be read ({type(exc).__name__})"]
+        return None, [f"{path.name} cannot be read ({type(exc).__name__})"]
     flags = [('"pass"', ("pass",)), *([("checks.fp16.pass", ("checks", "fp16", "pass"))] if fp16 else [])]
     problems = [f"{path.name} {label} is {_field(doc, *keys)!r}, not true" for label, keys in flags
                 if _field(doc, *keys) is not True]
@@ -865,7 +949,23 @@ def _gate0_problems(path: Path, writer: str, model_rev: str | None, *, fp16: boo
     licensed = _field(doc, "revisions", "global")
     if model_rev is not None and licensed != model_rev:
         problems.append(f"{path.name} revisions.global is {licensed!r}, not {model_rev}")
-    return problems
+    return doc, problems
+
+
+def _reference_problems(licence: Any, reference: Any, name: str, rerun: str) -> list[str]:
+    """Why gate0.json is not the bf16 Gate 0 run the licence's comparison paired with: its
+    checks.precision.digest must be the licence's checks.fp16.reference_digest. A bf16 Gate 0 re-run (after
+    a harness fix) replaces both its verdict and its run, which no comparison has seen yet."""
+    compared = _field(licence, "checks", "fp16", "reference_digest")
+    current = _field(reference, "checks", "precision", "digest")
+    if not isinstance(compared, str) or not compared:
+        return [f"{name} checks.fp16.reference_digest is {compared!r}: it does not say which bf16 Gate 0 run "
+                f"it compared with, so re-run {rerun} against the current bf16 Gate 0"]
+    if current != compared:
+        shown = current[:12] if isinstance(current, str) else repr(current)
+        return [f"gate0.json checks.precision.digest is {shown}, not the {compared[:12]} {name} compared "
+                f"with: the bf16 Gate 0 was re-run since, so re-run {rerun} against the current bf16 Gate 0"]
+    return []
 
 
 def _field(node: Any, *keys: str) -> Any:
@@ -876,7 +976,8 @@ def _field(node: Any, *keys: str) -> Any:
 
 
 def _licence_problems(dtype: str, gens: Sequence[GenerationRecord]) -> list[str]:
-    """Why Gate 0's licence for ``dtype`` does not cover these generations' revision of Global."""
+    """Why Gate 0's licence for ``dtype`` does not cover these generations: their revision of Global
+    (``check_dtype_licence``) or how they were made (``_coverage_problems``)."""
     problems = []
     unnamed = sum(not g.meta.get("model_rev") for g in gens)
     if unnamed:
@@ -886,7 +987,38 @@ def _licence_problems(dtype: str, gens: Sequence[GenerationRecord]) -> list[str]
             check_dtype_licence(dtype, rev)
         except ValueError as exc:
             problems.append(str(exc))
-    return list(dict.fromkeys(problems))
+    return list(dict.fromkeys(problems + _coverage_problems(dtype, gens)))
+
+
+def _coverage_problems(dtype: str, gens: Sequence[GenerationRecord]) -> list[str]:
+    """Why Gate 0's comparison for ``dtype`` says nothing about these generations: each ``LICENCE_COVERS``
+    field (harness, decoding settings, GPU class) must equal what the licence records of its paired runs. A
+    cell made on another GPU class (an A100 job given --dtype fp16) or under another harness never had its
+    precision compared. Empty when the licence cannot be read (``check_dtype_licence`` says so)."""
+    path = metrics_dir() / f"gate0-{dtype}.json"
+    try:
+        licence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    problems = []
+    for name, keys in LICENCE_COVERS.items():
+        where, covered = f"{path.name} {'.'.join(keys)}", _field(licence, *keys)
+        if covered is None:
+            problems.append(f"{where} is missing: the licence does not say which {name} its comparison "
+                            "ran with")
+            continue
+        off = sorted(g.pid for g in gens if g.meta.get(name) != covered)
+        if off:
+            made = sorted({str(g.meta.get(name)) for g in gens})
+            problems.append(f"{len(off)} generations were made with {name} {made}, not {where} "
+                            f"{covered!r}, e.g. {off[:5]}")
+    if problems:
+        problems.append(f"a cell in {dtype} counts only when made under the harness and decoding settings, "
+                        "and on the GPU class, of Gate 0's comparison: re-run "
+                        f"`lift smoke --compare-dtype {dtype}` on the T4 against the current bf16 Gate 0 "
+                        f"after a harness change, or make the cell again on the T4 ({dtype} runs on a GPU "
+                        "with native bf16 are never reported)")
+    return problems
 
 
 def _generation_stack(meta: Mapping[str, Any]) -> str:
@@ -960,7 +1092,8 @@ def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRec
     if others:
         problems.append(f"judged by {others}, not the configured {role} judge {shown}")
     if any(pids for pids, _ in stale):
-        problems.append(f"to make the cell again, run `{restart_command(*cell)}` as a job line right after "
+        restart = restart_command(*cell, dtype=_file_dtype(gens))
+        problems.append(f"to make the cell again, run `{restart}` as a job line right after "
                         "`lift sync pull`, then generate and judge it")
     if problems:
         raise ValueError(f"{variant}/{set_name}_{lang}_{split} cannot be reported "

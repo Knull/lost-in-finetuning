@@ -19,7 +19,7 @@ from lift import config, gate0
 from lift.io import read_jsonl, sha256_text, stable_json, write_jsonl
 from lift.judge import pipeline
 from lift.judge.pipeline import JudgeItem, JudgeOutcome
-from lift.models.generate import StaleOutputError, generations_path
+from lift.models.generate import OtherPrecisionError, StaleOutputError, generations_path, restart_command
 from lift.paths import manifests_dir, metrics_dir, validation_dir
 from lift.schemas import GenerationRecord
 
@@ -31,6 +31,10 @@ SECOND = "openai/placeholder-model@safety_v1:0123456789ab+t0+max1024"
 REV = "c" * 40                                  # Global's commit sha, as generate records it in meta
 STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}      # an A100
 L4 = {**STACK, "gpu_capability": "8.9"}
+DIGEST = "e" * 64          # gate0.json's checks.precision.digest: the bf16 run the comparison paired with
+DECODING = "d" * 16
+COMPARED = {"reference_digest": DIGEST, "harness": 1, "decoding": DECODING}     # what the comparison ran with
+T4_META = {"model_rev": REV, "harness": 1, "decoding": DECODING, "gpu_capability": "7.5"}  # a T4 generation
 
 
 @pytest.fixture(autouse=True)
@@ -135,18 +139,25 @@ def setup_cell(store, n=6, outputs=None, dtype="bf16", meta=None):
     return pids, gens, write_gens(gens)
 
 
-def write_licence(dtype="fp16", *, passed=True, fp16=True, rev=REV, name=None, reference=True, ref_rev=REV):
+def write_licence(dtype="fp16", *, passed=True, fp16=True, rev=REV, name=None, reference=True, ref_rev=REV,
+                  digest=DIGEST, gpu="7.5"):
     """What Gate 0's comparison run (lift smoke --compare-dtype) writes to outputs/metrics/gate0-{dtype}.json,
     and the bf16 reference's own Gate 0 (gate0.json; ``reference`` None leaves it out), reduced to the
     fields the licence reads. ``fp16`` is the fp16 check's pass flag on a comparison of 200 prompts, or
-    the whole check."""
-    fp16 = fp16 if isinstance(fp16, dict) else {"pass": fp16, "comparable": True, "n": 200}
+    the whole check; either way it records ``COMPARED`` unless it says otherwise. ``digest`` is gate0.json's
+    checks.precision.digest (the comparison paired with ``DIGEST``), ``gpu`` the GPU class the comparison
+    ran on (None leaves either out)."""
+    fp16 = {**COMPARED, **fp16} if isinstance(fp16, dict) else {"pass": fp16, "comparable": True, "n": 200,
+                                                                  **COMPARED}
     doc = {"dtype": dtype, "reference_dtype": "bf16", "pass": passed,
-           "checks": {"precision": {"pass": True}, "fp16": fp16},
+           **({"gpu_capability": gpu} if gpu else {}),
+           "checks": {"precision": {"pass": True, "digest": "f" * 64}, "fp16": fp16},
            "revisions": {"global": rev, "judge": "a" * 40}}
     metrics_dir().mkdir(parents=True, exist_ok=True)
     if reference is not None:
-        ref = {"dtype": "bf16", "pass": reference, "revisions": {"global": ref_rev, "judge": "a" * 40}}
+        precision = {"pass": True, **({"digest": digest} if digest else {})}
+        ref = {"dtype": "bf16", "pass": reference, "checks": {"precision": precision},
+               "revisions": {"global": ref_rev, "judge": "a" * 40}}
         (metrics_dir() / "gate0.json").write_text(json.dumps(ref), encoding="utf-8")
     path = metrics_dir() / f"{name or f'gate0-{dtype}'}.json"
     path.write_text(json.dumps(doc), encoding="utf-8")
@@ -282,11 +293,42 @@ def test_a_failure_with_a_real_label_is_refused(fake_prompt_files):
 
 
 def test_judges_are_never_mixed_in_one_file(fake_prompt_files):
+    """A MixedJudgesError is a StaleOutputError, so run-dev and lift judge list the cell and go on. No
+    restart line covers a file no role owns."""
     _, gens, path = setup_cell(fake_prompt_files)
     pipeline.judge_file(path, judge=FakeJudge("judge-a@1"), lid=FakeLID(), keys=[gens[0].key])
-    with pytest.raises(ValueError, match="never mixed"):
+    with pytest.raises(pipeline.MixedJudgesError, match="never mixed") as refused:
         pipeline.judge_file(path, judge=FakeJudge("judge-b@1"), lid=FakeLID())
+    assert isinstance(refused.value, StaleOutputError) and refused.value.command is None
+    assert "by hand" in str(refused.value) and "lift restart" not in str(refused.value)
     assert len(list(read_jsonl(pipeline.judgements_path("fake", *CELL)))) == 1
+
+
+def test_a_file_begun_by_another_judge_names_both_remedies(fake_prompt_files):
+    """Review 4, W10 (contract I): 'judges are never mixed' was a plain ValueError that stopped run-dev at
+    the cell, leaving every later cell unjudged, and named no way out. It is a MixedJudgesError whose command
+    is the role's restart --judge line, and whose message also names the other remedy: the file's own judge
+    (its id shows its precision and Controversial mode)."""
+    _, gens, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4))
+    pipeline.judge_file(path, judge=guard(strict=False), lid=FakeLID(), keys=[gens[0].key])    # begun loose
+    strict = guard()
+    with pytest.raises(pipeline.MixedJudgesError) as refused:
+        pipeline.judge_file(path, judge=strict, lid=FakeLID())
+    err, line = refused.value, RESTART + " --judge primary"
+    assert isinstance(err, StaleOutputError) and err.command == line
+    message = str(err)
+    assert f"holds judgements by ['{GUARD_ID}#bf16#loose'], not {PRIMARY}; judges are never mixed" in message
+    assert "finish the file with its own judge (its id names" in message
+    assert f"run `{line}` as a job line right after `lift sync pull`" in message and LONG not in message
+    assert strict.guard.stats["pairs"] == 0
+
+    out = pipeline.judgements_path("qwen3guard", *CELL)         # judged by a T4 before judge_file checked it
+    write_jsonl(out, [{**r, "judge": GUARD_ID + "#fp16#strict"} for r in read_jsonl(out)])
+    with pytest.raises(pipeline.MixedJudgesError) as refused:
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    message = str(refused.value)
+    assert "judged in ['fp16'] of generations made in bf16, so they can never be reported" in message
+    assert f"run `{line}`" in message and "its own judge" not in message and refused.value.command == line
 
 
 def test_duplicate_or_stale_judgements_raise(fake_prompt_files, tmp_path):
@@ -571,14 +613,80 @@ def safe_outputs(n):
 def test_load_labels_refuses_a_judge_in_another_precision(fake_prompt_files):
     assert config.get("generation.dtype") == "bf16"
     _, _, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4))
-    pipeline.judge_file(path, judge=guard(dtype="fp16"), lid=FakeLID())     # bf16 outputs, a T4 judge
+    out = pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    write_jsonl(out, [{**r, "judge": GUARD_ID + "#fp16#strict"} for r in read_jsonl(out)])   # a T4 judge
     with pytest.raises(ValueError, match="not the configured primary judge .*#bf16#strict"):
         pipeline.load_labels(*CELL)
 
 
-def t4_cell(store, n=4):
-    """A T4 run: fp16 generations of Global at REV, judged by the primary judge in fp16."""
-    pids, gens, path = setup_cell(store, n=n, outputs=safe_outputs(n), dtype="fp16", meta={"model_rev": REV})
+def test_a_judge_in_another_precision_than_the_generations_is_refused_before_judging(fake_prompt_files):
+    """Review 4, W10 (contract I): a T4 job (`lift judge --dtype fp16`) judged a cell the A100 generated in
+    bf16, writing judgements no reader can ever report. judge_file refuses a local judge whose precision is
+    not the generations' before judging anything: an OtherPrecisionError (a StaleOutputError, so a run lists
+    the cell and goes on) naming both precisions, whose remedy is the file's --dtype or leaving the cell out,
+    never a restart (it would discard the other precision's outputs)."""
+    pids, _, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4))
+    out = pipeline.judgements_path("qwen3guard", *CELL)
+    t4 = guard(dtype="fp16")
+    with pytest.raises(OtherPrecisionError) as refused:
+        pipeline.judge_file(path, judge=t4, lid=FakeLID())
+    err = refused.value
+    assert isinstance(err, StaleOutputError) and err.command is None and err.dtype == "bf16"
+    message = str(err)
+    assert "generated in bf16" in message and "runs in fp16" in message
+    assert "--dtype bf16" in message and "--sets/--langs" in message
+    assert "restart" not in message and LONG not in message
+    assert not out.exists() and t4.guard.stats["pairs"] == 0 and manifests() == []
+
+    write_gens([gen(p, output=f"SAFE {LONG}", dtype="fp16") for p in pids])
+    with pytest.raises(OtherPrecisionError, match="generated in fp16.*runs in bf16") as refused:
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID())           # an fp16 cell, the A100's judge
+    assert refused.value.dtype == "fp16" and not out.exists()
+    pipeline.judge_file(path, judge=t4, lid=FakeLID())                    # its own precision judges it
+    pipeline.judge_file(path, judge=pipeline.FrontierAdapter(FakeFrontier()), lid=FakeLID())   # no precision
+    pipeline.judge_file(path, judge=FakeJudge(), lid=FakeLID())
+    assert len(list(read_jsonl(out))) == 4
+    write_gens([gen(p, output=f"SAFE {LONG}", dtype="fp16" if i else "bf16") for i, p in enumerate(pids)])
+    with pytest.raises(ValueError, match=r"generations mix precisions \['bf16', 'fp16'\]"):
+        pipeline.judge_file(path, judge=t4, lid=FakeLID(), out_path=out.with_name("other.jsonl"))
+
+
+def test_every_restart_line_of_an_fp16_cell_names_its_precision(fake_prompt_files, judge_stack):
+    """Contract H: lift restart refuses (without --force) a cell whose generations were made in another dtype
+    than its --dtype, so each restart line the pipeline names for an fp16 cell carries --dtype fp16
+    (restart_command adds it off generation.dtype only): the judge-stack, mixed-judge and stale-cell ones."""
+    pids, gens, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4), dtype="fp16", meta=T4_META)
+    out = pipeline.judge_file(path, judge=guard(dtype="fp16"), lid=FakeLID(), keys=[g.key for g in gens[:2]])
+    rejudge, remake = (restart_command(*CELL, judge="primary", dtype="fp16"),
+                       restart_command(*CELL, dtype="fp16"))
+    assert "--dtype fp16" in rejudge and "--dtype fp16" in remake
+    assert restart_command(*CELL, dtype="bf16") == RESTART                  # generation.dtype is not named
+    judge_stack["stack"] = L4
+    with pytest.raises(pipeline.StaleJudgementsError) as refused:
+        pipeline.judge_file(path, judge=guard(dtype="fp16"), lid=FakeLID())
+    assert refused.value.command == rejudge and f"`{rejudge}`" in str(refused.value)
+    judge_stack["stack"] = dict(STACK)
+    with pytest.raises(pipeline.MixedJudgesError) as refused:
+        pipeline.judge_file(path, judge=guard(dtype="fp16", strict=False), lid=FakeLID())
+    assert refused.value.command == rejudge and f"`{rejudge}`" in str(refused.value)
+
+    write_gens([gen(p, output=f"HARM {LONG} {p}", dtype="fp16", meta=T4_META) for p in pids])   # same keys
+    with pytest.raises(pipeline.StaleJudgementsError) as refused:
+        pipeline.judge_file(path, judge=guard(dtype="fp16"), lid=FakeLID())
+    assert refused.value.command == rejudge
+    with pytest.raises(ValueError, match="another output") as refused:
+        pipeline.load_records(*CELL, complete=False, dtype="fp16")
+    assert f"`{remake}`" in str(refused.value)
+    fake_prompt_files[("harmful", "en")][0] = make_prompt(pids[0], text="a corrected translation")
+    with pytest.raises(StaleOutputError, match="another prompt text") as refused:
+        pipeline.judge_file(path, judge=guard(dtype="fp16"), lid=FakeLID())
+    assert refused.value.command == remake and out.exists()
+
+
+def t4_cell(store, n=4, **meta):
+    """A T4 run: fp16 generations of Global at REV (``T4_META``; ``meta`` overrides), judged by the primary
+    judge in fp16."""
+    pids, gens, path = setup_cell(store, n=n, outputs=safe_outputs(n), dtype="fp16", meta={**T4_META, **meta})
     pipeline.judge_file(path, judge=guard(dtype="fp16"), lid=FakeLID())
     return pids, gens
 
@@ -631,7 +739,7 @@ def test_gate0s_licence_admits_its_precision_for_its_revision_only(fake_prompt_f
     with pytest.raises(ValueError, match=r"gate0-fp32\.json"):
         pipeline.check_dtype_licence("fp32", REV)
 
-    path = write_gens([gen(p, variant="adapter", output=g.output, dtype="fp16", meta={"model_rev": REV})
+    path = write_gens([gen(p, variant="adapter", output=g.output, dtype="fp16", meta=T4_META)
                        for p, g in zip(pids, gens, strict=True)])
     pipeline.judge_file(path, judge=guard(dtype="fp16"), lid=FakeLID())
     a, b = pipeline.paired_labels("stock", "adapter", *CELL[1:], dtype="fp16")
@@ -686,6 +794,66 @@ def test_a_licence_needs_a_comparison_of_200_prompts(fake_prompt_files, n):
     assert pipeline.LICENCE_MIN_PROMPTS == gate0.N_PRECISION == 200
     write_licence(fp16={"pass": True, "comparable": True, "n": 572})
     assert pipeline.load_labels(*CELL, dtype="fp16") == {p: "refusal" for p in pids}
+
+
+def test_a_licence_counts_only_against_the_bf16_gate0_it_compared_with(fake_prompt_files):
+    """Review 4, W6 (contract J): the A100 re-runs Gate 0 after a harness fix and it passes again. gate0.json
+    and its reference run are now another run than the one the T4 comparison paired with, so that comparison
+    licenses nothing: gate0.json's checks.precision.digest must be the licence's
+    checks.fp16.reference_digest."""
+    pids, _ = t4_cell(fake_prompt_files)
+    write_licence()
+    assert pipeline.load_labels(*CELL, dtype="fp16") == {p: "refusal" for p in pids}
+    pipeline.check_dtype_licence("fp16", REV)
+
+    write_licence(digest="9" * 64)                                   # re-run since: PASS, the same revision
+    message = licence_problems()
+    assert f"gate0.json checks.precision.digest is {'9' * 12}, not the {'e' * 12} gate0-fp16.json" in message
+    assert "re-run `lift smoke --compare-dtype fp16` on the T4 against the current bf16 Gate 0" in message
+    with pytest.raises(ValueError, match=r"cannot be reported .*checks\.precision\.digest"):
+        pipeline.load_labels(*CELL, dtype="fp16")
+    write_licence(passed=False, digest="9" * 64)                     # every problem is listed, as before
+    message = licence_problems()
+    assert 'gate0-fp16.json "pass" is False' in message and "checks.precision.digest" in message
+
+    write_licence(fp16={"pass": True, "comparable": True, "n": 200, "reference_digest": None})     # older
+    assert "gate0-fp16.json checks.fp16.reference_digest is None" in licence_problems()
+    write_licence(digest=None)                                       # a gate0.json that names no run
+    assert "gate0.json checks.precision.digest is None" in licence_problems()
+    write_licence(digest=None, fp16={"pass": True, "comparable": True, "n": 200, "reference_digest": None})
+    assert "reference_digest is None" in licence_problems()          # two missing digests never match
+
+
+@pytest.mark.parametrize("field, made", [("harness", 2), ("decoding", "0" * 16), ("gpu_capability", "8.0")],
+                         ids=["harness", "decoding", "gpu-class"])
+def test_a_licence_covers_only_cells_made_as_its_comparison_was(fake_prompt_files, field, made):
+    """Review 4, W6 and W15 (contract J): the comparison says nothing about a cell made under another harness
+    or other decoding settings, or on another GPU class (an A100 job given --dtype fp16, a Kaggle line pasted
+    into lift remote): every generation's meta.harness, meta.decoding and meta.gpu_capability must be the
+    licence's checks.fp16.harness, checks.fp16.decoding and gpu_capability."""
+    t4_cell(fake_prompt_files, **{field: made})
+    write_licence()
+    pipeline.check_dtype_licence("fp16", REV)                        # the reports themselves are fine
+    with pytest.raises(ValueError, match=r"cannot be reported") as refused:
+        pipeline.load_labels(*CELL, dtype="fp16")
+    message = str(refused.value)
+    assert f"4 generations were made with {field} ['{made}'], not gate0-fp16.json " in message
+    assert "re-run `lift smoke --compare-dtype fp16` on the T4 against the current bf16 Gate 0" in message
+    with pytest.raises(ValueError, match=f"generations were made with {field}"):
+        pipeline.load_records(*CELL, complete=False, dtype="fp16")
+
+
+def test_a_licence_that_records_no_harness_decoding_or_gpu_class_covers_no_cell(fake_prompt_files):
+    """A licence from before contract J does not say what its comparison ran with, so it covers nothing."""
+    t4_cell(fake_prompt_files)
+    write_licence(gpu=None, fp16={"pass": True, "comparable": True, "n": 200, "harness": None,
+                                  "decoding": None})
+    with pytest.raises(ValueError, match="cannot be reported") as refused:
+        pipeline.load_labels(*CELL, dtype="fp16")
+    for where in ("checks.fp16.harness", "checks.fp16.decoding", "gpu_capability"):
+        assert f"gate0-fp16.json {where} is missing" in str(refused.value)
+    write_licence()
+    assert len(pipeline.load_labels(*CELL, dtype="fp16")) == 4
 
 
 def test_a_pinned_judge_revision_is_checked(fake_prompt_files, monkeypatch):
@@ -896,7 +1064,7 @@ def test_strict_and_loose_labels_never_share_a_file(fake_prompt_files):
         pipeline.judge_file(path, judge=strict, lid=FakeLID(), batch_size=2)       # 2 judged, then lost
     loose = guard(strict=False)
     assert (strict.judge_id, loose.judge_id) == (PRIMARY, GUARD_ID + "#bf16#loose")
-    with pytest.raises(ValueError, match="never mixed"):
+    with pytest.raises(pipeline.MixedJudgesError, match="never mixed"):
         pipeline.judge_file(path, judge=loose, lid=FakeLID(), batch_size=2)
 
     pipeline.judgements_path("qwen3guard", *CELL).unlink()
