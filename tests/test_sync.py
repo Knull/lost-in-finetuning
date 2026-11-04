@@ -24,7 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from lift import paths, sync
-from lift.io import read_jsonl, stable_json
+from lift.io import read_jsonl, sha256_obj, sha256_text, stable_json
 
 REPO = "tester/lift-runs"
 GEN = "outputs/generations/stock/harmful_en_dev.jsonl"
@@ -387,8 +387,10 @@ def state_file() -> Path:
 
 
 def judged(gens: list[dict], label: str = "refusal", **fields) -> bytes:
-    """One judgement per generation, each labelled ``label``, as lift.judge.pipeline writes them."""
-    return lines(*(jud_row(g["key"], g["pid"], label, **fields) for g in gens))
+    """One judgement per generation, each labelled ``label``, as lift.judge.pipeline writes them: naming
+    the output it judged (``output_sha``) unless ``fields`` say otherwise."""
+    return lines(*(jud_row(g["key"], g["pid"], label, **{"output_sha": sha256_text(g["output"]), **fields})
+                   for g in gens))
 
 
 def record_path(*, judge: str = "qwen3guard", dtype: str | None = None, text: str = "redacted") -> str:
@@ -399,10 +401,13 @@ def record_path(*, judge: str = "qwen3guard", dtype: str | None = None, text: st
     return "outputs/" + path.relative_to(paths.output_dir()).as_posix()
 
 
-def audit_record(gens: list[dict], refusal_rate: float) -> bytes:
-    """Stands in for audit.record_safety's record of a cell: its keys and a rate, no text."""
-    return (json.dumps({"metadata": {"lift": {"refusal_rate": refusal_rate,
-                                              "keys": [g["key"] for g in gens]}}}) + "\n").encode()
+def audit_record(gens: list[dict], label: str = "refusal", **lift) -> bytes:
+    """Stands in for audit.record_safety's record of a cell judged ``label`` throughout: no text, and the
+    keys_sha256 and labels_sha256 it writes over the cell's judgements (plus ``lift``)."""
+    lift = {"refusal_rate": float(label == "refusal"),
+            "keys_sha256": sha256_obj({g["pid"]: g["key"] for g in gens}),
+            "labels_sha256": sha256_obj({g["pid"]: label for g in gens}), **lift}
+    return (json.dumps({"metadata": {"lift": lift}}, indent=2) + "\n").encode()
 
 
 REAL_MAKE_API = sync.make_api
@@ -945,12 +950,13 @@ def test_push_never_reverts_a_concurrent_push_between_its_commits(tmp_path, monk
     them must survive: upload_folder re-sends files it never changed and guards only its first commit,
     so its later commits put this machine's older copy back. Every commit must be guarded instead."""
     gens = {f"outputs/generations/stock/f{i}.jsonl": records(f"k{i}") for i in range(6)}
-    hub = FakeHub({**gens, JUD: records("j1")})
+    cell = [gen_row("j1", "p1"), gen_row("jB", "p2")]
+    hub = FakeHub({**gens, GEN: lines(*cell), JUD: judged(cell[:1])})
     monkeypatch.setattr(sync, "COMMIT_FILES", 1)
     a, b = tmp_path / "A", tmp_path / "B"
     machine(b, monkeypatch)
     sync.pull(api=hub)
-    append(local(JUD), records("jB"))                                 # B judged more, pushes mid-way
+    append(local(JUD), judged(cell[1:]))                              # B judged more, pushes mid-way
     machine(a, monkeypatch)
     sync.pull(api=hub)
     for i in (0, 5):
@@ -1191,7 +1197,11 @@ def test_judgements_pushed_alone_need_the_same_generations_on_the_hub():
     local(GEN).unlink()                                     # the Hub has generations, this machine none
     assert sync.push(["outputs/judgements"], api=hub).files == {JUD: "conflict"}
     lone = "outputs/judgements/qwen3guard/adapter-hi/harmful_en_dev.jsonl"
-    write(local(lone), judged([gen_row("k9", "p9")]))      # no generations anywhere: nothing to pair
+    write(local(lone), judged([gen_row("k9", "p9")]))      # no generations anywhere: they pair with nothing
+    report = sync.push(["outputs/judgements/qwen3guard/adapter-hi"], api=hub)
+    assert report.files == {lone: "conflict"} and report.unpaired == {
+        lone: "lift restart --variant adapter-hi --split dev --sets harmful --langs en --judge primary"}
+    write(local(lone), b"")                                # what lift restart leaves: nothing to pair
     assert sync.push(["outputs/judgements/qwen3guard/adapter-hi"], api=hub).files == {lone: "new"}
 
 
@@ -1214,7 +1224,7 @@ def test_auditkit_records_never_go_up_without_their_cell(tmp_path, monkeypatch):
     g_b = [gen_row("k1", "p1", output="B1"), gen_row("k2", "p2", output="B2")]
     write(local(GEN), lines(*g_b))
     write(local(JUD), judged(g_b, "harmful"))
-    write(local(rec), audit_record(g_b, 0.0))
+    write(local(rec), audit_record(g_b, "harmful"))
     report = sync.push(api=hub)
     assert report.files == {GEN: "conflict", JUD: "conflict", rec: "conflict"}
     assert report.held == {JUD: GEN, rec: GEN} and rec not in hub.files
@@ -1225,7 +1235,7 @@ def test_auditkit_records_never_go_up_without_their_cell(tmp_path, monkeypatch):
     assert any("1 judgements file(s) held back" in line for line in report.summary())
     machine(tmp_path / "A", monkeypatch)
     write(local(JUD), judged(g_a))
-    write(local(rec), audit_record(g_a, 1.0))
+    write(local(rec), audit_record(g_a))
     assert sync.push(api=hub).files == {GEN: "same", JUD: "new", rec: "new"}
     assert hub.files[rec] == local(rec).read_bytes()
 
@@ -1245,7 +1255,7 @@ def test_a_precision_record_follows_its_cell(tmp_path, monkeypatch):
     write(local(GEN), lines(*g_fp16))
     write(local(JUD), judged(g_fp16, judge=FP16_JUDGE))
     for rec in recs:
-        write(local(rec), audit_record(g_fp16, 1.0))
+        write(local(rec), audit_record(g_fp16))
     report = sync.push(api=hub)
     assert report.files == {GEN: "conflict", JUD: "conflict", **{rec: "conflict" for rec in recs}}
     assert report.held == {JUD: GEN, **{rec: GEN for rec in recs}}
@@ -1269,7 +1279,7 @@ def test_auditkit_records_never_go_up_beside_other_judgements(tmp_path, monkeypa
     assert sync.push(api=hub).files == {GEN: "same", JUD: "new"}
     machine(b, monkeypatch)
     write(local(JUD), judged(g, "harmful"))
-    write(local(rec), audit_record(g, 0.0))
+    write(local(rec), audit_record(g, "harmful"))
     assert sync.status(api=hub)["push"].files == {GEN: "same", JUD: "merge", rec: "new"}   # not tried yet
     report = sync.push(api=hub)
     assert report.files == {GEN: "same", JUD: "conflict", rec: "conflict"} and report.held == {rec: JUD}
@@ -1283,7 +1293,7 @@ def test_auditkit_records_pushed_alone_need_their_cell_on_the_hub():
     rec, full = record_path(), record_path(text="full")
     write(local(JUD), judged(g))
     for path in (rec, full):
-        write(local(path), audit_record(g, 1.0))
+        write(local(path), audit_record(g))
     planned = sync.status(["outputs/metrics"], api=hub)["push"]
     assert planned.files == {rec: "conflict", full: "conflict"} and planned.held == {rec: JUD, full: JUD}
     report = sync.push(["outputs/metrics"], api=hub)
@@ -1291,12 +1301,13 @@ def test_auditkit_records_pushed_alone_need_their_cell_on_the_hub():
     assert sync.push(["outputs/judgements"], api=hub).files == {JUD: "new"}
     assert sync.push(["outputs/metrics"], api=hub).files == {rec: "new", full: "new"}
     hub.put({JUD: judged(g, "harmful")})                      # another machine re-judged the cell
-    write(local(rec), audit_record(g, 0.5))                   # a record of the old judgements, rewritten
+    write(local(rec), audit_record(g, n_judge_failures=0))    # a record of the old judgements, rewritten
     report = sync.push(api=hub)
     assert report.files[JUD] == "stale" and report.files[rec] == "conflict" and report.held == {rec: JUD}
     other = record_path(judge="frontier")                     # the second judge's: no judgements anywhere
-    write(local(other), audit_record(g, 1.0))
-    assert sync.push(["outputs/metrics/auditkit/frontier"], api=hub).files == {other: "new"}
+    write(local(other), audit_record(g))
+    report = sync.push(["outputs/metrics/auditkit/frontier"], api=hub)
+    assert report.files == {other: "conflict"} and report.unpaired == {other: RESTART_SECOND}
 
 
 @pytest.mark.parametrize("path,made_from", [
@@ -1315,6 +1326,460 @@ def test_auditkit_records_pushed_alone_need_their_cell_on_the_hub():
 def test_an_auditkit_record_maps_to_its_cell(path, made_from):
     """Every name lift.audit.auditkit_path gives ({set}_{lang}_{split}, then -{dtype} and .full)."""
     assert sync._recorded_from(path) == made_from
+
+
+# ---------------------------------------------------------------------------- pairing by content
+
+
+J2 = "outputs/judgements/frontier/stock/harmful_en_dev.jsonl"     # the second judge's: an API judge, no GPU
+R2 = "outputs/metrics/auditkit/frontier/stock/harmful_en_dev.json"
+FRONTIER_ID = "anthropic/placeholder-judge@default"
+RESTART = "lift restart --variant stock --split dev --sets harmful --langs en"
+RESTART_PRIMARY, RESTART_SECOND = f"{RESTART} --judge primary", f"{RESTART} --judge second"
+
+
+def second_judged(gens: list[dict]) -> bytes:
+    return judged(gens, judge=FRONTIER_ID)
+
+
+def remade(gens: list[dict], text: str) -> list[dict]:
+    """The same prompts made again on another stack: the same keys (the stack is not in the key), other
+    outputs."""
+    return [on(L4, {**g, "output": f"{text} {g['pid']}"}) for g in gens]
+
+
+def restart(**kwargs) -> None:
+    """``lift restart`` of the stock harmful_en_dev cell."""
+    from lift.models.generate import aside_root, restart_cell
+
+    restart_cell("stock", "harmful", "en", "dev", aside=aside_root(), **kwargs)
+
+
+def reads_back(path: str, judge: str) -> None:
+    """What judge_file checks before it resumes ``path``: raises StaleJudgementsError unless every
+    judgement is of a generation now in the cell's generations file, of its current output."""
+    from lift.judge import pipeline
+    from lift.models.generate import read_generations
+
+    cell = ("stock", "harmful", "en", "dev")
+    pipeline._resume_state(local(path), judge, read_generations(local(GEN)), cell, resume=True, restart=None)
+
+
+@pytest.mark.parametrize("with_record", [False, True])
+def test_judgements_of_outputs_a_pull_replaced_never_go_up(tmp_path, monkeypatch, with_record):
+    """The laptop judged a cell with the frontier judge and has not pushed. Colab takes the cell over (pull,
+    lift restart, run-dev) and pushes other outputs under the same keys. The laptop's push holds its
+    judgements back with its stale generations; its pull then updates the generations under them. Those
+    judgements, and an AuditKIT record of them (the frontier judge as the primary, after P04's swap), are
+    now of outputs the Hub no longer holds: the pull reports them, no push sends them (not even --force),
+    and both name the restart line of the frontier judge's role. Once it has run, the push goes through."""
+    hub = FakeHub()
+    colab, laptop = tmp_path / "colab", tmp_path / "laptop"
+    g1 = [gen_row("k1", "p1", output="first 1"), gen_row("k2", "p2", output="first 2")]
+    machine(colab, monkeypatch)
+    write(local(GEN), lines(*g1))
+    sync.push(api=hub)
+    machine(laptop, monkeypatch)
+    sync.pull(api=hub)
+    write(local(J2), second_judged(g1))
+    if with_record:
+        write(local(R2), audit_record(g1))
+    machine(colab, monkeypatch)
+    sync.pull(api=hub)
+    restart()
+    write(local(GEN), lines(*remade(g1, "second")))
+    assert sync.push(api=hub).files == {GEN: "update"}
+
+    machine(laptop, monkeypatch)
+    first = sync.push(api=hub)
+    assert first.files[GEN] == "stale" and first.held[J2] == GEN and not first.unpaired
+    stale = {J2: RESTART_SECOND, **({R2: RESTART_SECOND} if with_record else {})}
+    pulled = sync.pull(api=hub)
+    assert pulled.files == {GEN: "update"} and pulled.unpaired == stale and not pulled.ok
+    assert f"  UNPAIRED {J2}" in pulled.summary()
+    assert any(f"`{RESTART_SECOND}`" in line for line in pulled.summary())
+    second = sync.push(api=hub)
+    assert {p: second.files[p] for p in stale} == {p: "conflict" for p in stale} and second.unpaired == stale
+    assert second.held == {p: GEN for p in stale} and not [p for p in stale if p in hub.files]
+    assert (f"  CONFLICT {J2} (does not pair with {GEN}; local copy on the Hub at "
+            f"{second.conflict_copies[J2]})") in second.summary()
+    assert any(f"`{RESTART_SECOND}`" in line for line in second.summary())
+    assert sync.push(api=hub, force=True).unpaired == stale and J2 not in hub.files
+
+    restart(judge_dir="frontier")                     # the line both name
+    if with_record:
+        write(local(R2), b"")                         # what it does to the role's AuditKIT records: retired
+    third = sync.push(api=hub)
+    assert third.ok and hub.files[J2] == b"" and (not with_record or hub.files[R2] == b"")
+
+
+def test_a_record_never_goes_up_beside_judgements_that_no_longer_pair(tmp_path, monkeypatch):
+    """The judgements went up before Colab took the cell over; the record of them did not. It counts them
+    exactly, but they are of outputs the cell no longer holds, so it is held back too."""
+    hub = FakeHub()
+    colab, laptop = tmp_path / "colab", tmp_path / "laptop"
+    g1 = [gen_row("k1", "p1", output="first 1"), gen_row("k2", "p2", output="first 2")]
+    machine(colab, monkeypatch)
+    write(local(GEN), lines(*g1))
+    sync.push(api=hub)
+    machine(laptop, monkeypatch)
+    sync.pull(api=hub)
+    write(local(J2), second_judged(g1))
+    write(local(R2), audit_record(g1))
+    machine(colab, monkeypatch)
+    sync.pull(api=hub)                                        # before the laptop's judgements land
+    machine(laptop, monkeypatch)
+    assert sync.push(["outputs/judgements"], api=hub).files == {J2: "new"}
+    machine(colab, monkeypatch)
+    restart()
+    write(local(GEN), lines(*remade(g1, "second")))
+    assert sync.push(api=hub).unpaired_on_hub == {J2: RESTART_SECOND}
+    machine(laptop, monkeypatch)
+    assert sync.pull(api=hub).unpaired == {J2: RESTART_SECOND, R2: RESTART_SECOND}
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "same", J2: "same", R2: "conflict"} and report.held == {R2: GEN}
+    assert report.unpaired == {R2: RESTART_SECOND} and R2 not in hub.files
+    assert any(line.startswith(f"  CONFLICT {R2} (does not pair with {GEN}; ") for line in report.summary())
+
+
+def test_settling_a_generations_conflict_never_mixes_two_machines_judgements(tmp_path, monkeypatch):
+    """Two bf16 VMs made one cell under the same keys with different outputs (another batch size), and each
+    judged part of it. B's cell is on the Hub. A's pull keeps A's judgements as they are while the
+    generations conflict instead of merging B's into them; `pull --force` then takes B's generations and
+    B's judgements (A's are kept under .sync-backup), never a mix of both."""
+    hub = FakeHub()
+    a, b, reader = tmp_path / "A", tmp_path / "B", tmp_path / "reader"
+    g_b = [gen_row("k1", "p1", output="B 1"), gen_row("k2", "p2", output="B 2")]
+    g_a = [gen_row("k1", "p1", output="A 1"), gen_row("k2", "p2", output="A 2")]
+    machine(b, monkeypatch)
+    write(local(GEN), lines(*g_b))
+    write(local(JUD), judged(g_b[:1]))
+    sync.push(api=hub)
+    machine(a, monkeypatch)
+    write(local(GEN), lines(*g_a))
+    write(local(JUD), judged(g_a[1:]))
+    mine = local(JUD).read_bytes()
+    assert sync.push(api=hub).held == {JUD: GEN}
+    pulled = sync.pull(api=hub)
+    assert pulled.files == {GEN: "conflict", JUD: "conflict"} and pulled.held == {JUD: GEN}
+    assert local(JUD).read_bytes() == mine
+    assert f"  CONFLICT {JUD} (not taken while {GEN} conflicts)" in pulled.summary()
+    assert any("1 judgements file(s) kept as they are while their cell's generations conflict" in line
+               for line in pulled.summary())
+    forced = sync.pull(api=hub, force=True)
+    assert forced.files == {GEN: "force", JUD: "force"} and forced.ok
+    assert local(GEN).read_bytes() == hub.files[GEN] and local(JUD).read_bytes() == hub.files[JUD]
+    assert Path(forced.backups[JUD]).read_bytes() == mine
+    assert sync.push(api=hub).files == {GEN: "same", JUD: "same"}
+    machine(reader, monkeypatch)
+    sync.pull(api=hub)
+    reads_back(JUD, jud_row("x", "x", "refusal")["judge"])
+
+
+def test_push_force_sends_the_judgements_of_the_generations_it_forces(tmp_path, monkeypatch):
+    """`push --force` settles the same conflict the other way: A's generations go up over B's, and A's own
+    judgements with them, unmerged, since B's would pair with nothing the Hub then holds."""
+    hub = FakeHub()
+    g_b = [gen_row("k1", "p1", output="B 1"), gen_row("k2", "p2", output="B 2")]
+    g_a = [gen_row("k1", "p1", output="A 1"), gen_row("k2", "p2", output="A 2")]
+    machine(tmp_path / "B", monkeypatch)
+    write(local(GEN), lines(*g_b))
+    write(local(JUD), judged(g_b[:1]))
+    sync.push(api=hub)
+    machine(tmp_path / "A", monkeypatch)
+    write(local(GEN), lines(*g_a))
+    write(local(JUD), judged(g_a[1:]))
+    forced = sync.push(api=hub, force=True)
+    assert forced.files == {GEN: "force", JUD: "force"} and forced.ok
+    assert hub.files[GEN] == lines(*g_a) and hub.files[JUD] == judged(g_a[1:])
+
+
+def test_a_push_that_replaces_generations_reports_the_hubs_judgements_it_unpairs(tmp_path, monkeypatch):
+    """No user error: the laptop pushes frontier judgements between a job's pull and its checkpoint push. The
+    job's lift restart empties only the files it has, so they survive it; the push that replaces the
+    generations under them does not send them. It reports them with the line that sets them aside, and is
+    not ok (lift sync exits 3). Pull, that line and a push then retire them."""
+    hub = FakeHub()
+    colab, laptop = tmp_path / "colab", tmp_path / "laptop"
+    g1 = [gen_row("k1", "p1", output="first 1"), gen_row("k2", "p2", output="first 2")]
+    machine(colab, monkeypatch)
+    write(local(GEN), lines(*g1))
+    sync.push(api=hub)
+    machine(laptop, monkeypatch)
+    sync.pull(api=hub)
+    write(local(J2), second_judged(g1))
+    machine(colab, monkeypatch)
+    sync.pull(api=hub)                                        # the job's first line
+    machine(laptop, monkeypatch)
+    assert sync.push(api=hub).files[J2] == "new"              # lands between the job's pull and its push
+    machine(colab, monkeypatch)
+    restart()                                                 # the job's second line
+    write(local(GEN), lines(*remade(g1, "second")))           # run-dev made the cell again
+    pushed = sync.push(api=hub)
+    assert pushed.files == {GEN: "update"} and pushed.unpaired_on_hub == {J2: RESTART_SECOND}
+    assert not pushed.ok and f"  UNPAIRED {J2} (on the Hub)" in pushed.summary()
+    assert any("on the Hub" in line and f"`{RESTART_SECOND}`" in line for line in pushed.summary())
+    pulled = sync.pull(api=hub)
+    assert pulled.files[J2] == "new" and pulled.unpaired == {J2: RESTART_SECOND}
+    restart(judge_dir="frontier")
+    assert sync.push(api=hub).ok and hub.files[J2] == b""
+
+
+def test_a_restart_of_judgements_is_never_undone_by_a_merge(tmp_path, monkeypatch):
+    """The laptop pushed part of its frontier judgements and judged one more; Colab's restart empties them on
+    the Hub with the generations. Merging the laptop's judgements of the old outputs into the emptied file
+    would undo the restart: pull and push both refuse it and name the restart line."""
+    hub = FakeHub()
+    colab, laptop = tmp_path / "colab", tmp_path / "laptop"
+    g1 = [gen_row("k1", "p1", output="first 1"), gen_row("k2", "p2", output="first 2")]
+    machine(colab, monkeypatch)
+    write(local(GEN), lines(*g1))
+    sync.push(api=hub)
+    machine(laptop, monkeypatch)
+    sync.pull(api=hub)
+    write(local(J2), second_judged(g1[:1]))
+    assert sync.push(api=hub).files[J2] == "new"
+    write(local(J2), second_judged(g1))                       # judged one more, not pushed yet
+    mine = local(J2).read_bytes()
+    machine(colab, monkeypatch)
+    sync.pull(api=hub)
+    restart()
+    write(local(GEN), lines(*remade(g1, "second")))
+    assert sync.push(api=hub).files == {GEN: "update", J2: "update"} and hub.files[J2] == b""
+    machine(laptop, monkeypatch)
+    assert sync.push(api=hub).files[J2] == "conflict"
+    pulled = sync.pull(api=hub)
+    assert pulled.files == {GEN: "update", J2: "conflict"} and pulled.unpaired == {J2: RESTART_SECOND}
+    assert local(J2).read_bytes() == mine
+    again = sync.push(api=hub)
+    assert again.files == {GEN: "same", J2: "conflict"} and again.unpaired == {J2: RESTART_SECOND}
+    assert hub.files[J2] == b""
+
+
+def test_an_auditkit_record_goes_up_only_if_it_counts_the_judgements_beside_it():
+    """A record is the cell's numbers: its keys_sha256 and labels_sha256 must be those of the judgements the
+    Hub will hold, else it is held back with the restart line of its judge's role."""
+    g = [gen_row("k1", "p1"), gen_row("k2", "p2")]
+    hub = FakeHub({GEN: lines(*g), JUD: judged(g)})
+    sync.pull(api=hub)
+    rec = record_path()
+    for stale in (audit_record(g, "harmful"),                          # of other labels
+                  audit_record([gen_row("k9", "p1"), g[1]]),           # of another generation of p1
+                  b'{"metadata": {"lift": {"refusal_rate": 1.0}}}\n',  # says nothing of what it counts
+                  b"{not json"):
+        write(local(rec), stale)
+        report = sync.push(api=hub)
+        assert report.files[rec] == "conflict" and report.held == {rec: JUD}
+        assert report.unpaired == {rec: RESTART_PRIMARY} and rec not in hub.files
+    write(local(rec), audit_record(g))
+    assert sync.push(api=hub).files[rec] == "new" and hub.files[rec] == local(rec).read_bytes()
+
+
+def test_a_retired_auditkit_record_always_goes_up():
+    """lift restart empties a cell's AuditKIT records: retired, readers and P08 skip them. An empty record
+    counts nothing, so it goes up whatever its cell's generations and judgements are doing."""
+    g = [gen_row("k1", "p1")]
+    rec = record_path()
+    hub = FakeHub({GEN: lines(*g), JUD: judged(g), rec: audit_record(g)})
+    sync.pull(api=hub)
+    hub.put({GEN: lines(*g, gen_row("k2", "p2"))})            # newer on the Hub: stale here
+    write(local(rec), b"")
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "stale", JUD: "same", rec: "update"} and report.ok and hub.files[rec] == b""
+
+
+def test_a_judgement_that_does_not_name_its_output_never_goes_up():
+    g = [gen_row("k1", "p1"), gen_row("k2", "p2")]
+    hub = FakeHub({GEN: lines(*g)})
+    sync.pull(api=hub)
+    write(local(JUD), lines(jud_row("k1", "p1", "refusal")))   # no output_sha: of which output?
+    report = sync.push(api=hub)
+    assert report.files[JUD] == "conflict" and report.unpaired == {JUD: RESTART_PRIMARY}
+    assert JUD not in hub.files
+
+
+def test_the_restart_line_names_the_precision_of_the_cell():
+    """lift restart refuses a cell made in another precision than its --dtype: for Kaggle's fp16 cell the
+    line says --dtype fp16."""
+    g = [gen_row("k1", "p1", dtype="fp16")]
+    hub = FakeHub({GEN: lines(*g)})
+    sync.pull(api=hub)
+    write(local(JUD), judged(g, judge=FP16_JUDGE, output_sha="0" * 64))
+    assert sync.push(api=hub).unpaired == {JUD: f"{RESTART_PRIMARY} --dtype fp16"}
+
+
+def test_a_merge_never_adds_the_hubs_judgements_that_do_not_pair():
+    """The Hub holds judgements of other outputs than its generations (left by an older sync); the ones
+    here pair. Merging would mix them in, so pull keeps the local copy and push leaves the Hub's: a
+    plain conflict, which `push --force` settles by sending the local copy as it is."""
+    g = [gen_row("k1", "p1"), gen_row("k2", "p2")]
+    hub = FakeHub({GEN: lines(*g), JUD: judged(g[1:], output_sha="0" * 64)})
+    sync.pull(["outputs/generations"], api=hub)
+    write(local(JUD), judged(g[:1]))
+    mine = local(JUD).read_bytes()
+    assert sync.pull(api=hub).files == {GEN: "same", JUD: "conflict"} and local(JUD).read_bytes() == mine
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "same", JUD: "conflict"} and not report.held and not report.unpaired
+    assert any("lift sync push --force uploads the local copy" in line for line in report.summary())
+    forced = sync.push(api=hub, force=True)
+    assert forced.files == {GEN: "same", JUD: "force"} and forced.ok and hub.files[JUD] == mine
+
+
+@pytest.mark.parametrize("change,pairs", [
+    ({}, True),
+    ({"key": "k9"}, False),                    # a generation no longer in the file
+    ({"pid": "p2"}, False),
+    ({"output_sha": "0" * 64}, False),         # another output than the one now under the key
+    ({"output_sha": None}, False),
+])
+def test_a_judgement_pairs_by_key_pid_and_output(change, pairs):
+    """The rule judge_file's resume and load_records enforce."""
+    g = [gen_row("k1", "p1", output="one"), gen_row("k2", "p2", output="two")]
+    row = {**json.loads(judged(g[:1])), **change}
+    assert sync._pairs([row], sync._outputs(lines(*g))) is pairs
+    assert sync._pairs([], sync._outputs(None)) and not sync._pairs([row], sync._outputs(None))
+    assert not sync._pairs([row], sync._outputs(b"not json\n" + lines(*g)))
+
+
+def test_jsonl_rows_are_read_as_their_readers_read_them():
+    """A last line without its newline is kept when it parses and dropped when it was cut short, as
+    repair_tail does; any other bad line makes the file unreadable."""
+    assert sync._rows(b'{"a": 1}\n\n{"b": 2}') == [{"a": 1}, {"b": 2}]
+    assert sync._rows(b'{"a": 1}\n{"b": ') == [{"a": 1}]
+    assert sync._rows(b'{"a": 1}\nnot json\n') is None and sync._rows(b"[1]\n") is None
+    assert sync._rows(b"") == []
+
+
+def test_a_push_that_takes_a_cell_over_reports_the_record_it_leaves_on_the_hub(tmp_path, monkeypatch):
+    """Kaggle's licensed fp16 cell is on the Hub with its -fp16 AuditKIT record. Colab takes the cell over in
+    bf16 without that record here (its pull left out outputs/metrics, or the record landed after it), so its
+    restart cannot retire it. The push that replaces the cell does not send it: it reports it, with the
+    line that retires it, instead of leaving numbers of outputs that are gone beside the bf16 cell."""
+    hub = FakeHub()
+    machine(tmp_path / "kaggle", monkeypatch)
+    g_fp16 = [gen_row("kf1", "p1", dtype="fp16"), gen_row("kf2", "p2", dtype="fp16")]
+    rec_fp16 = record_path(dtype="fp16")
+    write(local(GEN), lines(*g_fp16))
+    write(local(JUD), judged(g_fp16, "harmful", judge=FP16_JUDGE))
+    write(local(rec_fp16), audit_record(g_fp16, "harmful"))
+    assert sync.push(api=hub).ok
+    machine(tmp_path / "colab", monkeypatch)
+    sync.pull(["outputs/generations", "outputs/judgements"], api=hub)
+    restart()
+    g_bf16 = [gen_row("kb1", "p1"), gen_row("kb2", "p2")]
+    rec = record_path()
+    write(local(GEN), lines(*g_bf16))
+    write(local(JUD), judged(g_bf16))
+    write(local(rec), audit_record(g_bf16))
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "update", JUD: "update", rec: "new"}
+    assert report.unpaired_on_hub == {rec_fp16: RESTART_PRIMARY} and not report.ok
+    assert f"  UNPAIRED {rec_fp16} (on the Hub)" in report.summary()
+
+
+def test_a_cell_taken_over_in_another_precision_never_keeps_its_old_record_silently(tmp_path, monkeypatch):
+    """The documented takeover (pull, lift restart, run-dev, push) with the -fp16 record pulled here: either
+    lift restart retires it (an empty record goes up) or the push reports it. It never stays on the Hub
+    beside the bf16 cell with an ok push."""
+    hub = FakeHub()
+    machine(tmp_path / "kaggle", monkeypatch)
+    g_fp16 = [gen_row("kf1", "p1", dtype="fp16"), gen_row("kf2", "p2", dtype="fp16")]
+    rec_fp16 = record_path(dtype="fp16")
+    write(local(GEN), lines(*g_fp16))
+    write(local(JUD), judged(g_fp16, "harmful", judge=FP16_JUDGE))
+    write(local(rec_fp16), audit_record(g_fp16, "harmful"))
+    sync.push(api=hub)
+    machine(tmp_path / "colab", monkeypatch)
+    sync.pull(api=hub)
+    restart()                                                 # generate refused the fp16 cell
+    g_bf16 = [gen_row("kb1", "p1"), gen_row("kb2", "p2")]
+    write(local(GEN), lines(*g_bf16))
+    write(local(JUD), judged(g_bf16))
+    write(local(record_path()), audit_record(g_bf16))
+    report = sync.push(api=hub)
+    assert report.files[GEN] == report.files[JUD] == "update" and report.files[record_path()] == "new"
+    retired = hub.files[rec_fp16] == b""
+    assert retired or report.unpaired_on_hub == {rec_fp16: RESTART_PRIMARY}
+    assert report.ok is retired
+
+
+def test_a_restart_push_reports_the_record_of_the_outputs_it_set_aside(tmp_path, monkeypatch):
+    """A job restarts a finished cell and its checkpoint push replaces the Hub's generations and judgements
+    with empty files. The cell's record landed after the job's pull, so the restart could not retire it:
+    the push reports it rather than leave a record of outputs that were set aside."""
+    hub = FakeHub()
+    g = [gen_row("k1", "p1"), gen_row("k2", "p2")]
+    rec = record_path()
+    machine(tmp_path / "vm1", monkeypatch)
+    write(local(GEN), lines(*g))
+    write(local(JUD), judged(g))
+    sync.push(api=hub)
+    machine(tmp_path / "vm2", monkeypatch)
+    sync.pull(api=hub)
+    machine(tmp_path / "vm1", monkeypatch)
+    write(local(rec), audit_record(g))
+    assert sync.push(api=hub).files[rec] == "new"
+    machine(tmp_path / "vm2", monkeypatch)
+    restart()
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "update", JUD: "update"} and hub.files[GEN] == hub.files[JUD] == b""
+    assert report.unpaired_on_hub == {rec: RESTART_PRIMARY} and not report.ok
+
+
+def test_status_shows_judgements_that_do_not_pair_without_downloading():
+    g = [gen_row("k1", "p1"), gen_row("k2", "p2")]
+    hub = FakeHub({GEN: lines(*g)})
+    sync.pull(api=hub)
+    write(local(JUD), judged(g, output_sha="0" * 64))
+    calls = len(hub.calls)
+    planned = sync.status(api=hub)["push"]
+    assert planned.files == {GEN: "same", JUD: "conflict"} and planned.unpaired == {JUD: RESTART_PRIMARY}
+    assert planned.held == {JUD: GEN} and [name for name, _ in hub.calls[calls:]] == ["dataset_info",
+                                                                                      "list_repo_tree"]
+
+
+def test_a_push_that_appends_generations_downloads_nothing_to_check_them():
+    """A checkpoint push appends to a cell's generations, which keeps every record the Hub had: the
+    judgements on the Hub still pair, so nothing is fetched to check them."""
+    g = [gen_row("k1", "p1"), gen_row("k2", "p2")]
+    hub = FakeHub({GEN: lines(g[0]), JUD: judged(g[:1]), J2: second_judged(g[:1])})
+    sync.pull(["outputs/generations"], api=hub)               # no judgements here
+    append(local(GEN), lines(g[1]))
+    fetched = len(hub.called("hf_hub_download"))
+    report = sync.push(api=hub)
+    assert report.files == {GEN: "update"} and report.ok and len(hub.called("hf_hub_download")) == fetched
+
+
+def test_pull_keeps_the_judgements_and_record_of_a_cell_whose_generations_conflict(tmp_path, monkeypatch):
+    """Neither is taken from the Hub while the cell's generations conflict: they go with the Hub's
+    generations, not with the ones kept here."""
+    g_b = [gen_row("k1", "p1", output="B 1")]
+    rec = record_path()
+    hub = FakeHub({GEN: lines(*g_b), JUD: judged(g_b), rec: audit_record(g_b)})
+    write(local(GEN), lines(gen_row("k1", "p1", output="A 1")))
+    pulled = sync.pull(api=hub)
+    assert pulled.files == {GEN: "conflict", JUD: "conflict", rec: "conflict"}
+    assert pulled.held == {JUD: GEN, rec: GEN} and not local(JUD).exists() and not local(rec).exists()
+    assert sync.pull(api=hub, force=True).files == {GEN: "force", JUD: "new", rec: "new"}
+
+
+def test_cli_exits_3_and_names_the_restart_line_when_files_do_not_pair(tmp_path, monkeypatch, capsys):
+    hub = FakeHub()
+    serve(monkeypatch, hub)
+    g1 = [gen_row("k1", "p1", output="first 1")]
+    machine(tmp_path / "colab", monkeypatch)
+    write(local(GEN), lines(*g1))
+    write(local(JUD), judged(g1))
+    assert run_cli(["sync", "push"]) == 0
+    machine(tmp_path / "laptop", monkeypatch)
+    assert run_cli(["sync", "pull"]) == 0
+    machine(tmp_path / "colab", monkeypatch)
+    write(local(GEN), lines(*remade(g1, "second")))            # made again here; its judgements kept
+    assert run_cli(["sync", "push", "--only", "outputs/generations"]) == 3
+    machine(tmp_path / "laptop", monkeypatch)
+    assert run_cli(["sync", "pull"]) == 3
+    out = capsys.readouterr().out
+    assert f"UNPAIRED {JUD}" in out and RESTART_PRIMARY in out and "first 1" not in out
 
 
 # ---------------------------------------------------------------------------- pull
@@ -1576,18 +2041,19 @@ def test_pull_never_replaces_a_file_written_while_it_downloads():
     """Pull plans "update" because nobody edited the local copy, then downloads. Rows a judge on this
     machine appends meanwhile must not be lost to the replace: the file stays as it is, reported as a
     conflict, and the next pull merges it."""
-    hub = FakeHub()
-    first = jud_row("k1", "p1", "refusal")
-    write(local(JUD), lines(first))
+    cell = [gen_row(f"k{i}", f"p{i}") for i in (1, 2, 3)]
+    hub = FakeHub({GEN: lines(*cell)})
+    sync.pull(api=hub)
+    write(local(JUD), judged(cell[:1]))
     sync.push(api=hub)
-    hub.put({JUD: lines(first, jud_row("k2", "p2", "benign"))})       # another machine judged k2
-    while_downloading(hub, lambda: append(local(JUD), lines(jud_row("k3", "p3", "harmful"))))
+    hub.put({JUD: judged(cell[:1]) + judged(cell[1:2], "benign")})    # another machine judged k2
+    while_downloading(hub, lambda: append(local(JUD), judged(cell[2:], "harmful")))
     report = sync.pull(api=hub)
-    assert report.files == {JUD: "conflict"} and report.busy == [JUD] and not report.ok
+    assert report.files == {GEN: "same", JUD: "conflict"} and report.busy == [JUD] and not report.ok
     assert keys_of(local(JUD)) == ["k1", "k3"]
     assert f"  CONFLICT {JUD} (changed here while sync ran)" in report.summary()
     assert any("1 file(s) changed on this machine while sync ran" in line for line in report.summary())
-    assert sync.pull(api=FakeHub(hub.files)).files == {JUD: "merge"}  # nothing writes now
+    assert sync.pull(api=FakeHub(hub.files)).files == {GEN: "same", JUD: "merge"}   # nothing writes now
     assert keys_of(local(JUD)) == ["k1", "k3", "k2"]
 
 
@@ -1613,25 +2079,26 @@ def test_pull_force_leaves_a_file_written_while_it_downloads():
 
 @pytest.mark.parametrize("direction", ["pull", "push"])
 def test_a_merge_is_never_written_over_lines_added_meanwhile(direction, monkeypatch):
-    hub = FakeHub({JUD: lines(jud_row("k1", "p1", "refusal"))})
+    cell = [gen_row(f"k{i}", f"p{i}") for i in (1, 2, 3, 4)]
+    hub = FakeHub({GEN: lines(*cell), JUD: judged(cell[:1])})
     sync.pull(api=hub)
-    hub.put({JUD: lines(jud_row("k1", "p1", "refusal"), jud_row("k2", "p2", "benign"))})
-    append(local(JUD), lines(jud_row("k3", "p3", "harmful")))
+    hub.put({JUD: judged(cell[:1]) + judged(cell[1:2], "benign")})
+    append(local(JUD), judged(cell[2:3], "harmful"))
     merge = sync.merge_jsonl_by_key
 
     def merge_while_the_judge_appends(mine, theirs, *, kind):
         merged = merge(mine, theirs, kind=kind)
-        append(mine, lines(jud_row("k4", "p4", "benign")))            # after the read, before the write
+        append(mine, judged(cell[3:], "benign"))                      # after the read, before the write
         return merged
 
     monkeypatch.setattr(sync, "merge_jsonl_by_key", merge_while_the_judge_appends)
     on_the_hub = hub.files[JUD]
     report = getattr(sync, direction)(api=hub)
-    assert report.files == {JUD: "conflict"} and report.busy == [JUD]
+    assert report.files == {GEN: "same", JUD: "conflict"} and report.busy == [JUD]
     assert keys_of(local(JUD)) == ["k1", "k3", "k4"] and hub.files[JUD] == on_the_hub
     assert not report.conflict_copies and not [p for p in hub.files if p.startswith("conflicts/")]
     monkeypatch.setattr(sync, "merge_jsonl_by_key", merge)
-    assert getattr(sync, direction)(api=hub).files == {JUD: "merge"}
+    assert getattr(sync, direction)(api=hub).files == {GEN: "same", JUD: "merge"}
     assert keys_of(local(JUD)) == ["k1", "k3", "k4", "k2"]
 
 
@@ -1641,23 +2108,23 @@ def test_a_merge_is_never_written_over_lines_added_meanwhile(direction, monkeypa
 def test_merge_never_reverts_a_rejudged_file_to_older_records(tmp_path, monkeypatch):
     """A re-judge after a fix keeps the keys and changes labels. A machine that still holds the old file
     plus a change of its own must not merge its old labels back in, by pull or by push."""
-    hub = FakeHub({JUD: lines(jud_row("k1", "p1", "harmful"), jud_row("k2", "p2", "refusal"))})
+    cell = [gen_row(f"k{i}", f"p{i}") for i in (1, 2, 3)]
+    hub = FakeHub({GEN: lines(*cell), JUD: judged(cell[:1], "harmful") + judged(cell[1:2])})
     a, b = tmp_path / "A", tmp_path / "B"
     machine(a, monkeypatch)
     sync.pull(api=hub)
-    append(local(JUD), lines(jud_row("k3", "p3", "benign")))             # A judged one more key
+    append(local(JUD), judged(cell[2:], "benign"))                       # A judged one more key
     machine(b, monkeypatch)
     sync.pull(api=hub)
-    write(local(JUD), lines(jud_row("k1", "p1", "refusal"), jud_row("k2", "p2", "refusal"),
-                            jud_row("k3", "p3", "benign")))             # B re-judged after a parser fix
-    assert sync.push(api=hub).files == {JUD: "update"}
+    write(local(JUD), judged(cell[:2]) + judged(cell[2:], "benign"))    # B re-judged after a parser fix
+    assert sync.push(api=hub).files == {GEN: "same", JUD: "update"}
     rejudged = hub.files[JUD]
     machine(a, monkeypatch)
     old = local(JUD).read_bytes()
     pulled = sync.pull(api=hub)
-    assert pulled.files == {JUD: "conflict"} and local(JUD).read_bytes() == old
+    assert pulled.files == {GEN: "same", JUD: "conflict"} and local(JUD).read_bytes() == old
     pushed = sync.push(api=hub)
-    assert pushed.files == {JUD: "conflict"} and hub.files[JUD] == rejudged
+    assert pushed.files == {GEN: "same", JUD: "conflict"} and hub.files[JUD] == rejudged
     assert hub.files[pushed.conflict_copies[JUD]] == old
 
 

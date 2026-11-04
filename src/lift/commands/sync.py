@@ -3,12 +3,14 @@ through the PRIVATE HF dataset repo named by LIFT_RUNS_REPO (rules in lift.sync)
 
 Exit codes, which the job runners act on: 0 done; 3 done, but some files conflicted (push: their local
 copies went under conflicts/<utc-timestamp>/ in the runs repo; pull: the local copies were kept;
-status: a pull or push would conflict), so a rerun changes nothing and runners report it without
-retrying; 1 a transient or unknown error: not everything was transferred, and a rerun is safe (sync
-compares content, so it resumes); 2 a problem no rerun fixes (SyncError.permanent: a token missing,
-rejected or not allowed, the runs repo missing or not private, LIFT_RUNS_REPO unset or malformed,
-HF_DEBUG set, a bad path; argparse's own usage errors exit 2 too), so runners stop the job instead of
-retrying. No message shows LIFT_RUNS_REPO's value before the Hub has answered for it as a repo.
+status: a pull or push would conflict), or judgements files or AuditKIT records here or on the Hub do
+not pair with their cell's generations (the summary names the lift restart line that sets them
+aside), so a rerun changes nothing and runners report it without retrying; 1 a transient or unknown
+error: not everything was transferred, and a rerun is safe (sync compares content, so it resumes); 2 a
+problem no rerun fixes (SyncError.permanent: a token missing, rejected or not allowed, the runs repo
+missing or not private, LIFT_RUNS_REPO unset or malformed, HF_DEBUG set, a bad path; argparse's own
+usage errors exit 2 too), so runners stop the job instead of retrying. No message shows
+LIFT_RUNS_REPO's value before the Hub has answered for it as a repo.
 
 ``lift sync check [--write]`` runs lift.sync.preflight before a job spends GPU time: 0 ok, 1 a
 transient error, 2 a problem no rerun fixes. huggingface_hub is imported only when a handler runs, so
@@ -24,10 +26,12 @@ EXIT_OK, EXIT_ERROR, EXIT_PERMANENT, EXIT_CONFLICT = 0, 1, 2, 3
 
 _EXIT_CODES = ("exit codes: 0 done; 3 done, but some files conflicted (push: their local copies went under "
                "conflicts/<utc-timestamp>/ in the runs repo; pull: the local copies were kept; status: a "
-               "pull or push would conflict), so do not retry; 1 a transient or unknown error: not "
-               "everything was transferred, safe to rerun; 2 a problem no rerun fixes (a token missing, "
-               "rejected or not allowed, the runs repo missing or not private, LIFT_RUNS_REPO unset or "
-               "malformed, HF_DEBUG set, a bad argument): fix it, do not retry")
+               "pull or push would conflict), or judgements or AuditKIT records do not pair with their "
+               "cell's generations (the summary names the lift restart line that sets them aside), so do "
+               "not retry; 1 a transient or unknown error: not everything was transferred, safe to rerun; 2 "
+               "a problem no rerun fixes (a token missing, rejected or not allowed, the runs repo missing or "
+               "not private, LIFT_RUNS_REPO unset or malformed, HF_DEBUG set, a bad argument): fix it, do "
+               "not retry")
 
 _CHECK_EXIT_CODES = ("exit codes: 0 ok; 1 a transient Hub or network error, safe to rerun; 2 a problem no "
                      "rerun fixes (as for push and pull): fix it before starting a job")
@@ -40,10 +44,13 @@ _COMMANDS = {
     "push": ("upload new and changed local files. Append-only JSONL changed on both sides is merged by "
              "key; any other file changed on both sides, or a merge that would pick between two records "
              "of one key, stays as it is on the Hub and its local copy goes to "
-             "conflicts/<utc-timestamp>/<path>",
-             "on a conflict, upload the local copy over the Hub's"),
+             "conflicts/<utc-timestamp>/<path>. Judgements and AuditKIT records go up only with the "
+             "generations they pair with, and so does a merge of them",
+             "on a conflict, upload the local copy over the Hub's (never judgements or AuditKIT records "
+             "that do not pair with their cell's generations)"),
     "pull": ("download new and changed files from the Hub, never overwriting a local edit. Append-only "
-             "JSONL changed on both sides is merged by key; any other conflict keeps the local copy",
+             "JSONL changed on both sides is merged by key; any other conflict keeps the local copy, and so "
+             "do the judgements and AuditKIT records of a cell whose generations conflict",
              "on a conflict, replace the local copy with the Hub's and keep the local one under "
              "outputs/.sync-backup/<utc-timestamp>/<path>"),
     "status": ("dry run: show what pull and push would do", None),

@@ -26,14 +26,28 @@ pull; never pushed), which says which side changed since:
   copy under ``conflicts/<utc-timestamp>/<path>`` so it is not lost. ``force`` lets the remote copy
   win on pull (the replaced local copy is kept under ``outputs/.sync-backup/<utc-timestamp>/<path>``,
   never pushed) and the local copy win on push (the Hub keeps the old one in its history);
-- push: judgements go up only with the generations they were made from. A judgements file whose
-  generations file (same variant/set/lang/split) will not be the same here and on the Hub after the
-  push (a conflict, stale, or left out of the push and different) is a CONFLICT too, never merged or
-  sent to its path: the Hub would pair one machine's generations with another's judgements, a cell
-  every reader rejects and no sync repairs. Likewise an AuditKIT record
-  (outputs/metrics/auditkit/{judge}/{variant}/{cell}[-{dtype}][.full].json) goes up only with its
-  cell's generations and that judge's judgements, as they stand once every merge was tried: the Hub
-  would otherwise publish numbers of outputs that are not its cell's.
+- judgements and AuditKIT records pair with their cell, checked by content: a cell whose files do not
+  belong together is one every reader rejects and no sync repairs, and P08 publishes the records.
+  A judgement pairs with a generations file when its key is there, with the same pid, and its
+  output_sha is the sha256 of the output now under that key (judge_file's resume and load_records
+  enforce the same rule; a judgement without output_sha never pairs). A non-empty AuditKIT record
+  (outputs/metrics/auditkit/{judge}/{variant}/{cell}[-{dtype}][.full].json) pairs when its
+  metadata.lift keys_sha256 and labels_sha256 are those of its judge's judgements file of the cell,
+  which pairs in turn; an empty one (retired by lift restart) always does.
+- push: a judgements file goes up only with the generations it was made from, and a record only with
+  those and its judge's judgements: one whose sources will not be this machine's copy on the Hub after
+  the push (a conflict, stale, or left out of the push and different) is held back. So is one that
+  does not pair with them, a merge included (the merge is then not written; when only the Hub's
+  judgements would not pair, it is a plain conflict, which --force settles by sending the local copy
+  as it is). Held back means a CONFLICT, never merged or sent to its path, and --force sends nothing
+  that does not pair; the summary names the ``lift restart`` line that sets it aside (``unpaired``). A
+  push that replaces a cell's generations, or a judgements file, other than by appending reports the
+  cell's judgements files and records on the Hub that it does not send and that no longer pair
+  (``unpaired_on_hub``, fetched unless the copy here is the Hub's).
+- pull: generations come first. A judgements file or record of a cell whose generations conflict is
+  not taken from the Hub (it goes with the Hub's generations); a merge of judgements that would not
+  pair with the generations here is not written; and every judgements file and record of a cell the
+  pull changed that no longer pairs with the generations here is reported (``unpaired``).
 
 Push sends exactly the files it planned (new, updated, merged, forced) and the conflict copies,
 with ``create_commit``. Never upload_folder: it re-sends files nobody changed and guards only the
@@ -81,7 +95,7 @@ from pathlib import Path
 from typing import Any
 
 from lift import config, paths
-from lift.io import sha256_obj, stable_json, write_jsonl
+from lift.io import sha256_obj, sha256_text, stable_json, write_jsonl
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +133,7 @@ IGNORE_PATTERNS = (
 # AuditKIT record names (lift.audit.auditkit_path): {set}_{lang}_{split}, then -{dtype} for a precision
 # other than generation.dtype, then .full for the private record that keeps the outputs.
 _RECORD_NAME = re.compile(r"(?P<cell>.+_[^_.-]+)(?:-[^_.-]+)?(?:\.full)?\.json")
+_EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 _NOT_SHOWN = "its value is not shown, in case a token was pasted there"
 
 # What happened to a file (for status: what would happen).
@@ -795,11 +810,12 @@ def _hold_back(items: list[_Item], tree: dict[str, Any], digest: Callable[[Path]
     """A file goes up only with the files it was made from (``made_from``): one the push would send (or
     merge) becomes a CONFLICT, kept under conflicts/ like any other, unless the Hub will then hold this
     machine's copy of each of them. Otherwise the Hub would pair one machine's judgements, or AuditKIT
-    record, with another machine's generations or judgements. Returns path -> the first file it waits for."""
+    record, with another machine's generations or judgements. A retired record goes up regardless: it
+    counts nothing. Returns path -> the first file it waits for."""
     planned = {i.path: i for i in items}
     held = {}
     for item in items:
-        if item.action not in _SENT:
+        if item.action not in _SENT or _retired(item):
             continue
         waits = [p for p in made_from(item.path) if not _same_after_push(p, planned, tree, digest)]
         if waits:
@@ -820,6 +836,304 @@ def _same_after_push(path: str, planned: dict[str, _Item], tree: dict[str, Any],
     if not local.is_file():
         return entry is None
     return entry is not None and digest(local).matches(entry)
+
+
+def _retired(item: _Item) -> bool:
+    """An AuditKIT record ``lift restart`` emptied: readers and P08 skip it, so it may always go up."""
+    return bool(_recorded_from(item.path)) and item.digest is not None and item.digest.sha256 == _EMPTY_SHA256
+
+
+# ---------------------------------------------------------------------------- pairing
+
+
+def _cell(path: str) -> tuple[str, str] | None:
+    """(variant, "{set}_{lang}_{split}") of a cell's generations file, judgements file or AuditKIT
+    record; None for any other path."""
+    sources = (path,) if merge_kind(path) == "generations" else _judged_from(path) or _recorded_from(path)
+    parts = sources[0].split("/") if sources else []
+    if len(parts) != 4:
+        return None
+    name = parts[3].removesuffix(".jsonl")
+    pieces = name.rsplit("_", 2)
+    return (parts[2], name) if len(pieces) == 3 and all(pieces) else None
+
+
+def _generations_of(cell: tuple[str, str]) -> str:
+    return f"outputs/generations/{cell[0]}/{cell[1]}.jsonl"
+
+
+def _judge_dir_of(path: str) -> str:
+    """The judge directory of a judgements file (outputs/judgements/{judge}/...) or an AuditKIT record
+    (outputs/metrics/auditkit/{judge}/...)."""
+    parts = path.split("/")
+    return parts[2] if parts[1] == "judgements" else parts[3]
+
+
+def _rows(data: bytes) -> list[dict] | None:
+    """The records of a JSONL file as its readers see them: blank lines skipped, a last line without its
+    newline kept if it parses and dropped if it was cut short (as repair_tail does). None when any other
+    line is not a JSON object: nothing in such a file can be trusted to pair."""
+    lines = data.split(b"\n")
+    rows = []
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:   # also invalid UTF-8
+            row = None
+        if isinstance(row, dict):
+            rows.append(row)
+        elif i < len(lines) - 1:
+            return None
+    return rows
+
+
+@dataclass(frozen=True)
+class _Outputs:
+    """What pairing needs of a cell's generations file: key -> (pid, sha256 of its output), and the
+    precision it was made in (the first record's meta.dtype), which the cell's lift restart line names."""
+
+    by_key: dict[str, tuple[Any, str | None]]
+    dtype: str | None = None
+
+
+def _outputs(data: bytes | None) -> _Outputs:
+    """The _Outputs of a generations file's bytes. No file, or one that is not JSONL, holds none."""
+    by_key: dict[str, tuple[Any, str | None]] = {}
+    dtype = None
+    for row in (_rows(data) if data else None) or ():
+        key, output, meta = row.get("key"), row.get("output"), row.get("meta")
+        if isinstance(key, str):
+            by_key[key] = (row.get("pid"), sha256_text(output) if isinstance(output, str) else None)
+        if dtype is None and isinstance(meta, dict) and isinstance(meta.get("dtype"), str):
+            dtype = meta["dtype"]
+    return _Outputs(by_key, dtype)
+
+
+def _pairs(judgements: Sequence[dict] | None, gens: _Outputs) -> bool:
+    """Whether every judgement is of a generation in ``gens``: its key there, with the same pid, and its
+    output_sha the sha256 of the output now under the key. A judgement without output_sha never pairs,
+    nor does anything of a file that is not JSONL (None); a file without judgements always does."""
+    if judgements is None:
+        return False
+    for row in judgements:
+        key, sha = row.get("key"), row.get("output_sha")
+        gen = gens.by_key.get(key) if isinstance(key, str) else None
+        if gen is None or gen[0] != row.get("pid") or not isinstance(sha, str) or sha != gen[1]:
+            return False
+    return True
+
+
+def _counts(record: bytes, judgements: Sequence[dict]) -> bool:
+    """Whether an AuditKIT record counts exactly ``judgements``: its metadata.lift keys_sha256 and
+    labels_sha256 are sha256_obj({pid: key}) and sha256_obj({pid: label}) over them, as lift.audit writes
+    both. A record that does not parse, or names neither, counts nothing."""
+    try:
+        meta = json.loads(record)["metadata"]["lift"]
+    except (ValueError, KeyError, TypeError):
+        return False
+    if not isinstance(meta, dict) or not all(isinstance(row.get("pid"), str) for row in judgements):
+        return False
+    keys = sha256_obj({row["pid"]: row.get("key") for row in judgements})
+    labels = sha256_obj({row["pid"]: row.get("label") for row in judgements})
+    return meta.get("keys_sha256") == keys and meta.get("labels_sha256") == labels
+
+
+def _record_fault(record: bytes, judgements: bytes | None, gens: _Outputs) -> str | None:
+    """Why an AuditKIT record may not stand beside its cell: "judgements" when it does not count exactly
+    ``judgements``, its judge's judgements file of the cell (no such file counts nothing), "generations"
+    when that file does not pair with ``gens``; None when it may, and for a retired (empty) record."""
+    if not record:
+        return None
+    rows = _rows(judgements) if judgements is not None else None
+    if rows is None or not _counts(record, rows):
+        return "judgements"
+    return None if _pairs(rows, gens) else "generations"
+
+
+def _local_bytes(path: str) -> bytes | None:
+    """This machine's copy of the canonical ``path`` (under outputs/), None when it has none."""
+    local = paths.output_dir().joinpath(*path.split("/")[1:])
+    return local.read_bytes() if local.is_file() else None
+
+
+def _restart_line(cell: tuple[str, str], judge_dir: str | None, gens: _Outputs) -> str:
+    """The ``lift restart`` line that sets aside a file of ``cell`` which does not pair with it: --judge for
+    the role whose judgements directory is ``judge_dir`` (lift.judge.pipeline.judge_dir), the whole cell
+    when no role's is, and the precision the cell's generations were made in, which lift restart must be
+    given. Imported here: sync runs without torch."""
+    from lift.judge.pipeline import ROLES
+    from lift.judge.pipeline import judge_dir as role_dir
+    from lift.models.generate import restart_command
+
+    def owns(role: str) -> bool:
+        try:
+            return role_dir(role) == judge_dir
+        except (KeyError, ValueError):     # an entry that names no judge kind
+            return False
+
+    role = next((r for r in ROLES if judge_dir is not None and owns(r)), None)
+    variant, name = cell
+    set_name, lang, split = name.rsplit("_", 2)
+    return restart_command(variant, set_name, lang, split, judge=role, dtype=gens.dtype)
+
+
+def _unpair(item: _Item, report: SyncReport, source: str, gens: _Outputs | None = None) -> None:
+    """``item`` does not pair with ``source`` (its generations or judgements): a CONFLICT whose summary
+    names the restart line. ``gens``: the cell's generations here, read when not given."""
+    cell = _cell(item.path)
+    if gens is None:
+        gens = _outputs(_local_bytes(_generations_of(cell)))
+    item.action = CONFLICT
+    report.held[item.path] = source
+    report.unpaired[item.path] = _restart_line(cell, _judge_dir_of(item.path), gens)
+
+
+def _merge_refused(item: _Item, merged: Sequence[dict]) -> str | None:
+    """Why a merge of a judgements file must not be written: "local" when this machine's own judgements do
+    not pair with the cell's generations here, "hub" when only the Hub's would not, None when every
+    merged judgement pairs (and for any other file). Push asks once its location rule made the
+    generations here the ones the Hub will hold; pull, once it took the Hub's generations."""
+    cell = _cell(item.path)
+    if merge_kind(item.path) != "judgements" or cell is None:
+        return None
+    gens = _outputs(_local_bytes(_generations_of(cell)))
+    if _pairs(merged, gens):
+        return None
+    return "hub" if _pairs(_rows(item.local.read_bytes()), gens) else "local"
+
+
+def _hold_unpaired(items: list[_Item], report: SyncReport, *, records: bool) -> None:
+    """Push: a judgements file (``records`` False) or an AuditKIT record that would go up must pair with its
+    cell as the Hub will then hold it, which _hold_back made this machine's copy. Otherwise it is held
+    back (_unpair), also with --force. A record held back with judgements that do not pair names their
+    restart line."""
+    gens: dict[tuple[str, str], _Outputs] = {}
+    for item in items:
+        cell = _cell(item.path)
+        made_from = _recorded_from(item.path) if records else _judged_from(item.path)
+        if cell is None or not made_from:
+            continue
+        if records and (source := report.held.get(item.path)) in report.unpaired:
+            report.held[item.path] = report.held[source]     # the generations its judgements do not pair with
+            report.unpaired[item.path] = report.unpaired[source]
+            continue
+        if item.action not in _SENT:
+            continue
+        if cell not in gens:
+            gens[cell] = _outputs(_local_bytes(_generations_of(cell)))
+        data = item.local.read_bytes()
+        if records and (fault := _record_fault(data, _local_bytes(made_from[1]), gens[cell])):
+            _unpair(item, report, made_from[1] if fault == "judgements" else made_from[0], gens[cell])
+        elif not records and not _pairs(_rows(data), gens[cell]):
+            _unpair(item, report, made_from[0], gens[cell])
+
+
+def _extends(local: Path, entry: Any) -> bool:
+    """Whether ``local`` is the Hub's copy (``entry``) with lines appended: its first entry.size bytes hash as
+    the entry does. Sending it keeps every record the Hub had, so whatever paired with them still does."""
+    size = getattr(entry, "size", None)
+    if not isinstance(size, int) or local.stat().st_size < size:
+        return False
+    algo, want = remote_hash(entry)
+    h = hashlib.sha256() if algo == "sha256" else hashlib.sha1(b"blob %d\0" % size, usedforsecurity=False)
+    left = size
+    with open(local, "rb") as f:
+        while left and (block := f.read(min(left, 1 << 20))):
+            h.update(block)
+            left -= len(block)
+    return not left and h.hexdigest() == want
+
+
+def _unpaired_on_hub(remote: _Remote, items: list[_Item], tree: dict[str, Any], staging: Path,
+                     digest: Callable[[Path], Digest]) -> dict[str, str]:
+    """Push: the judgements files and AuditKIT records on the Hub that this push does not send and that no
+    longer pair once it replaces their cell's generations, or a record's judgements, other than by
+    appending (path -> restart line). Each is fetched unless the copy here is the Hub's; a push that only
+    appends fetches nothing."""
+    sent = {i.path: i for i in items if i.action in _SENT}
+    replaced = {p for p, i in sent.items() if i.action in (UPDATE, FORCE) and i.entry is not None
+                and merge_kind(p) in ("generations", "judgements") and _cell(p) is not None
+                and not _extends(i.local, i.entry)}
+    cells = {_cell(p) for p in replaced if merge_kind(p) == "generations"}
+
+    def hub(path: str) -> bytes | None:
+        """What the Hub will hold at ``path`` once this push is done."""
+        if path in sent:
+            return sent[path].local.read_bytes()
+        if (entry := tree.get(path)) is None:
+            return None
+        local = paths.output_dir().joinpath(*path.split("/")[1:])
+        if local.is_file() and digest(local).matches(entry):
+            return local.read_bytes()
+        return _download(remote, _Item(path, "outputs", local, entry, None), staging)[0].read_bytes()
+
+    gens: dict[tuple[str, str], _Outputs] = {}
+    found = {}
+    for path in sorted(tree):
+        cell, (_, jud) = _cell(path), _recorded_from(path) or (None, None)
+        if path in sent or cell is None or merge_kind(path) == "generations" or not (
+                cell in cells or jud in replaced):
+            continue
+        if cell not in gens:
+            gens[cell] = _outputs(hub(_generations_of(cell)))
+        data = hub(path)
+        if (_record_fault(data, hub(jud), gens[cell]) if jud else not _pairs(_rows(data), gens[cell])):
+            found[path] = _restart_line(cell, _judge_dir_of(path), gens[cell])
+    return found
+
+
+def _wait_for_generations(items: list[_Item]) -> dict[str, str]:
+    """Pull: a judgements file or AuditKIT record of a cell whose generations conflict is not taken from the
+    Hub, where it goes with the Hub's generations, not with the ones kept here: it stays as it is, a
+    CONFLICT. Returns path -> those generations."""
+    conflicting = {i.path for i in items if merge_kind(i.path) == "generations" and i.action == CONFLICT}
+    held = {}
+    for item in items:
+        sources = _judged_from(item.path) or _recorded_from(item.path)
+        if sources and sources[0] in conflicting and item.action in (NEW, UPDATE, MERGE, FORCE):
+            item.action = CONFLICT
+            held[item.path] = sources[0]
+    return held
+
+
+def _cell_files_here(cell: tuple[str, str]) -> list[str]:
+    """The canonical paths of this machine's judgements files and AuditKIT records of ``cell``."""
+    variant, name = cell
+    out = paths.output_dir()
+    found = [f"outputs/judgements/{d.name}/{variant}/{name}.jsonl" for d in _subdirs(out / "judgements")
+             if (d / variant / f"{name}.jsonl").is_file()]
+    for d in _subdirs(out / "metrics" / "auditkit"):
+        folder = d / variant
+        for f in sorted(folder.iterdir()) if folder.is_dir() else ():
+            path = f"outputs/metrics/auditkit/{d.name}/{variant}/{f.name}"
+            if f.is_file() and _cell(path) == cell:
+                found.append(path)
+    return found
+
+
+def _subdirs(folder: Path) -> list[Path]:
+    return sorted(p for p in folder.iterdir() if p.is_dir()) if folder.is_dir() else []
+
+
+def _unpaired_here(items: list[_Item], report: SyncReport) -> dict[str, str]:
+    """Pull: the judgements files and AuditKIT records here of every cell this pull changed that no longer
+    pair with the cell's generations here (path -> restart line). A cell without generations here (a pull
+    of judgements alone) is left out."""
+    changed = {cell for i in items if i.action in (NEW, UPDATE, FORCE, MERGE) and (cell := _cell(i.path))}
+    found = {}
+    for cell in sorted(changed):
+        if (gen := _local_bytes(_generations_of(cell))) is None:
+            continue
+        gens = _outputs(gen)
+        for path in _cell_files_here(cell):
+            data, (_, jud) = _local_bytes(path), _recorded_from(path) or (None, None)
+            if path in report.unpaired or data is None:
+                continue
+            if (_record_fault(data, _local_bytes(jud), gens) if jud else not _pairs(_rows(data), gens)):
+                found[path] = _restart_line(cell, _judge_dir_of(path), gens)
+    return found
 
 
 def _changed_since_plan(item: _Item) -> bool:
@@ -873,7 +1187,13 @@ class SyncReport:
     conflict_copies: dict[str, str] = field(default_factory=dict)  # push: path -> copy under conflicts/
     backups: dict[str, str] = field(default_factory=dict)          # pull --force: path -> replaced local copy
     backup_dir: str = ""                                           # pull --force: the folder holding them
-    held: dict[str, str] = field(default_factory=dict)   # push: held back -> a file it was made from
+    # Held back (push) or not taken (pull) -> the file it waits for, or does not pair with.
+    held: dict[str, str] = field(default_factory=dict)
+    # Judgements files and AuditKIT records here that do not pair with their cell -> the lift restart line
+    # that sets them aside: held back by push, left as they are or reported by pull.
+    unpaired: dict[str, str] = field(default_factory=dict)
+    # push: the same on the Hub, left there by this push (it does not send them).
+    unpaired_on_hub: dict[str, str] = field(default_factory=dict)
     busy: list[str] = field(default_factory=list)        # changed here while sync ran: left as they are
 
     def paths(self, action: str) -> list[str]:
@@ -885,7 +1205,7 @@ class SyncReport:
 
     @property
     def ok(self) -> bool:
-        return not self.conflicts
+        return not (self.conflicts or self.unpaired or self.unpaired_on_hub)
 
     def counts(self) -> dict[str, Counter]:
         """prefix -> action -> number of files."""
@@ -903,13 +1223,9 @@ class SyncReport:
         for prefix, counts in self.counts().items():
             if counts:
                 lines.append(f"  {prefix}: " + ", ".join(f"{counts[a]} {a}" for a in ACTIONS if counts[a]))
-        for path in self.conflicts:
-            notes = [f"held back with {self.held[path]}"] if path in self.held else []
-            if path in self.busy:
-                notes.append("changed here while sync ran")
-            if copy := self.conflict_copies.get(path):
-                notes.append(f"local copy on the Hub at {copy}")
-            lines.append(f"  CONFLICT {path}" + (f" ({'; '.join(notes)})" if notes else ""))
+        lines += [f"  CONFLICT {path}{self._notes(path)}" for path in self.conflicts]
+        lines += [f"  UNPAIRED {path}" for path in sorted(self.unpaired) if self.files.get(path) != CONFLICT]
+        lines += [f"  UNPAIRED {path} (on the Hub)" for path in sorted(self.unpaired_on_hub)]
         would = "would be " if self.dry_run else ""
         if kept := self.paths(KEEP):
             lines.append(f"  {len(kept)} local edit(s) {would}kept, not on the Hub yet: run lift sync push")
@@ -925,17 +1241,66 @@ class SyncReport:
                    else "lift sync push --force uploads the local copy over the Hub's")
             lines.append(f"  {len(plain)} conflict(s): changed here and on the Hub since the last "
                          f"sync; the local copy {would or 'was '}kept. Resolve by hand, or {fix}")
-        kinds = (("judgements file(s)", "generations", _judged_from),
-                 ("AuditKIT record(s)", "generations and judgements", _recorded_from))
-        for what, sources, made_from in kinds:
-            if n := sum(bool(made_from(p)) for p in self.held):
-                lines.append(f"  {n} {what} {would}held back with the {sources} they were made from: settle "
-                             "those first (pull, or resolve their conflict), then push again")
+        lines += self._pairing(would)
         if self.busy:
             lines.append(f"  {len(self.busy)} file(s) changed on this machine while sync ran and were "
                          "left as they are: stop whatever writes them, then rerun lift sync "
                          f"{self.direction}")
         return lines
+
+    def _notes(self, path: str) -> str:
+        """Why a conflicting file stayed as it is, and where its copy went."""
+        notes = []
+        if source := self.held.get(path):
+            if path in self.unpaired:
+                notes.append(f"does not pair with {source}")
+            else:
+                notes.append(f"held back with {source}" if self.direction == "push"
+                             else f"not taken while {source} conflicts")
+        if path in self.busy:
+            notes.append("changed here while sync ran")
+        if copy := self.conflict_copies.get(path):
+            notes.append(f"local copy on the Hub at {copy}")
+        return f" ({'; '.join(notes)})" if notes else ""
+
+    def _pairing(self, would: str) -> list[str]:
+        """What to do about the judgements and records held back or not taken, and those that do not pair."""
+        lines = []
+        waiting = [p for p in self.held if p not in self.unpaired]
+        kinds = (("judgements file(s)", "generations", _judged_from),
+                 ("AuditKIT record(s)", "generations and judgements", _recorded_from))
+        for what, sources, made_from in kinds:
+            if not (n := sum(bool(made_from(p)) for p in waiting)):
+                continue
+            if self.direction == "push":
+                lines.append(f"  {n} {what} {would}held back with the {sources} they were made from: settle "
+                             "those first (pull, or resolve their conflict), then push again")
+            else:
+                lines.append(f"  {n} {what} {would}kept as they are while their cell's generations conflict: "
+                             "settle that conflict first, then pull again")
+        for line, found in _by_line(self.unpaired):
+            lines.append(f"  {_kinds(found)} here do not pair with their cell's generations: set them aside "
+                         f"with `{line}` (on a GPU job, a line right after lift sync pull), then judge the "
+                         "cell again")
+        for line, found in _by_line(self.unpaired_on_hub):
+            lines.append(f"  {_kinds(found)} on the Hub no longer pair with the cell this push sent: run "
+                         f"lift sync pull, then `{line}`, judge the cell again and push")
+        return lines
+
+
+def _by_line(unpaired: dict[str, str]) -> list[tuple[str, list[str]]]:
+    """(restart line, the paths it sets aside), by line."""
+    grouped: dict[str, list[str]] = {}
+    for path, line in sorted(unpaired.items()):
+        grouped.setdefault(line, []).append(path)
+    return sorted(grouped.items())
+
+
+def _kinds(found: Sequence[str]) -> str:
+    """"2 judgements file(s) and 1 AuditKIT record(s)"."""
+    records = sum(bool(_recorded_from(p)) for p in found)
+    return " and ".join(f"{n} {what}" for n, what in ((len(found) - records, "judgements file(s)"),
+                                                     (records, "AuditKIT record(s)")) if n)
 
 
 def _log(report: SyncReport) -> None:
@@ -949,9 +1314,12 @@ def _log(report: SyncReport) -> None:
 
 def pull(subdirs: Sequence[str] = (), *, force: bool = False, api: Any = None) -> SyncReport:
     """Download new and changed files of the runs repo, pinned to its current commit, without ever
-    overwriting a local edit (rules in the module docstring). Conflicts leave ``report.ok`` False;
-    ``force`` lets the remote copy win them instead, keeping each replaced local copy under
-    outputs/.sync-backup/<utc-timestamp>/<path> (``report.backups``)."""
+    overwriting a local edit (rules in the module docstring). Generations come first: the judgements
+    and AuditKIT records of a cell whose generations conflict are not taken, and a merge of judgements
+    that would not pair with the generations here is not written. Conflicts, and files of a changed cell
+    that no longer pair (``report.unpaired``), leave ``report.ok`` False; ``force`` lets the remote copy
+    win conflicts instead, keeping each replaced local copy under outputs/.sync-backup/<utc-timestamp>/<path>
+    (``report.backups``)."""
     selected = select(subdirs)
     remote = _connect(api)
     tree = _remote_tree(remote)
@@ -965,14 +1333,23 @@ def pull(subdirs: Sequence[str] = (), *, force: bool = False, api: Any = None) -
                 state.set(item.path, item.digest)
         fetch = [i for i in items if i.action in (NEW, UPDATE, FORCE, MERGE)]
         with _staging() as staging:
-            _run_parallel(lambda item: _fetch(remote, item, staging, backups), fetch,
-                          lambda item, result: _pulled(item, result, state, force=force, backups=backups))
+            def work(item: _Item) -> tuple[Path, Digest]:
+                return _fetch(remote, item, staging, backups)
+
+            def done(item: _Item, result: tuple[Path, Digest]) -> None:
+                _pulled(item, result, state, report, force=force, backups=backups)
+
+            later = [i for i in fetch if merge_kind(i.path) != "generations"]
+            _run_parallel(work, [i for i in fetch if merge_kind(i.path) == "generations"], done)
+            report.held = _wait_for_generations(items)
+            _run_parallel(work, [i for i in later if i.action != CONFLICT], done)
     finally:
         state.save()   # whatever finished is recorded, also when a download fails
     report.files = {i.path: i.action for i in items}
     report.backups = {i.path: str(i.backup) for i in items if i.backup is not None}
     report.backup_dir = str(backups) if report.backups else ""
     report.busy = sorted(i.path for i in items if i.busy)
+    report.unpaired |= _unpaired_here(items, report)
     _log(report)
     return report
 
@@ -1013,20 +1390,33 @@ def _backup(item: _Item, root: Path) -> None:
     log.warning("sync pull --force: the local copy of %s is kept at %s", item.path, dest)
 
 
-def _pulled(item: _Item, result: tuple[Path, Digest], state: _State, *, force: bool, backups: Path) -> None:
-    """Record a verified download (already in place), or merge it into the local JSONL first. A file
-    left as it is (a conflict) records nothing."""
+def _pulled(item: _Item, result: tuple[Path, Digest], state: _State, report: SyncReport, *, force: bool,
+            backups: Path) -> None:
+    """Record a verified download (already in place), or merge it into the local JSONL first. A merge that
+    cannot be made, or of judgements that would not pair with the generations here, is not written: the
+    Hub's copy replaces the local one with ``force``, else the local one stays (a conflict, which
+    records nothing)."""
     staged, digest = result
     if item.action == MERGE:
+        refused: str | None
         try:
             merged = merge_jsonl_by_key(item.local, staged, kind=merge_kind(item.path))
         except ValueError as e:
             log.warning("sync pull: cannot merge %s by key (%s)", item.path, e)
-            item.action = FORCE if force else CONFLICT
-            if force:
-                _replace_local(item, staged, backups)
+            refused = "merge"
         else:
+            if refused := _merge_refused(item, merged.rows):
+                log.warning("sync pull: merged, %s would hold judgements that do not pair with the cell's "
+                            "generations here; not merged", item.path)
+        if refused is None:
             _apply_merge(item, merged, "pull")
+        elif force:
+            item.action = FORCE
+            _replace_local(item, staged, backups)
+        elif refused == "local":
+            _unpair(item, report, _generations_of(_cell(item.path)))
+        else:
+            item.action = CONFLICT
     if item.action == CONFLICT:
         return
     # The remote version is now in (or merged into) the local file. After a merge the local file
@@ -1049,8 +1439,9 @@ def push(subdirs: Sequence[str] = (), *, force: bool = False, api: Any = None) -
     """Upload new and changed files to the runs repo in commits guarded by parent_commit (rules in
     the module docstring). A file changed on both sides is merged (append-only JSONL) or, without
     ``force``, left alone on the Hub and uploaded under conflicts/<utc-timestamp>/<path>, and so are
-    the judgements and AuditKIT records of a cell held back; conflicts leave ``report.ok`` False. If
-    another machine commits meanwhile, the push is planned again."""
+    the judgements and AuditKIT records held back (``force`` never sends one that does not pair). Conflicts,
+    and judgements or records on the Hub this push leaves unpaired (``report.unpaired_on_hub``), leave
+    ``report.ok`` False. If another machine commits meanwhile, the push is planned again."""
     selected = select(subdirs)
     for attempt in range(1, PUSH_ATTEMPTS + 1):
         try:
@@ -1078,12 +1469,15 @@ def _push_once(selected: list[tuple[str, Path]], *, force: bool, api: Any) -> Sy
         with _staging() as staging:
             # Generations first: how they end decides which judgements may go up, or be merged at all.
             for item in gens:
-                _merge_for_push(remote, item, staging, force=force)
+                _merge_for_push(remote, item, staging, report, force=force)
             report.held = _hold_back(items, tree, digest, _judged_from)
             for item in rest:
-                _merge_for_push(remote, item, staging, force=force)
-        # AuditKIT records last: they follow their judgements too, whose merge may just have failed.
-        report.held |= _hold_back(items, tree, digest, _recorded_from)
+                _merge_for_push(remote, item, staging, report, force=force)
+            _hold_unpaired(items, report, records=False)
+            # AuditKIT records last: they follow their judgements too, whose merge may just have failed.
+            report.held |= _hold_back(items, tree, digest, _recorded_from)
+            _hold_unpaired(items, report, records=True)
+            report.unpaired_on_hub = _unpaired_on_hub(remote, items, tree, staging, digest)
         stamp = _stamp()
         aside = [i for i in items if i.action == CONFLICT and not i.busy]   # a busy file stays here only
         report.conflict_copies, copies = _conflict_copies(aside, tree, stamp)
@@ -1100,8 +1494,11 @@ def _push_once(selected: list[tuple[str, Path]], *, force: bool, api: Any) -> Sy
     return report
 
 
-def _merge_for_push(remote: _Remote, item: _Item, staging: Path, *, force: bool) -> None:
-    """Fold the remote records of a JSONL changed on both sides into the local file before upload."""
+def _merge_for_push(remote: _Remote, item: _Item, staging: Path, report: SyncReport, *, force: bool) -> None:
+    """Fold the remote records of a JSONL changed on both sides into the local file before upload. A merge
+    of judgements that would not pair with the cell's generations is not written: held back when this
+    machine's own judgements do not pair (_unpair), a conflict when only the Hub's would not (``force``
+    then sends the local copy as it is)."""
     if item.action != MERGE:
         return
     staged, _ = _download(remote, item, staging)
@@ -1113,6 +1510,15 @@ def _merge_for_push(remote: _Remote, item: _Item, staging: Path, *, force: bool)
             return
         log.warning("sync push: cannot merge %s by key (%s)", item.path, e)
         item.action = FORCE if force else CONFLICT
+        return
+    if refused := _merge_refused(item, merged.rows):
+        whose = "this machine's" if refused == "local" else "the Hub's"
+        log.warning("sync push: merged, %s would hold judgements (%s) that do not pair with the cell's "
+                    "generations; not merged", item.path, whose)
+        if refused == "local":
+            _unpair(item, report, _generations_of(_cell(item.path)))
+        else:
+            item.action = FORCE if force else CONFLICT
         return
     if _apply_merge(item, merged, "push"):
         item.digest = file_digest(item.local)
@@ -1212,8 +1618,10 @@ def _check_tree(remote: _Remote, revision: str, tree: dict[str, Any], written: d
 
 def status(subdirs: Sequence[str] = (), *, api: Any = None) -> dict[str, SyncReport]:
     """Dry run: {"pull": ..., "push": ...}, what each would do now. Downloads, uploads and writes
-    nothing (merges are planned, not tried: a planned merge counts as going up when push decides which
-    judgements and AuditKIT records to hold back)."""
+    nothing: merges are planned, not tried (a planned merge counts as going up when push decides which
+    judgements and AuditKIT records to hold back, and its judgements are checked as they stand here),
+    and the Hub's own judgements and records that a push replacing generations would leave unpaired,
+    which takes their contents, are not looked at."""
     selected = select(subdirs)
     remote = _connect(api)
     tree = _remote_tree(remote)
@@ -1223,10 +1631,12 @@ def status(subdirs: Sequence[str] = (), *, api: Any = None) -> dict[str, SyncRep
     reports = {}
     for direction, plan in (("pull", _plan_pull), ("push", _plan_push)):
         items = plan(selected, tree, state, force=False, digest=digest)
-        held: dict[str, str] = {}
-        if direction == "push":
-            for made_from in (_judged_from, _recorded_from):    # in push's order
-                held |= _hold_back(items, tree, digest, made_from)
-        reports[direction] = SyncReport(direction, remote.repo, remote.sha, prefixes,
-                                        {i.path: i.action for i in items}, dry_run=True, held=held)
+        report = SyncReport(direction, remote.repo, remote.sha, prefixes, dry_run=True)
+        if direction == "push":                                 # in push's order
+            report.held = _hold_back(items, tree, digest, _judged_from)
+            _hold_unpaired(items, report, records=False)
+            report.held |= _hold_back(items, tree, digest, _recorded_from)
+            _hold_unpaired(items, report, records=True)
+        report.files = {i.path: i.action for i in items}
+        reports[direction] = report
     return reports
