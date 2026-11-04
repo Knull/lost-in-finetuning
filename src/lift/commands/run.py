@@ -9,9 +9,10 @@ cuda:1 when there are two GPUs (Kaggle T4 x2: two separate 16 GB devices) and cu
 A cell lift generate, judge or run-dev cannot go on with (a StaleOutputError) is logged and skipped, and
 the other cells go on. At the end each kind is listed apart with its remedy: stale (begun under another
 stack, or made from other inputs): the ``lift restart`` line that starts it over, a job line right after
-``lift sync pull``; made in another precision (OtherPrecisionError): its own ``--dtype``, or leaving it
-out, never a restart (that would discard it); another judge's judgements (MixedJudgesError): the file's
-judge, or the role's ``lift restart --judge`` line. Exit codes: 0 done; 3 done, but some cells were
+``lift sync pull``, with the lines that job needs under it; made in another precision than the run's
+(whatever refusal came first): its own ``--dtype``, or leaving it out, never a restart (that would
+discard it); another judge's judgements (MixedJudgesError): the file's judge, or the role's ``lift
+restart --judge`` line. Exit codes: 0 done; 3 done, but some cells were
 skipped or their AuditKIT record was refused (a GPU job goes on with its next lines and fails at the
 end); 1 an error. A precision other than ``generation.dtype`` is refused on a GPU with native bf16
 (compute capability 8 or more): other precisions exist only for the T4's licence (decisions.md 27).
@@ -25,7 +26,7 @@ import queue
 import sys
 import threading
 from collections import Counter
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -150,8 +151,10 @@ def _record(variant: str, set_name: str, lang: str, split: str, *, dtype: str,
 # Each kind of skipped cell (contract I), and the head of its end-of-run listing.
 SKIPPED = {
     "stale": ("were skipped as stale (see the errors above). To start one over, run its line once as a job "
-              "line right after `lift sync pull`, followed by the line that failed (and any line under it: "
-              "the restart also sets aside other judges' judgements, which only their own line fills again)"),
+              "line right after `lift sync pull`, followed by the lines under it where they say and the line "
+              "that failed: a `lift judge` line needs its cell generated first, as the restart empties the "
+              "generations too, and the restart also sets aside other judges' judgements, which only their "
+              "own line fills again"),
     "precision": ("were made in another precision and left as they are (see the errors above): a restart "
                   "would discard them"),
     "judges": ("hold another judge's judgements and were left as they are (see the errors above): judges are "
@@ -161,6 +164,7 @@ SKIPPED = {
 }
 _SKIPPED_AS = {"stale": "stale", "precision": "made in another precision",
                "judges": "judged by another judge"}
+REDRAW = "after P04 draws the key list again (lift validate second-judge-sample, then lift sync push)"
 
 
 def _kind(exc: Exception) -> str:
@@ -173,30 +177,64 @@ def _kind(exc: Exception) -> str:
 
 
 def _skip(skipped: dict[str, dict[str, str]], variant: str, set_name: str, lang: str, split: str,
-          exc: Exception, *, judged: str | None, dtype: str) -> None:
+          exc: Exception, *, judged: str | None, dtype: str, generates: bool = True,
+          keys: bool = False) -> None:
     """Log a cell the command cannot go on with and keep its remedy under its kind (``SKIPPED``), so the
-    command goes on with the other cells and lists it at the end. A stale cell's whole-cell restart
-    also sets aside other judges' judgements: the lines that refill those (not ``judged``'s, which the
-    line that failed refills) go under its restart line."""
-    kind = _kind(exc)
-    log.error("%s %s_%s_%s: %s, skipped: %s", variant, set_name, lang, split, _SKIPPED_AS[kind], exc)
+    command goes on with the other cells and lists it at the end. A cell made in another precision than
+    the run's ``dtype`` is listed as such whatever refusal came first (an API judge has no precision for
+    judge_file to check): a restart line run here would discard it. A stale cell's whole-cell restart
+    gets the lines its job needs under it (``_after_restart``)."""
+    from lift.models.generate import made_in
+
+    found = _kind(exc)
+    if found == "precision":
+        made = exc.dtype
+    else:
+        made = "/".join(sorted(made_in(variant, set_name, lang, split) - {dtype}))
+    kind = "precision" if made else found
+    cell = f"{set_name}_{lang}_{split}"
+    if kind == found:
+        log.error("%s %s: %s, skipped: %s", variant, cell, _SKIPPED_AS[kind], exc)
+    else:                                      # its error's remedy is for a run in the cell's precision
+        log.error("%s %s: made in another precision, skipped: its generations were made in %s, and this run "
+                  "is %s. It was also found %s, which a run in %s settles: a restart from here would discard "
+                  "its %s outputs", variant, cell, made, dtype, _SKIPPED_AS[found], made, made)
     command = getattr(exc, "command", None)
     if kind == "precision":
-        made = exc.dtype
         remedy = (f"made in {made}: run it with --dtype {made} where {made} runs, or leave it out with "
                   "--sets/--langs")
     elif command is None:
         remedy = "no lift restart line covers it (see its error above)"
-    else:
+    elif " --judge " in command:
         remedy = command
-        if " --judge " not in command:
-            from lift.models.generate import cell_judgements
+    else:
+        remedy = command + _after_restart(variant, set_name, lang, split, judged=judged, dtype=dtype,
+                                          generates=generates, keys=keys,
+                                          redraw=getattr(exc, "keys_changed", True))
+    skipped.setdefault(kind, {})[cell] = remedy
 
-            held = [p for p in cell_judgements(variant, set_name, lang, split) if p.stat().st_size]
-            remedy += "".join(f"\n    and once it is generated again: {line}"
-                              for _path, line in _refills(variant, set_name, lang, split, held,
-                                                          judged=judged, dtype=dtype))
-    skipped.setdefault(kind, {})[f"{set_name}_{lang}_{split}"] = remedy
+
+def _after_restart(variant: str, set_name: str, lang: str, split: str, *, judged: str | None, dtype: str,
+                   generates: bool, keys: bool, redraw: bool) -> str:
+    """The lines a whole-cell restart's job needs, each under the restart line saying when it runs. The
+    restart empties the generations too, so a line that does not generate (``generates`` False: lift
+    judge) needs lift generate first; and it sets aside every judge's judgements, while the line that
+    failed refills only ``judged``'s: the other roles' lines refill theirs. When the cause may have
+    changed the cell's generation keys (``redraw``: anything but a stack move), a line reading P04's key
+    list (a refill, or the line that failed: ``keys``) runs only after P04 draws it again."""
+    from lift.models.generate import cell_judgements
+
+    lines = []
+    if not generates:
+        generate = _generate_line(variant, set_name, lang, split, dtype=dtype)
+        lines.append(f"first generate it again: {generate}")
+    if keys and redraw:
+        lines.append(f"then the line that failed, {REDRAW}")
+    held = [p for p in cell_judgements(variant, set_name, lang, split) if p.stat().st_size]
+    for _path, line in _refills(variant, set_name, lang, split, held, judged=judged, dtype=dtype):
+        when = f", {REDRAW}" if redraw and " --keys " in line else ""
+        lines.append(f"and once it is generated again{when}: {line}")
+    return "".join(f"\n    {line}" for line in lines)
 
 
 def _listing(skipped: Mapping[str, Mapping[str, str]]) -> list[str]:
@@ -317,10 +355,7 @@ def _judge(args: argparse.Namespace) -> int:
         cells = _key_cells(args.variant, args.split, keys, sets=sets if args.sets else None,
                            langs=langs if args.langs else None, allow_missing=args.allow_missing)
     paths = {(s, lang): generations_path(args.variant, s, lang, args.split) for s, lang in cells}
-    missing = [str(p) for p in paths.values() if not p.is_file() or not p.stat().st_size]
-    if missing:
-        raise SystemExit(f"{len(missing)} generations files are missing or empty, e.g. {missing[:3]}; "
-                         "run lift generate first (lift restart leaves a cell's files empty)")
+    _generated_first(paths.values())
     dtype = _dtype(args.dtype)
     device = _judge_device(args.device) if local else None
     if local:                                  # an API judge has no precision and runs on no GPU of ours
@@ -332,30 +367,50 @@ def _judge(args: argparse.Namespace) -> int:
         try:
             judge_file(path, judge=judge, sample=args.sample, keys=keys)
         except StaleOutputError as exc:
-            _skip(skipped, args.variant, set_name, lang, args.split, exc, judged=args.judge, dtype=dtype)
+            _skip(skipped, args.variant, set_name, lang, args.split, exc, judged=args.judge, dtype=dtype,
+                  generates=False, keys=keys is not None)
             continue
         if args.judge == "primary":
             _record(args.variant, set_name, lang, args.split, dtype=dtype, refused=refused)
     return _refused_exit(refused, skipped)
 
 
+def _generated_first(paths: Iterable[Path]) -> None:
+    """Refuse a lift judge run over generations files that are missing or empty: lift generate comes
+    first (lift restart leaves a cell's files empty)."""
+    missing = [str(p) for p in paths if not p.is_file() or not p.stat().st_size]
+    if missing:
+        raise SystemExit(f"{len(missing)} generations files are missing or empty, e.g. {missing[:3]}; "
+                         "run lift generate first (lift restart leaves a cell's files empty)")
+
+
 def _key_cells(variant: str, split: str, keys: Sequence[str], *, sets: Collection[str] | None,
                langs: Collection[str] | None, allow_missing: bool) -> list[tuple[str, str]]:
     """The (set, lang) generations files a --keys run judges: every file of ``variant``'s ``split`` that
-    holds a listed key, within --sets/--langs when they were given. A key in no file at all was
-    regenerated under a new key (a fixed prompt) or is a typo, and stops the command unless
-    ``allow_missing``: its item would silently lose its label. Keys in files outside an explicit
-    --sets/--langs are expected (P04 prints one line per group over one list) and are logged by
-    "{set}_{lang}" of the file, counts only."""
-    from lift.models.generate import read_generations
+    holds a listed key, within --sets/--langs when they were given. A listed key in no file at all may be
+    in a file within them that is empty (lift restart leaves a cell so) or, named by an explicit --sets
+    and --langs, missing: then the command is refused with lift generate's message, which --allow-missing
+    never skips, as that says nothing about the list. Otherwise such a key was regenerated under a new key
+    (a fixed prompt) or is a typo, and stops the command unless ``allow_missing``: its item would silently
+    lose its label. Keys in files outside an explicit --sets/--langs are expected (P04 prints one line per
+    group over one list) and are logged by "{set}_{lang}" of the file, counts only."""
+    from lift.models.generate import generations_path, read_generations
     from lift.paths import generations_dir
 
-    wanted = set(keys)
-    holder: dict[str, tuple[str, str]] = {}
+    files: dict[tuple[str, str], Path] = {}
     for path in sorted((generations_dir() / variant).glob(f"*_{split}.jsonl")):
         set_name, lang, _ = path.stem.rsplit("_", 2)
-        holder.update({g.key: (set_name, lang) for g in read_generations(path) if g.key in wanted})
+        files[(set_name, lang)] = path
+    wanted = set(keys)
+    holder: dict[str, tuple[str, str]] = {}
+    for cell, path in files.items():
+        holder.update({g.key: cell for g in read_generations(path) if g.key in wanted})
     unknown = sorted(wanted - set(holder))
+    if unknown:                                 # they may be the keys of a cell not generated (again) yet
+        within = [p for (s, lang), p in files.items()
+                  if (sets is None or s in sets) and (langs is None or lang in langs)]
+        named = [generations_path(variant, s, lang, split) for s in sets or () for lang in langs or ()]
+        _generated_first(dict.fromkeys([*within, *named]))
     if unknown and not allow_missing:
         raise SystemExit(f"{len(unknown)} listed keys are in none of {variant}'s {split} generations files, "
                          f"e.g. {[k[:12] for k in unknown[:5]]}; regenerate the key list "
@@ -379,28 +434,49 @@ def _judge_entry(role: str) -> str:
     return {"primary": "judges.safety_primary", "second": "judges.safety_second"}[role]
 
 
+def _p04_list(variant: str, split: str) -> Path:
+    """P04's second-judge key list of a variant and split (decisions.md 31)."""
+    from lift.paths import validation_dir
+
+    return validation_dir() / "keys" / "second_judge" / f"{variant}_{split}.txt"
+
+
 def _p04_keys(variant: str, split: str) -> str:
-    """P04's second-judge key list of a variant and split (decisions.md 31) as a job line names it:
-    relative to the repo, where every job line runs, unless LIFT_VALIDATION_DIR moved validation/."""
+    """``_p04_list`` as a job line names it: relative to the repo, where every job line runs, unless
+    LIFT_VALIDATION_DIR moved validation/."""
     import shlex
 
-    from lift.paths import REPO_ROOT, validation_dir
+    from lift.paths import REPO_ROOT
 
-    path = validation_dir() / "keys" / "second_judge" / f"{variant}_{split}.txt"
+    path = _p04_list(variant, split)
     try:
         return path.relative_to(REPO_ROOT).as_posix()
     except ValueError:
         return shlex.quote(str(path))
 
 
-def _judge_line(variant: str, set_name: str, lang: str, split: str, *, role: str, dtype: str) -> str:
-    """The job line that judges one cell again with ``role``'s judge: the second judge's over P04's
-    key list, and the precision when it is not ``generation.dtype``."""
+def _dtype_flag(dtype: str) -> str:
+    """A job line's ``--dtype``, named when it is not ``generation.dtype``."""
     from lift import config
 
+    return f" --dtype {dtype}" if dtype != config.get("generation.dtype") else ""
+
+
+def _generate_line(variant: str, set_name: str, lang: str, split: str, *, dtype: str) -> str:
+    """The job line that generates one cell again (in ``dtype``)."""
+    line = f"lift generate --variant {variant} --split {split} --sets {set_name} --langs {lang}"
+    return line + _dtype_flag(dtype)
+
+
+def _judge_line(variant: str, set_name: str, lang: str, split: str, *, role: str, dtype: str) -> str:
+    """The job line that judges one cell again with ``role``'s judge (in ``dtype``): the second judge's
+    over P04's key list, or with decisions.md 31's --sample 0.10 while P04 has drawn none (the second
+    judge ran with --sample then, and a line naming a missing list would only fail)."""
     line = f"lift judge --variant {variant} --split {split} --sets {set_name} --langs {lang} --judge {role}"
-    line += f" --keys {_p04_keys(variant, split)}" if role == "second" else ""
-    return line + (f" --dtype {dtype}" if dtype != config.get("generation.dtype") else "")
+    if role == "second":
+        listed = _p04_list(variant, split).is_file()
+        line += f" --keys {_p04_keys(variant, split)}" if listed else " --sample 0.10"
+    return line + _dtype_flag(dtype)
 
 
 def _refills(variant: str, set_name: str, lang: str, split: str, paths: Sequence[Path], *,
@@ -614,8 +690,9 @@ generations file, every judgements file and every AuditKIT record of the cell (w
 judge's judgements file and records) is copied to outputs/.aside/<UTC stamp>/, which is never synced,
 and left EMPTY: the next lift sync push replaces the runs repo's copies (an empty record is retired),
 and run-dev (or generate, then judge) fills the cell again. The log names the line that refills any
-other judge's judgements it set aside (the second judge's, over P04's key list), a judge run-dev
-never runs.
+other judge's judgements it set aside, a judge run-dev never runs: the second judge's, over P04's key
+list (drawn again first when the cell's generation keys changed: a fixed prompt text or another
+configuration), or with --sample 0.10 while P04 has drawn none.
 
 --dtype is the precision this job makes the cells in (default: generation.dtype; the T4 passes
 --dtype fp16, as its restart lines say). A cell made in another precision is refused, and nothing is
@@ -709,9 +786,13 @@ def _restart(args: argparse.Namespace) -> int:
     log.info("%d file(s) emptied and %d AuditKIT record(s) retired: the next lift sync push replaces the "
              "runs repo's copies (an empty record is retired there too), and %s", emptied, retired, refill)
     if refills:
+        redraw = ("; when its generation keys changed (a fixed prompt text or another configuration, as the "
+                  f"listing that named this restart says), run a --keys line only {REDRAW}")
+        keyed = any(" --keys " in line for _path, line in refills)
         log.warning("%d judgements file(s) of another judge were set aside, which that line never fills "
-                    "again. Once the cell is generated again, add each one's line to the job:\n%s",
-                    len(refills), "".join(f"  {path}: {line}\n" for path, line in refills))
+                    "again. Once the cell is generated again, add each one's line to the job%s:\n%s",
+                    len(refills), redraw if keyed else "",
+                    "".join(f"  {path}: {line}\n" for path, line in refills))
     return 0
 
 

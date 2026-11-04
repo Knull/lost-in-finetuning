@@ -266,6 +266,27 @@ def test_changed_inputs_name_the_restart_line(stock, tmp_path):
     assert "`lift restart" not in str(exc.value) and exc.value.command is None
 
 
+def test_a_refusal_says_whether_the_cell_made_again_keeps_its_keys(stock, monkeypatch):
+    # X9: a key list drawn from the cell (P04's second-judge list) still holds after a restart only when the
+    # cell is made again under the same keys: only the stack moved, which the key leaves out. A fixed prompt
+    # text or another configuration makes new keys, so the list is drawn again before a --keys line.
+    path = cell_path()
+    run(stock, path, ps=prompts()[:2])
+    fixed = prompts()
+    fixed[0] = make_prompt(fixed[0].pid, text=fixed[0].text + " (fixed translation)")
+    with pytest.raises(gen.StaleOutputError, match="a fixed prompt text") as exc:
+        run(stock, path, ps=fixed)
+    assert exc.value.keys_changed is True
+    with pytest.raises(gen.StaleOutputError, match="another configuration") as exc:
+        run(stock, path, max_new_tokens=CAP - 1)
+    assert exc.value.keys_changed is True
+    moved_stack(monkeypatch, torch="2.99.0+cu130")
+    with pytest.raises(gen.StaleOutputError, match="another stack") as exc:
+        run(stock, path)
+    assert exc.value.keys_changed is False and exc.value.command == RESTART
+    assert gen.StaleOutputError("a cause no one marked").keys_changed is True     # the list is drawn again
+
+
 def test_restart_command_names_the_cell_the_judge_and_a_precision_other_than_the_default():
     assert gen.restart_command("stock", "easy_benign", "hi", "final") == (
         "lift restart --variant stock --split final --sets easy_benign --langs hi")
