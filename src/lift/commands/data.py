@@ -193,7 +193,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     s.set_defaults(func=_stats)
 
     c = data.add_parser("spotcheck-sheets", help="write the translation spot-check sheets to "
-                                                 "validation/sheets")
+                                                 "validation/sheets (LIFT_VALIDATION_DIR moves it)")
     c.add_argument("--langs", nargs="+", choices=translated, metavar="LANG",
                    help=f"languages (default: hi zh es; any of {', '.join(translated)})")
     c.add_argument("--n", type=int,
@@ -207,6 +207,8 @@ def register(sub: argparse._SubParsersAction) -> None:
                                     "Exit 0 when applied, 1 when the sheet or the cache is refused (nothing "
                                     "applied), 3 when the rebuild lost records.")
     a.add_argument("--file", required=True, type=Path,
-                   help="the filled sheet, saved as CSV UTF-8 (commas, semicolons or tabs)")
+                   help="the filled sheet, saved as CSV UTF-8 (commas, semicolons or tabs); a relative path "
+                        "that does not exist here is looked up in the validation tree (validation/... "
+                        "under LIFT_VALIDATION_DIR, a bare name in its sheets/)")
     a.add_argument("--dry-run", action="store_true", help="check the sheet and report, write nothing")
     a.set_defaults(func=_apply)

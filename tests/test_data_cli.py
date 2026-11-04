@@ -199,6 +199,37 @@ def test_stats_sheets_and_apply_on_a_built_fixture(dirs, monkeypatch, capsys, ca
     assert "verdict must be ok, fixed or bad" in caplog.text and rows[1]["translation"] not in caplog.text
 
 
+def test_spotcheck_sheets_are_written_and_read_under_the_validation_dir(dirs, monkeypatch, capsys, tmp_path):
+    # R1 post-merge item 2: a remote runtime moves validation/ with LIFT_VALIDATION_DIR, and P04's sheets
+    # and lift sync follow it. So do P01's: written there, and a filled sheet found there by the name a
+    # job line gives it (run from the clone, where validation/ is not that tree).
+    use_fixtures(monkeypatch)
+    moved = tmp_path / "moved" / "validation"
+    monkeypatch.setenv("LIFT_VALIDATION_DIR", str(moved))
+    assert main(["data", "build"]) == 0
+    capsys.readouterr()
+    assert main(["data", "spotcheck-sheets", "--langs", "hi", "--n", "1"]) == 0
+    written = [Path(line) for line in capsys.readouterr().out.splitlines()]
+    assert [p.name for p in written] == ["spotcheck_hi.csv", "spotcheck_hi_failures.csv"]
+    assert all(p.parent == moved / "sheets" and p.is_file() for p in written)
+    sheet = moved / "sheets" / "spotcheck_hi.csv"
+    rows = read_sheet(sheet)
+    rows[0]["verdict"] = "ok"
+    write_sheet(sheet, rows)
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    monkeypatch.chdir(clone)
+    names = ("spotcheck_hi.csv", "validation/sheets/spotcheck_hi.csv", r"validation\sheets\spotcheck_hi.csv")
+    for name in names:
+        assert main(["data", "apply-spotchecks", "--file", name, "--dry-run"]) == 0, name
+        assert "dry run: 1 verdicts checked (1 new" in capsys.readouterr().out
+    # A file that exists where it is named is read from there, as before.
+    (clone / "spotcheck_hi.csv").write_bytes(sheet.read_bytes())
+    sheet.unlink()
+    assert main(["data", "apply-spotchecks", "--file", "spotcheck_hi.csv", "--dry-run"]) == 0
+    assert main(["data", "apply-spotchecks", "--file", "nowhere.csv", "--dry-run"]) == 1
+
+
 def test_spotcheck_sheets_exits_1_before_a_build(dirs, monkeypatch, capsys, caplog):
     use_fixtures(monkeypatch)
     caplog.set_level(logging.ERROR)

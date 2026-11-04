@@ -68,15 +68,16 @@ def fixture_ctx(**overrides: Any) -> build.BuildContext:
 
 
 def isolate(monkeypatch: Any, tmp_path: Path) -> SimpleNamespace:
-    """Point the data dir, outputs dir (run manifests), split files and spot-check sheets at tmp. The
-    manifests' git lookup is stubbed (two git calls per build add up across the suite)."""
+    """Point the data dir, outputs dir (run manifests), split files and validation tree (where the
+    spot-check sheets go) at tmp. The manifests' git lookup is stubbed (two git calls per build add up
+    across the suite)."""
     root = Path(tmp_path).resolve()
     dirs = SimpleNamespace(data=root / "data", splits=root / "splits", outputs=root / "outputs",
-                           sheets=root / "sheets")
+                           validation=root / "validation", sheets=root / "validation" / "sheets")
     monkeypatch.setenv("LIFT_DATA_DIR", str(dirs.data))
     monkeypatch.setenv("LIFT_OUTPUT_DIR", str(dirs.outputs))
+    monkeypatch.setenv("LIFT_VALIDATION_DIR", str(dirs.validation))
     monkeypatch.setattr(splits, "SPLITS_DIR", dirs.splits)
-    monkeypatch.setattr(build, "SHEETS_DIR", dirs.sheets)
     monkeypatch.setattr(manifest, "git_sha", lambda: "0" * 40)
     return dirs
 
