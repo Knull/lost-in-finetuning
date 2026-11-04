@@ -15,12 +15,12 @@ from pathlib import Path
 import pytest
 from fakes import make_prompt
 
-from lift import config
-from lift.io import read_jsonl, sha256_text, write_jsonl
+from lift import config, gate0
+from lift.io import read_jsonl, sha256_text, stable_json, write_jsonl
 from lift.judge import pipeline
 from lift.judge.pipeline import JudgeItem, JudgeOutcome
-from lift.models.generate import generations_path
-from lift.paths import manifests_dir, validation_dir
+from lift.models.generate import StaleOutputError, generations_path
+from lift.paths import manifests_dir, metrics_dir, validation_dir
 from lift.schemas import GenerationRecord
 
 CELL = ("stock", "harmful", "en", "dev")
@@ -28,11 +28,28 @@ LONG = "placeholder words that make a long enough answer"
 GUARD_ID = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
 PRIMARY = GUARD_ID + "#bf16#strict"             # the configured primary judge, in bf16 and strict mode
 SECOND = "openai/placeholder-model@safety_v1:0123456789ab+t0+max1024"
+REV = "c" * 40                                  # Global's commit sha, as generate records it in meta
+STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}      # an A100
+L4 = {**STACK, "gpu_capability": "8.9"}
 
 
 @pytest.fixture(autouse=True)
 def quick_manifests(monkeypatch):
     monkeypatch.setattr("lift.manifest.git_sha", lambda: "test")
+
+
+@pytest.fixture(autouse=True)
+def judge_stack(monkeypatch):
+    """lift.models.generate.stack without a GPU: returns ``state["stack"]`` (an A100 unless a test moves
+    the judge) and records the devices it was asked about."""
+    state = {"stack": dict(STACK), "devices": []}
+
+    def stack(device):
+        state["devices"].append(device)
+        return dict(state["stack"])
+
+    monkeypatch.setattr("lift.models.generate.stack", stack)
+    return state
 
 
 @pytest.fixture
@@ -110,12 +127,30 @@ def write_gens(records, path=None):
     return path
 
 
-def setup_cell(store, n=6, outputs=None, dtype="bf16"):
+def setup_cell(store, n=6, outputs=None, dtype="bf16", meta=None):
     """n prompts in the fake prompt store and one generation each; returns (pids, gens, path)."""
     pids = [f"prh-test-{i:04d}" for i in range(n)]
     store[("harmful", "en")] = [make_prompt(p) for p in pids]
-    gens = [gen(p, output=(outputs or {}).get(p), dtype=dtype) for p in pids]
+    gens = [gen(p, output=(outputs or {}).get(p), dtype=dtype, meta=meta) for p in pids]
     return pids, gens, write_gens(gens)
+
+
+def write_licence(dtype="fp16", *, passed=True, fp16=True, rev=REV, name=None, reference=True, ref_rev=REV):
+    """What Gate 0's comparison run (lift smoke --compare-dtype) writes to outputs/metrics/gate0-{dtype}.json,
+    and the bf16 reference's own Gate 0 (gate0.json; ``reference`` None leaves it out), reduced to the
+    fields the licence reads. ``fp16`` is the fp16 check's pass flag on a comparison of 200 prompts, or
+    the whole check."""
+    fp16 = fp16 if isinstance(fp16, dict) else {"pass": fp16, "comparable": True, "n": 200}
+    doc = {"dtype": dtype, "reference_dtype": "bf16", "pass": passed,
+           "checks": {"precision": {"pass": True}, "fp16": fp16},
+           "revisions": {"global": rev, "judge": "a" * 40}}
+    metrics_dir().mkdir(parents=True, exist_ok=True)
+    if reference is not None:
+        ref = {"dtype": "bf16", "pass": reference, "revisions": {"global": ref_rev, "judge": "a" * 40}}
+        (metrics_dir() / "gate0.json").write_text(json.dumps(ref), encoding="utf-8")
+    path = metrics_dir() / f"{name or f'gate0-{dtype}'}.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
 
 
 def judged(path):
@@ -187,24 +222,42 @@ def test_resume_after_a_crash_writes_no_duplicates(fake_prompt_files):
         pipeline.judge_file(path, judge=FakeJudge(), lid=FakeLID(), resume=False)
 
 
+RESTART = "lift restart --variant stock --split dev --sets harmful --langs en"      # the cell of CELL
+
+
+def assert_restart(err, command):
+    """A stale cell's refusal (contract C): a StaleOutputError naming the exact ``lift restart`` line of the
+    cell, to run right after the job's ``lift sync pull`` (a file moved aside by hand comes back with that
+    pull), and no record text."""
+    message = str(err)
+    assert isinstance(err, pipeline.StaleJudgementsError) and isinstance(err, StaleOutputError)
+    assert err.command == command and f"`{command}`" in message
+    assert ("--judge" in command) == ("--judge" in message)
+    assert "right after `lift sync pull`" in message and "move the judgements file aside" not in message
+    assert LONG not in message and "prompt prh-" not in message
+
+
 def test_a_changed_output_under_the_same_key_is_never_resumed(fake_prompt_files):
     """The key hashes the inputs only. A regenerated output (bf16 batch effects, a lost and rebuilt
-    file) under the same key must be re-judged, never inherit the old output's label."""
+    file) under the same key must be re-judged, never inherit the old output's label. The generations
+    are current, so the refusal names the role's restart, which keeps them (contract C)."""
     pids, gens, path = setup_cell(fake_prompt_files, n=4)
-    out = pipeline.judge_file(path, judge=FakeJudge(), lid=FakeLID())
+    out = pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
     flipped = [gen(p, output=f"HARM {LONG} {p}") for p in pids]
     assert [g.key for g in flipped] == [g.key for g in gens]
     write_gens(flipped)
-    again = FakeJudge()
-    with pytest.raises(ValueError, match="generations changed since judging; move the judgements file aside"):
+    again = primary_judge()
+    with pytest.raises(pipeline.StaleJudgementsError, match="generations changed since judging") as refused:
         pipeline.judge_file(path, judge=again, lid=FakeLID())
     assert again.calls == []
+    assert_restart(refused.value, RESTART + " --judge primary")
+    assert "the generations are kept" in str(refused.value)
 
     write_gens(gens)                                     # a judgement naming no output is not trusted either
     rows = list(read_jsonl(out))
     write_jsonl(out, [{k: v for k, v in r.items() if k != "output_sha"} for r in rows])
-    with pytest.raises(ValueError, match="changed since judging"):
-        pipeline.judge_file(path, judge=FakeJudge(), lid=FakeLID())
+    with pytest.raises(StaleOutputError, match="changed since judging"):
+        pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
 
 
 def test_a_judge_failure_is_unclear_and_counted(fake_prompt_files):
@@ -236,28 +289,60 @@ def test_judges_are_never_mixed_in_one_file(fake_prompt_files):
     assert len(list(read_jsonl(pipeline.judgements_path("fake", *CELL)))) == 1
 
 
-def test_duplicate_or_stale_judgements_raise(fake_prompt_files):
+def test_duplicate_or_stale_judgements_raise(fake_prompt_files, tmp_path):
     pids, gens, path = setup_cell(fake_prompt_files)
-    out = pipeline.judge_file(path, judge=FakeJudge(), lid=FakeLID())
+    out = pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
     lines = out.read_text(encoding="utf-8").splitlines(keepends=True)
     out.write_text("".join(lines + lines[:1]), encoding="utf-8", newline="\n")
     with pytest.raises(ValueError, match="duplicate"):
-        pipeline.judge_file(path, judge=FakeJudge(), lid=FakeLID())
+        pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
 
     out.write_text("".join(lines), encoding="utf-8", newline="\n")
     write_gens(gens[:-1] + [gen(pids[-1], tag="v2")])          # one output regenerated under a new key
-    with pytest.raises(ValueError, match="not in the generations file"):
-        pipeline.judge_file(path, judge=FakeJudge(), lid=FakeLID())
+    with pytest.raises(pipeline.StaleJudgementsError, match="not in the generations file") as refused:
+        pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
+    assert_restart(refused.value, RESTART + " --judge primary")     # the role's judgements only
+
+    other = pipeline.judgements_path("fake", *CELL)            # no role's dir: the whole cell's restart
+    other.parent.mkdir(parents=True)
+    other.write_bytes(out.read_bytes())
+    with pytest.raises(StaleOutputError) as refused:
+        pipeline.judge_file(path, judge=FakeJudge(PRIMARY), lid=FakeLID())
+    assert_restart(refused.value, RESTART)
+    elsewhere = tmp_path / "elsewhere.jsonl"                    # no restart line covers it
+    elsewhere.write_bytes(out.read_bytes())
+    with pytest.raises(StaleOutputError, match="by hand") as refused:
+        pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID(), out_path=elsewhere)
+    assert refused.value.command is None
 
 
 def test_prompt_changed_after_generation_raises(fake_prompt_files):
+    """A translation fixed after generation leaves a stale cell (contract C): its generations are made
+    again, so the refusal names the restart of the whole cell, as generate's own refusal does."""
     pids, _, path = setup_cell(fake_prompt_files)
     fake_prompt_files[("harmful", "en")][-1] = make_prompt(pids[-1], text="a corrected translation")
-    with pytest.raises(ValueError, match=pids[-1]):
+    with pytest.raises(StaleOutputError, match=pids[-1]) as refused:
         pipeline.judge_file(path, judge=FakeJudge(), lid=FakeLID())
+    assert_restart(refused.value, RESTART)
+    assert "corrected" not in str(refused.value)
     assert not pipeline.judgements_path("fake", *CELL).exists()
-    with pytest.raises(ValueError, match="no prompt text"):
+    with pytest.raises(StaleOutputError, match="no prompt text"):
         pipeline.judge_file(path, judge=FakeJudge(), lid=FakeLID(), prompts_by_pid={})
+
+
+def test_an_emptied_cell_is_judged_from_the_start(fake_prompt_files):
+    """``lift restart`` leaves an empty file at every path it sets aside, so the next push replaces the
+    Hub's copy (contract A). An empty judgements file is judged from the start; an empty generations file
+    is said to need generating first."""
+    _, _, path = setup_cell(fake_prompt_files, n=4)
+    out = pipeline.judgements_path("qwen3guard", *CELL)
+    out.parent.mkdir(parents=True)
+    out.write_bytes(b"")
+    pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
+    assert len(pipeline.load_records(*CELL)) == 4
+    path.write_bytes(b"")
+    with pytest.raises(ValueError, match="holds no generations.*lift generate"):
+        pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
 
 
 def test_one_variant_set_lang_split_per_file(fake_prompt_files, tmp_path):
@@ -440,8 +525,11 @@ def test_load_labels_refuses_a_judgement_of_another_output(fake_prompt_files):
     changed = gen(pids[0], output=f"HARM {LONG}")
     assert changed.key == gens[0].key
     write_gens([changed, *gens[1:]])
-    with pytest.raises(ValueError, match="1 judgements are of another output .*changed since judging"):
+    with pytest.raises(ValueError, match="1 judgements are of another output .*changed since judging") as err:
         pipeline.load_labels(*CELL)
+    message = str(err.value)        # a remedy a GPU job can run: a file moved aside comes back with a pull
+    assert f"`{RESTART}` as a job line right after `lift sync pull`" in message and LONG not in message
+    assert "move the judgements file aside" not in message
     with pytest.raises(ValueError, match="another output"):
         pipeline.load_labels(*CELL, complete=False)
 
@@ -454,6 +542,21 @@ def test_load_labels_refuses_mixed_dtypes(fake_prompt_files):
     mixed = r"1 generations are not in bf16 \(the cell has \['bf16', 'fp16'\]\)"
     with pytest.raises(ValueError, match=mixed):
         pipeline.load_labels(*CELL)
+
+
+def test_load_records_refuses_generations_made_on_two_stacks(fake_prompt_files):
+    """One run configuration (the inputs) is not enough: a generations file merged from two machines, or
+    extended after a transformers upgrade, holds outputs of two numerical stacks."""
+    pids, gens, path = setup_cell(fake_prompt_files, n=4, meta={"run_config": "rc", "stack": "1" * 16})
+    pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
+    assert len(pipeline.load_records(*CELL)) == 4
+    write_gens(gens[:2] + [gen(p, meta={"run_config": "rc", "stack": "2" * 16}) for p in pids[2:]])
+    with pytest.raises(ValueError, match=r"generations mix 2 stacks \['1{16}', '2{16}'\]"):
+        pipeline.load_records(*CELL)
+    old = {"run_config": "rc", "torch": "2.15.0", "transformers": "5.22.1"}      # no meta["stack"] yet
+    write_gens([gen(p, meta={**old, "gpu_capability": "8.9" if i else "8.0"}) for i, p in enumerate(pids)])
+    with pytest.raises(ValueError, match="generations mix 2 stacks"):
+        pipeline.load_records(*CELL, complete=False)
 
 
 def guard(*, dtype="bf16", strict=True, results=None):
@@ -473,14 +576,116 @@ def test_load_labels_refuses_a_judge_in_another_precision(fake_prompt_files):
         pipeline.load_labels(*CELL)
 
 
-def test_load_labels_refuses_generations_in_another_precision_unless_asked(fake_prompt_files):
-    pids, _, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4), dtype="fp16")   # a T4 run
+def t4_cell(store, n=4):
+    """A T4 run: fp16 generations of Global at REV, judged by the primary judge in fp16."""
+    pids, gens, path = setup_cell(store, n=n, outputs=safe_outputs(n), dtype="fp16", meta={"model_rev": REV})
     pipeline.judge_file(path, judge=guard(dtype="fp16"), lid=FakeLID())
+    return pids, gens
+
+
+def test_load_labels_refuses_generations_in_another_precision_unless_named_and_licensed(fake_prompt_files):
+    pids, _ = t4_cell(fake_prompt_files)
     with pytest.raises(ValueError, match="4 generations are not in bf16"):
         pipeline.load_labels(*CELL)
     with pytest.raises(ValueError, match="not in bf16"):
         pipeline.load_records(*CELL, complete=False)
+    with pytest.raises(ValueError, match=r"gate0-fp16\.json"):
+        pipeline.load_labels(*CELL, dtype="fp16")
+    write_licence()
     assert pipeline.load_labels(*CELL, dtype="fp16") == {p: "refusal" for p in pids}     # Gate 0 licensed it
+
+
+LICENCES = {
+    "none": None,
+    "gate 0 failed": {"passed": False, "fp16": False},
+    "fp16 check failed": {"fp16": False},
+    "fp16 check not run": {"passed": False, "fp16": {"pass": False, "not_run": True, "reason": "one GPU"}},
+    "another Global revision": {"rev": "d" * 40},
+    "only a partial run": {"name": "gate0-fp16-partial"},
+    "the bf16 Gate 0 failed": {"reference": False},
+    "no bf16 Gate 0": {"reference": None},
+    "a bf16 Gate 0 of another revision": {"ref_rev": "d" * 40},
+}
+
+
+@pytest.mark.parametrize("licence", list(LICENCES.values()), ids=list(LICENCES))
+def test_naming_another_precision_is_not_a_licence(fake_prompt_files, licence):
+    """``lift judge/run-dev --dtype fp16`` always name their dtype, so naming it must not be enough: a T4
+    cell counts only if Gate 0's fp16-vs-bf16 check passed on this revision of Global (gate0-fp16.json)."""
+    t4_cell(fake_prompt_files)
+    if licence is not None:
+        write_licence(**licence)
+    with pytest.raises(ValueError, match=r"cannot be reported .*gate0-fp16\.json"):
+        pipeline.load_labels(*CELL, dtype="fp16")
+    with pytest.raises(ValueError, match=r"gate0-fp16\.json"):
+        pipeline.load_records(*CELL, complete=False, dtype="fp16")
+
+
+def test_gate0s_licence_admits_its_precision_for_its_revision_only(fake_prompt_files):
+    pids, gens = t4_cell(fake_prompt_files)
+    write_licence()
+    pipeline.check_dtype_licence("fp16", REV)
+    pipeline.check_dtype_licence("fp16", None)                     # no revision to compare
+    with pytest.raises(ValueError, match=r"gate0-fp16\.json .*revisions\.global"):
+        pipeline.check_dtype_licence("fp16", "d" * 40)
+    with pytest.raises(ValueError, match=r"gate0-fp32\.json"):
+        pipeline.check_dtype_licence("fp32", REV)
+
+    path = write_gens([gen(p, variant="adapter", output=g.output, dtype="fp16", meta={"model_rev": REV})
+                       for p, g in zip(pids, gens, strict=True)])
+    pipeline.judge_file(path, judge=guard(dtype="fp16"), lid=FakeLID())
+    a, b = pipeline.paired_labels("stock", "adapter", *CELL[1:], dtype="fp16")
+    assert a == b == {p: "refusal" for p in pids}
+    write_gens([gen(p, output=g.output, dtype="fp16") for p, g in zip(pids, gens, strict=True)])
+    with pytest.raises(ValueError, match="4 generations name no model revision"):
+        pipeline.load_labels(*CELL, dtype="fp16")
+
+
+def licence_problems(dtype="fp16", rev=REV):
+    with pytest.raises(ValueError) as refused:
+        pipeline.check_dtype_licence(dtype, rev)
+    return str(refused.value)
+
+
+def test_the_licence_error_lists_every_problem_of_both_reports():
+    """A failed fp16 verdict must show although the bf16 gate0.json is missing or unreadable too: one error
+    lists every problem of both reports, so nobody spends a bf16 Gate 0 run only to learn afterwards that
+    T4 runs can never be reported (review 3, V24)."""
+    write_licence(passed=False, fp16=False, reference=None)          # the A100 wrote only gate0-partial.json
+    (metrics_dir() / "gate0-partial.json").write_text(json.dumps({"pass": False}), encoding="utf-8")
+    message = licence_problems()
+    for problem in ('gate0-fp16.json "pass" is False', "gate0-fp16.json checks.fp16.pass is False",
+                    "gate0.json does not exist"):
+        assert problem in message
+    (metrics_dir() / "gate0.json").write_text("{not json", encoding="utf-8")
+    message = licence_problems()
+    assert "checks.fp16.pass is False" in message and "gate0.json cannot be read (JSONDecodeError)" in message
+
+    (metrics_dir() / "gate0.json").unlink()
+    (metrics_dir() / "gate0-fp16.json").unlink()
+    message = licence_problems()
+    assert "gate0-fp16.json does not exist" in message and "gate0.json does not exist" in message
+    write_licence(rev="d" * 40, reference=False, ref_rev="e" * 40)
+    message = licence_problems()
+    for problem in (f"gate0-fp16.json revisions.global is '{'d' * 40}', not {REV}",
+                    'gate0.json "pass" is False', f"gate0.json revisions.global is '{'e' * 40}', not {REV}"):
+        assert problem in message
+
+
+@pytest.mark.parametrize("n", [18, 199, None, True, "200"])
+def test_a_licence_needs_a_comparison_of_200_prompts(fake_prompt_files, n):
+    """decisions.md 27: fp16 must agree with bf16 on 95% of the same 200 prompts. A quick pair of runs with
+    --n-precision 18 (or a candidate of 50 against the 200-prompt reference: every one of its prompts pairs)
+    passes Gate 0's own comparison but licenses nothing (review 3, V26 and V15)."""
+    pids, _ = t4_cell(fake_prompt_files)
+    write_licence(fp16={"pass": True, "comparable": True, **({} if n is None else {"n": n})})
+    assert (f"gate0-fp16.json checks.fp16.n is {n!r}: the comparison must cover at least 200 prompts"
+            in licence_problems())
+    with pytest.raises(ValueError, match=r"cannot be reported .*checks\.fp16\.n"):
+        pipeline.load_labels(*CELL, dtype="fp16")
+    assert pipeline.LICENCE_MIN_PROMPTS == gate0.N_PRECISION == 200
+    write_licence(fp16={"pass": True, "comparable": True, "n": 572})
+    assert pipeline.load_labels(*CELL, dtype="fp16") == {p: "refusal" for p in pids}
 
 
 def test_a_pinned_judge_revision_is_checked(fake_prompt_files, monkeypatch):
@@ -513,20 +718,27 @@ def test_load_records_is_the_checked_door_to_every_per_prompt_field(fake_prompt_
     assert pipeline.load_labels(*CELL) == {r.pid: r.label for r in records}
 
 
+PAIR_PIDS = [f"prh-test-{i:04d}" for i in range(4)]
+PAIR_META = {"run_config": "rc", "model_rev": REV, "harness": 1, "template": "9" * 16, "decoding": "d" * 16,
+             "torch": "2.15.0", "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB"}
+
+
+def pair_cell(store, variant, *, sha="a" * 40, dtype="bf16", **meta):
+    """One arm of a pair: generations with PAIR_META (``meta`` overrides), judged by the primary judge."""
+    store[("harmful", "en")] = [make_prompt(p) for p in PAIR_PIDS]
+    path = write_gens([gen(p, variant=variant, dtype=dtype, meta={**PAIR_META, **meta}) for p in PAIR_PIDS])
+    pipeline.judgements_path("qwen3guard", variant, *CELL[1:]).unlink(missing_ok=True)
+    judge = primary_judge(f"Qwen/Qwen3Guard-Gen-4B@{sha}#{dtype}#strict")
+    pipeline.judge_file(path, judge=judge, lid=FakeLID())
+
+
+def pair(**kw):
+    return pipeline.paired_labels("stock", "adapter", *CELL[1:], **kw)
+
+
 def test_paired_labels_refuses_pairs_that_mix_judges_or_generations(fake_prompt_files, caplog):
-    pids = [f"prh-test-{i:04d}" for i in range(4)]
-    fake_prompt_files[("harmful", "en")] = [make_prompt(p) for p in pids]
-    base = {"run_config": "rc", "model_rev": "c" * 40, "harness": 1, "torch": "2.15.0",
-            "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB"}
-
-    def make(variant, *, sha="a" * 40, dtype="bf16", **meta):
-        path = write_gens([gen(p, variant=variant, dtype=dtype, meta={**base, **meta}) for p in pids])
-        pipeline.judgements_path("qwen3guard", variant, *CELL[1:]).unlink(missing_ok=True)
-        judge = primary_judge(f"Qwen/Qwen3Guard-Gen-4B@{sha}#{dtype}#strict")
-        pipeline.judge_file(path, judge=judge, lid=FakeLID())
-
-    def pair(**kw):
-        return pipeline.paired_labels("stock", "adapter", *CELL[1:], **kw)
+    def make(variant, **kw):
+        pair_cell(fake_prompt_files, variant, **kw)
 
     make("stock")
     make("adapter", sha="b" * 40)                                     # the judge re-resolved to another sha
@@ -547,13 +759,30 @@ def test_paired_labels_refuses_pairs_that_mix_judges_or_generations(fake_prompt_
     make("adapter", gpu="NVIDIA L4", transformers="5.23.0")          # allowed, but said
     with caplog.at_level(logging.WARNING, logger="lift.judge.pipeline"):
         a, b = pair()
-    assert a == b == {p: "benign" for p in pids}
+    assert a == b == {p: "benign" for p in PAIR_PIDS}
     assert "gpu" in caplog.text and "transformers" in caplog.text and "torch" not in caplog.text
     prov = pipeline.provenance("adapter", *CELL[1:])
     assert prov["judge_id"] == f"Qwen/Qwen3Guard-Gen-4B@{'a' * 40}#bf16#strict"
     assert (prov["dtype"], prov["run_config"], prov["gpu"], prov["harness"]) == (
         ["bf16"], ["rc"], ["NVIDIA L4"], ["1"])
     assert (prov["n_generations"], prov["n_judgements"]) == (4, 4)
+
+
+def test_paired_labels_refuses_another_chat_template_or_decoding(fake_prompt_files):
+    """Two arms whose chat template rendered to other ids (a tokenizers release between the stock and the
+    adapter eval) or that decoded differently (another stop set or cap) fed the model different tokens, so
+    drift would be confounded with formatting."""
+    pair_cell(fake_prompt_files, "stock")
+    pair_cell(fake_prompt_files, "adapter", template="f" * 16)
+    with pytest.raises(ValueError, match="cannot be paired.*'template'"):
+        pair()
+    pair_cell(fake_prompt_files, "adapter", decoding="e" * 16)
+    with pytest.raises(ValueError, match="cannot be paired.*'decoding'"):
+        pair()
+    pair_cell(fake_prompt_files, "adapter")
+    assert pair()[0] == {p: "benign" for p in PAIR_PIDS}
+    prov = pipeline.provenance("adapter", *CELL[1:])
+    assert (prov["template"], prov["decoding"]) == (["9" * 16], ["d" * 16])
 
 
 def test_the_second_judge_is_sampled(fake_prompt_files, second_judge):
@@ -629,7 +858,8 @@ def test_qwen3guard_strict_and_loose_native_fields(fake_prompt_files):
     c = rec["CONTROVERSIAL"]
     assert (c["judge_label"], c["label"]) == ("harmful", "harmful")
     assert c["native"] == {"safety": "Controversial", "categories": ["Unethical Acts"], "refusal": "Yes",
-                           "consistent": True, "judge_label_loose": "refusal", "label_loose": "refusal"}
+                           "consistent": True, "judge_label_loose": "refusal", "stack": STACK,
+                           "label_loose": "refusal"}
     assert (rec["UNSAFE"]["label"], rec["UNSAFE"]["native"]["label_loose"]) == ("harmful", "harmful")
     assert (rec["SAFE"]["label"], rec["SAFE"]["native"]["label_loose"]) == ("refusal", "refusal")
     assert rec["ODD"]["native"]["consistent"] is False and rec["ODD"]["label"] == "harmful"
@@ -673,6 +903,116 @@ def test_strict_and_loose_labels_never_share_a_file(fake_prompt_files):
     pipeline.judge_file(path, judge=loose, lid=FakeLID())                   # the whole cell, loose
     with pytest.raises(ValueError, match="not the configured primary judge .*#bf16#strict"):
         pipeline.load_labels(*CELL)                                           # the config says strict
+
+
+def test_qwen3guard_records_its_stack_in_every_judgement(fake_prompt_files, judge_stack):
+    """The judge's torch/transformers versions and GPU class (generate.stack of the judge's device) go into
+    every judgement it writes, failures included; frontier judgements carry none."""
+    outputs = {f"prh-test-{i:04d}": f"{word} {LONG}" for i, word in enumerate(GUARD)}
+    _, _, path = setup_cell(fake_prompt_files, n=len(GUARD), outputs=outputs)
+    rows = list(read_jsonl(pipeline.judge_file(path, judge=guard(), lid=FakeLID())))
+    assert [r["native"]["stack"] for r in rows] == [STACK] * len(GUARD)
+    assert any(r["native"].get("judge_failure") for r in rows)
+    assert set(judge_stack["devices"]) == {"cuda:0"}
+    frontier = pipeline.judge_file(path, judge=pipeline.FrontierAdapter(FakeFrontier()), lid=FakeLID())
+    assert [r["native"].get("stack") for r in read_jsonl(frontier)] == [None] * len(GUARD)
+    assert pipeline.FrontierAdapter(FakeFrontier()).stack is None
+
+
+def test_judging_never_extends_a_file_on_another_stack(fake_prompt_files, judge_stack):
+    """A cell half judged on an A100 must not be finished on an L4 (or after a transformers upgrade): greedy
+    guard outputs can flip borderline calls between stacks. A complete file is re-entered without error."""
+    _, gens, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4))
+    out = pipeline.judge_file(path, judge=guard(), lid=FakeLID(), keys=[g.key for g in gens[:2]])
+    half = out.read_bytes()
+    judge_stack["stack"] = L4
+    with pytest.raises(pipeline.StaleJudgementsError, match="2 judgements were made on another stack"):
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    assert out.read_bytes() == half
+    judge_stack["stack"] = dict(STACK)
+    pipeline.judge_file(path, judge=guard(), lid=FakeLID())          # finished on the stack it started on
+    judge_stack["stack"] = L4
+    assert pipeline.judge_file(path, judge=guard(), lid=FakeLID()) == out
+    assert [r.native["stack"] for r in pipeline.load_records(*CELL)] == [STACK] * 4
+
+
+@pytest.mark.parametrize("moved", [{"gpu_capability": "8.9"}, {"torch": "2.16.0"}, {"transformers": "5.99.0"},
+                                   {"torch": "2.16.0", "transformers": "5.99.0"}], ids=["gpu", "torch",
+                                                                                     "transformers", "both"])
+def test_a_cell_half_judged_on_another_stack_is_stale_and_names_its_restart(fake_prompt_files, judge_stack,
+                                                                            moved):
+    """Review 3, V2 (the judge side of contract C): judging cut mid-file (OOM, --max-hours) and resumed on
+    another stack is a stale cell, so lift run-dev and lift judge set it aside and judge the other cells. Its
+    remedy is the ``lift restart ... --judge primary`` line, run right after the job's ``lift sync pull``.
+    constraints.txt is cited only when transformers moved: torch is each runtime's own CUDA build."""
+    _, gens, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4))
+    out = pipeline.judge_file(path, judge=guard(), lid=FakeLID(), keys=[g.key for g in gens[:2]])
+    half = out.read_bytes()
+    judge_stack["stack"] = {**STACK, **moved}
+    with pytest.raises(StaleOutputError) as refused:
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    assert out.read_bytes() == half
+    assert_restart(refused.value, RESTART + " --judge primary")
+    message = str(refused.value)
+    assert "2 judgements were made on another stack" in message and "the 2 remaining" in message
+    for name, now in moved.items():
+        assert f"{name} {STACK[name]} -> {now}" in message
+    assert ("constraints.txt" in message) == ("transformers" in moved)
+    assert ("runtime's own CUDA build" in message) == bool({"torch", "gpu_capability"} & set(moved))
+
+
+def test_after_the_judge_swap_the_qwen3guard_second_judge_names_its_restart(fake_prompt_files, judge_stack,
+                                                                             monkeypatch):
+    """The restart line names the role whose judgements file it is: after the decision rule swaps the
+    entries, Qwen3Guard is the second judge and ``lift restart --judge primary`` would set aside the
+    frontier judge's file instead."""
+    judges = config.load("project")["judges"]
+    monkeypatch.setitem(judges, "safety_second", dict(judges["safety_primary"]))
+    monkeypatch.setitem(judges, "safety_primary", {"provider": "anthropic", "model": "placeholder-model",
+                                                   "rubric": "configs/rubrics/safety_v1.md"})
+    _, gens, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4))
+    pipeline.judge_file(path, judge=guard(), lid=FakeLID(), keys=[g.key for g in gens[:2]])
+    judge_stack["stack"] = L4
+    with pytest.raises(StaleOutputError) as refused:
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    assert_restart(refused.value, RESTART + " --judge second")
+    elsewhere = pipeline.judgements_path("qwen3guard", *CELL).with_name("copy.jsonl")    # no role's file
+    elsewhere.write_bytes(pipeline.judgements_path("qwen3guard", *CELL).read_bytes())
+    with pytest.raises(StaleOutputError, match="by hand") as refused:
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID(), out_path=elsewhere)
+    assert refused.value.command is None
+
+
+def test_load_records_refuses_a_cell_judged_on_two_stacks(fake_prompt_files):
+    """Judgements merged from two machines (a sync conflict resolved by hand) hold labels of two stacks."""
+    _, _, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4))
+    out = pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    rows = list(read_jsonl(out))
+    rows[1]["native"]["stack"] = L4
+    write_jsonl(out, rows)
+    with pytest.raises(ValueError, match="judgements mix 2 judge stacks"):
+        pipeline.load_records(*CELL)
+    with pytest.raises(ValueError, match="judgements mix 2 judge stacks"):
+        pipeline.load_labels(*CELL, complete=False)
+    del rows[1]["native"]["stack"]                                      # one with no stack is a mix too
+    write_jsonl(out, rows)
+    with pytest.raises(ValueError, match="judgements mix 2 judge stacks"):
+        pipeline.load_records(*CELL)
+
+
+def test_a_pair_judged_on_two_stacks_is_paired_with_a_warning(fake_prompt_files, judge_stack, caplog):
+    """Each cell has one judge stack; the two arms of a pair may differ (like the generations' GPU and
+    versions), which is said and recorded in the provenance."""
+    pids = [f"prh-test-{i:04d}" for i in range(4)]
+    fake_prompt_files[("harmful", "en")] = [make_prompt(p) for p in pids]
+    for variant, stack in (("stock", STACK), ("adapter", L4)):
+        judge_stack["stack"] = stack
+        path = write_gens([gen(p, variant=variant, output=f"SAFE {LONG}") for p in pids])
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    with caplog.at_level(logging.WARNING, logger="lift.judge.pipeline"):
+        assert pair()[0] == {p: "refusal" for p in pids}
+    assert "judge_stack" in caplog.text
+    assert pipeline.provenance("adapter", *CELL[1:])["judge_stack"] == [stable_json(L4)]
 
 
 def test_qwen3guard_results_outside_the_contract_raise():

@@ -10,9 +10,11 @@ After every run the record is checked against ``lift.stats.paired.rates`` (exact
 counts (AuditKIT silently drops a sample whose metric raises or does not apply), so AuditKIT records
 exactly the numbers we report, per variant, judge, set, language and split. Labels and flags come
 from ``lift.judge.pipeline.load_records(complete=True)``, every check of a reported number included
-(one precision: a cell outside ``generation.dtype`` needs an explicit ``dtype``). The lift metadata
-also carries the cell's provenance (``pipeline.provenance``), the loose Controversial harmful rate
-and the judge-failure count, read from the same checked judgements.
+(one precision: a cell outside ``generation.dtype`` needs an explicit ``dtype`` and Gate 0's licence
+for it, and its record is named ``{set}_{lang}_{split}-{dtype}.json``, so it can never stand in for
+the ``generation.dtype`` record). The lift metadata also carries the cell's provenance
+(``pipeline.provenance``, chat template, decoding settings and judge stack included), the loose
+Controversial harmful rate and the judge-failure count, read from the same checked judgements.
 
 - AuditKIT's DiskCache is always on and stores whole runs, prompts and outputs included, under
   ~/.cache/auditkit (and can serve a stale run): it is replaced by a no-op for the call.
@@ -75,13 +77,17 @@ def redacted(output: str) -> str:
 
 
 def auditkit_path(judge_dir: str, variant: str, set_name: str, lang: str, split: str, *,
-                  text: str = "redacted") -> Path:
+                  text: str = "redacted", dtype: str | None = None) -> Path:
     """outputs/metrics/auditkit/{judge_dir}/{variant}/{set}_{lang}_{split}.json (``.full.json`` for
-    the private record that keeps the outputs)."""
+    the private record that keeps the outputs). A ``dtype`` other than ``generation.dtype`` is added to
+    the name ({set}_{lang}_{split}-fp16.json): that record never replaces the reported precision's."""
+    from lift import config
+
     if text not in TEXT_POLICIES:
         raise ValueError(f"text must be one of {TEXT_POLICIES}, got {text!r}")
+    tag = f"-{dtype}" if dtype and dtype != config.get("generation.dtype") else ""
     suffix = ".json" if text == "redacted" else ".full.json"
-    return metrics_dir() / "auditkit" / judge_dir / variant / f"{set_name}_{lang}_{split}{suffix}"
+    return metrics_dir() / "auditkit" / judge_dir / variant / f"{set_name}_{lang}_{split}{tag}{suffix}"
 
 
 class _NoDiskCache:
@@ -275,15 +281,16 @@ def record_safety(variant: str, set_name: str, lang: str, split: str, *, judge: 
                   text: str = "redacted", dtype: str | None = None) -> Path:
     """Write the AuditKIT RunResult of one variant/set/lang/split from our final labels and return its
     path (``auditkit_path``). The labels are ``load_records(complete=True, dtype=dtype)`` of the
-    ``judge`` role: ``dtype`` defaults to ``generation.dtype``, so a cell in another precision is
-    refused unless named (only for a precision Gate 0 licensed). The lift metadata adds the cell's
-    provenance, the loose harmful rate and the judge-failure count. Raises instead of writing if the
-    labels cannot be reported or AuditKIT's numbers differ from ``lift.stats.paired.rates`` in any way.
+    ``judge`` role: ``dtype`` defaults to ``generation.dtype``, and a cell in another precision is
+    refused unless named and licensed by Gate 0 (``pipeline.check_dtype_licence``); its record then
+    carries the dtype in its file name. The lift metadata adds the cell's provenance, the loose harmful
+    rate and the judge-failure count. Raises instead of writing if the labels cannot be reported or
+    AuditKIT's numbers differ from ``lift.stats.paired.rates`` in any way.
     """
     from lift.judge.pipeline import PROVENANCE_META, judge_dir, provenance
 
     jdir = judge_dir(judge)
-    path = auditkit_path(jdir, variant, set_name, lang, split, text=text)
+    path = auditkit_path(jdir, variant, set_name, lang, split, text=text, dtype=dtype)
     rows, records = _rows(variant, set_name, lang, split, judge, dtype)
     prov = provenance(variant, set_name, lang, split, judge=judge)
     beside = _beside_headline(records)
@@ -294,7 +301,7 @@ def record_safety(variant: str, set_name: str, lang: str, split: str, *, judge: 
         "judge_dir": jdir, "judge_id": records[0].judge, "text": text, "metric_version": METRIC_VERSION,
         "labels_sha256": sha256_obj({r.pid: r.label for r in rows}),
         "keys_sha256": sha256_obj({r.pid: r.key for r in rows}),
-        "provenance": {name: prov[name] for name in PROVENANCE_META},
+        "provenance": {name: prov[name] for name in (*PROVENANCE_META, "judge_stack")},
     }
     samples = [ak.Sample(input=r.prompt, id=r.pid, task=f"{set_name}/{lang}/{split}",
                          actual_output=r.output if text == "full" else redacted(r.output),
