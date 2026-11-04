@@ -7,12 +7,16 @@ Checks (each PASS, FAIL or NOT RUN; numbers go to outputs/metrics/gate0.json and
               prompt fits the context with 256 new tokens; the preamble's token length is reported.
   precision   200 dev prompts mixed across languages and sets, generated and judged in the run dtype
               (bf16 on an A100). A teacher-forced pass over prompt + output checks that every hidden
-              state and logit is finite and records the max |activation| per layer.
+              state and logit is finite and records the max |activation| per layer. Its digest
+              (``precision_digest``) names the outputs and labels the verdict is about.
   fp16        only with --compare-dtype fp16, on a T4: the same 200 prompts in fp16 against the stored
               bf16 run (pulled from the runs repo): greedy output agreement and judge-label agreement.
               This decides whether T4 runs can ever be reported, so it counts only against a bf16 Gate 0
               that passed (gate0.json) for the same revision, on all of at least 200 prompts made with
-              the same inputs and decoding settings.
+              the same inputs and decoding settings, and only with the very outputs that Gate 0 judged
+              (its checks.precision.digest): a later --skip, reduced or stopped bf16 run replaces those
+              outputs but never gate0.json. It records that digest and the pairs' harness and decoding,
+              which the licence holds every fp16 cell to (check_dtype_licence).
   throughput  batch sizes 8, 16 and 32 at real prompt lengths: prompts/sec, tokens/sec, peak memory.
   dry_run     20 prompts x 6 languages x 3 sets through generate and judge: exactly one generation
               and one judgement per prompt, and no judge failure.
@@ -26,12 +30,15 @@ real result: a non-finite fp16 run, or a valid comparison under the agreement ba
 Verdicts. A check that raises is a FAIL with its error, and so is a model whose revision cannot be
 resolved or that cannot load (the "load" check), so a report is always written. A check that cannot
 run for want of a resource or an input (one GPU with no room for the judge; an fp16 run with no valid
-comparison) is NOT RUN: it decides nothing and leaves the run incomplete, never failed.
+comparison) is NOT RUN: it decides nothing and leaves the run incomplete, never failed. So is a
+precision or dry-run check of the reference gate that found nothing wrong on fewer prompts than
+decisions.md 27 pins (--n-precision under 200, --n-dry under 20): a quick check is no verdict.
 Any failure is a full verdict, gate0.json (gate0-fp16.json for the comparison run), so a failed
-re-run replaces an earlier PASS. A run that is only incomplete (--skip, NOT RUN) is written as
-gate0-partial.json (gate0-fp16-partial.json) and never replaces the full record. A refused
-configuration writes nothing: --compare-dtype fp16 on a GPU with native bf16, and the reference gate
-(no --compare-dtype) on one without (a T4), whose failed load would replace the A100's gate0.json.
+re-run replaces an earlier PASS; a failure on a reduced sample is one too. A run that is only
+incomplete (--skip, NOT RUN) is written as gate0-partial.json (gate0-fp16-partial.json) and never
+replaces the full record. A refused configuration writes nothing: --compare-dtype fp16 on a GPU
+with native bf16, and the reference gate (no --compare-dtype) on one without (a T4), whose failed
+load would replace the A100's gate0.json.
 
 Pass thresholds that the README leaves open are pinned in docs/decisions.md (Nov 3, P02):
 the fp16 run passes if every activation is finite and its final labels agree with bf16 on at least
@@ -294,6 +301,25 @@ def precision_pairs(root: Path) -> list[tuple[str, str]]:
     return pairs
 
 
+def precision_digest(root: Path) -> str:
+    """Which run a precision verdict is about: sha256 of the sorted (set, lang, pid, key, sha256(output),
+    label) of every generation under ``root``, with its judgement's label ("missing" without one).
+    gate0.json records it (checks.precision.digest) and a comparison recomputes it over the reference
+    outputs on disk, so outputs a later --skip, reduced or stopped run put there, which write no
+    gate0.json, never pass for the run gate0.json passed."""
+    from lift.io import sha256_obj, sha256_text
+    from lift.models.generate import read_generations
+    from lift.schemas import JudgementRecord
+
+    rows = []
+    for gpath in sorted((root / "generations").glob("*.jsonl")):
+        juds = [JudgementRecord.model_validate(j) for j in _read(root / "judgements" / gpath.name)]
+        labels = {j.key: j.label for j in juds}
+        rows.extend((g.set, g.lang, g.pid, g.key, sha256_text(g.output), labels.get(g.key, "missing"))
+                    for g in read_generations(gpath))
+    return sha256_obj(sorted(rows))
+
+
 PROVENANCE_FIELDS = ("model_rev", "harness", "template", "decoding")
 
 
@@ -310,7 +336,8 @@ def compare_runs(reference_root: Path, candidate_root: Path, tokenizer: Any) -> 
     harness, decoding settings (``meta.decoding``: cap, stop tokens) and judge (model, revision and
     Controversial mode: only the precision may differ), so every mismatch is counted and listed in
     ``invalid``: a stale reference run (a fixed translation, a harness fix, another cap) must be re-run
-    first."""
+    first. ``harness`` and ``decoding`` are the pairs' one setting (None when they hold several): the
+    fp16 licence covers only cells made with them."""
     from lift.models.generate import read_generations
     from lift.schemas import JudgementRecord
     from lift.stats import cohens_kappa, mcnemar_exact
@@ -354,9 +381,10 @@ def compare_runs(reference_root: Path, candidate_root: Path, tokenizer: Any) -> 
     kappa = cohens_kappa(ref_labels, cand_labels) if not missing else None
     mc = mcnemar_exact([x == "harmful" for x in cand_labels], [x == "harmful" for x in ref_labels])
     diverged = [d for d in divergence if d is not None]
+    pairs = [run[k] for run in (ref, cand) for k in shared]
     return {
         "n": len(shared), "n_reference": len(ref), "n_candidate": len(cand), "missing_labels": missing,
-        "invalid": invalid,
+        "invalid": invalid, **{field: _one_setting(pairs, field) for field in ("harness", "decoding")},
         "exact_output_agreement": sum(same_text) / len(shared),
         "median_first_divergence_token": sorted(diverged)[len(diverged) // 2] if diverged else None,
         "label_agreement": agree, "kappa": kappa,
@@ -366,14 +394,21 @@ def compare_runs(reference_root: Path, candidate_root: Path, tokenizer: Any) -> 
     }
 
 
+def _one_setting(rows: Sequence[dict[str, Any]], field: str) -> Any:
+    """The one value of ``field`` in ``rows``, or None when they hold several."""
+    values = {row[field] for row in rows}
+    return values.pop() if len(values) == 1 else None
+
+
 def fp16_verdict(cmp: dict[str, Any], precision: dict[str, Any], n_precision: int, *,
                  reference: str, reference_problem: str | None) -> dict[str, Any]:
     """The fp16 check from ``compare_runs`` and the finished fp16 run's precision check (decisions.md,
     entry 27). It fails only on a real result: a non-finite fp16 run, or a valid comparison under
     ``FP16_MIN_LABEL_AGREEMENT``. Without a valid comparison (no reference run, other prompts, fewer
     than ``N_PRECISION``, missing labels, pairs made from other inputs, or a reference whose own Gate 0
-    did not pass for this revision: ``reference_problem``, see ``reference_gate_problem``) it is not
-    run: nothing about fp16 is known, and the remedy is the reference run, never giving up T4 runs."""
+    did not pass for this revision on these very outputs: ``reference_problem``, see
+    ``reference_gate_problem``) it is not run: nothing about fp16 is known, and the remedy is the
+    reference run, never giving up T4 runs."""
     out = {k: v for k, v in cmp.items() if k not in ("pass", "error")}
     out["min_label_agreement"] = FP16_MIN_LABEL_AGREEMENT
     if precision.get("all_finite") is False:
@@ -391,8 +426,9 @@ def fp16_verdict(cmp: dict[str, Any], precision: dict[str, Any], n_precision: in
 def _not_comparable(cmp: dict[str, Any], n_precision: int, reference: str,
                     reference_problem: str | None) -> str | None:
     """Why ``compare_runs`` made no valid comparison, or None. A valid one pairs all ``n_precision``
-    prompts, at least ``N_PRECISION``, with a reference run whose own Gate 0 passed for this revision:
-    what check_dtype_licence asks of the licence, so a comparison it would refuse never reads PASS."""
+    prompts, at least ``N_PRECISION``, with a reference run whose own Gate 0 passed for this revision
+    on those outputs: what check_dtype_licence asks of the licence, so a comparison it would refuse
+    never reads PASS."""
     reasons = [reference_problem] if reference_problem else []
     if n_precision < N_PRECISION:
         reasons.append(f"{n_precision} prompts, under the {N_PRECISION} decisions.md 27 requires")
@@ -408,10 +444,13 @@ def _not_comparable(cmp: dict[str, Any], n_precision: int, reference: str,
     return "; ".join(reasons) or None
 
 
-def reference_gate_problem(revision: str, reference: str) -> str | None:
+def reference_gate_problem(revision: str, reference: str, *, digest: str) -> str | None:
     """Why the reference run's own Gate 0 verdict (outputs/metrics/gate0.json) cannot back a comparison
-    with it, or None: it must be there, pass, and be for ``revision``. A comparison against a failed,
-    missing or stale reference proves nothing, and check_dtype_licence would refuse its licence."""
+    with the reference outputs on disk, whose ``precision_digest`` is ``digest``, or None: it must be
+    there, pass, be for ``revision``, and have judged those very outputs (its checks.precision.digest).
+    A comparison against a failed, missing or stale reference proves nothing, nor does one against
+    outputs a later --skip, reduced or stopped run put there (none of them writes gate0.json), and
+    check_dtype_licence would refuse its licence."""
     path = metrics_dir() / "gate0.json"
     name = f"the {reference} Gate 0 ({path.name})"
     try:
@@ -420,12 +459,25 @@ def reference_gate_problem(revision: str, reference: str) -> str | None:
         return f"{name} is missing"
     except (OSError, ValueError) as exc:          # unreadable, or not JSON
         return f"{name} cannot be read ({type(exc).__name__})"
-    doc = doc if isinstance(doc, dict) else {}
-    if doc.get("pass") is not True:
+    if _field(doc, "pass") is not True:
         return f"{name} did not pass"
-    revisions = doc.get("revisions")
-    got = revisions.get("global") if isinstance(revisions, dict) else None
-    return None if got == revision else f"{name} is for Global revision {got}, not {revision}"
+    got = _field(doc, "revisions", "global")
+    if got != revision:
+        return f"{name} is for Global revision {got}, not {revision}"
+    passed = _field(doc, "checks", "precision", "digest")
+    if passed is None:
+        return f"{name} records no checks.precision.digest (an older Gate 0): what it judged is unknown"
+    if passed != digest:
+        return (f"the {reference} precision outputs here are not the ones {path.name} passed: a later "
+                f"--skip, reduced or stopped {reference} run replaced them, or they were not pulled with it")
+    return None
+
+
+def _field(node: Any, *keys: str) -> Any:
+    """``node[k1][k2]...``, or None where a level is missing or not a mapping."""
+    for key in keys:
+        node = node.get(key) if isinstance(node, dict) else None
+    return node
 
 
 # --- throughput -------------------------------------------------------------------------------------
@@ -560,7 +612,7 @@ JUDGE_HEADROOM_GB = 4.0      # its KV cache and the activation scan's logits
 def required_checks(compare_dtype: str | None) -> tuple[str, ...]:
     """The checks a run must complete before its verdict counts. A comparison run (a T4) only has to
     settle the fp16 question; the pipeline itself was checked by the reference run, whose gate0.json
-    must have passed (``reference_gate_problem``)."""
+    must have passed on the outputs compared with (``reference_gate_problem``)."""
     return ("precision", "fp16") if compare_dtype else tuple(c for c in CHECKS if c != "fp16")
 
 
@@ -616,7 +668,9 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
     Otherwise there is always a result to write: a check that raises is recorded as a failure with
     its error and the gate goes on; a revision that cannot be resolved or a model that cannot load
     is the failed "load" check; every check draws its own prompts, so missing prompt files (or a P01
-    stub) fail the checks that need them.
+    stub) fail the checks that need them. The reference gate's precision and dry run on fewer prompts
+    than decisions.md 27 pins (``n_precision`` under ``N_PRECISION``, ``n_dry`` under ``N_DRY``) are
+    NOT RUN unless they failed (``_reduced``).
     ``model_id``/``revision``, ``judge``, ``lid`` and ``max_new_tokens`` are for tests (a tiny local
     model, fakes, short outputs); the real gate decodes the locked 256 new tokens. ``resolve_pins``
     also resolves Base's and the primary judge's revisions for the pin list (``pin_revisions``).
@@ -701,14 +755,20 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
             sample = mixed_sample(n_precision, split="dev", seed=SEED)
             run = generate_and_judge(stock, judge, sample, root, lid=lid, max_new_tokens=max_new_tokens)
             scan = activation_scan(stock.model, stock.tokenizer, precision_pairs(root), device=device)
-            return {**scan, **run, "pass": scan["all_finite"] and not run["problems"]}
+            out = {**scan, **run, "digest": precision_digest(root),
+                   "pass": scan["all_finite"] and not run["problems"]}
+            return out if compare_dtype else _reduced(out, len(sample), N_PRECISION)
 
         def fp16() -> dict[str, Any]:
             if "all_finite" not in checks["precision"]:      # it raised: there is no fp16 run to compare
                 return {"comparable": False, **not_run("the precision run did not finish")}
-            cmp = compare_runs(gate0_dir(base_dtype) / "precision", root, stock.tokenizer)
-            return fp16_verdict(cmp, checks["precision"], n_precision, reference=base_dtype,
-                                reference_problem=reference_gate_problem(rev, base_dtype))
+            reference_root = gate0_dir(base_dtype) / "precision"
+            cmp = compare_runs(reference_root, root, stock.tokenizer)
+            digest = precision_digest(reference_root)
+            problem = reference_gate_problem(rev, base_dtype, digest=digest)
+            out = fp16_verdict(cmp, checks["precision"], n_precision, reference=base_dtype,
+                               reference_problem=problem)
+            return {**out, "reference_digest": digest}
 
         attempt("precision", precision)
         if "fp16" in needs_judge:
@@ -723,7 +783,7 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
             c = run["counts"]
             one_each = c["prompts"] == c["generations"] == c["judgements"] == len(sample)
             run["pass"] = bool(not run["problems"] and one_each and c["judge_failures"] == 0)
-            return run
+            return run if compare_dtype else _reduced(run, len(sample), N_DRY * len(SAFETY_SETS) * len(LANGS))
 
         attempt("dry_run", dry_run)
 
@@ -734,6 +794,16 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
             model_id, rev, mixed_sample(N_PARITY, split="dev", seed=SEED + 3), device=device,
             max_new_tokens=max_new_tokens))
     return decide(result)
+
+
+def _reduced(check: dict[str, Any], n: int, pinned: int) -> dict[str, Any]:
+    """A reference check that found nothing wrong on ``n`` prompts, fewer than the ``pinned`` that
+    decisions.md 27 requires, is NOT RUN with its numbers kept: a quick --n-precision or --n-dry run is
+    incomplete (gate0-partial.json), so it never replaces gate0.json, a FAIL included. A failure stays
+    one: it is real on any sample."""
+    if n >= pinned or not check.get("pass"):
+        return check
+    return {**check, **not_run(f"reduced sample: {n} of the {pinned} decisions.md 27 requires")}
 
 
 def _fresh(path: Path) -> Path:
@@ -859,8 +929,10 @@ def _cell(text: str) -> str:
 
 
 def _summary(check: str, c: dict[str, Any]) -> str:
+    """A check's key numbers; a check not run gives its reason, then the numbers of a reduced run."""
     if c.get("not_run"):
-        return str(c.get("reason"))
+        ran = _summary(check, {k: v for k, v in c.items() if k != "not_run"}) if "counts" in c else ""
+        return f"{c.get('reason')}; {ran}" if ran else str(c.get("reason"))
     if c.get("error"):
         return str(c["error"])[:200]
     if check == "preamble":
