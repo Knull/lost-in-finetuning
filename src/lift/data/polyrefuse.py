@@ -279,7 +279,8 @@ def check_alignment(root: Path, langs: Iterable[str], *, lid: LangIdentifier | N
     - train/val files: Pearson correlation of log character lengths with the English rows >= 0.5
       (files with >= 3 rows), and a spot check of min(5, n) evenly spaced rows: every char-length
       ratio within [0.1, 4.0] and, with ``lid``, at least ceil(0.8 * spot rows) pass
-      ``lid.is_lang`` (one short-string misread is normal: real zh harmful val row 0 reads und_Nshu);
+      ``lid.is_lang`` (one short-string misread is normal: real zh harmful val row 0 read und_Nshu
+      before lift.lang spaced Chinese ideographs, and cmn_Hani 1.0 since);
     - the harmless test English source (what zh and hi are translated from) equals the English
       column of every harmless test file of ``langs`` and of the configured languages, row for row.
     Collects every problem and raises ONE AlignmentError listing them (file, check, row; no text).
