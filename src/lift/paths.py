@@ -59,6 +59,18 @@ def adapters_dir() -> Path:
     return output_dir() / "adapters"
 
 
+def utility_dir() -> Path:
+    """UtilityVerdict files: ``utility/{judge_dir}/{variant}/utility_hi_{split}.jsonl`` (P03). Not under
+    judgements/, whose files lift.sync pairs with generations as JudgementRecords."""
+    return output_dir() / "utility"
+
+
+def scores_dir() -> Path:
+    """Per-item log-likelihood scores (P03): ``scores/belebele/{variant}/belebele_{lang}_{split}.jsonl``
+    and ``scores/heldout_loss/{variant}/utility_hi_{split}.jsonl``."""
+    return output_dir() / "scores"
+
+
 def artifacts_dir() -> Path:
     """Repair artifacts (CAST vectors and conditions, direction tensors)."""
     return output_dir() / "artifacts"

@@ -56,6 +56,13 @@ class LoadedVariant:
     # The HF model under a wrapper (CAST). config, generation_config and the stop set are read from it,
     # so a wrapper that only exposes .generate stops on exactly the tokens stock and adapter stop on.
     base: Any = None
+    # Log-likelihood scoring of a wrapper variant (lift.models.loglik: Belebele, held-out loss). A CAST
+    # builder (P05) sets it to ``fn(input_ids, attention_mask, *, position_ids, prompt_lengths,
+    # logits_to_keep) -> logits``, the gate decided per row on that row's prompt (its first
+    # ``prompt_lengths[i]`` real tokens) exactly as at generation time, with ``batch_meta()`` giving each
+    # row's decision afterwards. None for a plain model, which loglik calls directly; loglik refuses a
+    # wrapper (``base`` set) without it, so a gated variant is never scored ungated.
+    score_logits: Callable[..., Any] | None = None
 
     @property
     def hf_model(self) -> Any:
