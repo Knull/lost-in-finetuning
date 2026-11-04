@@ -1,22 +1,29 @@
 """kaggle/runner.ipynb and kaggle/bootstrap.sh, checked offline.
 
 The notebook's two code cells run here for real, in one namespace as in a Kaggle kernel, with Kaggle's
-secrets client, git, bash and the filesystem calls replaced by fakes: no network, no real token,
-nothing written outside tmp. The bootstrap runs under a real bash (Git Bash on Windows) with fake
-python, pip, uv and nvidia-smi on PATH; its heredoc checks run on this interpreter.
+secrets client, git, bash, the filesystem calls, subprocess.Popen and os.killpg replaced by fakes: no
+network, no real token, no real process started or signalled, nothing written outside tmp. The
+exception is the Linux-only tests of the PDEATHSIG shim, which start and kill small local processes
+(sh, cat, sleep and a stand-in kernel), never lift. The bootstrap runs under a real bash (Git Bash on
+Windows) with fake python, pip, uv and nvidia-smi on PATH; its heredoc checks run on this interpreter.
 """
 
 from __future__ import annotations
 
 import ast
 import base64
+import errno
 import io
+import itertools
 import json
 import os
 import re
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 import types
 from pathlib import Path, PurePosixPath
@@ -42,6 +49,8 @@ KAGGLE_TOKENS = {"KAGGLE_USER_SECRETS_TOKEN": "eyJdummy0jwt0for0tests",
                  "KAGGLE_IAP_TOKEN": "dummy0iap0for0tests"}
 HIDDEN = (*SECRETS, *UNATTACHED, *KAGGLE_TOKENS)  # no child process inherits these
 PUSH = "lift sync push"
+CHECK = "lift sync check --write"  # cell 2's preflight, before the first line
+KILL = getattr(signal, "SIGKILL", signal.SIGTERM)  # as in cell 2: Windows has no SIGKILL
 
 
 def _notebook() -> dict:
@@ -50,6 +59,14 @@ def _notebook() -> dict:
 
 def _code_cells() -> list[str]:
     return ["".join(c["source"]) for c in _notebook()["cells"] if c["cell_type"] == "code"]
+
+
+def _about() -> str:
+    return "".join(_notebook()["cells"][0]["source"])
+
+
+def _readme() -> str:
+    return (KAGGLE / "README.md").read_text(encoding="utf-8")
 
 
 def _inside_working(path: str) -> bool:
@@ -72,7 +89,7 @@ def _hidden(env: dict[str, str]) -> dict[str, str]:
 AS_DUMMIES = {name: name for name in SECRETS}  # what _hidden returns for an environment holding SECRETS
 
 
-# --- the notebook file ----------------------------------------------------------------------------------
+# --- the notebook file and the docs ---------------------------------------------------------------------
 
 
 def test_notebook_is_clean_nbformat_4():
@@ -102,16 +119,143 @@ def _sentences(text: str) -> list[str]:
     return re.split(r"(?<=[.!?])\s+", " ".join(text.split()))
 
 
-def test_docs_say_a_push_never_stops_the_job_and_a_conflict_exits_3():
-    """kaggle/README.md said in one place that a push conflict stops the job and in another that a
-    failed push does not. The runner never stops for a push, and a conflict is exit code 3."""
-    about = "".join(_notebook()["cells"][0]["source"])
-    for name, text in (("kaggle/README.md", (KAGGLE / "README.md").read_text(encoding="utf-8")),
-                       ("the notebook's first cell", about)):
+def _items(text: str) -> list[str]:
+    """The paragraphs and list items of a markdown text, each on one line."""
+    return [" ".join(part.split()) for part in re.split(r"\n\s*\n|\n\s*(?:-|\d+\.) ", text) if part.strip()]
+
+
+def _docs() -> tuple[tuple[str, str], ...]:
+    return ("kaggle/README.md", _readme()), ("the notebook's first cell", _about())
+
+
+def _code_blocks(text: str) -> list[list[str]]:
+    """The fenced code blocks of a markdown text, each as its stripped, non-empty lines."""
+    blocks, inside = [], False
+    for line in (line.strip() for line in text.splitlines()):
+        if line.startswith("```"):
+            inside = not inside
+            if inside:
+                blocks.append([])
+        elif inside and line:
+            blocks[-1].append(line)
+    return blocks
+
+
+def test_docs_state_the_sync_exit_codes_as_the_runner_acts_on_them():
+    """A push never stops the job, except an exit 2: a configuration problem that no retry fixes, which
+    ends the job at once. An exit 3 (conflicts) is reported and never retried."""
+    for name, text in _docs():
         stops = [s for s in _sentences(text)
                  if "push" in s and re.search(r"(?<!not )(?<!never )\bstops? the job", s)]
         assert stops == [], name
         assert re.search(r"\bexits? 3\b", text), name
+        assert [s for s in _sentences(text) if re.search(r"\bexits? 2\b", s) and "configuration" in s], name
+        assert CHECK in text, name  # the preflight
+
+
+def _constants(source: str, *names: str) -> dict:
+    """Module-level constants of a cell, read without running it."""
+    found = {target.id: ast.literal_eval(node.value) for node in ast.parse(source).body
+             if isinstance(node, ast.Assign) for target in node.targets
+             if isinstance(target, ast.Name) and target.id in names}
+    assert sorted(found) == sorted(names), "cell 2 lacks some of its watchdog limits"
+    return found
+
+
+def test_docs_state_the_watchdog_limits_cell_2_sets():
+    limits = _constants(_code_cells()[1], "MAX_SILENT_MINUTES", "PUSH_LIMIT_MINUTES", "KILL_GRACE_SECONDS",
+                        "RETRY_WAITS")
+    for name, text in _docs():
+        text = " ".join(text.split())
+        assert f"{limits['MAX_SILENT_MINUTES']} minutes" in text, name
+        assert f"{limits['PUSH_LIMIT_MINUTES']} minutes" in text, name
+        assert f"{len(limits['RETRY_WAITS']) + 1} attempts" in text, name
+    readme = " ".join(_readme().split())
+    assert f"{limits['KILL_GRACE_SECONDS']} seconds" in readme and "SIGKILL" in readme
+    assert limits["MAX_SILENT_MINUTES"] == 45 and limits["PUSH_LIMIT_MINUTES"] == 30  # colab/job.py's
+
+
+def test_docs_name_a_branch_that_can_run_jobs_and_put_the_pin_step_before_the_dev_eval():
+    """p02-harness alone has P01's prompt loader and LangID as stubs, and main has no lift sync before
+    P02 merges, so BRANCH must hold both. generate, judge and run-dev refuse unpinned revisions and
+    read the clone's configs/project.yaml, so the pin step (a commit to BRANCH, then cell 1 again) sits
+    between Gate 0 and the dev eval."""
+    for name, text in _docs():
+        text = " ".join(text.split())
+        assert "p01-data" in text and "p02-harness" in text and "BRANCH" in text, name
+    section = _readme().split("## Jobs on a T4 x2", 1)[1].split("\n## ", 1)[0]
+    text = " ".join(section.split())
+    order = [text.find(s) for s in ("Gate 0", "configs/project.yaml", "docs/decisions.md", "rerun cell 1",
+                                    "lift run-dev --variant stock --dtype fp16")]
+    assert -1 not in order and order == sorted(order)
+
+
+def test_readme_says_what_each_fp16_gate0_record_means():
+    """gate0-fp16.json failing with "fp16 failed" means T4 numbers are never reported. A
+    gate0-fp16-partial.json means no valid comparison was made (the bf16 reference is not in the runs
+    repo, say, or one GPU had no room for the judge): it decides nothing, and the bf16 Gate 0's outputs
+    are pulled or re-run before trying again."""
+    items = _items(_readme())
+    partial = [item for item in items if item.startswith("`gate0-fp16-partial.json`")]
+    assert len(partial) == 1, "no list item says what gate0-fp16-partial.json means"
+    assert "bf16 Gate 0" in partial[0] and "never reported" not in partial[0]
+    assert re.search(r"\b(pull|re-run)\b", partial[0])
+    never = [item for item in items if "never reported" in item]
+    assert never and all(item.startswith("`gate0-fp16.json`") for item in never)
+
+
+def test_readme_keys_example_is_a_file_p04_writes():
+    """P04 writes validation/keys/second_judge/{variant}_{split}.txt (docs/decisions.md, 31): an example
+    naming any other file would send lift judge --keys to a FileNotFoundError."""
+    keys = re.findall(r"validation/keys/[^\s`)]+", _readme())
+    assert keys
+    for key in keys:
+        assert re.fullmatch(r"validation/keys/second_judge/[a-z0-9_.-]+_(dev|final)\.txt", key), key
+
+
+def test_docs_say_the_final_push_still_runs_after_an_exit_2_from_a_pull():
+    """Review 3, V21: only the preflight's or a push's exit 2 means that a push would fail the same way.
+    One from another lift sync line (a pull, status, a check in JOB) may come from the line's own
+    arguments, so the final push still runs."""
+    for name, text in _docs():
+        items = [item for item in _items(text) if re.search(r"\bexits? 2\b", item)]
+        assert [item for item in items if "final push still runs" in item], name
+
+
+def test_readme_says_commands_die_with_the_kernel_and_to_interrupt_cell_2_before_a_restart():
+    """Review 3, V23: a command in its own process group outlived a forced kernel restart or shutdown,
+    holding the GPUs. On Linux the shim ties it to the kernel; the interrupt stays the way to stop a job,
+    since it runs the final push."""
+    for name, text in _docs():
+        assert re.search(r"[Ii]nterrupt cell 2 before restarting the kernel", " ".join(text.split())), name
+    assert "PR_SET_PDEATHSIG" in _readme()
+
+
+def test_readme_recovers_a_stale_cell_with_lift_restart_right_after_the_pull():
+    """Review 3, V22: a stale cell's file moved aside by hand came back with the job's own lift sync pull,
+    so the same refusal followed on every rerun. lift restart, as the JOB line right after lift sync
+    pull, sets the cell's files aside and leaves them empty, so the push after it replaces the runs
+    repo's copies (contract A)."""
+    readme = _readme()
+    assert not re.search(r"move [^.]*aside and run the job again", " ".join(readme.split()))
+    blocks = [block for block in _code_blocks(readme) if any(s.startswith("lift restart") for s in block)]
+    assert blocks, "no JOB example with a lift restart line"
+    for lines in blocks:
+        (i,) = [i for i, line in enumerate(lines) if line.startswith("lift restart")]  # one per example
+        assert i > 0 and lines[i - 1] == "lift sync pull"
+        assert re.fullmatch(r"lift restart --variant \S+ --split (dev|final) --sets( \S+)+ --langs( \S+)+"
+                            r"( --judge (primary|second))?", lines[i])
+
+
+def test_docs_say_the_fp16_licence_needs_both_gate0_records():
+    """Review 3, V25/V19: check_dtype_licence reads gate0-fp16.json and the bf16 gate0.json. Both must
+    pass for the Global revision that made the cell, with at least 200 prompts compared (contract E)."""
+    passing = [item for item in _items(_readme()) if item.startswith("`gate0-fp16.json`, PASS")]
+    assert len(passing) == 1
+    assert "`gate0.json`" in passing[0] and "revision" in passing[0] and "200" in passing[0]
+    for name, text in _docs():
+        counts = [s for s in _sentences(text) if re.search(r"\bnumbers? counts? only\b", s)]
+        assert counts and all("bf16 Gate 0" in s for s in counts), name
 
 
 # --- cell 1: secrets, paths, clone, bootstrap -----------------------------------------------------------
@@ -245,27 +389,128 @@ def test_a_failed_bootstrap_fails_the_setup_cell(setup_cell):
 
 # --- cell 2: the job runner -----------------------------------------------------------------------------
 
+_REAL_RUN = subprocess.run
+_REAL_SLEEP = time.sleep
+_PIDS = itertools.count(4000)
 
-class _FakeRun:
-    """Stands in for subprocess.run. ``outcomes`` maps a line ("lift sync push") to an exit code, a
-    list of exit codes (consumed in order, then 0) or an exception to raise."""
 
-    def __init__(self, outcomes: dict | None = None):
-        self.outcomes = outcomes or {}
+class _FakeProc:
+    """One command as Popen starts it. It prints ``output`` (bytes, or a list of chunks ``pace`` s
+    apart) and then ends with ``rc``. With ``hang`` it keeps running until signalled: by SIGINT, or with
+    ``stubborn`` only by KILL. It gives up after 10 s, so a missing watchdog fails a test instead of
+    hanging the suite. With ``interrupt`` its first wait raises KeyboardInterrupt, as interrupting the
+    cell does. It also serves subprocess.run (communicate, with), so a cell 2 without the watchdog runs
+    on these fakes and fails the watchdog tests on their asserts."""
+
+    def __init__(self, argv, line, *, rc=0, output=b"", pace=0.0, hang=False, stubborn=False,
+                 interrupt=False, straggler=False):
+        self.args, self.line, self.pid, self.rc = argv, line, next(_PIDS), rc
+        self.pace, self.hang, self.stubborn, self.interrupt = pace, hang, stubborn, interrupt
+        self.straggler = straggler  # a child of it stays in its process group after it ends
+        self.chunks = list(output) if isinstance(output, list) else [output]
+        self.signals: list = []
+        self.via_group: list = []  # the signals that came through os.killpg, to its process group
+        self.ended = threading.Event()
+        if not hang and not pace:
+            self.ended.set()
+        self.stdout = self
+
+    def read1(self, size=-1):
+        while self.chunks:
+            if self.pace:
+                _REAL_SLEEP(self.pace)  # time.sleep itself is _no_sleep while cell 2's template runs
+            chunk = self.chunks.pop(0)
+            if chunk:
+                return chunk
+        if not self.hang:
+            self.ended.set()  # the output is done, and so is the command
+        self.ended.wait(10)
+        return b""
+
+    read = read1
+
+    def close(self):
+        pass
+
+    def deliver(self, sig, *, group=False):
+        self.signals.append(sig)
+        if group:
+            self.via_group.append(sig)
+        if sig != signal.SIGINT or not self.stubborn:
+            self.ended.set()
+
+    def _code(self):
+        return -int(self.signals[-1]) if self.signals else self.rc
+
+    def poll(self):
+        return self._code() if self.ended.is_set() else None
+
+    def wait(self, timeout=None):
+        if self.interrupt:
+            self.interrupt = False
+            raise KeyboardInterrupt
+        if not self.ended.wait(10 if timeout is None else timeout) and timeout is not None:
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return self._code()
+
+    def send_signal(self, sig):
+        self.deliver(sig)
+
+    def kill(self):
+        self.deliver(KILL)
+
+    def communicate(self, input=None, timeout=None):
+        self.wait(timeout)
+        return None, None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.ended.wait(10)
+
+
+class _FakeHost:
+    """subprocess.Popen and os.killpg as cell 2 sees them. ``outcomes`` maps a line ("lift sync push")
+    to what a run of it does: an exit code, or a dict of _FakeProc options; a list is used up run by
+    run (then exit 0). ``argvs`` keeps each argv as given; a line is read from the command inside the
+    PDEATHSIG shim, if any."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self, outcomes: dict | None = None):
+        self.outcomes = {line: list(o) if isinstance(o, list) else o for line, o in (outcomes or {}).items()}
         self.lines: list[str] = []
+        self.argvs: list[list[str]] = []
         self.kwargs: list[dict] = []
+        self.procs: list[_FakeProc] = []
 
-    def __call__(self, cmd, **kwargs):
-        lift = cmd[:3] == [LIFT_PY, "-m", "lift"]
-        line = " ".join(["lift", *cmd[3:]] if lift else cmd)
-        self.lines.append(line)
-        self.kwargs.append(kwargs)
+    def __call__(self, argv, **kwargs):
+        argv = list(argv)
+        self.argvs.append(argv)
+        if argv[1:3] == ["-S", "-c"]:  # python -S -c PDEATHSIG_SHIM <kernel pid> <the command>
+            argv = argv[5:]
+        line = " ".join(["lift", *argv[3:]] if argv[:3] == [LIFT_PY, "-m", "lift"] else argv)
         outcome = self.outcomes.get(line, 0)
         if isinstance(outcome, list):
             outcome = outcome.pop(0) if outcome else 0
-        if isinstance(outcome, BaseException):
-            raise outcome
-        return subprocess.CompletedProcess(cmd, outcome)
+        proc = _FakeProc(argv, line, **(outcome if isinstance(outcome, dict) else {"rc": outcome}))
+        self.lines.append(line)
+        self.kwargs.append(kwargs)
+        self.procs.append(proc)
+        return proc
+
+    def proc(self, line: str) -> _FakeProc:
+        return next(p for p in self.procs if p.line == line)
+
+    def killpg(self, pgid, sig):
+        proc = next(p for p in self.procs if p.pid == pgid)
+        if proc.ended.is_set() and not proc.straggler:
+            raise ProcessLookupError(errno.ESRCH, "No such process")
+        if sig == KILL:
+            proc.straggler = False
+        proc.deliver(sig, group=True)
 
 
 def _fake_open(path, *args, **kwargs):
@@ -280,49 +525,64 @@ def _no_sleep(seconds):
 @pytest.fixture
 def job_cell(setup_cell, monkeypatch, capsys):
     """Runs cell 1, then cell 2 as committed (its template JOB) in the same namespace, as a kernel
-    does, against a fake subprocess.run. Returns ``run(job, fake, sleep=...)``, which calls cell 2's
-    run_job as the cell does, the fake and what cell 2 printed."""
+    does, with subprocess.Popen and os.killpg served by a _FakeHost. Returns ``run(job, outcomes,
+    sleep=...)``, which calls cell 2's run_job as the cell does and returns the host; also the host,
+    the template run's commands and output, and the cell's namespace."""
     for name in HIDDEN:  # no real secret of this machine may reach a fake child or a failure message
         monkeypatch.delenv(name, raising=False)
     setup_cell.run(SECRETS)
     for name, path in setup_cell.ns["LIFT_DIRS"].items():  # cell 1's os.environ changes, which the
         monkeypatch.setenv(name, path)                    # setup_cell fixture rolled back
-    fake = _FakeRun()
-    monkeypatch.setattr(subprocess, "run", fake)
+    host = _FakeHost()
+    monkeypatch.setattr(subprocess, "run", _REAL_RUN)  # cell 1's fake is done; run starts a Popen too
+    monkeypatch.setattr(subprocess, "Popen", host)
+    monkeypatch.setattr(os, "killpg", host.killpg, raising=False)  # never a real process group
     capsys.readouterr()
     namespace = {**setup_cell.ns, "open": _fake_open}
     with mock.patch.object(time, "sleep", _no_sleep):  # becomes run_job's default: no test really sleeps
         exec(compile(_code_cells()[1], "runner.ipynb:job", "exec"), namespace)
+    template = SimpleNamespace(lines=list(host.lines), kwargs=list(host.kwargs))
 
-    def run(job, fake, sleep=_no_sleep):
-        return namespace["run_job"](job, LIFT_PY, cwd=ROOT, secrets=SECRETS, run=fake, sleep=sleep)
+    def run(job, outcomes=None, sleep=_no_sleep):
+        host.reset(outcomes)
+        namespace["run_job"](job, LIFT_PY, cwd=ROOT, secrets=SECRETS, sleep=sleep)
+        return host
 
-    return SimpleNamespace(run=run, fake=fake, printed=capsys.readouterr().out)
+    return SimpleNamespace(run=run, host=host, ns=namespace, template=template,
+                           printed=capsys.readouterr().out)
+
+
+@pytest.fixture
+def fast_watchdog(job_cell):
+    """Cell 2's watchdog limits cut to a quarter of a second. The time is real: the fakes block."""
+    job_cell.ns.update(MAX_SILENT_MINUTES=0.25 / 60, PUSH_LIMIT_MINUTES=0.25 / 60, KILL_GRACE_SECONDS=0.25,
+                       TICK_SECONDS=0.01)
+    return job_cell
 
 
 def test_job_cell_refuses_to_run_before_the_setup_cell(monkeypatch):
-    fake = _FakeRun()
-    monkeypatch.setattr(subprocess, "run", fake)
+    host = _FakeHost()
+    monkeypatch.setattr(subprocess, "Popen", host)
     monkeypatch.delenv("LIFT_OUTPUT_DIR", raising=False)  # a restarted kernel has lost cell 1's env
     with pytest.raises(RuntimeError, match="setup cell"):
         exec(compile(_code_cells()[1], "runner.ipynb:job", "exec"),
              {"__name__": "__main__", "open": _fake_open})
-    assert fake.lines == []
+    assert host.lines == []
 
 
 def test_job_cell_refuses_when_the_kernel_lost_the_secrets(monkeypatch, tmp_path):
-    fake = _FakeRun()
-    monkeypatch.setattr(subprocess, "run", fake)
+    host = _FakeHost()
+    monkeypatch.setattr(subprocess, "Popen", host)
     monkeypatch.setenv("LIFT_OUTPUT_DIR", str(tmp_path / "outputs"))  # %reset clears SECRETS, not os.environ
     with pytest.raises(RuntimeError, match="setup cell"):
         exec(compile(_code_cells()[1], "runner.ipynb:job", "exec"),
              {"__name__": "__main__", "ROOT": ROOT, "open": _fake_open})
-    assert fake.lines == []
+    assert host.lines == []
 
 
 def test_job_cell_runs_the_template_then_pushes_after_each_line_and_at_the_end(job_cell):
-    assert job_cell.fake.lines == ["lift sync pull", "lift info", PUSH, PUSH]
-    for kwargs in job_cell.fake.kwargs:
+    assert job_cell.template.lines == [CHECK, "lift sync pull", "lift info", PUSH, PUSH]
+    for kwargs in job_cell.template.kwargs:
         hidden = _hidden(kwargs["env"])
         assert kwargs["cwd"] == ROOT and kwargs["env"]["PYTHONUNBUFFERED"] == "1"
         assert hidden == AS_DUMMIES  # the lift commands get cell 1's SECRETS
@@ -332,10 +592,9 @@ def test_job_cell_runs_the_template_then_pushes_after_each_line_and_at_the_end(j
 def test_only_the_lift_commands_get_the_secrets(job_cell, monkeypatch):
     for name, value in KAGGLE_TOKENS.items():  # a Kaggle kernel has them; no child may
         monkeypatch.setenv(name, value)
-    fake = _FakeRun()
-    job_cell.run("nvidia-smi -L\nlift info", fake)
-    assert fake.lines == ["nvidia-smi -L", PUSH, "lift info", PUSH, PUSH]
-    for line, kwargs in zip(fake.lines, fake.kwargs, strict=True):
+    host = job_cell.run("nvidia-smi -L\nlift info")
+    assert host.lines == [CHECK, "nvidia-smi -L", PUSH, "lift info", PUSH, PUSH]
+    for line, kwargs in zip(host.lines, host.kwargs, strict=True):
         hidden = _hidden(kwargs["env"])
         assert hidden == (AS_DUMMIES if line.startswith("lift ") else {}), line
 
@@ -347,31 +606,32 @@ def test_job_stops_at_the_first_failure_and_still_pushes(job_cell):
     lift generate --variant stock --split dev --dtype fp16
     lift judge --variant stock --split dev --dtype fp16
     """
-    fake = _FakeRun({"lift generate --variant stock --split dev --dtype fp16": 1})
+    line = "lift generate --variant stock --split dev --dtype fp16"
     with pytest.raises(RuntimeError, match="job FAILED: 'lift generate .*' exited 1"):
-        job_cell.run(job, fake)
-    assert fake.lines == ["lift sync pull", "lift generate --variant stock --split dev --dtype fp16", PUSH]
+        job_cell.run(job, {line: 1})
+    assert job_cell.host.lines == [CHECK, "lift sync pull", line, PUSH]
 
 
 def test_a_pull_conflict_stops_the_job_before_any_gpu_work(job_cell):
-    fake = _FakeRun({"lift sync pull": 3})
     with pytest.raises(RuntimeError, match="'lift sync pull' exited 3"):
-        job_cell.run("lift sync pull\nlift run-dev --variant stock --dtype fp16", fake)
-    assert fake.lines == ["lift sync pull", PUSH]
+        job_cell.run("lift sync pull\nlift run-dev --variant stock --dtype fp16", {"lift sync pull": 3})
+    assert job_cell.host.lines == [CHECK, "lift sync pull", PUSH]
 
 
-def test_job_pushes_even_after_an_interrupt(job_cell):
-    fake = _FakeRun({"lift run-dev --variant stock --dtype fp16": KeyboardInterrupt()})
+def test_an_interrupt_stops_the_running_command_and_still_pushes(job_cell):
+    line = "lift run-dev --variant stock --dtype fp16"
     with pytest.raises(KeyboardInterrupt):
-        job_cell.run("lift run-dev --variant stock --dtype fp16\nlift info", fake)
-    assert fake.lines == ["lift run-dev --variant stock --dtype fp16", PUSH]
+        job_cell.run(f"{line}\nlift info", {line: {"hang": True, "interrupt": True}})
+    host = job_cell.host
+    assert host.proc(line).via_group == [signal.SIGINT]  # lift may close its files first
+    assert host.lines == [CHECK, line, PUSH]
 
 
 def test_a_push_that_exits_1_is_retried_with_backoff(job_cell, capsys):
     # Exit 1: not everything was sent (a Hub 502, a reset connection), and a push is safe to repeat.
-    fake, waits = _FakeRun({PUSH: [1, 1, 0]}), []
-    job_cell.run("lift sync pull", fake, sleep=waits.append)
-    assert fake.lines == ["lift sync pull", PUSH, PUSH, PUSH]
+    waits = []
+    host = job_cell.run("lift sync pull", {PUSH: [1, 1, 0]}, sleep=waits.append)
+    assert host.lines == [CHECK, "lift sync pull", PUSH, PUSH, PUSH]
     assert waits == [60, 120]
     assert "job OK" in capsys.readouterr().out
 
@@ -379,34 +639,35 @@ def test_a_push_that_exits_1_is_retried_with_backoff(job_cell, capsys):
 def test_a_push_failing_three_times_is_reported_and_the_job_goes_on(job_cell):
     # As in colab/job.py, a failed checkpoint push does not stop the GPU work: the next push sends
     # whatever is missing, and the job still fails at the end so the person sees it.
-    fake, waits = _FakeRun({PUSH: [1, 1, 1]}), []
-    with pytest.raises(RuntimeError, match="checkpoint push after 'lift info' exited 1 on all 3 attempts"):
-        job_cell.run("lift info\nlift smoke --compare-dtype fp16", fake, sleep=waits.append)
-    assert fake.lines == ["lift info", PUSH, PUSH, PUSH, "lift smoke --compare-dtype fp16", PUSH, PUSH]
+    waits = []
+    with pytest.raises(RuntimeError, match=r"checkpoint push after 'lift info' failed on all 3 attempts "
+                                           r"\(the last exited 1\)"):
+        job_cell.run("lift info\nlift smoke --compare-dtype fp16", {PUSH: [1, 1, 1]}, sleep=waits.append)
+    assert job_cell.host.lines == [CHECK, "lift info", PUSH, PUSH, PUSH, "lift smoke --compare-dtype fp16",
+                                   PUSH, PUSH]
     assert waits == [60, 120]
 
 
 def test_a_push_conflict_is_reported_never_retried_and_the_job_goes_on(job_cell):
     # Exit 3: done, but the conflicting local copies went under conflicts/ in the runs repo.
-    fake = _FakeRun({PUSH: [3]})
     with pytest.raises(RuntimeError, match=r"checkpoint push after 'lift info' exited 3 \(conflicts"):
-        job_cell.run("lift info\nlift smoke --compare-dtype fp16", fake)
-    assert fake.lines == ["lift info", PUSH, "lift smoke --compare-dtype fp16", PUSH, PUSH]
+        job_cell.run("lift info\nlift smoke --compare-dtype fp16", {PUSH: [3]})
+    assert job_cell.host.lines == [CHECK, "lift info", PUSH, "lift smoke --compare-dtype fp16", PUSH, PUSH]
 
 
 def test_a_failed_final_push_fails_the_job_and_only_exit_1_is_retried(job_cell):
-    fake = _FakeRun({PUSH: [0, 2]})
-    with pytest.raises(RuntimeError, match="final push exited 2"):
-        job_cell.run("lift info", fake)
-    assert fake.lines == ["lift info", PUSH, PUSH]
+    # 137: the push was killed (the kernel's OOM killer, say); only lift sync's own exit 1 is retried.
+    with pytest.raises(RuntimeError, match="final push exited 137"):
+        job_cell.run("lift info", {PUSH: [0, 137]})
+    assert job_cell.host.lines == [CHECK, "lift info", PUSH, PUSH]
 
 
 def test_a_push_line_in_the_job_is_retried_and_never_stops_the_job(job_cell):
     line = "lift sync push --only outputs"
-    fake, waits = _FakeRun({line: [1, 3]}), []
+    waits = []
     with pytest.raises(RuntimeError, match=re.escape(f"{line!r} exited 3")):
-        job_cell.run(f"{line}\nlift info", fake, sleep=waits.append)
-    assert fake.lines == [line, line, "lift info", PUSH, PUSH]
+        job_cell.run(f"{line}\nlift info", {line: [1, 3]}, sleep=waits.append)
+    assert job_cell.host.lines == [CHECK, line, line, "lift info", PUSH, PUSH]
     assert waits == [60]
 
 
@@ -414,17 +675,361 @@ def test_an_interrupt_while_waiting_to_retry_still_pushes_at_the_end(job_cell):
     def interrupt(seconds):
         raise KeyboardInterrupt
 
-    fake = _FakeRun({PUSH: [1]})
     with pytest.raises(KeyboardInterrupt):
-        job_cell.run("lift info\nlift smoke --compare-dtype fp16", fake, sleep=interrupt)
-    assert fake.lines == ["lift info", PUSH, PUSH]
+        job_cell.run("lift info\nlift smoke --compare-dtype fp16", {PUSH: [1]}, sleep=interrupt)
+    assert job_cell.host.lines == [CHECK, "lift info", PUSH, PUSH]
 
 
 def test_job_runs_non_lift_lines_verbatim_and_adds_no_checkpoint_after_sync_lines(job_cell):
-    fake = _FakeRun()
-    job_cell.run("nvidia-smi -L\nlift sync push\n\n# done", fake)
-    # nvidia-smi, its checkpoint push, the job's own push line (no checkpoint after it), the final push
-    assert fake.lines == ["nvidia-smi -L", PUSH, PUSH, PUSH]
+    host = job_cell.run("nvidia-smi -L\nlift sync push\n\n# done")
+    # the check, nvidia-smi, its checkpoint push, the job's own push line (no checkpoint after it), the
+    # final push
+    assert host.lines == [CHECK, "nvidia-smi -L", PUSH, PUSH, PUSH]
+
+
+# Contract: lift sync exits 1 for an error a retry may fix and 2 for one no retry fixes.
+
+
+@pytest.mark.parametrize("failing, ran", [
+    (CHECK, [CHECK]),
+    (PUSH, [CHECK, "lift sync pull", "lift info", PUSH]),  # the checkpoint push after lift info
+    ("lift sync push --only outputs", [CHECK, "lift sync pull", "lift info", PUSH,
+                                       "lift sync push --only outputs"]),
+])
+def test_a_preflight_or_push_exit_2_ends_the_job_at_once(job_cell, failing, ran):
+    """Exit 2: HTTP 401 or 403 (a read token), a runs repo missing or public, a missing secret, a BRANCH
+    without lift sync. No retry fixes it, so nothing is retried (no sleep is allowed here), no further
+    line runs, and after the preflight's or a push's exit 2 there is no final push either: it would
+    fail the same way."""
+    job = "\n".join(["lift sync pull", "lift info", "lift sync push --only outputs",
+                     "lift run-dev --variant stock --dtype fp16"])
+    with pytest.raises(RuntimeError, match="exited 2: a configuration problem"):
+        job_cell.run(job, {failing: 2})
+    assert job_cell.host.lines == ran
+
+
+@pytest.mark.parametrize("failing", ["lift sync status # what is left to push?",  # the comment's words
+                                     "lift sync pull --only outputs/no-such-dir",
+                                     "lift sync check",
+                                     "lift sync pull"])
+def test_an_exit_2_from_a_sync_line_that_is_not_a_push_still_tries_the_final_push(job_cell, failing):
+    """Review 3, V21: such an exit 2 may come from the line's own arguments (an inline comment, a typo, an
+    --only path that matches nothing), and then a push still works. Here the checkpoint push after
+    run-dev failed on all 3 attempts (a Hub blip): with no final push, run-dev's outputs would end with
+    the session. No further line runs; an exit 2 returns at once, so trying costs seconds."""
+    line = "lift run-dev --variant stock --dtype fp16"
+    outcome = [0, 2] if failing == "lift sync pull" else 2  # the job's first line pulls too
+    with pytest.raises(RuntimeError, match=re.escape(f"{failing!r} exited 2: a configuration problem")):
+        job_cell.run(f"lift sync pull\n{line}\n{failing}\nlift info", {PUSH: [1, 1, 1], failing: outcome},
+                     sleep=lambda seconds: None)
+    assert job_cell.host.lines == [CHECK, "lift sync pull", line, PUSH, PUSH, PUSH, failing, PUSH]
+
+
+def test_a_pull_that_exits_1_is_retried_like_a_push(job_cell):
+    waits = []
+    host = job_cell.run("lift sync pull\nlift info", {"lift sync pull": [1, 1, 0]}, sleep=waits.append)
+    pulls = ["lift sync pull"] * 3
+    assert host.lines == [CHECK, *pulls, "lift info", PUSH, PUSH]
+    assert waits == [60, 120]
+
+
+def test_a_pull_failing_on_every_attempt_stops_the_job(job_cell):
+    waits = []
+    with pytest.raises(RuntimeError, match="'lift sync pull' failed on all 3 attempts"):
+        job_cell.run("lift sync pull\nlift run-dev --variant stock --dtype fp16", {"lift sync pull": 1},
+                     sleep=waits.append)
+    assert job_cell.host.lines == [CHECK, "lift sync pull", "lift sync pull", "lift sync pull", PUSH]
+
+
+def test_the_preflight_runs_before_any_line_and_a_failing_one_runs_none(job_cell):
+    """A read-only token used to surface at the first push, after the GPU work. The check is retried
+    like a push when it exits 1; if it never succeeds, no line runs (the final push still tries to send
+    what an earlier job left)."""
+    waits = []
+    with pytest.raises(RuntimeError, match=re.escape(f"preflight {CHECK!r} failed on all 3 attempts")):
+        job_cell.run("lift run-dev --variant stock --dtype fp16", {CHECK: 1}, sleep=waits.append)
+    assert job_cell.host.lines == [CHECK, CHECK, CHECK, PUSH]
+    assert waits == [60, 120]
+
+
+# Review R18: nothing stopped a hung line or a stalled push, so an unattended committed run held the T4
+# x2 session, and the weekly quota, until Kaggle's 12-hour limit, which also skips the final push.
+
+
+def test_a_stalled_push_is_stopped_after_the_push_limit_and_tried_again(fast_watchdog, capsys):
+    """huggingface_hub sets no HTTP timeout: one stalled read in a push would never end."""
+    waits = []
+    line = "lift run-dev --variant stock --dtype fp16"
+    host = fast_watchdog.run(f"lift sync pull\n{line}", {PUSH: [{"hang": True}]}, sleep=waits.append)
+    stalled = host.proc(PUSH)
+    assert stalled.via_group == [signal.SIGINT]
+    # the checkpoint push after run-dev: stopped, then tried again; then the final push
+    assert host.lines == [CHECK, "lift sync pull", line, PUSH, PUSH, PUSH]
+    assert waits == [60]
+    printed = capsys.readouterr().out
+    assert "has run for" in printed and "job OK" in printed
+
+
+def test_a_stalled_pull_is_stopped_once_and_not_tried_again(fast_watchdog, capsys):
+    """Like colab/job.py (review 3, V11): a pull the watchdog stopped already held the GPUs for the push
+    limit, and another try would most likely stall too. The job stops; the final push still runs."""
+    with pytest.raises(RuntimeError, match="'lift sync pull' was stopped and is not tried again"):
+        fast_watchdog.run("lift sync pull\nlift info", {"lift sync pull": {"hang": True}}, sleep=[].append)
+    host = fast_watchdog.host
+    assert host.proc("lift sync pull").via_group == [signal.SIGINT]
+    assert host.lines == [CHECK, "lift sync pull", PUSH]
+
+
+def test_the_attached_secrets_never_reach_the_saved_output(job_cell, capsys):
+    """Kaggle saves the printed output with every version: a secret a command prints, even one split
+    across two reads, is printed as ***; short values (a spend cap) are left alone."""
+    token = SECRETS["HF_TOKEN"].encode()
+    output = [b"token " + token[:6], token[6:] + b" ok\r", b"cap 150 " + SECRETS["GITHUB_TOKEN"].encode()]
+    job_cell.run("lift info", {"lift info": {"output": output}})
+    printed = capsys.readouterr().out
+    assert "token *** ok\r" in printed and "cap 150 ***" in printed
+    assert not any(value in printed for value in SECRETS.values())
+
+
+def test_a_line_silent_past_the_limit_is_stopped_and_fails_then_the_outputs_are_pushed(fast_watchdog):
+    line = "lift run-dev --variant stock --dtype fp16"
+    with pytest.raises(RuntimeError, match=re.escape(f"{line!r} was stopped: no output for")):
+        fast_watchdog.run(f"{line}\nlift info", {line: {"hang": True, "output": b"loading\n"}})
+    host = fast_watchdog.host
+    assert host.proc(line).via_group == [signal.SIGINT]
+    assert host.lines == [CHECK, line, PUSH]
+
+
+def test_a_command_that_ignores_sigint_gets_sigkill_after_the_grace(fast_watchdog):
+    line = "lift generate --variant stock --split dev --dtype fp16"
+    with pytest.raises(RuntimeError, match="was stopped: no output for"):
+        fast_watchdog.run(line, {line: {"hang": True, "stubborn": True}})
+    assert fast_watchdog.host.proc(line).via_group == [signal.SIGINT, KILL]
+    assert fast_watchdog.ns["KILL"] == KILL
+
+
+def test_nothing_of_a_stopped_commands_group_outlives_it(fast_watchdog):
+    # A worker left behind by a stopped lift line would keep its GPU memory from the next line.
+    line = "lift run-dev --variant stock --dtype fp16"
+    with pytest.raises(RuntimeError, match="was stopped"):
+        fast_watchdog.run(line, {line: {"hang": True, "straggler": True}})
+    assert fast_watchdog.host.proc(line).via_group == [signal.SIGINT, KILL]
+
+
+def test_a_line_that_keeps_printing_is_never_stopped(fast_watchdog):
+    line = "lift run-dev --variant stock --dtype fp16"
+    host = fast_watchdog.run(line, {line: {"output": [b"batch done\n"] * 20, "pace": 0.02}})  # 0.4 s
+    assert host.proc(line).signals == []
+
+
+def test_each_command_runs_in_its_own_process_group_with_its_output_in_the_cell(job_cell, capsys):
+    word = "हिन्दी".encode()  # a character split across two reads must survive
+    output = [b"lift info says ", word[:4], word[4:] + b"\n"]
+    host = job_cell.run("lift info", {"lift info": {"output": output}})
+    for line, kwargs in zip(host.lines, host.kwargs, strict=True):
+        assert kwargs.get("start_new_session") is True, line  # so the watchdog can signal the whole group
+        assert kwargs.get("stdout") is subprocess.PIPE and kwargs.get("stderr") is subprocess.STDOUT, line
+        assert kwargs.get("stdin") is subprocess.DEVNULL, line
+    assert "lift info says हिन्दी\n" in capsys.readouterr().out
+
+
+# Review 3, V23: start_new_session takes a command out of the kernel's process group, which a forced kernel
+# restart or shutdown kills, so a running line went on as an orphan, holding the GPUs, while the person
+# reran the cells. On Linux every command now starts through a PR_SET_PDEATHSIG shim.
+
+
+def _cell_2_definitions() -> dict:
+    """Cell 2's constants and functions, without its last lines, which need cell 1 and run the job."""
+    source = _code_cells()[1]
+    source = source[:source.index('if "SECRETS" not in globals()')]
+    namespace = {"__name__": "__main__", "child_env": lambda extra=(): {**os.environ, **dict(extra)}}
+    exec(compile(source, "runner.ipynb:job", "exec"), namespace)
+    return namespace
+
+
+def test_on_linux_every_command_starts_through_the_pdeathsig_shim(job_cell, monkeypatch):
+    monkeypatch.setitem(job_cell.ns, "PDEATHSIG", True)  # as on Kaggle's Linux kernel
+    monkeypatch.setitem(job_cell.ns, "which", lambda cmd, path=None: cmd)
+    host = job_cell.run("nvidia-smi -L\nlift info")
+    assert host.lines == [CHECK, "nvidia-smi -L", PUSH, "lift info", PUSH, PUSH]
+    shim = [sys.executable, "-S", "-c", job_cell.ns.get("PDEATHSIG_SHIM"), str(os.getpid())]
+    for argv, kwargs in zip(host.argvs, host.kwargs, strict=True):
+        assert argv[:5] == shim
+        assert kwargs["start_new_session"] is True and "preexec_fn" not in kwargs  # the watchdog's group
+    assert host.argvs[3][5:] == [LIFT_PY, "-m", "lift", "info"]  # the command itself, as without the shim
+
+
+def test_commands_start_as_they_are_without_prctl_or_when_they_cannot_be_found(job_cell, monkeypatch):
+    """Off Linux there is no prctl. A command that cannot be found is not wrapped either, so Popen
+    raises for it in the kernel as it always did."""
+    assert job_cell.ns["PDEATHSIG"] is sys.platform.startswith("linux")
+    monkeypatch.setitem(job_cell.ns, "PDEATHSIG", False)
+    assert job_cell.run("lift info").argvs[1] == [LIFT_PY, "-m", "lift", "info"]
+    monkeypatch.setitem(job_cell.ns, "PDEATHSIG", True)
+    monkeypatch.setitem(job_cell.ns, "which", lambda cmd, path=None: None)  # a typo'd command
+    assert job_cell.run("nvidia-smii -L").argvs[1] == ["nvidia-smii", "-L"]
+
+
+class _Killed(BaseException):
+    """The end of a process that sent itself SIGKILL, as the shim tests' fake os.kill plays it."""
+
+
+def _run_shim(monkeypatch, parent: int, command: list[str], *, sigint=None, prctl=True) -> list[tuple]:
+    """Run PDEATHSIG_SHIM in this process as `python -S -c SHIM <parent> <command...>` would, with
+    ctypes, signal.signal, signal.getsignal, os.getppid (4321), os.getpid (5555), os.kill and
+    os.execvp faked. ``sigint`` is the SIGINT handler Python's startup left (default_int_handler).
+    Returns the calls in order."""
+    shim = _cell_2_definitions()["PDEATHSIG_SHIM"]
+    calls = []
+
+    def kill(pid, sig):
+        calls.append(("kill", pid, sig))
+        raise _Killed
+
+    def fake_prctl(*args):
+        calls.append(("prctl", *[getattr(arg, "value", arg) for arg in args]))  # c_ulong or int
+        return 0
+
+    libc = SimpleNamespace(prctl=fake_prctl) if prctl else SimpleNamespace()  # no prctl: AttributeError
+    ctypes = types.ModuleType("ctypes")
+    ctypes.CDLL = lambda name: libc
+    ctypes.c_ulong = lambda value: SimpleNamespace(value=value)
+    startup = signal.default_int_handler if sigint is None else sigint
+    with monkeypatch.context() as m:
+        m.setitem(sys.modules, "ctypes", ctypes)
+        m.setattr(sys, "path", list(sys.path))
+        m.setattr(sys, "argv", ["-c", str(parent), *command])
+        for name, number in (("SIGKILL", 9), ("SIGPIPE", 13), ("SIGXFSZ", 25)):  # Windows lacks them
+            m.setattr(signal, name, getattr(signal, name, number), raising=False)
+        m.setattr(signal, "getsignal", lambda sig: startup if sig == signal.SIGINT else signal.SIG_IGN)
+        m.setattr(signal, "signal", lambda sig, handler: calls.append(("signal", int(sig), handler)))
+        m.setattr(os, "getppid", lambda: 4321)
+        m.setattr(os, "getpid", lambda: 5555)
+        m.setattr(os, "kill", kill)
+        m.setattr(os, "execvp", lambda file, args: calls.append(("execvp", file, list(args))))
+        try:
+            exec(compile(shim, "PDEATHSIG_SHIM", "exec"), {"__name__": "__main__"})
+        except _Killed:
+            pass
+    return calls
+
+
+def test_the_shim_ties_the_command_to_the_kernel_then_execs_it_unchanged(monkeypatch):
+    command = [LIFT_PY, "-m", "lift", "run-dev", "--variant", "stock", "--dtype", "fp16"]
+    calls = _run_shim(monkeypatch, 4321, command)
+    assert calls[0] == ("prctl", 1, 9, 0, 0, 0)  # PR_SET_PDEATHSIG, SIGKILL
+    assert calls[-1] == ("execvp", LIFT_PY, command)  # the argv as given; the environment is untouched
+    # What Python's own startup changed goes back to what subprocess hands a command: SIGINT and
+    # (restore_signals) SIGPIPE and SIGXFSZ at their defaults.
+    numbers = [int(getattr(signal, name, number)) for name, number in (("SIGPIPE", 13), ("SIGXFSZ", 25))]
+    restored = {call[1:] for call in calls if call[0] == "signal"}
+    assert restored == {(number, signal.SIG_DFL) for number in (int(signal.SIGINT), *numbers)}
+    assert not [call for call in calls if call[0] == "kill"]
+
+
+def test_the_shim_kills_the_command_when_the_kernel_died_before_prctl(monkeypatch):
+    # The shim's parent is 4321 now, not the kernel that started it (1234): the death signal will never
+    # come, so it ends as if it had.
+    calls = _run_shim(monkeypatch, 1234, [LIFT_PY, "-m", "lift", "info"])
+    assert calls[0][0] == "prctl" and calls[-1] == ("kill", 5555, getattr(signal, "SIGKILL", 9))
+    assert not [call for call in calls if call[0] == "execvp"]
+
+
+def test_the_shim_keeps_an_ignored_sigint_and_runs_the_command_without_prctl(monkeypatch):
+    calls = _run_shim(monkeypatch, 4321, ["nvidia-smi"], sigint=signal.SIG_IGN, prctl=False)
+    assert not [call for call in calls if call[0] == "prctl" or call[:2] == ("signal", int(signal.SIGINT))]
+    assert calls[-1] == ("execvp", "nvidia-smi", ["nvidia-smi"])
+
+
+needs_linux = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG is Linux's")
+
+# Plays a Jupyter kernel: runs cell 2's run_command on a long line, which writes its pid and sleeps.
+_KERNEL = """
+import json, os, shlex, subprocess, sys, time
+notebook, pidfile, shim = sys.argv[1], shlex.quote(sys.argv[2]), sys.argv[3] == "1"
+source = "".join(json.load(open(notebook, encoding="utf-8"))["cells"][2]["source"])
+ns = {"__name__": "kernel", "child_env": lambda extra=(): dict(os.environ)}
+exec(source[:source.index('if "SECRETS" not in globals()')], ns)
+ns["PDEATHSIG"] = shim
+line = ["sh", "-c", f"echo $$ > {pidfile}.tmp && mv {pidfile}.tmp {pidfile} && exec sleep 120"]
+ns["run_command"](line, "a long line", sync=False, cwd=os.path.dirname(sys.argv[2]), env=dict(os.environ),
+                  popen=subprocess.Popen, clock=time.monotonic)
+"""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+@needs_linux
+@pytest.mark.parametrize("shim", [True, False])
+def test_a_running_command_dies_with_the_kernel_only_through_the_shim(tmp_path, shim):
+    """jupyter_client starts a kernel in its own session and, at a forced restart or shutdown, kills the
+    kernel's process group. A command in its own group survived that until the shim tied it to the
+    kernel (the case without the shim shows the test reaches the orphan)."""
+    pidfile = tmp_path / "line.pid"
+    script = tmp_path / "kernel.py"
+    script.write_text(_KERNEL, encoding="utf-8")
+    kernel = subprocess.Popen([sys.executable, str(script), str(NOTEBOOK), str(pidfile), str(int(shim))],
+                              start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    line_pid = None
+    try:
+        deadline = time.monotonic() + 60
+        while not pidfile.exists():
+            assert kernel.poll() is None and time.monotonic() < deadline, "the kernel never started the line"
+            time.sleep(0.05)
+        line_pid = int(pidfile.read_text(encoding="utf-8"))
+        os.killpg(kernel.pid, signal.SIGKILL)
+        kernel.wait(30)
+        deadline = time.monotonic() + (10 if shim else 1)
+        while _alive(line_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert _alive(line_pid) is not shim
+    finally:
+        for kill, pid in ((os.killpg, kernel.pid), (os.kill, line_pid)):
+            if pid is not None:
+                try:
+                    kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+@needs_linux
+@pytest.mark.parametrize("argv, rc", [
+    (["sh", "-c", 'printf "%s|" "$0" "$@" "$PROBE"; exit 7', "zero", "one two", ""], 7),
+    (["sh", "-c", "echo ending; kill -TERM $$"], 128 + signal.SIGTERM),
+    (["cat", "/proc/self/status"], 0),  # the signal mask and dispositions the command starts with
+    (["sha256sum", "/proc/self/environ"], 0),  # its whole environment, of which no value is printed
+])
+def test_the_real_shim_changes_nothing_a_command_sees(tmp_path, capsys, argv, rc):
+    ns = _cell_2_definitions()
+    env = {**os.environ, "PROBE": "a b"}
+    assert ns["PDEATHSIG"] is True and ns["tied_to_kernel"](argv, env)[:2] == [sys.executable, "-S"]
+    seen = {}
+    for shim in (True, False):
+        ns["PDEATHSIG"] = shim
+        got = ns["run_command"](argv, "probe", sync=False, cwd=tmp_path, env=env, popen=subprocess.Popen,
+                                clock=time.monotonic)
+        out = capsys.readouterr().out
+        if argv[0] == "cat":
+            out = [line for line in out.splitlines() if re.match(r"Sig(Pnd|Blk|Ign|Cgt):", line)]
+        seen[shim] = got, out
+    assert seen[True] == seen[False]
+    assert seen[True][0] == (rc, None) and seen[True][1]
+
+
+@needs_linux
+def test_the_real_shim_ends_a_command_whose_kernel_is_already_gone(tmp_path):
+    marker = tmp_path / "ran"
+    shim = _cell_2_definitions()["PDEATHSIG_SHIM"]
+    # Its parent is this process, not "pid 1": as if the kernel had died before prctl.
+    command = f"touch {shlex.quote(str(marker))}"
+    result = subprocess.run([sys.executable, "-S", "-c", shim, "1", "sh", "-c", command], timeout=60)
+    assert result.returncode == -signal.SIGKILL and not marker.exists()
 
 
 # --- bootstrap.sh ---------------------------------------------------------------------------------------
@@ -478,6 +1083,8 @@ class cuda:
     def device_count():
         return 0
 """
+# An install line with the constraints: "... -c <repo>/constraints.txt -e <repo>[gpu,data,eval]".
+CONSTRAINED = re.compile(r" -c (?P<repo>.+)/constraints\.txt -e (?P=repo)\[gpu,data,eval\]$")
 
 
 def _write(path: Path, text: str) -> Path:
@@ -488,10 +1095,13 @@ def _write(path: Path, text: str) -> Path:
 
 
 def _run_bootstrap(tmp_path: Path, *, python_too_old: bool, gpu: bool = False, fake_torch: bool = False,
-                   watch: dict[str, str] | None = None):
-    """Run a copy of bootstrap.sh (so its repo is tmp/repo) with the fakes first on PATH. ``watch``
-    variables are put in its environment, and every fake python call that can see one is logged."""
+                   watch: dict[str, str] | None = None, constraints: bool = True):
+    """Run a copy of bootstrap.sh (so its repo is tmp/repo, with a constraints.txt unless told not to)
+    with the fakes first on PATH. ``watch`` variables are put in its environment, and every fake python
+    call that can see one is logged."""
     script = _write(tmp_path / "repo" / "kaggle" / "bootstrap.sh", BOOTSTRAP.read_text(encoding="utf-8"))
+    if constraints:
+        _write(tmp_path / "repo" / "constraints.txt", "transformers==0.0.0\n")
     _write(tmp_path / "bin" / "python", FAKE_PYTHON)
     _write(tmp_path / "bin" / "nvidia-smi", FAKE_NVIDIA_SMI)
     site = tmp_path / "site"
@@ -515,7 +1125,8 @@ def _run_bootstrap(tmp_path: Path, *, python_too_old: bool, gpu: bool = False, f
     })
     result = subprocess.run([BASH, script.as_posix()], env=env, capture_output=True, text=True,
                             encoding="utf-8", errors="replace", timeout=180)
-    log = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    log_file = tmp_path / "calls.log"
+    log = log_file.read_text(encoding="utf-8").splitlines() if log_file.exists() else []
     seen = tmp_path / "seen.log"
     lift_env = tmp_path / "lift_env"
     return SimpleNamespace(rc=result.returncode, stdout=result.stdout, stderr=result.stderr, log=log,
@@ -538,6 +1149,16 @@ def test_bootstrap_venv_branch_never_uses_pip_inside_the_uv_venv():
     assert "set -euo pipefail" in text
 
 
+def test_bootstrap_installs_both_ways_with_the_constraints():
+    # Contract: every GPU runtime installs with -c constraints.txt (the repo root), pip and uv alike.
+    text = BOOTSTRAP.read_text(encoding="utf-8")
+    installs = re.findall(r"^.*-m (?:uv )?pip install .*$", text, flags=re.M)
+    lift_installs = [line for line in installs if "${REPO}[${EXTRAS}]" in line]
+    assert len(lift_installs) == 2
+    assert all('-c "$CONSTRAINTS"' in line for line in lift_installs)
+    assert 'CONSTRAINTS="${REPO}/constraints.txt"' in text
+
+
 @needs_bash
 def test_bootstrap_in_a_uv_venv_installs_and_removes_torchao_through_uv(tmp_path):
     r = _run_bootstrap(tmp_path, python_too_old=True)
@@ -545,8 +1166,8 @@ def test_bootstrap_in_a_uv_venv_installs_and_removes_torchao_through_uv(tmp_path
     venv_python = f"{(tmp_path / 'venv').as_posix()}/bin/python"
     assert r.lift_env == f"LIFT_PY={venv_python}\n"
     installs = [line for line in r.log if line.startswith("image: -m uv pip install")]
-    assert len(installs) == 1 and f"--python {venv_python} -e " in installs[0]
-    assert installs[0].endswith("/repo[gpu,data,eval]")
+    assert len(installs) == 1 and f"--python {venv_python} -c " in installs[0]
+    assert CONSTRAINED.search(installs[0]) and installs[0].endswith("/repo[gpu,data,eval]")
     assert "UV_TORCH_BACKEND=auto" in r.log
     assert f"image: -m uv pip uninstall -q --python {venv_python} torchao" in r.log
     assert not [line for line in r.log if line.startswith("venv: -m pip")]  # a uv venv has no pip
@@ -559,11 +1180,22 @@ def test_bootstrap_on_a_new_enough_image_uses_the_image_pip(tmp_path):
     r = _run_bootstrap(tmp_path, python_too_old=False)
     assert r.rc == 0, r.stderr
     assert r.lift_env.startswith("LIFT_PY=") and r.lift_env.rstrip("\n").endswith("/bin/python")
-    assert "image: -m pip install -q -e " in "\n".join(r.log)
-    assert [line for line in r.log if line.endswith("[gpu,data,eval]")]
+    installs = [line for line in r.log if line.startswith("image: -m pip install -q -c ")]
+    assert len(installs) == 1 and CONSTRAINED.search(installs[0])
     assert "image: -m pip uninstall -y -q torchao" in r.log
     assert not [line for line in r.log if "-m uv" in line]
     assert not r.torchao_left
+
+
+@needs_bash
+@pytest.mark.parametrize("python_too_old", [True, False])
+def test_bootstrap_stops_on_a_ref_without_constraints_txt(tmp_path, python_too_old):
+    # A ref without the file predates P02: it cannot run the jobs either (kaggle/README.md, BRANCH).
+    r = _run_bootstrap(tmp_path, python_too_old=python_too_old, constraints=False)
+    assert r.rc != 0
+    assert "constraints.txt" in r.stderr and "BRANCH" in r.stderr
+    assert not [line for line in r.log if " install" in line]  # nothing was installed
+    assert r.lift_env is None
 
 
 @needs_bash

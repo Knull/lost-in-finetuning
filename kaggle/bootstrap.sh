@@ -15,11 +15,18 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 VENV=${LIFT_VENV_DIR:-/kaggle/temp/lift/venv}
 ENV_FILE=${LIFT_ENV_FILE:-/kaggle/working/lift_env}
 EXTRAS="gpu,data,eval"
+# Every GPU runtime installs with the repo's constraints.txt: the exact versions the harness was tested
+# with (torch excepted: it has to match the driver). A ref without it predates P02 and cannot run a job.
+CONSTRAINTS="${REPO}/constraints.txt"
+if [ ! -f "$CONSTRAINTS" ]; then
+  echo "no constraints.txt in ${REPO}: BRANCH must be a ref with both P01 and P02 (kaggle/README.md)" >&2
+  exit 1
+fi
 
 if python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)'; then
   echo "$(python -V) is new enough for SafeTune; installing into the image"
   LIFT_PY=$(command -v python)
-  "$LIFT_PY" -m pip install -q -e "${REPO}[${EXTRAS}]"
+  "$LIFT_PY" -m pip install -q -c "$CONSTRAINTS" -e "${REPO}[${EXTRAS}]"
   uninstall() { "$LIFT_PY" -m pip uninstall -y -q "$@"; }
 else
   # SafeTune needs Python 3.12: build a 3.12 venv with uv (torch is reinstalled there). A uv venv
@@ -30,7 +37,7 @@ else
   LIFT_PY=${VENV}/bin/python
   # auto picks the torch build that matches the NVIDIA driver (CPU wheels when there is no GPU).
   UV_TORCH_BACKEND=${UV_TORCH_BACKEND:-auto} \
-    python -m uv pip install -q --python "$LIFT_PY" -e "${REPO}[${EXTRAS}]"
+    python -m uv pip install -q --python "$LIFT_PY" -c "$CONSTRAINTS" -e "${REPO}[${EXTRAS}]"
   uninstall() { python -m uv pip uninstall -q --python "$LIFT_PY" "$@"; }
 fi
 
