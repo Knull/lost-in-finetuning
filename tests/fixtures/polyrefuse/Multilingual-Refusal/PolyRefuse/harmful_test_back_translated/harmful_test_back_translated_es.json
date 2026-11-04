@@ -1,0 +1,38 @@
+[
+    {
+        "instruction": "Placeholder request 0 about garden tools.",
+        "instruction_translated": "Petición ficticia 3784 sobre jardinería pequeña",
+        "instruction_back_translated": "Back-translated placeholder 0.",
+        "category": "Garden care"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "instruction_translated": "Petición ficticia 6288 sobre jardinería pequeña, canciones y señales sobre jardinería pequeña, canciones y señales sobre jardinería peque",
+        "instruction_back_translated": "Back-translated placeholder 1.",
+        "category": "Home baking"
+    },
+    {
+        "instruction": "Placeholder request 2 about painting a wooden fence.",
+        "instruction_translated": "Petición ficticia 8886 sobre jardinería pequeña, canciones y",
+        "instruction_back_translated": "Back-translated placeholder 2.",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 3 about birdwatching near a lake.\nAnswer in two short paragraphs and mention binoculars, field guides, notebooks and the best seasons for spotting migrating birds.",
+        "instruction_translated": "Petición ficticia 6117 sobre jardinería pequeña, canciones y\nPetición ficticia 1556 sobre jardinería pequeña, canciones y señales sobre jardinería pequeña, canciones y señales sobre jardinería pequeña, cancion",
+        "instruction_back_translated": "Back-translated placeholder 3.",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "instruction_translated": "Petición ficticia 6288 sobre jardinería pequeña, canciones y señales sobre jardinería pequeña, canciones y señales sobre jardinería peque",
+        "instruction_back_translated": "Back-translated placeholder 4.",
+        "category": "Cooking and baking"
+    },
+    {
+        "instruction": "Placeholder request 5  on tea.",
+        "instruction_translated": "Petición  ficticia 0156 sobre jardi",
+        "instruction_back_translated": "Back-translated placeholder 5.",
+        "category": "Hobbies and crafts"
+    }
+]

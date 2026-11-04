@@ -1,0 +1,32 @@
+[
+    {
+        "instruction": "Placeholder request 0 about garden tools.",
+        "instruction_translated": "\u5360\u4f4d\u8bf7\u6c423784\u5173\u4e8e\u56ed\u827a",
+        "category": "Garden care"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "instruction_translated": "\u5360\u4f4d\u8bf7\u6c426288\u5173\u4e8e\u56ed\u827a\u548c\u70f9\u996a\u7684\u793a\u4f8b\u6587\u672c\u5173\u4e8e\u56ed\u827a\u548c\u70f9\u996a\u7684\u793a\u4f8b\u6587\u672c\u5173\u4e8e\u56ed\u827a",
+        "category": "Home baking"
+    },
+    {
+        "instruction": "Placeholder request 2 about painting a wooden fence.",
+        "instruction_translated": "\u5360\u4f4d\u8bf7\u6c428886\u5173\u4e8e\u56ed\u827a\u548c\u70f9\u996a\u7684",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 3 about birdwatching near a lake.\nAnswer in two short paragraphs and mention binoculars, field guides, notebooks and the best seasons for spotting migrating birds.",
+        "instruction_translated": "\u5360\u4f4d\u8bf7\u6c426117\u5173\u4e8e\u56ed\u827a\u548c\u70f9\u996a\u7684\n\u5360\u4f4d\u8bf7\u6c421556\u5173\u4e8e\u56ed\u827a\u548c\u70f9\u996a\u7684\u793a\u4f8b\u6587\u672c\u5173\u4e8e\u56ed\u827a\u548c\u70f9\u996a\u7684\u793a\u4f8b\u6587\u672c\u5173\u4e8e\u56ed\u827a\u548c\u70f9\u996a",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "instruction_translated": "\u5360\u4f4d\u8bf7\u6c426288\u5173\u4e8e\u56ed\u827a\u548c\u70f9\u996a\u7684\u793a\u4f8b\u6587\u672c\u5173\u4e8e\u56ed\u827a\u548c\u70f9\u996a\u7684\u793a\u4f8b\u6587\u672c\u5173\u4e8e\u56ed\u827a",
+        "category": "Cooking and baking"
+    },
+    {
+        "instruction": "Placeholder request 5  on tea.",
+        "instruction_translated": "\u5360\u4f4d\u8bf7\u6c420156\u5173",
+        "category": "Hobbies and crafts"
+    }
+]

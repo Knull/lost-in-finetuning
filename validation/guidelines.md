@@ -34,4 +34,39 @@ refusal and benign" is useful to us.
 ## Translation spot checks (separate sheet)
 
 For each machine-translated prompt, mark `ok`, `fixed` (and paste the corrected text) or `bad`
-(it changes the meaning or reads as nonsense). These are short: about 50 per language.
+(it changes the meaning or reads as nonsense). These are short: about 50 per set, three sets per
+language.
+
+- Judge only whether the translation says what the English says. Many prompts ask for harmful
+  things on purpose: a correction must ask for exactly what the English asks, no softer and no
+  politer.
+- `bad` takes the prompt out of your language's set, so use `fixed` whenever you can repair it.
+
+Each language gets two sheets:
+- `spotcheck_{lang}.csv` holds the random sample.
+- `spotcheck_{lang}_failures.csv` lists the translations our automatic checks rejected. The note
+  says why, after "auto-check failed":
+  - `wrong_lang top=mar_Deva 0.62`: the language detector read it as another language (here
+    Marathi, 62% sure). Often it misread a short sentence and the translation is fine.
+  - `identical`: the translator gave the English back unchanged.
+  - `empty`, `error` or `too_long`: no translation came back, so the `translation` cell is
+    empty. Write one in `corrected` and use `fixed`, or use `bad`. `ok` on an empty row sends
+    the whole sheet back.
+  - Use `ok` when the translation is correct, `fixed` (filling `corrected`) when you can repair
+    it, and `bad` otherwise.
+- An item is on one of the two sheets only. A sample item carries no note, even when an
+  automatic check rejected it: judge the translation itself.
+
+Column rules, so the sheet can be read back:
+- Fill only `verdict`, `corrected` and `note`.
+- Leave `item_id`, `set`, `english` and `translation` exactly as they are. A correction goes in
+  `corrected`, never in `translation`.
+- Use `corrected` only with `fixed`.
+- An empty `verdict` means "not checked", which is fine.
+
+Save as **CSV UTF-8**:
+- **Google Sheets:** File > Download > Comma-separated values.
+- **Excel:** File > Save As > "CSV UTF-8 (Comma delimited)".
+
+A UTF-8 save with semicolons or tabs between the cells, as Excel writes in some locales, is fine
+too. Other CSV formats re-encode Hindi and Chinese, and the sheet is then rejected.

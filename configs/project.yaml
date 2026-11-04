@@ -32,6 +32,7 @@ judges:
 langid:
   id: cis-lmu/glotlid
   file: model.bin
+  revision: baa20d139151a26a71a20eddabf30d4de7329fc7   # pinned Nov 3 (P01)
   min_prob: 0.5
 
 languages:
@@ -40,13 +41,19 @@ languages:
   transfer_validated: [zh, es]
   exploratory: [ar, th]
   all: [en, hi, zh, es, ar, th]
-  # GlotLID labels that count as each language. P01 must check these exist in GlotLID's label set.
+  # GlotLID labels that count as each language. Checked against the pinned model's 2,102 labels
+  # on Nov 3 (lift.lang.LangID re-checks at load). GlotLID has no macrolanguage labels (no
+  # zho_Hans or zho_Hani), and it spreads genuine Hindi, Chinese and Arabic across neighbouring
+  # varieties (long formal Hindi often reads as Angika, anp_Deva, with hin_Deva second), so hi,
+  # zh and ar list those varieties (docs/decisions.md, Nov 3, P01).
   accept_labels:
     en: [eng_Latn]
-    hi: [hin_Deva, hin_Latn]     # romanised Hindi counts as Hindi; code-mixing is reported separately
-    zh: [cmn_Hani, zho_Hans, zho_Hani]
+    # romanised Hindi counts as Hindi; code-mixing is reported separately
+    hi: [hin_Deva, hin_Latn, anp_Deva, awa_Deva, bho_Deva, hne_Deva, mag_Deva, mai_Deva]
+    zh: [cmn_Hani, yue_Hani, wuu_Hani, hak_Hani, nan_Hani, lzh_Hani]
     es: [spa_Latn]
-    ar: [arb_Arab]
+    ar: [arb_Arab, ars_Arab, acm_Arab, apc_Arab, ajp_Arab, aeb_Arab, ary_Arab, arz_Arab, arq_Arab,
+         ayp_Arab, shu_Arab]
     th: [tha_Thai]
   belebele: {en: eng_Latn, hi: hin_Deva, zh: zho_Hans, es: spa_Latn, ar: arb_Arab, th: tha_Thai}
   google_translate: {hi: hi, zh: zh-CN, es: es, ar: ar, th: th}
@@ -65,6 +72,11 @@ unclear:
 
 seeds: [1, 2, 3]
 split_seed: 20261028
+# Which prompts must share a split, and which train/val prompts are dropped as copies of a test
+# prompt (lift.data.build): two prompts are linked if their English is equal (dup_key) or has a
+# character 3-gram Jaccard >= 0.7 (the instruction rule of sources.sft.heldout.near_dup), or if their
+# PolyRefuse translations into one language are equal. Added Nov 4 (P01; docs/decisions.md item 40).
+split_near_dup: {ngram: 3, jaccard: 0.7}
 
 sizes:
   harmful: {dev: 172, final: 400}            # PolyRefuse harmful test, 572 per language
@@ -84,18 +96,43 @@ back_translation:
   langs: [ar, th]
   fraction: 0.20
   engine: facebook/nllb-200-distilled-600M
+  revision: f8d333a098d19b4fd9a8b18f94170487ad3f821d   # pinned Nov 3 (P01)
 
+# Every source is pinned to a commit so a rebuild reproduces the prompt files and splits
+# (pinned Nov 3 in P01; docs/decisions.md).
 sources:
   polyrefuse:
     repo: https://github.com/mainlp/Multilingual-Refusal
-    commit: TBD                  # pin in P01
+    commit: 985169df2a0b1ba56a95c65d5f60e228f12be4a1   # checked on every build
     dir: PolyRefuse
-  orbench: {id: bench-llm/or-bench, config: or-bench-hard-1k, n: 400}
-  aya_redteaming: {id: CohereLabs/aya_redteaming, language: hindi}
-  belebele: {id: facebook/belebele}
+    counts: {harmful_test: 572, harmless_test: 500, harmful_train: 260, harmful_val: 39,
+             harmless_train: 200, harmless_val: 200}
+    # zh harmless train/val are a different, unstored 200-row draw: they line up with no English
+    # file, so zh harmless train is translated from English like hi (verified Nov 3, P01).
+    misaligned: [harmless_train_zh, harmless_val_zh]
+  orbench: {id: bench-llm/or-bench, config: or-bench-hard-1k, split: train, n: 400,
+            revision: e36d8b80e81837c8a8f264bbb2a49f1b32c7e272}
+  # The dataset's only config is "default"; each language is a split.
+  aya_redteaming: {id: CohereLabs/aya_redteaming, split: hindi,
+                   revision: 5a16fee03c19d681b4f3527b6a750e1ed4d434c7}
+  belebele: {id: facebook/belebele, split: test, revision: 7899cdfa4e1e0d733fd77c848e2c273cb1d32be2}
   sft:
-    aya: {id: CohereLabs/aya_dataset, language: Hindi}
-    indicalign: {id: ai4bharat/indic-align, subset: TBD}  # licence check in P01
+    aya: {id: CohereLabs/aya_dataset, split: train, language: Hindi,   # 1,153 Hindi rows, all in train
+          revision: f9ea04583f02a8f86404ff6c58bf75fe637df8a2}
+    # One general, single-turn, human-written subset (docs/decisions.md, Nov 3): Dolly_T, Hindi
+    # column hin_Deva. Upstream licence CC-BY-SA-3.0 (databricks-dolly-15k); the card says CC-BY-4.0.
+    indicalign: {id: ai4bharat/indic-align, subset: Dolly_T, split: train, column: hin_Deva,
+                 revision: 032b6a9070e7f85f1a38e0506419f4590a20455a}
+    # IndicAlign dropped Dolly's context passages, so rows whose Dolly source had one are unusable;
+    # the original file tells which (matched on the English instruction).
+    dolly: {id: databricks/databricks-dolly-15k, file: databricks-dolly-15k.jsonl,
+            revision: bdd27f4d94b9c1f951818a7da7fd7aeea5dbff1a}
+    heldout:
+      per_source: 150            # x 2 sources = sizes.utility
+      # A training row is a near-duplicate of a held-out row if its instruction's character 3-gram
+      # Jaccard similarity is >= 0.7, or its response's is >= 0.85 (both responses >= 20 chars).
+      # Exact Jaccard (the quantity MinHash estimates), against both sources' held-out rows.
+      near_dup: {ngram: 3, instruction: 0.7, response: 0.85, response_min_chars: 20}
 
 storage:
   runs_repo_env: LIFT_RUNS_REPO  # private HF dataset repo used to move outputs between Kaggle and laptop

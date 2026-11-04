@@ -1,0 +1,32 @@
+[
+    {
+        "instruction": "Placeholder request 0 about garden tools.",
+        "instruction_translated": "\u0637\u0644\u0628 \u0646\u0645\u0648\u0630\u062c\u064a 3784 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e",
+        "category": "Garden care"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "instruction_translated": "\u0637\u0644\u0628 \u0646\u0645\u0648\u0630\u062c\u064a 6288 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e \u0648\u0627\u0644\u0642\u0631\u0627\u0621\u0629 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e \u0648\u0627\u0644\u0642\u0631\u0627\u0621\u0629 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e \u0648\u0627\u0644\u0642\u0631\u0627\u0621",
+        "category": "Home baking"
+    },
+    {
+        "instruction": "Placeholder request 2 about painting a wooden fence.",
+        "instruction_translated": "\u0637\u0644\u0628 \u0646\u0645\u0648\u0630\u062c\u064a 8886 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e \u0648\u0627\u0644\u0642\u0631\u0627\u0621\u0629",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 3 about birdwatching near a lake.\nAnswer in two short paragraphs and mention binoculars, field guides, notebooks and the best seasons for spotting migrating birds.",
+        "instruction_translated": "\u0637\u0644\u0628 \u0646\u0645\u0648\u0630\u062c\u064a 6117 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e \u0648\u0627\u0644\u0642\u0631\u0627\u0621\u0629\n\u0637\u0644\u0628 \u0646\u0645\u0648\u0630\u062c\u064a 1556 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e \u0648\u0627\u0644\u0642\u0631\u0627\u0621\u0629 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e \u0648\u0627\u0644\u0642\u0631\u0627\u0621\u0629 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e \u0648\u0627\u0644\u0642\u0631\u0627\u0621\u0629 \u0639\u0646 \u0627\u0644\u0628",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "instruction_translated": "\u0637\u0644\u0628 \u0646\u0645\u0648\u0630\u062c\u064a 6288 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e \u0648\u0627\u0644\u0642\u0631\u0627\u0621\u0629 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e \u0648\u0627\u0644\u0642\u0631\u0627\u0621\u0629 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a\u0646\u0629 \u0648\u0627\u0644\u0637\u0628\u062e \u0648\u0627\u0644\u0642\u0631\u0627\u0621",
+        "category": "Cooking and baking"
+    },
+    {
+        "instruction": "Placeholder request 5  on tea.",
+        "instruction_translated": "\u0637\u0644\u0628  \u0646\u0645\u0648\u0630\u062c\u064a 0156 \u0639\u0646 \u0627\u0644\u0628\u0633\u062a",
+        "category": "Hobbies and crafts"
+    }
+]

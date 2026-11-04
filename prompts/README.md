@@ -63,7 +63,7 @@ real figure.
 
 | Day | Claude Code | GPU (Colab A100 unless noted) | You |
 | --- | --- | --- | --- |
-| Tue Nov 3 | P01, P02 and P04 in parallel, merge; R1 tonight if there's time | data build on the laptop (no GPU; translation takes about an hour) once P01 merges | redeem the HF credits; HF licences; private runs repo; secrets; judge API credits |
+| Tue Nov 3 | P01, P02 and P04 in parallel, merge; R1 tonight if there's time | data build on a machine Google Translate does not refuse (no GPU; translation takes 1.5 to 2 hours; it refused this laptop on Nov 3) once P01 merges | redeem the HF credits; HF licences; private runs repo; secrets; judge API credits |
 | Wed Nov 4 | R1 if not done, then P03 and P06 | Gate 0 (~15 min), stock dev eval (~10 min), the 3 pilot fine-tunes (~1 to 1.5 h total) | Hindi spot checks; send the zh and es spot-check sheets; pick the frontier judge model |
 | Thu Nov 5 | P05 and P06 | pilot dev evals (~30 min); Gates 1 and 2; seeds 2-3 of the chosen recipe (~45 min) | validation round 1: you do 60 hi and 40 en; send 40 zh and 40 es; apply spot-check fixes |
 | Fri Nov 6 | fixes from GPU runs | fit CAST on seed 1; dev sweep of 10 settings (~1 h); diagnosis on stock + seed 1 (~15 min) | import round 1 labels; `lift validate decide-judge` |
