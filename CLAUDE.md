@@ -78,6 +78,7 @@ prompts/        the implementation prompts and the schedule (prompts/README.md)
 validation/     guidelines.md for the human annotators
 hf/             model card, dataset cards, Space, article drafts                  <- P08
 docs/           decisions.md (dated changes), toolkit-notes.md (verified APIs)
+constraints.txt exact library versions the GPU runtimes install with
 ```
 
 A stub raises `NotImplementedError("Pxx")` and carries its spec in the docstring. Keep the
@@ -106,11 +107,17 @@ six languages, so pairing, splitting and clustering all go by pid.
     Claude Code session (`colab/README.md`), or from a notebook if the CLI misbehaves.
   - **Backup: Kaggle T4 x2, fp16** (`kaggle/README.md`). A T4 x2 is two separate 16 GB devices:
     the generator goes on `cuda:0` and the judge on `cuda:1`. On a single GPU, both share it.
+  - A GPU job runs a git ref (`lift remote --ref`, Kaggle `BRANCH`), not the working tree, and
+    installs with `-c constraints.txt`. The ref needs P01 and P02 (P02 alone has P01's prompt
+    loader and LangID as stubs).
 - **One precision for every reported number.** Every reported generation uses bf16. A T4 fp16
   run can count only if Gate 0's fp16-vs-bf16 check passes. Paired comparisons never mix
   precisions: the cache key includes the dtype, `lift.judge.pipeline.load_labels` refuses a cell
   in another dtype, and every paired comparison loads its two sides with
-  `lift.judge.pipeline.paired_labels`, which refuses mismatched dtypes, judges or models.
+  `lift.judge.pipeline.paired_labels`, which refuses mismatched dtypes, judges, models, chat
+  templates or decoding settings. An fp16 cell is read only while `outputs/metrics/gate0-fp16.json`
+  (at least 200 prompts compared) and the bf16 `gate0.json` both pass for its Global revision
+  (`check_dtype_licence`).
 - **Claude Code sessions** run in the Claude desktop app on a Windows laptop (PowerShell). They
   have no usable GPU for this project.
   - Write cross-platform Python: `pathlib` everywhere, and files written with `newline="\n"`
@@ -121,12 +128,16 @@ six languages, so pairing, splitting and clustering all go by pid.
     PowerShell syntax for local steps.
 - **Sessions are wiped.** Colab and Kaggle sessions lose their disk when they end (Kaggle after
   12 h). Every job pulls from and pushes to the runs repo (`lift sync`), and resumes by cache
-  key.
+  key. One file never holds two stacks (torch, transformers, GPU class): a finished cell is reused
+  on any stack, but an unfinished one resumes only on the stack that started it, or is made again
+  with the `lift restart` line its refusal prints (a job line right after `lift sync pull`).
 - **Secrets.** `HF_TOKEN` (with accepted access to tiny-aya-global and tiny-aya-base),
   `GITHUB_TOKEN` (remote runtimes clone this private repo), the judge API key with its spend cap
   `LIFT_JUDGE_MAX_USD` (per lift process), and `LIFT_RUNS_REPO`.
 - **Pinned revisions.** `lift generate`, `lift judge` and `lift run-dev` refuse a revision that is
-  not a commit sha; Gate 0 (`lift smoke`) resolves and prints the shas to pin.
+  not a commit sha; Gate 0 (`lift smoke`) resolves and prints the shas to pin. Pin them in
+  configs/project.yaml with a dated decisions.md entry, then commit and push to the ref the GPU
+  job runs.
 
 ## Tiny Aya
 
@@ -188,6 +199,6 @@ six languages, so pairing, splitting and clustering all go by pid.
   stats.paired, stats.agreement, judge.labels, manifest, cli and `lift info`.
 - **P02 (harness).** models.load/generate/variants (stock, adapter), train.merge, prompts,
   judge.qwen3guard, judge.frontier (safety), judge.pipeline, audit.record_safety, sync, gate0, and
-  `lift smoke|generate|judge|run-dev|sync|remote`, with colab/job.py and kaggle/runner.ipynb.
+  `lift smoke|generate|judge|run-dev|restart|sync|remote`, with colab/job.py and kaggle/runner.ipynb.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

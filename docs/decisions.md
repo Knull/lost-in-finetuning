@@ -24,6 +24,18 @@ time).
     - **Merge parity.** A random LoRA (r 16, alpha 32, the training targets) on Global, merged vs
       unmerged, token for token in fp32 on 20 dev prompts. This is the README's merged-adapter parity
       before a real adapter exists; P03 repeats it for every adapter.
+    - **Verdicts.** PASS needs every required check run and passed. A failed check, or a model that
+      does not load, is FAIL and replaces the earlier report (gate0.json, gate0-fp16.json). A check
+      that could not run (one GPU too small for the judge beside the generator, or no valid bf16
+      run to compare with: none, a failed one, another revision, other decoding settings, or fewer
+      than 200 prompts) is NOT RUN, and the run is INCOMPLETE, written as gate0-partial.json or
+      gate0-fp16-partial.json; so is a run with a required check skipped. "fp16 failed: T4 runs
+      are never reported" needs a real comparison under 95% or a non-finite fp16 run. The bf16
+      Gate 0 is refused on a GPU without native bf16 (a T4), so it never overwrites the A100's.
+    - **The fp16 licence.** An fp16 cell is read for reporting only while gate0-fp16.json passes
+      (with its fp16 check, on at least 200 prompts) and the bf16 Gate 0 it compared against
+      (gate0.json) passes, both for the Global revision that made the cell. Its AuditKIT record is
+      named `...-fp16.json`.
 28. **Counting new tokens.** `n_new_tokens`, which the "fewer than 5 new tokens" unclear rule reads,
     counts the output's content tokens: special tokens such as `<|START_RESPONSE|>` and the
     end-of-turn token are excluded. `hit_cap` means no end-of-turn token within 256 new tokens. Stop
@@ -44,8 +56,22 @@ time).
     the `--sets/--langs` P04 prints). `--sample 0.10` reproduces their random part exactly: for each
     (set, split), ceil(0.10 x the number of pids) prompt ids ranked by sha256(seed:second:set:split:pid),
     the same prompts in every language and variant, so the second judge's view stays paired by pid.
-    Every item in the validation sheets is added. A listed key that is in none of the variant's
-    generations files (regenerated, or a typo) stops `lift judge` unless `--allow-missing` is given.
+    Every item in the validation sheets is added. With `--keys`, every generations file that holds a
+    listed key is judged; an explicit `--sets/--langs` narrows that (P04 prints one line per group
+    over one list), and the keys left outside are logged as counts. A listed key that is in none of
+    the variant's generations files (regenerated, or a typo) stops `lift judge` unless
+    `--allow-missing` is given.
+32. **Library versions and stacks.** GPU runtimes install with `constraints.txt` (transformers
+    5.22.1, tokenizers 0.23.3, accelerate 1.15.0, peft 0.21.2, safetensors 0.8.0, huggingface_hub
+    2.4.0, hf_xet 1.8.0, openai 3.43.0, anthropic 2.4.0); torch stays the runtime's own CUDA build.
+    Every generation and every Qwen3Guard judgement records its stack (torch, transformers, GPU
+    class), and one file never holds two stacks: a finished cell is reused under another stack,
+    appending to an unfinished one is refused, and sync refuses to merge two stacks into one file.
+    A refused cell is made again with `lift restart` (its files go to the unsynced outputs/.aside/
+    and empty ones take their place, so the next push replaces the Hub's copies); the other cells
+    of the run go on.
+    Two arms of a paired comparison may run on different stacks (logged), but their chat template
+    and decoding settings must match.
 
 ## Nov 3, 2026 (evening): after the organisers' announcements, still before any run
 

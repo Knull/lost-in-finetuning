@@ -139,6 +139,9 @@ metrics=...)` form written here before raises `TypeError` (there is no `prompts=
 
 ## Harness dependencies (verified Nov 3 for P02)
 
+The GPU runtimes install these exact versions from `constraints.txt` (torch excepted: it is the
+runtime's own CUDA build); the full set resolves for Linux with safetune 0.1.12.
+
 - **transformers 5.22.1.** `generate()` fills every generation setting a caller leaves `None` from
   the checkpoint's generation_config.json, and logits processors such as `repetition_penalty` act
   in greedy mode too. `lift.models.load` therefore replaces the model's generation_config with a
@@ -160,13 +163,22 @@ metrics=...)` form written here before raises `TypeError` (there is no `prompts=
   files and splits large uploads into several commits of which only the first carries
   `parent_commit`, so a concurrent push can be silently reverted. `lift.sync` therefore writes with
   `create_commit` (only the files it planned, every part guarded by `parent_commit`), verifies every
-  download's hash, and refuses a repo unless `private is True`.
+  download's hash, and refuses a repo unless `private is True`. `whoami()` gives the token's
+  `auth.accessToken.role` ("read", "write" or "fineGrained", with scoped permissions such as
+  `repo.write`); `lift sync check --write` and `lift remote` refuse a read token before any GPU time.
 - **Colab CLI 0.7.5.** See colab/README.md. `colab run --env` writes values into local history and
   `colab.log`, so secrets go through `colab upload` of a temp file only; `colab exec` exits 0 even
   when the code fails; `--timeout` above 4294967 overflows on Windows. The default auth is oauth2
   (the CLI's own README says adc); `colab stop` exits 0 for a session name it does not know; an
-  unknown `--gpu` silently becomes A100.
+  unknown `--gpu` silently becomes A100. An `exec` reuses the session's kernel, so a second exec
+  queues behind a busy cell: a push from the laptop cannot overtake a job that is still pushing.
 - **OpenAI SDK 3.43 / Anthropic SDK 2.4.** Anthropic's API version 2026-10-21 (the SDK default)
   rejects `temperature`, `top_p` and `top_k`; its 529 `OverloadedError` is not an
   `InternalServerError` subclass; both SDKs log full request bodies at DEBUG (the judge pins their
   loggers to WARNING); OpenAI's Responses API stores responses unless `store=False`.
+  - Account limits stop a run instead of failing items. Anthropic answers a reached workspace or
+    organisation spend limit with HTTP 400 invalid_request_error, "You have reached your specified
+    (workspace) API usage limits" (docs/en/api/rate-limits), an exhausted credit balance with "Your
+    credit balance is too low", and billing problems with 402 billing_error; the tier's monthly cap is
+    a 429 (error.details.error_code "enforced_spend_limit_reached", no retry-after). anthropic 2.4.0
+    puts the whole response body's repr in `exc.message`; openai 3.43.0 keeps `body["error"]`.
