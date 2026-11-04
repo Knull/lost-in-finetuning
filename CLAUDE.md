@@ -190,6 +190,7 @@ six languages, so pairing, splitting and clustering all go by pid.
   - Each module's docstring holds the verified facts about its source.
   - The splits are frozen in `data/splits/` (Nov 4). The 8 files that need Google Translate
     (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) wait for the
-    translation job. The SFT candidates have 679 rows each.
+    translation job. The SFT candidates have 679 rows each
+    (`data/sft/{cand}/{variant}/sft_messages.jsonl`; N is `decision.rows` in `data/sft/report.json`).
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.
