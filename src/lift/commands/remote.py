@@ -24,9 +24,13 @@ examples (PowerShell, repo root, venv active; --ref must hold P01 and P02, see c
 Before any VM, the runs repo is checked as `lift sync check --write` does. The job pushes its outputs
 after every line and once more at the end, also after a failure; a push that exits 1 is tried again,
 and once more from this laptop before the VM is stopped; one that exits 2 (a problem no retry can
-fix) never is. The job stops itself 30 minutes before --max-hours. Ctrl+C asks the job to stop and
-push, waits up to 15 minutes for it (up to 55 while its log shows a push running), then stops the
-VM; a second Ctrl+C stops the VM at once (the outputs since the last push are then lost).
+fix) never is. A generate, judge or run-dev line that exits 3 (done, but some cells were skipped,
+each listed with its remedy) does not stop the job: its next lines run, and lift remote exits 1. The
+job stops itself 30 minutes before --max-hours. Ctrl+C asks the job to stop and push, waits up to 15
+minutes for it (up to 55 while its log shows a push running), then stops the VM; a stop request that
+cannot be uploaded is tried again while it waits, never a reason to stop sooner. A second Ctrl+C
+stops the VM at once (the outputs since the last push are then lost). One lift remote process at a
+time follows a job: watch is refused while another one does, with its pid.
 
 """
 
@@ -84,7 +88,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.set_defaults(func=_remote)
     actions = p.add_subparsers(dest="remote_action", metavar="{watch,stop}",
                                title="recovery (for a job started from this machine)")
-    w = actions.add_parser("watch", help="re-attach to a job: print its log, stop its VM when it ends")
+    w = actions.add_parser("watch", help="re-attach to a job: print its log, stop its VM when it ends",
+                           description="Re-attach to a job started from this machine: print its log, and "
+                                       "stop its VM when it ends, after one push retry if its final push "
+                                       "failed. That retry needs HF_TOKEN (or `hf auth login`) and "
+                                       "LIFT_RUNS_REPO in this shell, not GITHUB_TOKEN; without them the "
+                                       "VM is kept, with the outputs on it (exit 1). Refused (exit 2) "
+                                       "while another lift remote process on this machine follows the "
+                                       "job: check first whether the original lift remote still runs.")
     w.add_argument("name", help="the session name lift remote printed")
     w.add_argument("--poll", type=float, default=argparse.SUPPRESS, help="seconds between log downloads")
     w.add_argument("--max-hours", dest="watch_max_hours", type=float, default=None,

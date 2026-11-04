@@ -747,6 +747,43 @@ def test_an_explicit_push_line_runs_as_a_push_and_never_stops_the_job(job, tmp_p
     assert status["rc"] == 0 and status["checkpoint_push_failures"] == 1
 
 
+SWEEP = ["lift sync pull", "lift run-dev --variant stock",
+         "lift run-dev --variant wiseft-l0.50-adapter-aya-std-s1",
+         "lift run-dev --variant resta-a0.50-adapter-aya-std-s1"]
+SKIPPED = (b"1 cells were skipped (see the errors above), each with its remedy:\n"
+           b"  harmful_hi_dev: lift restart --variant stock --split dev --sets harmful --langs hi\n")
+
+
+# Review 4, W8 and contract G: generate, judge and run-dev exit 3 for "done, but some cells were skipped".
+# job.py ended the job at such a line, so one stale cell of stock skipped every repair variant after it.
+def test_a_line_that_skipped_cells_is_reported_and_the_next_lines_run(job, tmp_path):
+    root = tmp_path / "content"
+    root.mkdir()
+    vm = FakeVM(root, rcs={SWEEP[1]: 3}, outputs={SWEEP[1]: SKIPPED})
+    status, vm, out = run_job(job, root, SWEEP, vm=vm)
+    assert vm.keys("lift ") == [SWEEP[0], SWEEP[1], "lift sync push", SWEEP[2], "lift sync push", SWEEP[3],
+                                "lift sync push"]
+    assert status["partial_lines"] == [1] and status["failed_line"] is None and status["stopped"] is None
+    assert status["rc"] == 3 and status["push_rc"] == 0 and status["checkpoint_push_failures"] == 0
+    log = log_bytes(root)
+    assert SKIPPED in log and b"line 2/4 exited 3" in log and b"the job fails at the end" in log
+    assert "1 line(s) exited 3" in out
+    # lift remote: a job line failed (1), also when the push had to be retried from the laptop.
+    assert remote.exit_code(status) == 1 and "line 2 exited 3" in remote.describe(status)
+    assert remote.exit_code({**status, "push_rc": 1}, rescue={"push_rc": 0}) == 1
+    # A line that fails after it still ends the job, and so does exit 3 of any other command.
+    root = tmp_path / "then-fails"
+    lines = ["lift generate --variant stock --split dev", "lift judge --variant stock --split dev",
+             "lift info"]
+    status, vm, _ = run_job(job, root, lines, vm=FakeVM(root, rcs={lines[0]: 3, lines[1]: 1}))
+    assert vm.keys("lift ") == [lines[0], "lift sync push", lines[1], "lift sync push"]
+    assert status["partial_lines"] == [0] and status["failed_line"] == 1 and status["rc"] == 1
+    root = tmp_path / "smoke"
+    status, vm, _ = run_job(job, root, ["lift smoke", "lift info"], vm=FakeVM(root, rcs={"lift smoke": 3}))
+    assert vm.keys("lift ") == ["lift smoke", "lift sync push"]
+    assert status["partial_lines"] == [] and status["failed_line"] == 0 and status["rc"] == 3
+
+
 # --- lift remote ----------------------------------------------------------------------------------
 
 
@@ -936,7 +973,7 @@ def test_launch_runs_new_upload_exec_poll_stop_sessions(tmp_path):
     assert fake.argvs[1] == [EXE, "new", "-s", "lift-t1", "--gpu", "A100"]
     exec_argv = fake.argvs[3]
     assert exec_argv[1:8] == ["exec", "-s", "lift-t1", "-f", str(remote.JOB_FILE), "--timeout",
-                              str(12 * 3600 + int(remote.PUSH_WAIT) + 900)]  # past the longest wait
+                              str(12 * 3600 + int(remote.STOP_WAIT + remote.PUSH_WAIT) + 900)]  # longest wait
     assert exec_argv[8] == "--env" and exec_argv[9].startswith("LIFT_JOB_B64=")
     spec = json.loads(base64.b64decode(exec_argv[9].split("=", 1)[1]))
     # The job stops itself 30 minutes before --max-hours, so its final push fits.
@@ -972,6 +1009,22 @@ def test_a_failed_line_exits_1_and_says_which(tmp_path):
     assert remote.launch(remote.Launch(gpu="T4", job="lift info", name="lift-t2"), ctx) == 1
     assert manifest("lift-t2")["rc"] == 1 and manifest("lift-t2")["job"]["rc"] == 3 and fake.handle.killed
     assert "line 2 failed" in ctx.out.getvalue()
+
+
+# Contract G: a job whose generate, judge or run-dev line exited 3 (cells skipped) ran its other lines,
+# and lift remote exits 1 for it, also when the push retry from here sent its outputs.
+def test_a_job_whose_lines_skipped_cells_exits_1(tmp_path):
+    partial = {**OK, "rc": 3, "partial_lines": [1], "installed": True, "ran": 3}
+    job_text = "; ".join(SWEEP[:3])
+    fake, ctx = setup(tmp_path, [done_log(partial)])
+    fake.handle.rc = 0
+    assert remote.launch(remote.Launch(gpu="A100", job=job_text, name="lift-p3"), ctx) == 1
+    text = ctx.out.getvalue()
+    assert manifest("lift-p3")["rc"] == 1 and "line 2 exited 3" in text
+    fake, ctx = setup(tmp_path / "rescued", [done_log({**partial, "push_rc": 1})], rescue_rc=0)
+    fake.handle.rc = 0
+    assert remote.launch(remote.Launch(gpu="A100", job=job_text, name="lift-p4"), ctx) == 1
+    assert len(fake.rescues) == 1 and manifest("lift-p4")["rescue_push"]["push_rc"] == 0
 
 
 @pytest.mark.parametrize("gpu", ["a10g", "H100", "cpu", "", None])
@@ -1100,9 +1153,58 @@ def test_ctrl_c_before_the_job_line_still_stops_the_vm(tmp_path):
     assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-t6"), ctx) == 130
     assert fake.calls[-2:] == ["stop", "sessions"] and fake.handle.killed and fake.server == {}
     assert manifest("lift-t6")["outcome"] == "interrupted"
-    # The stop request went up, but no last line came: the operator is told what that means.
+    # The stop request went up, but no job log ever appeared: the operator is told nothing was lost.
     assert fake.uploads[-1]["remote"] == STOP_FILE
-    assert "outputs since its last successful push may be lost" in ctx.out.getvalue()
+    text = ctx.out.getvalue()
+    assert "the job never started" in text and "nothing was lost" in text and "may be lost" not in text
+
+
+# Review 4, W13: the closing message said outputs were lost when no job line could have run.
+def test_a_stop_before_any_job_line_could_run_says_nothing_was_lost(tmp_path):
+    # Ctrl+C while the secrets go up to a fresh VM that does not answer yet: no job was started.
+    fake, ctx = setup(tmp_path, upload_rc=1)
+    ctx.sleep = interrupting_sleep(ctx, 1)
+    opts = remote.Launch(gpu="A100", job="lift sync pull; lift smoke", name="lift-cs")
+    assert remote.launch(opts, ctx) == 130
+    text = ctx.out.getvalue()
+    assert "exec" not in fake.calls and fake.server == {}
+    assert "before the job was started" in text and "nothing was lost" in text
+    assert "are lost" not in text and "may be lost" not in text
+    # Ctrl+C twice after the exec, before job.py wrote its log: no line can have run either.
+    fake, ctx = setup(tmp_path / "twice", [None])
+    ctx.sleep = interrupting_sleep(ctx, 2, 3)
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-cs2"), ctx) == 130
+    text = ctx.out.getvalue()
+    assert fake.server == {} and "before the job's log appeared" in text and "nothing was lost" in text
+    assert "are lost" not in text and "may be lost" not in text
+    # The exec client failed before the job's log appeared: the job never started.
+    fake, ctx = setup(tmp_path / "no-start", [None])
+    fake.handle.rc = 1
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-cs3"), ctx) == 1
+    text = ctx.out.getvalue()
+    assert manifest("lift-cs3")["outcome"] == "no-start"
+    assert "the job never started" in text and "nothing was lost" in text and "may be lost" not in text
+    # Once the log was seen, a line can have run: the warning stays.
+    fake, ctx = setup(tmp_path / "seen", [LOG_START])
+    ctx.sleep = interrupting_sleep(ctx, 2, 3)
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-cs4"), ctx) == 130
+    text = ctx.out.getvalue()
+    assert "since the last successful push are lost" in text
+    # So it does when nobody looked for the log within minutes of the start (a long --poll), and when
+    # job.py ran without a log it could not open (a full disk): it says so on the exec client's output.
+    fake, ctx = setup(tmp_path / "late", [None])
+    ctx.sleep = interrupting_sleep(ctx, 1, 2)
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-cs5", poll=600), ctx) == 130
+    text = ctx.out.getvalue()
+    assert "since the last successful push are lost" in text
+    fake, ctx = setup(tmp_path / "no-log", [None])
+    fake.handle.rc = 0
+    exec_log = remote.exec_log_path("lift-cs6")
+    exec_log.parent.mkdir(parents=True, exist_ok=True)
+    exec_log.write_bytes(b"[lift-job] 10:00:00 cannot open /content/lift_job.log (OSError): job.py goes on\n")
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-cs6"), ctx) == 1
+    text = ctx.out.getvalue()
+    assert "may be lost" in text and "nothing was lost" not in text
 
 
 # Review #33: Ctrl+C unassigned the VM at once, so job.py never ran its final push.
@@ -1189,7 +1291,9 @@ def test_max_hours_without_an_answer_stops_the_vm_after_the_wait(tmp_path):
     assert fake.calls[7:9] == ["download", "upload"]  # one last look, then the stop request
     assert fake.calls[-2:] == ["stop", "sessions"] and fake.server == {}
     assert manifest("lift-t13")["outcome"] == "max-hours"
-    assert "outputs since its last successful push may be lost" in ctx.out.getvalue()
+    # No job log ever appeared (review 4, W13): nothing was lost, and the closing message says so.
+    text = ctx.out.getvalue()
+    assert "the job never started" in text and "nothing was lost" in text and "may be lost" not in text
 
 
 # Review #35: past the cap, the log was never read, so a finished job was reported as max-hours.
@@ -1507,12 +1611,100 @@ def test_the_wait_for_a_running_push_has_a_bound(tmp_path):
     assert "may be lost" in ctx.out.getvalue()
 
 
+def deadline_log(t0: float, now: float, done_at: float, status: dict) -> bytes:
+    """The job log at ``now`` under a 1-hour cap from ``t0``: a line runs; the job stops itself at its
+    own deadline (t0 + 2700) and runs its final push, a heartbeat every 5 minutes, until ``done_at``."""
+    data = LOG_START + job_note(5, "$ lift run-dev --variant stock   (line 1/1)")
+    for t in range(300, 2700, 300):
+        if t0 + t <= now:
+            data += job_note(t, f"alive {remote.hms(t)}: line 1/1, 0:00:10 since its last output")
+    if t0 + 2700 <= now:
+        data += job_note(2700, "deadline reached: stopping the job; its final push still runs")
+        data += job_note(2730, "lift sync push (final, try 1/4)")
+    for t in range(3000, int(done_at - t0) + 1, 300):
+        if t0 + t <= now:
+            pushing = remote.hms(t - 2730)
+            data += job_note(t, f"alive {remote.hms(t)}: final push, the push has run for {pushing}")
+    if now >= done_at:
+        data += b"@@LIFT_DONE " + json.dumps(status, sort_keys=True).encode() + b"\n"
+    return data
+
+
+def failing_stop_uploads(fake: FakeColab, ctx: remote.Context, fail: int, then=None) -> list[float]:
+    """The VM's proxy fails the first ``fail`` stop-file uploads (all when ``fail`` is None); the next
+    one goes up and calls ``then``. Returns the time of every stop-file try."""
+    tries: list[float] = []
+    upload = fake.do_upload
+
+    def do_upload(args, config):
+        if args[4] != STOP_FILE:
+            return upload(args, config)
+        tries.append(ctx.clock())
+        if fail is None or len(tries) <= fail:
+            return remote.Result(1, "[colab] Upload failed: 502 Server Error for url: https://vm.invalid/x")
+        if then:
+            then()
+        return upload(args, config)
+
+    fake.do_upload = do_upload
+    return tries
+
+
+# Review 4, W5: a stop request whose upload failed twice in a row (no wait between the tries) skipped the
+# whole wait and stopped the VM at once, even at --max-hours, where the job had stopped itself at its
+# own deadline and was running its final push.
+def test_a_stop_request_that_does_not_go_up_never_cuts_the_wait(tmp_path):
+    stopped = {**OK, "rc": 130, "failed_line": 0, "stopped": "deadline reached", "installed": True, "ran": 1}
+    fake, ctx = setup(tmp_path, [LOG_START])
+    t0 = ctx.clock()
+    done_at = t0 + 3600 + 300  # the job's final push ends 5 minutes after the cap
+    tries = failing_stop_uploads(fake, ctx, None)
+    fake.on_download = lambda n: setattr(fake, "logs", [deadline_log(t0, ctx.clock(), done_at, stopped)])
+    opts = remote.Launch(gpu="A100", job="lift run-dev --variant stock", name="lift-sf", max_hours=1.0,
+                         poll=60)
+    assert remote.launch(opts, ctx) == 1
+    assert ctx.clock() >= done_at and fake.server == {}  # the VM was stopped after the job's last line
+    record = manifest("lift-sf")
+    assert record["job"] == stopped and record["outcome"] == "max-hours" and record["rc"] == 1
+    # The first tries 15 and 30 s apart, then one every STOP_RETRY_EVERY while lift remote waited.
+    gaps = [round(b - a) for a, b in zip(tries, tries[1:], strict=False)]
+    assert len(tries) > remote.STOP_TRIES and gaps[:2] == [15, 30]
+    assert all(gap >= remote.STOP_RETRY_EVERY for gap in gaps[2:])
+    text = ctx.out.getvalue()
+    assert "the VM is stopped now" not in text and "may be lost" not in text
+
+
+def test_ctrl_c_tries_the_stop_request_again_while_it_waits(tmp_path):
+    stopped = {**OK, "rc": 130, "failed_line": 1, "stopped": "stop file: ctrl-c", "installed": True}
+    running = LOG_START + job_note(5, "$ lift run-dev --variant stock   (line 2/2)")
+    fake, ctx = setup(tmp_path, [running])
+    ctx.sleep = interrupting_sleep(ctx, 3)
+    answered = [done_log(stopped, running[len(LOG_START):])]
+    tries = failing_stop_uploads(fake, ctx, remote.STOP_TRIES, then=lambda: setattr(fake, "logs", answered))
+    job_text = "lift sync pull; lift run-dev --variant stock"
+    assert remote.launch(remote.Launch(gpu="A100", job=job_text, name="lift-sr"), ctx) == 130
+    assert len(tries) == remote.STOP_TRIES + 1 and tries[-1] - tries[-2] >= remote.STOP_RETRY_EVERY
+    assert manifest("lift-sr")["job"] == stopped and fake.server == {}
+    text = ctx.out.getvalue()
+    assert "the stop request went up" in text and "are lost" not in text and "may be lost" not in text
+    # A second Ctrl+C, here in the wait before the stop request's second try, stops the VM at once.
+    fake, ctx = setup(tmp_path / "twice", [running])
+    ctx.sleep = interrupting_sleep(ctx, 3, 4)
+    tries = failing_stop_uploads(fake, ctx, None)
+    assert remote.launch(remote.Launch(gpu="A100", job=job_text, name="lift-sr2"), ctx) == 130
+    assert len(tries) == 1 and fake.calls[-3:] == ["upload", "stop", "sessions"] and fake.server == {}
+    text = ctx.out.getvalue()
+    assert "since the last successful push are lost" in text
+
+
 def test_lift_remote_knows_job_py_push_schedule(job):
     assert remote.JOB_PUSH_LIMIT == job.PUSH_LIMIT_SECONDS and remote.JOB_KILL_GRACE == job.KILL_GRACE_SECONDS
     assert remote.JOB_PUSH_DELAYS == job.PUSH_DELAYS
     one_stalled_try = job.PUSH_LIMIT_SECONDS + job.KILL_GRACE_SECONDS + sum(job.PUSH_DELAYS)
     assert remote.STOP_WAIT < one_stalled_try and one_stalled_try + 600 <= remote.PUSH_WAIT == 3300
-    assert remote.exec_timeout(12) >= 12 * 3600 + remote.PUSH_WAIT
+    # The longest wait after the cap: a stop request that went up only at the end of STOP_WAIT, then
+    # PUSH_WAIT from there (review 4, W5). The exec client must outlast it.
+    assert remote.exec_timeout(12) > 12 * 3600 + remote.STOP_WAIT + remote.PUSH_WAIT
 
 
 def test_job_pushing_reads_what_job_py_logs(job, tmp_path):
@@ -1581,6 +1773,49 @@ def test_watch_no_stop_never_calls_outputs_on_the_running_vm_lost(tmp_path):
     assert fake.server and fake.rescues == [] and "ARE LOST" not in text
     assert "still on" in text and "lift remote watch lift-ns" in text
     assert manifest("lift-ns")["rc"] == 1
+    # It says what that retry needs in its shell (review 4, W1).
+    assert "HF_TOKEN" in text and "LIFT_RUNS_REPO" in text
+
+
+# Review 4, W1: watch from a new shell (README step 6 sets the secrets per PowerShell session) found the
+# job's final push failed, said to set the secrets "first", then released the VM holding the outputs.
+# It also counted GITHUB_TOKEN as needed, though the push retry never fetches.
+@pytest.mark.parametrize("environ, cached, lacking", [
+    ({}, HF, "LIFT_RUNS_REPO"),                  # a fresh shell; HF_TOKEN from `hf auth login`
+    ({"LIFT_RUNS_REPO": RUNS}, None, "HF_TOKEN"),
+], ids=["fresh-shell", "no-hf-token"])
+def test_watch_keeps_the_vm_when_this_shell_cannot_retry_the_push(tmp_path, environ, cached, lacking):
+    fake, ctx = setup(tmp_path, [done_log(PUSH_FAILED)], environ=environ, rescue_rc=0,
+                      hf_token=lambda: cached)
+    started_vm(fake, ctx, "lift-ws")
+    assert remote.watch("lift-ws", ctx=ctx) == 1
+    text = ctx.out.getvalue()
+    assert fake.server and fake.rescues == [] and "stop" not in fake.calls and "ARE LOST" not in text
+    assert f"missing {lacking}:" in text and "GITHUB_TOKEN" not in text
+    assert text.index("a push retry") < text.index("job finished")  # said when watch starts
+    assert "still on the VM" in text and "lift remote stop lift-ws" in text
+    assert "lift remote watch lift-ws retries the push" in text
+    record = manifest("lift-ws")
+    assert record["rc"] == 1 and record.get("vm_released") is not True and record["job"] == PUSH_FAILED
+    # From a shell with HF_TOKEN and LIFT_RUNS_REPO (no GITHUB_TOKEN: push mode never fetches) it retries.
+    ctx.environ = {"HF_TOKEN": HF, "LIFT_RUNS_REPO": RUNS}
+    ctx.out = io.StringIO()
+    assert remote.watch("lift-ws", ctx=ctx) == 0
+    assert len(fake.rescues) == 1 and fake.server == {} and manifest("lift-ws")["rescue_push"]["push_rc"] == 0
+    sent = [json.loads(u["data"]) for u in fake.uploads if u["remote"] == "content/.lift_secrets.json"]
+    assert sent == [{"HF_TOKEN": HF, "LIFT_RUNS_REPO": RUNS}]
+
+
+def test_watch_keeps_the_vm_for_an_unreported_end_this_shell_cannot_push(tmp_path):
+    ran = LOG_START + job_note(5, "$ lift run-dev --variant stock   (line 1/1)")
+    fake, ctx = setup(tmp_path, [ran], environ={}, rescue_rc=0)
+    started_vm(fake, ctx, "lift-wn")
+    assert remote.watch("lift-wn", ctx=ctx) == 1  # the log stops growing: stale, after lines ran
+    text = ctx.out.getvalue()
+    assert fake.server and fake.rescues == [] and "stop" not in fake.calls
+    assert "may be only on the VM" in text and "missing LIFT_RUNS_REPO, HF_TOKEN:" in text
+    record = manifest("lift-wn")
+    assert record["outcome"] == "stale" and record["rc"] == 1 and record.get("vm_released") is not True
 
 
 def test_watch_never_retries_a_final_push_that_exited_2(tmp_path):
@@ -1810,6 +2045,130 @@ def test_watch_never_replaces_a_recorded_status_with_a_weaker_one(tmp_path):
     assert record["outcome"] == "done" and record["job"] == OK and record["rc"] == 0
     # This call released the VM, so the billed time runs to now.
     assert record["vm_released"] is True and record["wall_seconds"] == ctx.clock() - started > 3 * 3600
+
+
+# Review 4, W12: watch run beside a still-alive launch (the README's after-sleep advice) wrote over the
+# launch's record and raised false "may be lost" and "ARE LOST" alarms. One lift remote process at a time
+# follows a job now; a second one is refused with the holder's pid.
+def test_watch_refuses_while_another_lift_remote_follows_the_job(tmp_path):
+    fake, ctx = setup(tmp_path, [done_log(OK)])
+    started_vm(fake, ctx, "lift-lk")
+    before = manifest("lift-lk")
+    with remote.follower_lock("lift-lk", "launch", ctx) as holder:
+        assert holder is None
+        with pytest.raises(remote.RemoteError) as err:
+            remote.watch("lift-lk", ctx=ctx)
+    message = str(err.value)
+    assert err.value.code == 2 and f"pid {os.getpid()}" in message and "launch" in message
+    assert fake.calls == [] and manifest("lift-lk") == before
+    assert remote.watch("lift-lk", ctx=ctx) == 0  # once that process is done, watch follows the job
+
+
+def test_launch_holds_the_jobs_lock_while_it_follows(tmp_path):
+    fake, ctx = setup(tmp_path, [LOG_START, done_log(OK)])
+    seen = []
+
+    def look(n):
+        with remote.follower_lock("lift-lh", "watch", ctx) as holder:
+            seen.append(holder)
+
+    fake.on_download = look
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-lh"), ctx) == 0
+    assert seen and all(h and f"pid {os.getpid()}" in h and "launch" in h for h in seen)
+    with remote.follower_lock("lift-lh", "watch", ctx) as holder:
+        assert holder is None
+
+
+LOCK_HOLDER = """\
+import os, sys
+from lift import remote
+ctx = remote.Context(runner=object(), out=sys.stderr, colab_exe="colab", config_dir=remote.Path("."))
+with remote.follower_lock(sys.argv[1], "watch", ctx) as holder:
+    print("held" if holder is None else "busy", os.getpid(), flush=True)
+    sys.stdin.readline()
+"""
+
+
+def test_the_jobs_lock_holds_across_processes_and_ends_with_its_holder(tmp_path):
+    fake, ctx = setup(tmp_path, [done_log(OK)])
+    started_vm(fake, ctx, "lift-lx")
+    child = subprocess.Popen([sys.executable, "-c", LOCK_HOLDER, "lift-lx"], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, text=True)
+    try:
+        said, pid = child.stdout.readline().split()  # its own pid: a venv's python.exe is a launcher
+        assert said == "held"
+        with pytest.raises(remote.RemoteError) as err:
+            remote.watch("lift-lx", ctx=ctx)
+        assert err.value.code == 2 and f"pid {pid}" in str(err.value) and fake.calls == []
+    finally:
+        child.kill()  # no cleanup, as when that lift remote crashed
+        child.wait(timeout=60)
+    deadline = time.monotonic() + 10
+    while True:  # the OS ends a dead process's lock (on Windows, within moments)
+        with remote.follower_lock("lift-lx", "watch", ctx) as holder:
+            if holder is None:
+                break
+        assert time.monotonic() < deadline, holder
+        time.sleep(0.05)
+    assert remote.watch("lift-lx", ctx=ctx) == 0
+
+
+# W12, the record itself: whatever another process recorded meanwhile (a follower that held no lock, or
+# `lift remote stop`) is read again before the retry decision and the last write, and kept.
+def test_watch_keeps_what_another_process_recorded_meanwhile(tmp_path):
+    fake, ctx = setup(tmp_path, [LOG_START + job_note(5, "$ lift smoke   (line 1/1)")])
+    started_vm(fake, ctx, "lift-cc")
+
+    def launch_finishes(n):  # between two polls the other follower saw the last line and released the VM
+        if n == 2:
+            record = remote.load_manifest("lift-cc")
+            record.update(outcome="done", rc=0, job=OK, vm_released=True, wall_seconds=125.0)
+            remote.write_manifest(remote.manifest_path("lift-cc"), record)
+            fake.server.clear()
+            fake.save({})
+            fake.logs = [remote.Result(1, "[colab] Session 'lift-cc' not found.\n")]
+
+    fake.on_download = launch_finishes
+    assert remote.watch("lift-cc", ctx=ctx) == 0
+    text = ctx.out.getvalue()
+    assert "may be lost" not in text and "stop" not in fake.calls
+    record = manifest("lift-cc")
+    assert record["outcome"] == "done" and record["job"] == OK and record["rc"] == 0
+    assert record["vm_released"] is True and record["wall_seconds"] == 125.0
+
+
+def test_watch_keeps_a_push_retry_that_another_process_made(tmp_path):
+    fake, ctx = setup(tmp_path, [done_log(PUSH_FAILED)])
+    started_vm(fake, ctx, "lift-cd")
+    theirs = {"mode": "push", "attempt": "launch01", "push_rc": 0}
+
+    def launch_finishes(n):  # while watch's retry waits, the other follower's retry pushed and it released
+        if n == 2:
+            record = remote.load_manifest("lift-cd")
+            record.update(outcome="done", rc=0, job=PUSH_FAILED, vm_released=True, rescue_push=theirs)
+            remote.write_manifest(remote.manifest_path("lift-cd"), record)
+            fake.server.clear()
+            fake.save({})
+            fake.logs = [remote.Result(1, "[colab] Session 'lift-cd' not found.\n")]
+
+    fake.on_download = launch_finishes
+    assert remote.watch("lift-cd", ctx=ctx) == 0
+    text = ctx.out.getvalue()
+    assert "ARE LOST" not in text
+    record = manifest("lift-cd")
+    assert record["rc"] == 0 and record["rescue_push"] == theirs and record["vm_released"] is True
+    # The retry decision reads the record again too: a retry that pushed already is not tried again.
+    fake, ctx = setup(tmp_path / "before", [LOG_START, done_log(PUSH_FAILED)], rescue_rc=1)
+    started_vm(fake, ctx, "lift-ce")
+
+    def pushed_meanwhile(n):
+        if n == 2:
+            record = remote.load_manifest("lift-ce")
+            remote.write_manifest(remote.manifest_path("lift-ce"), {**record, "rescue_push": theirs})
+
+    fake.on_download = pushed_meanwhile
+    assert remote.watch("lift-ce", ctx=ctx) == 0
+    assert fake.rescues == [] and fake.server == {} and manifest("lift-ce")["rescue_push"] == theirs
 
 
 def test_stop_by_endpoint_when_the_cli_lost_its_record(tmp_path):
@@ -2100,6 +2459,19 @@ def test_notebook_fallback_runs_sync_lines_like_job_py(monkeypatch, tmp_path):
                    "lift sync push"]
 
 
+# Contract G in the notebook fallback: a generate, judge or run-dev line that exits 3 (done, but some
+# cells were skipped) is reported, the next lines run, and the cell raises at the end, as job.py does.
+def test_notebook_fallback_goes_on_past_a_line_that_skipped_cells(monkeypatch, tmp_path):
+    ran = []
+    with pytest.raises(RuntimeError, match="rc 3"):
+        run_notebook_job(monkeypatch, tmp_path, SWEEP[:3], {SWEEP[1]: [3]}, ran=ran)
+    assert ran == [SWEEP[0], SWEEP[1], "lift sync push", SWEEP[2], "lift sync push"]
+    ran = []  # exit 3 of another command still ends the job
+    with pytest.raises(RuntimeError, match="rc 3"):
+        run_notebook_job(monkeypatch, tmp_path, ["lift smoke", "lift info"], {"lift smoke": [3]}, ran=ran)
+    assert ran == ["lift smoke", "lift sync push"]
+
+
 # Contract 7: the notebook installs like the other GPU runtimes, with the ref's constraints.txt.
 def test_notebook_setup_cell_installs_with_the_constraints(monkeypatch):
     cell = notebook_cell("userdata")
@@ -2177,3 +2549,25 @@ def test_readme_says_how_to_restart_a_stale_cell():
     text = readme()
     assert "lift restart --variant" in text and "outputs/.aside/" in text and "--judge second" in text
     assert re.search(r'--job "lift sync pull; lift restart [^";]+; lift run-dev [^";]+"', text)
+
+
+# Review 4 (W1, W5, W8, W12, W13) and contracts G, H, I and L, where the operator reads them.
+def test_readme_covers_skipped_cells_the_stop_request_and_watch():
+    text = readme()
+
+    def section(start: str, end: str) -> str:  # one line of words, however the README wraps them
+        return " ".join(text.split(start, 1)[1].split(end, 1)[0].split())
+
+    skipped = section("**Skipped cells (exit 3).**", "\nNotes:")
+    for words in ("exits 3", "the next lines run", "exits 1", "--dtype", "--force", "another precision",
+                  "never a restart", "judge", "AuditKIT record", "A100", "T4 licence"):
+        assert words in skipped, words
+    ctrl_c = section("- **Ctrl+C**", "\n- **")
+    assert "cannot be uploaded" in ctrl_c and "tried again" in ctrl_c and "nothing was lost" in ctrl_c
+    after_sleep = section("**After a laptop sleep or crash.**", "\n- **")
+    for words in ("still running", "pid", "HF_TOKEN", "LIFT_RUNS_REPO", "GITHUB_TOKEN", "keeps the VM"):
+        assert words in after_sleep, words
+    row = next(line for line in text.splitlines() if line.startswith("| 1 |"))
+    assert "exited 3" in row
+    for words in ("exited 3", "another lift remote"):
+        assert words in " ".join(remote.EXIT_CODES.split()), words

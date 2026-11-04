@@ -18,12 +18,18 @@ kernel's own python, and uninstall torchao; check that the ref has `lift sync` (
 without which nothing could be pulled or pushed; run each line as `python -m lift ...`, stopping at
 the first failure, with a `lift sync push` checkpoint after every line except sync lines and the last
 one; then, in `finally`, run the final `lift sync push` and write the status and the marker. The final
-push runs once a line other than a lift sync line ran: nothing else leaves new files on the VM.
+push runs once a line other than a lift sync line ran: nothing else leaves new files on the VM. A
+generate, judge or run-dev line that exits 3 (done, but some cells were skipped: stale, made in another
+precision or judged by another judge; or their AuditKIT record was refused; each listed with its
+remedy) does not end the job: it is reported, the next lines run (they do not depend on those cells),
+and the job fails at the end ("partial_lines" in the status). Any other command's exit 3 is a
+failure like any other.
 
 lift sync's exit code decides what follows. A pull or push that exits 1 (an error), or a push killed
 for running too long, is tried again, 4 tries in about 10 minutes; a pull killed for silence is not,
 its line fails as any line killed as hung does. 3 (done, the conflicting copies kept: a push's under
-conflicts/ in the runs repo) is reported, never retried; 2 (a problem no retry can fix: the token,
+conflicts/ in the runs repo; or files that do not pair with their cell, named in its summary) is
+reported, never retried; 2 (a problem no retry can fix: the token,
 the runs repo) is never retried and ends the job, the final push still tried once. A `lift sync
 push` line runs as a push: it never stops the job unless it exits 2. Everything the commands print
 goes to the log with every secret value replaced by "***".
@@ -71,9 +77,14 @@ PUSH_DELAYS = (60, 180, 360)  # waits between the 4 tries of a pull or push: abo
 KILL_GRACE_SECONDS = 30  # SIGINT first, so the command can close its files; SIGKILL after this
 SYNC_RETRY_RC = 1  # lift sync: an error, and trying again loses nothing (sync compares content)
 SYNC_REFUSED_RC = 2  # lift sync: a problem no retry can fix (the token, the runs repo): never retried
-SYNC_CONFLICT_RC = 3  # lift sync: done, the conflicting copies kept (a push's under conflicts/)
+SYNC_CONFLICT_RC = 3  # lift sync: done, but conflicts (copies kept) or unpaired files (named in its summary)
 PUSHED = (0, SYNC_CONFLICT_RC)
 SETUP_FAILED_RC = 3  # lift remote's exit code for "the job could not be set up on the VM"
+# lift generate, judge and run-dev: done, but some cells were skipped or their AuditKIT record refused
+# (each listed with its remedy). The job goes on with its next lines and fails at the end; any other
+# command's 3 is a failure as before.
+PARTIAL_RC = 3
+PARTIAL_COMMANDS = ("generate", "judge", "run-dev")
 REF_HINT = "GPU jobs need a ref with both P01 and P02 (colab/README.md, 'Code version')"
 STOPPED_RC = 1  # a stop request before a line started: the job did not finish
 MIN_SECRET_LEN = 8  # shorter values (a spend cap such as "20") are settings, not secrets: not masked
@@ -293,9 +304,10 @@ class Job:
             return None
         t0 = self.clock()
         status = {"mode": "job", "job_id": None, "rc": None, "failed_line": None, "failed_step": None,
-                  "push_rc": None, "installed": False, "ran": 0, "sync_refused": None, "stopped": None,
-                  "killed": None, "checkpoint_push_failures": 0, "push_conflicts": 0, "log_dropped": 0,
-                  "commit": None, "gpu": None, "python": ".".join(str(part) for part in self.version_info),
+                  "partial_lines": [], "push_rc": None, "installed": False, "ran": 0, "sync_refused": None,
+                  "stopped": None, "killed": None, "checkpoint_push_failures": 0, "push_conflicts": 0,
+                  "log_dropped": 0, "commit": None, "gpu": None,
+                  "python": ".".join(str(part) for part in self.version_info),
                   "started": _iso(t0), "seconds": {"setup": None, "lines": [], "push": None}}
         self._open_log()
         stop_monitor = self._start_monitor(t0)
@@ -470,6 +482,11 @@ class Job:
             if push and rc not in PUSHED:  # like a checkpoint push: the next push sends what it missed
                 status["checkpoint_push_failures"] += 1
                 self.note(f"{where} failed (rc {rc}){self._why()}; continuing, the final push sends it all")
+            elif words[1] in PARTIAL_COMMANDS and rc == PARTIAL_RC and not self.killed:
+                status["partial_lines"].append(i)
+                self.note(f"{where} exited {rc} in {_hms(self.clock() - t)}: done, but some cells were "
+                          "skipped or their AuditKIT record refused (its listing above names each with its "
+                          "remedy); the next lines run, and the job fails at the end")
             elif not (rc == 0 or (sync and rc == SYNC_CONFLICT_RC)) or self.killed:
                 status["rc"], status["failed_line"], status["killed"] = rc or 1, i, self.killed
                 if self.stop_reason and (self.killed == self.stop_reason or sync):  # stopped, or tries cut
@@ -488,7 +505,11 @@ class Job:
                 if rc not in PUSHED:
                     status["checkpoint_push_failures"] += 1
                     self.note("checkpoint push failed; continuing, the final push sends everything")
-        status["rc"] = 0
+        partial = status["partial_lines"]
+        status["rc"] = PARTIAL_RC if partial else 0
+        if partial:
+            self.note(f"{len(partial)} line(s) exited {PARTIAL_RC}, done but with cells skipped: line(s) "
+                      f"{', '.join(str(i + 1) for i in partial)}; the job fails")
 
     def _refused(self, status, what):
         """A lift sync call exited 2: a problem no retry can fix (a token that cannot write, the runs repo
@@ -517,8 +538,10 @@ class Job:
             if rc == SYNC_CONFLICT_RC:
                 if push and status is not None:
                     status["push_conflicts"] += 1
-                self.note("the push hit conflicts: the VM's copies are under conflicts/ in the runs repo"
-                          if push else "the pull hit conflicts: the local copies are kept")
+                self.note("the push ended with conflicts or unpaired files (its summary above names them): "
+                          "conflicting copies are under conflicts/ in the runs repo" if push else
+                          "the pull ended with conflicts or unpaired files (its summary above names them): "
+                          "the local copies are kept")
                 return rc
             if push:  # a push killed past PUSH_LIMIT_SECONDS is tried again
                 retry = rc == SYNC_RETRY_RC or self.killed is not None
@@ -853,7 +876,9 @@ def main(**kwargs):
     if status is not None and status["mode"] == "push":
         job.say(f"push retry finished: push rc {status['push_rc']}")
     elif status is not None:
-        job.say(f"finished: rc {status['rc']}, final push rc {status['push_rc']}")
+        partial = status["partial_lines"]
+        skipped = f", {len(partial)} line(s) exited {PARTIAL_RC} (cells skipped)" if partial else ""
+        job.say(f"finished: rc {status['rc']}{skipped}, final push rc {status['push_rc']}")
     return status
 
 
