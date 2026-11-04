@@ -127,13 +127,79 @@ Checked against the 0.1.22 source and an offline Hindi run on Nov 3 (P01):
 
 ## AuditKIT
 
-- **Flow.** `auditkit.evaluate(model=..., prompts=..., metrics=...)` goes
-  Dataset -> Adapter -> Model -> Metrics -> RunResult. Any `list[str] -> list[str]` callable is
-  a model.
-- **Comparisons.** Pairwise and preference metrics include win rate and Elo. `compare_models()`
-  also exists.
-- **Bug: don't use `paired_bootstrap`** (`src/auditkit/_bootstrap.py` at 71316da). It resamples
-  the uncentred paired differences, so its p-value is about 0.5 when every difference is
-  positive, and it returns no intervals.
+Corrected Nov 3 (P02) after reading 1.1.3's source: the `evaluate(model=..., prompts=...,
+metrics=...)` form written here before raises `TypeError` (there is no `prompts=` or `metrics=`).
+
+- **Call.** `auditkit.evaluate(dataset, model, scorers=None, *, config=None, tags=None, **opts)`
+  goes Dataset -> Adapter -> Model -> Metrics -> RunResult.
+  - `dataset` is a `list[Sample]` (`Sample(input, id=..., metadata=..., actual_output=...)`);
+    a list of strings or dicts raises.
+  - `model` is a `Model`, a `list[str] -> list[str]` callable, or `PrecomputedModel` (reads each
+    sample's `actual_output`, no model call). `lift.audit` uses a PrecomputedModel subclass with a
+    stable name, so the run's fingerprint and `model_spec` hold no memory address.
+- **Custom metrics** subclass `auditkit.metric.Metric` (not exported at the top level), must set
+  `direction` at class level, and score one sample at a time; a stat's mean is the headline.
+  - A metric that raises on a sample, or whose `required_fields` are missing, silently drops that
+    sample from the denominator. `lift.audit` asserts `failed_count == 0`, every `stat.count == N`,
+    and the headline equal to `lift.stats.rates()`.
+- **Side effects.** Every run reads and writes an on-disk cache of the full RunResult (prompts and
+  outputs) under `~/.cache/auditkit/runs`, keyed by a fingerprint that misses data held outside the
+  samples: a second variant can be served the first one's numbers. `lift.audit` patches the cache out
+  and never passes `experiment_name` (which writes another copy under `~/.local/share`).
+- **Saving.** `RunResult.save()` writes CRLF and `\u` escapes on Windows plus a timestamped
+  `lexsi_provenance.json`; `lift.audit` writes `to_dict()` itself (UTF-8, LF). Outputs are stored
+  redacted (`[redacted sha256:...]`) so the record can be published.
+- **Comparisons.** `WinRate`, `EloScore` and `PreferenceAccuracy` are reference- or overlap-based,
+  not judge-based; P03's utility record needs a custom metric over our verdict scores.
+- **Bug: don't use `paired_bootstrap`** (`src/auditkit/_bootstrap.py` at 71316da, unchanged in
+  1.1.3). It resamples the uncentred paired differences: p is 1.0 when every difference is equal
+  and about 0.5 when they vary but are all positive, and it returns no intervals.
+  `RunComparison.significance()` and the other `significance()` methods use it too.
   - File an issue upstream with a minimal repro; it's on the submission checklist.
   - `lift.stats.paired_bootstrap` is the replacement, with a regression test for this case.
+
+## Harness dependencies (verified Nov 3 for P02)
+
+The GPU runtimes install these exact versions from `constraints.txt` (torch excepted: it is the
+runtime's own CUDA build); the full set resolves for Linux with safetune 0.1.12.
+
+- **transformers 5.22.1.** `generate()` fills every generation setting a caller leaves `None` from
+  the checkpoint's generation_config.json, and logits processors such as `repetition_penalty` act
+  in greedy mode too. `lift.models.load` therefore replaces the model's generation_config with a
+  neutral one, and the harness passes an explicit greedy config. A prompt longer than the context
+  only warns. `apply_chat_template(tokenize=True)` returns a BatchEncoding, and `tokenizer(text)`
+  adds a second BOS to chat text (always tokenize it with `add_special_tokens=False`).
+- **Tiny Aya.** Gated with automatic approval: the HF account behind `HF_TOKEN` must accept the
+  terms of both tiny-aya-global and tiny-aya-base. `<|START_RESPONSE|>` is part of the generation
+  prompt; a system message never replaces the default preamble, it is appended as a "Developer
+  Preamble". generation_config.json is byte-identical to Base's.
+- **Qwen3Guard-Gen-4B** (main = 6ec42827, Apache-2.0). Pass exactly `[user, assistant]` to
+  `apply_chat_template(..., tokenize=False)`: the template writes the moderation instruction and its
+  own assistant prefix. Its tokenizer pads right by default (set left). The output is three lines
+  (`Safety:`, `Categories:`, `Refusal:`); the card's regex parser and the official eval's substring
+  check both default silently on malformed output, so `lift.judge.qwen3guard` parses strictly.
+- **huggingface_hub 2.4.** `snapshot_download`/`hf_hub_download` return stale local files with only
+  a warning when the Hub is unreachable, `DatasetInfo.private` can be `None`, and `upload_folder`
+  mutates the caller's `ignore_patterns` list. With hf_xet, `upload_folder` also re-sends unchanged
+  files and splits large uploads into several commits of which only the first carries
+  `parent_commit`, so a concurrent push can be silently reverted. `lift.sync` therefore writes with
+  `create_commit` (only the files it planned, every part guarded by `parent_commit`), verifies every
+  download's hash, and refuses a repo unless `private is True`. `whoami()` gives the token's
+  `auth.accessToken.role` ("read", "write" or "fineGrained", with scoped permissions such as
+  `repo.write`); `lift sync check --write` and `lift remote` refuse a read token before any GPU time.
+- **Colab CLI 0.7.5.** See colab/README.md. `colab run --env` writes values into local history and
+  `colab.log`, so secrets go through `colab upload` of a temp file only; `colab exec` exits 0 even
+  when the code fails; `--timeout` above 4294967 overflows on Windows. The default auth is oauth2
+  (the CLI's own README says adc); `colab stop` exits 0 for a session name it does not know; an
+  unknown `--gpu` silently becomes A100. An `exec` reuses the session's kernel, so a second exec
+  queues behind a busy cell: a push from the laptop cannot overtake a job that is still pushing.
+- **OpenAI SDK 3.43 / Anthropic SDK 2.4.** Anthropic's API version 2026-10-21 (the SDK default)
+  rejects `temperature`, `top_p` and `top_k`; its 529 `OverloadedError` is not an
+  `InternalServerError` subclass; both SDKs log full request bodies at DEBUG (the judge pins their
+  loggers to WARNING); OpenAI's Responses API stores responses unless `store=False`.
+  - Account limits stop a run instead of failing items. Anthropic answers a reached workspace or
+    organisation spend limit with HTTP 400 invalid_request_error, "You have reached your specified
+    (workspace) API usage limits" (docs/en/api/rate-limits), an exhausted credit balance with "Your
+    credit balance is too low", and billing problems with 402 billing_error; the tier's monthly cap is
+    a 429 (error.details.error_code "enforced_spend_limit_reached", no retry-after). anthropic 2.4.0
+    puts the whole response body's repr in `exc.message`; openai 3.43.0 keeps `body["error"]`.

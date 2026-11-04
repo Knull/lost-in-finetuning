@@ -1,4 +1,5 @@
-"""Where things live. Data and outputs can be moved with env vars (Kaggle: /kaggle/working/...).
+"""Where things live. Data, outputs and validation files can be moved with env vars (the Kaggle
+runner puts them under /kaggle/temp/lift/, outside the /kaggle/working that notebook versions save).
 
 The frozen split id lists always live in the repo (``data/splits``) so they are versioned in git.
 """
@@ -74,6 +75,12 @@ def figures_dir() -> Path:
 def manifests_dir() -> Path:
     """One JSON per run: git sha, config digest, versions, GPU, wall time."""
     return output_dir() / "manifests"
+
+
+def validation_dir() -> Path:
+    """Human validation files (sheets, keys, labels). Private: gitignored, moved only by lift sync.
+    ``LIFT_VALIDATION_DIR`` moves the tree, as in lift.validation (P04)."""
+    return _env_dir("LIFT_VALIDATION_DIR", REPO_ROOT / "validation")
 
 
 def ensure(path: Path) -> Path:

@@ -102,12 +102,13 @@ class JudgementRecord(_Record):
     lang: Lang
     set: PromptSet
     split: Split
-    judge: str                       # judge id with revision, e.g. "Qwen/Qwen3Guard-Gen-4B@<sha>"
+    judge: str                       # judge id with revision, e.g. "Qwen/Qwen3Guard-Gen-4B@<sha>#bf16#strict"
     judge_label: Label               # the judge's own call, mapped to our four classes
     label: Label                     # final class after the unclear rules (lift.judge.labels)
     flags: UnclearFlags
     native: dict[str, Any] = Field(default_factory=dict)  # judge-native fields (Safety, Refusal, ...)
     raw: str = ""                    # raw judge output, for audits
+    output_sha: str | None = None    # sha256 of the GenerationRecord.output judged (keys name inputs only)
 
 
 class UtilityVerdict(_Record):

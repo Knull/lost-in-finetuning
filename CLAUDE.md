@@ -59,10 +59,11 @@ configs/        project.yaml (models, langs, sizes, judges), train.yaml, repairs
                 variants.yaml (registry), rubrics/ (frozen judge prompts)
 data/splits/    committed split files {set}.json   (everything else in data/ is gitignored)
 src/lift/       config io paths schemas cachekey splits selection manifest cli   <- implemented
+                prompts (prompt records, mixed samples) gate0 remote              <- P02
   commands/     one CLI module per stage, each with register(subparsers)
   data/         polyrefuse translate sources sft build                            <- P01
-  models/       load variants generate loglik                                     <- P02, P03
-  judge/        labels (implemented) qwen3guard frontier pipeline                 <- P02
+  models/       load variants generate (P02), loglik (P03)
+  judge/        labels qwen3guard frontier (safety) pipeline                      <- P02
   train/        lora (P03), merge (P02)
   repair/       wiseft resta cast                                                 <- P05
   diagnose/     activations signatures                                            <- P06
@@ -70,13 +71,14 @@ src/lift/       config io paths schemas cachekey splits selection manifest cli  
   validation/   sample (blind sheets, agreement, judge decision)                  <- P04
   report/       tables figures cost                                               <- P07
   audit.py      AuditKIT record                                                   <- P02, P03
-  sync.py       outputs <-> private HF dataset repo                               <- P02
-colab/          how to run jobs on Colab A100 with the Colab CLI (primary GPU)
+  sync.py       data/, outputs/, validation/ <-> private HF dataset repo          <- P02
+colab/          job.py (runs inside the VM) and how to use lift remote (primary GPU)
 kaggle/         bootstrap.sh, runner notebook, how to run on Kaggle (backup GPU)
 prompts/        the implementation prompts and the schedule (prompts/README.md)
 validation/     guidelines.md for the human annotators
 hf/             model card, dataset cards, Space, article drafts                  <- P08
 docs/           decisions.md (dated changes), toolkit-notes.md (verified APIs)
+constraints.txt exact library versions the GPU runtimes install with
 ```
 
 A stub raises `NotImplementedError("Pxx")` and carries its spec in the docstring. Keep the
@@ -105,9 +107,18 @@ six languages, so pairing, splitting and clustering all go by pid.
     Claude Code session (`colab/README.md`), or from a notebook if the CLI misbehaves.
   - **Backup: Kaggle T4 x2, fp16** (`kaggle/README.md`). A T4 x2 is two separate 16 GB devices:
     the generator goes on `cuda:0` and the judge on `cuda:1`. On a single GPU, both share it.
+  - A GPU job runs a git ref (`lift remote --ref`, Kaggle `BRANCH`), not the working tree, and
+    installs with `-c constraints.txt`. The ref needs P01 and P02 (P02 alone has P01's prompt
+    loader and LangID as stubs).
 - **One precision for every reported number.** Every reported generation uses bf16. A T4 fp16
   run can count only if Gate 0's fp16-vs-bf16 check passes. Paired comparisons never mix
-  precisions; the cache key includes the dtype and the stats refuse mixed pairs.
+  precisions: the cache key includes the dtype, `lift.judge.pipeline.load_labels` refuses a cell
+  in another dtype, and every paired comparison loads its two sides with
+  `lift.judge.pipeline.paired_labels`, which refuses mismatched dtypes, judges, models, chat
+  templates or decoding settings. An fp16 cell is read only while `outputs/metrics/gate0-fp16.json`
+  (at least 200 prompts compared) and the bf16 `gate0.json` it compared against both pass for its
+  Global revision, and only if it was made (and judged) under the comparison's harness, decoding
+  and GPU class (`check_dtype_licence`). fp16 runs are refused on a GPU with native bf16.
 - **Claude Code sessions** run in the Claude desktop app on a Windows laptop (PowerShell). They
   have no usable GPU for this project.
   - Write cross-platform Python: `pathlib` everywhere, and files written with `newline="\n"`
@@ -118,10 +129,18 @@ six languages, so pairing, splitting and clustering all go by pid.
     PowerShell syntax for local steps.
 - **Sessions are wiped.** Colab and Kaggle sessions lose their disk when they end (Kaggle after
   12 h). Every job pulls from and pushes to the runs repo (`lift sync`), and resumes by cache
-  key.
+  key. One file never holds two stacks (torch, transformers, GPU class): a finished cell is reused
+  on any stack, but an unfinished one resumes only on the stack that started it, or is made again
+  with the `lift restart` line its refusal prints (a job line right after `lift sync pull`).
+  `lift generate`, `judge` and `run-dev` exit 3 when they finished but skipped cells (each listed
+  with its remedy); the runners go on with the next line.
 - **Secrets.** `HF_TOKEN` (with accepted access to tiny-aya-global and tiny-aya-base),
-  `GITHUB_TOKEN` (remote runtimes clone this private repo), the judge API key and
-  `LIFT_RUNS_REPO`.
+  `GITHUB_TOKEN` (remote runtimes clone this private repo), the judge API key with its spend cap
+  `LIFT_JUDGE_MAX_USD` (per lift process), and `LIFT_RUNS_REPO`.
+- **Pinned revisions.** `lift generate`, `lift judge` and `lift run-dev` refuse a revision that is
+  not a commit sha; Gate 0 (`lift smoke`) resolves and prints the shas to pin. Pin them in
+  configs/project.yaml with a dated decisions.md entry, then commit and push to the ref the GPU
+  job runs.
 
 ## Tiny Aya
 
@@ -163,9 +182,11 @@ six languages, so pairing, splitting and clustering all go by pid.
   (it writes `sft_messages.jsonl`); an unknown format only warns and exports nothing. Keep its
   manifest.json, rejected.jsonl and lexsi_provenance.json, and don't run its English toxicity
   gate on Hindi.
-- **AuditKIT 1.1.3.** `auditkit.evaluate(model=<callable list[str]->list[str]>, prompts=...,
-  metrics=...)`; pairwise metrics cover the win rate. Never use its `paired_bootstrap`: it
-  resamples uncentred differences and returns no intervals. `lift.stats` replaces it.
+- **AuditKIT 1.1.3.** `auditkit.evaluate(dataset: list[Sample], model, scorers=[...],
+  config=RunConfig(...), tags=[...])`; `lift.audit` uses the precomputed path with custom metrics
+  and patches out its disk cache (docs/toolkit-notes.md). Its WinRate/Elo metrics are reference-
+  or overlap-based, not judge-based. Never use its `paired_bootstrap`: it resamples uncentred
+  differences and returns no intervals. `lift.stats` replaces it.
 
 ## PolyRefuse (mainlp/Multilingual-Refusal)
 
@@ -192,5 +213,8 @@ six languages, so pairing, splitting and clustering all go by pid.
     (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) wait for the
     translation job. The SFT candidates have 679 rows each
     (`data/sft/{cand}/{variant}/sft_messages.jsonl`; N is `decision.rows` in `data/sft/report.json`).
+- **P02 (harness).** models.load/generate/variants (stock, adapter), train.merge, prompts,
+  judge.qwen3guard, judge.frontier (safety), judge.pipeline, audit.record_safety, sync, gate0, and
+  `lift smoke|generate|judge|run-dev|restart|sync|remote`, with colab/job.py and kaggle/runner.ipynb.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.
