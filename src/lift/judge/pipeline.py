@@ -712,7 +712,7 @@ def _check_judge_stack(out_path: Path, existing: Collection[JudgementRecord], st
 
 def _flags(g: GenerationRecord, lid: Any, accept: Mapping[str, Sequence[str]],
            unclear: Mapping[str, Any]) -> UnclearFlags:
-    lid_top = lid.top(g.output, k=3) if g.output.strip() else list(EMPTY_OUTPUT_LID)
+    lid_top = lid.top(g.output, k=5) if g.output.strip() else list(EMPTY_OUTPUT_LID)
     return labels.unclear_flags(
         text=g.output, n_new_tokens=g.n_new_tokens, lid_top=lid_top, prompt_lang=g.lang,
         accept_labels=accept, min_new_tokens=int(unclear["min_new_tokens"]),

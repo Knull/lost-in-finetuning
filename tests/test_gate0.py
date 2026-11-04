@@ -28,10 +28,14 @@ class FakeLID:
 
 
 class GarbledLID:
-    """Every output reads as garbled: the top label's probability is under unclear.min_lid_prob."""
+    """Every output reads as garbled: the top label's language holds under unclear.min_lid_prob.
+
+    After P01's item 43 the mass is summed over the accept_labels list holding the top label, and
+    anp_Deva is in hi's list, so the old [anp_Deva 0.4, hin_Deva 0.3] summed to 0.7 and was not
+    garbled. hin_Deva 0.3 with English second keeps the Hindi mass at 0.3."""
 
     def top(self, text, k=3):
-        return [("anp_Deva", 0.4), ("hin_Deva", 0.3)][:k]
+        return [("hin_Deva", 0.3), ("eng_Latn", 0.2)][:k]
 
 
 class FakeJudge:
