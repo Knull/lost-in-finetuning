@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import contextlib
 import errno
 import io
 import itertools
@@ -67,6 +68,10 @@ def _about() -> str:
 
 def _readme() -> str:
     return (KAGGLE / "README.md").read_text(encoding="utf-8")
+
+
+def _t4_section() -> str:
+    return _readme().split("## Jobs on a T4 x2", 1)[1].split("\n## ", 1)[0]
 
 
 def _inside_working(path: str) -> bool:
@@ -183,8 +188,7 @@ def test_docs_name_a_branch_that_can_run_jobs_and_put_the_pin_step_before_the_de
     for name, text in _docs():
         text = " ".join(text.split())
         assert "p01-data" in text and "p02-harness" in text and "BRANCH" in text, name
-    section = _readme().split("## Jobs on a T4 x2", 1)[1].split("\n## ", 1)[0]
-    text = " ".join(section.split())
+    text = " ".join(_t4_section().split())
     order = [text.find(s) for s in ("Gate 0", "configs/project.yaml", "docs/decisions.md", "rerun cell 1",
                                     "lift run-dev --variant stock --dtype fp16")]
     assert -1 not in order and order == sorted(order)
@@ -213,13 +217,15 @@ def test_readme_keys_example_is_a_file_p04_writes():
         assert re.fullmatch(r"validation/keys/second_judge/[a-z0-9_.-]+_(dev|final)\.txt", key), key
 
 
-def test_docs_say_the_final_push_still_runs_after_an_exit_2_from_a_pull():
-    """Review 3, V21: only the preflight's or a push's exit 2 means that a push would fail the same way.
-    One from another lift sync line (a pull, status, a check in JOB) may come from the line's own
-    arguments, so the final push still runs."""
+def test_docs_say_the_final_push_still_runs_after_an_exit_2_from_a_job_sync_line():
+    """Review 3, V21, and review 4, W16: only the preflight's or a plain lift sync push's exit 2 means that
+    the final push would fail the same way. One from another lift sync line in JOB (a pull, status, a
+    check, a push with more words) may come from the line's own arguments, so the final push still runs."""
     for name, text in _docs():
         items = [item for item in _items(text) if re.search(r"\bexits? 2\b", item)]
-        assert [item for item in items if "final push still runs" in item], name
+        assert [item for item in items if "final push still runs" in item
+                and "plain `lift sync push`" in item and "push with more words" in item], name
+        assert not re.search(r"\b(the check's or a push's|a push's exit 2)", " ".join(text.split())), name
 
 
 def test_readme_says_commands_die_with_the_kernel_and_to_interrupt_cell_2_before_a_restart():
@@ -235,7 +241,8 @@ def test_readme_recovers_a_stale_cell_with_lift_restart_right_after_the_pull():
     """Review 3, V22: a stale cell's file moved aside by hand came back with the job's own lift sync pull,
     so the same refusal followed on every rerun. lift restart, as the JOB line right after lift sync
     pull, sets the cell's files aside and leaves them empty, so the push after it replaces the runs
-    repo's copies (contract A)."""
+    repo's copies (contract A). On the T4 it takes --dtype fp16, as lift prints it there (contract H):
+    with the default, bf16, it would refuse the fp16 cell."""
     readme = _readme()
     assert not re.search(r"move [^.]*aside and run the job again", " ".join(readme.split()))
     blocks = [block for block in _code_blocks(readme) if any(s.startswith("lift restart") for s in block)]
@@ -243,8 +250,18 @@ def test_readme_recovers_a_stale_cell_with_lift_restart_right_after_the_pull():
     for lines in blocks:
         (i,) = [i for i, line in enumerate(lines) if line.startswith("lift restart")]  # one per example
         assert i > 0 and lines[i - 1] == "lift sync pull"
-        assert re.fullmatch(r"lift restart --variant \S+ --split (dev|final) --sets( \S+)+ --langs( \S+)+"
-                            r"( --judge (primary|second))?", lines[i])
+        assert re.fullmatch(r"lift restart --variant \S+ --split (dev|final) --sets( [\w-]+)+"
+                            r" --langs( [a-z]{2})+( --judge (primary|second))? --dtype fp16", lines[i])
+
+
+def test_readme_says_what_lift_restart_sets_aside_and_what_refills_it():
+    """Contract H: a restart also empties the cell's AuditKIT records (an empty one is retired), and a
+    whole-cell restart empties the other judges' judgements too, which the line that failed does not
+    refill: lift restart's log names the line that does (the second judge's with P04's --keys list)."""
+    items = [item for item in _items(_readme()) if item.startswith("`lift restart` moves")]
+    assert len(items) == 1
+    assert "AuditKIT records" in items[0] and "retired" in items[0]
+    assert "--judge second" in items[0] and "--keys" in items[0]
 
 
 def test_docs_say_the_fp16_licence_needs_both_gate0_records():
@@ -256,6 +273,59 @@ def test_docs_say_the_fp16_licence_needs_both_gate0_records():
     for name, text in _docs():
         counts = [s for s in _sentences(text) if re.search(r"\bnumbers? counts? only\b", s)]
         assert counts and all("bf16 Gate 0" in s for s in counts), name
+
+
+def test_docs_say_only_a_push_is_tried_again_after_the_push_limit():
+    """Review 4, W18: the first cell said that any lift sync command running past PUSH_LIMIT_MINUTES is
+    retried. Only a push is: a stopped pull, check or status ends the job (the final push still runs).
+    "About 3 minutes" holds for a command that exits 1."""
+    limit = _constants(_code_cells()[1], "PUSH_LIMIT_MINUTES")["PUSH_LIMIT_MINUTES"]
+    for name, text in _docs():
+        items = [item for item in _items(text) if f"{limit} minutes" in item]
+        claims = [s for item in items for s in _sentences(item)
+                  if f"{limit} minutes" in s and re.search(r"\b(retried|tried again)\b", s)]
+        assert all("push" in s and "pull" in s for s in claims), name
+        assert [item for item in items if re.search(r"stopped pull[^.]*\bends the job", item)], name
+        assert all("exits 1" in s for s in _sentences(text) if "about 3 minutes" in s), name
+
+
+def test_docs_say_a_kernel_that_ran_no_line_gives_a_stalled_final_push_one_try():
+    """Review 4, W17: in a kernel where no line but lift sync has run, the final push has nothing of the
+    kernel's to send, so a stalled one is not tried again."""
+    for name, text in _docs():
+        assert [s for s in _sentences(text) if "final push" in s and "one try" in s], name
+
+
+def test_docs_say_a_line_that_skipped_cells_exits_3_and_the_next_lines_run():
+    """Review 4, W8 (contract G): lift generate, judge and run-dev exit 3 when they are done but skipped
+    some cells, each listed with its remedy. The next lines run, and the cell raises at the end."""
+    for name, text in _docs():
+        items = [item for item in _items(text) if re.search(r"\bexits? 3\b", item) and "run-dev" in item]
+        assert [item for item in items if "next lines" in item and "remedy" in item], name
+    readme = " ".join(_readme().split())
+    assert not re.search(r"exits? 1 (and print|with no AuditKIT record)|A line exits 1 and lists", readme)
+
+
+def test_readme_says_fp16_lines_run_only_on_a_gpu_without_native_bf16():
+    """Contract L: fp16 runs exist only for the T4 licence, so lift generate, judge and run-dev refuse a
+    --dtype other than bf16 on a GPU with native bf16: the T4's lines cannot be reused on Colab as they
+    are."""
+    sentences = [s for s in _sentences(_t4_section()) if re.search(r"\bwith native bf16\b", s)]
+    assert sentences and all(re.search(r"\brefuses?\b", s) and "--dtype" in s for s in sentences)
+
+
+def test_docs_leave_the_bf16_cells_of_a_variant_colab_started_out_of_an_fp16_run():
+    """Review 4, W3 (the T4 side): output paths hold no dtype, so an fp16 run over a variant Colab started
+    meets its bf16 cells, the reported ones. They are left out with --sets and --langs, and never
+    restarted from the T4: lift restart --dtype fp16 refuses them unless --force, which would discard
+    them (contract H)."""
+    items = [item for item in _items(_t4_section()) if "bf16 cells" in item]
+    assert len(items) == 1
+    item = items[0]
+    assert "`--sets`" in item and "`--langs`" in item and re.search(r"\b[Nn]ever restart", item)
+    assert "lift restart --dtype fp16" in item and "`--force`" in item and "discard" in item
+    about = [s for s in _sentences(_about()) if "bf16 cells" in s]
+    assert about and all("--sets" in s and re.search(r"\bnever restart", s) for s in about)
 
 
 # --- cell 1: secrets, paths, clone, bootstrap -----------------------------------------------------------
@@ -552,12 +622,34 @@ def job_cell(setup_cell, monkeypatch, capsys):
                            printed=capsys.readouterr().out)
 
 
+FAST_LIMITS = {"MAX_SILENT_MINUTES": 0.25 / 60, "PUSH_LIMIT_MINUTES": 0.25 / 60, "KILL_GRACE_SECONDS": 0.25,
+               "TICK_SECONDS": 0.01}
+
+
 @pytest.fixture
 def fast_watchdog(job_cell):
     """Cell 2's watchdog limits cut to a quarter of a second. The time is real: the fakes block."""
-    job_cell.ns.update(MAX_SILENT_MINUTES=0.25 / 60, PUSH_LIMIT_MINUTES=0.25 / 60, KILL_GRACE_SECONDS=0.25,
-                       TICK_SECONDS=0.01)
+    job_cell.ns.update(FAST_LIMITS)
     return job_cell
+
+
+@pytest.fixture
+def kernel(setup_cell, job_cell):
+    """A fresh kernel where only cell 1 has run. Each ``run(job, outcomes, sleep=...)`` reruns cell 2 in
+    it, as a person does for each job: its definitions run again, then its run_job, with the watchdog
+    limits cut as in fast_watchdog. The Popen and killpg fakes are job_cell's."""
+    namespace = {**setup_cell.ns, "open": _fake_open}
+    source = _code_cells()[1]
+    definitions = compile(source[:source.index('if "SECRETS" not in globals()')], "runner.ipynb:job", "exec")
+
+    def run(job, outcomes=None, sleep=_no_sleep):
+        exec(definitions, namespace)
+        namespace.update(FAST_LIMITS)
+        job_cell.host.reset(outcomes)
+        namespace["run_job"](job, LIFT_PY, cwd=ROOT, secrets=SECRETS, sleep=sleep)
+        return job_cell.host
+
+    return SimpleNamespace(run=run, host=job_cell.host, ns=namespace)
 
 
 def test_job_cell_refuses_to_run_before_the_setup_cell(monkeypatch):
@@ -690,39 +782,77 @@ def test_job_runs_non_lift_lines_verbatim_and_adds_no_checkpoint_after_sync_line
 # Contract: lift sync exits 1 for an error a retry may fix and 2 for one no retry fixes.
 
 
-@pytest.mark.parametrize("failing, ran", [
-    (CHECK, [CHECK]),
-    (PUSH, [CHECK, "lift sync pull", "lift info", PUSH]),  # the checkpoint push after lift info
-    ("lift sync push --only outputs", [CHECK, "lift sync pull", "lift info", PUSH,
-                                       "lift sync push --only outputs"]),
+@pytest.mark.parametrize("outcomes, ran", [
+    ({CHECK: 2}, [CHECK]),
+    ({PUSH: 2}, [CHECK, "lift sync pull", "lift info", PUSH]),  # the checkpoint push after lift info
+    ({PUSH: [0, 2]}, [CHECK, "lift sync pull", "lift info", PUSH, PUSH]),  # the job's own plain push line
 ])
-def test_a_preflight_or_push_exit_2_ends_the_job_at_once(job_cell, failing, ran):
+def test_an_exit_2_of_the_preflight_or_a_plain_push_ends_the_job_at_once(job_cell, outcomes, ran):
     """Exit 2: HTTP 401 or 403 (a read token), a runs repo missing or public, a missing secret, a BRANCH
     without lift sync. No retry fixes it, so nothing is retried (no sleep is allowed here), no further
-    line runs, and after the preflight's or a push's exit 2 there is no final push either: it would
-    fail the same way."""
-    job = "\n".join(["lift sync pull", "lift info", "lift sync push --only outputs",
-                     "lift run-dev --variant stock --dtype fp16"])
-    with pytest.raises(RuntimeError, match="exited 2: a configuration problem"):
-        job_cell.run(job, {failing: 2})
+    line runs, and after the preflight's or a plain lift sync push's exit 2 there is no final push
+    either: the final push is that very command, and would fail the same way."""
+    job = "\n".join(["lift sync pull", "lift info", PUSH, "lift run-dev --variant stock --dtype fp16"])
+    with pytest.raises(RuntimeError, match="exited 2: a configuration problem .*The job ends here, with no "
+                                           "further push"):
+        job_cell.run(job, outcomes)
     assert job_cell.host.lines == ran
 
 
 @pytest.mark.parametrize("failing", ["lift sync status # what is left to push?",  # the comment's words
                                      "lift sync pull --only outputs/no-such-dir",
                                      "lift sync check",
-                                     "lift sync pull"])
-def test_an_exit_2_from_a_sync_line_that_is_not_a_push_still_tries_the_final_push(job_cell, failing):
-    """Review 3, V21: such an exit 2 may come from the line's own arguments (an inline comment, a typo, an
-    --only path that matches nothing), and then a push still works. Here the checkpoint push after
-    run-dev failed on all 3 attempts (a Hub blip): with no final push, run-dev's outputs would end with
-    the session. No further line runs; an exit 2 returns at once, so trying costs seconds."""
+                                     "lift sync pull",
+                                     "lift sync push --only output/metrics",  # review 4, W16: a typo
+                                     "lift sync push # push it",
+                                     "lift sync push && lift info"])
+def test_an_exit_2_from_a_job_sync_line_but_a_plain_push_still_tries_the_final_push(job_cell, failing):
+    """Review 3, V21, and review 4, W16: such an exit 2 may come from the line's own arguments (an inline
+    comment, a typo, an --only path that matches nothing, a shell's &&), a push line's included, and then
+    a plain push still works. Here the checkpoint push after run-dev failed on all 3 attempts (a Hub
+    blip): with no final push, run-dev's outputs would end with the session. No further line runs; an
+    exit 2 returns at once, so trying costs seconds."""
     line = "lift run-dev --variant stock --dtype fp16"
     outcome = [0, 2] if failing == "lift sync pull" else 2  # the job's first line pulls too
-    with pytest.raises(RuntimeError, match=re.escape(f"{failing!r} exited 2: a configuration problem")):
+    refused = re.escape(f"{failing!r} exited 2: a configuration problem")
+    with pytest.raises(RuntimeError, match=refused) as err:
         job_cell.run(f"lift sync pull\n{line}\n{failing}\nlift info", {PUSH: [1, 1, 1], failing: outcome},
                      sleep=lambda seconds: None)
     assert job_cell.host.lines == [CHECK, "lift sync pull", line, PUSH, PUSH, PUSH, failing, PUSH]
+    assert "the final push still runs" in str(err.value)
+
+
+# Review 4, W8 (contract G): lift generate, judge and run-dev exit 3 when they are done but skipped some
+# cells (stale, made in another precision, judged by another judge) or had an AuditKIT record refused,
+# each listed with its remedy. Their exit 1 used to end the job there, so one stale cell of stock kept a
+# sweep's later variants, which do not depend on it, from running in that session.
+
+
+@pytest.mark.parametrize("first, then", [
+    ("lift run-dev --variant stock --dtype fp16",
+     "lift run-dev --variant wiseft-l0.50-adapter-aya-std-s1 --dtype fp16"),
+    ("lift generate --variant stock --split dev --dtype fp16 --device cuda:0",
+     "lift judge --variant stock --split dev --dtype fp16 --device cuda:1"),
+    ("lift judge --variant stock --split dev --dtype fp16 --device cuda:1",
+     "lift run-dev --variant stock --dtype fp16"),
+])
+def test_a_line_that_skipped_cells_is_reported_pushed_and_the_next_lines_run(job_cell, first, then):
+    with pytest.raises(RuntimeError, match=re.escape(f"job FAILED: {first!r} exited 3: done, but")):
+        job_cell.run(f"lift sync pull\n{first}\n{then}", {first: 3})
+    assert job_cell.host.lines == [CHECK, "lift sync pull", first, PUSH, then, PUSH, PUSH]
+
+
+@pytest.mark.parametrize("line", [
+    "nvidia-smi -L",
+    "lift smoke --compare-dtype fp16",
+    "lift restart --variant stock --split dev --sets harmful --langs hi --dtype fp16",
+])
+def test_an_exit_3_of_any_other_line_still_stops_the_job(job_cell, line):
+    """Only lift generate, judge and run-dev define an exit 3; another program's 3 is an error."""
+    with pytest.raises(RuntimeError, match=re.escape(f"job FAILED: {line!r} exited 3")) as err:
+        job_cell.run(f"{line}\nlift info", {line: 3})
+    assert job_cell.host.lines == [CHECK, line, PUSH]
+    assert "done, but" not in str(err.value)
 
 
 def test_a_pull_that_exits_1_is_retried_like_a_push(job_cell):
@@ -780,6 +910,42 @@ def test_a_stalled_pull_is_stopped_once_and_not_tried_again(fast_watchdog, capsy
     assert host.lines == [CHECK, "lift sync pull", PUSH]
 
 
+# Review 4, W17: a committed run whose check or first pull stalled ran no line, yet its final push was
+# stopped and tried again on every stall: about 2 h of the T4 x2 session for a kernel with nothing to push.
+
+
+@pytest.mark.parametrize("stalled", [CHECK, "lift sync pull"])
+def test_a_kernel_that_ran_no_line_gives_a_stalled_final_push_one_try(kernel, stalled):
+    waits = []
+    outcomes = {stalled: {"hang": True}, PUSH: [{"hang": True}] * 3}
+    with pytest.raises(RuntimeError, match="the final push was stopped and is not tried again") as err:
+        kernel.run("lift sync pull\nlift run-dev --variant stock --dtype fp16", outcomes, sleep=waits.append)
+    head = [CHECK] if stalled == CHECK else [CHECK, "lift sync pull"]
+    assert kernel.host.lines == [*head, PUSH] and waits == []
+    assert re.search(f"{re.escape(repr(stalled))}.* was stopped and is not tried again", str(err.value))
+
+
+def test_a_kernel_that_ran_no_line_still_retries_a_final_push_that_exits_1(kernel):
+    waits = []
+    host = kernel.run("lift sync pull", {PUSH: [1, 0]}, sleep=waits.append)
+    assert host.lines == [CHECK, "lift sync pull", PUSH, PUSH] and waits == [60]
+
+
+@pytest.mark.parametrize("rc", [0, 1])
+def test_after_a_job_that_ran_a_line_a_stalled_final_push_is_tried_again(kernel, rc):
+    """The kernel keeps what an earlier job did when cell 2 runs again: that job's line, even a failed
+    one, may have left outputs its pushes did not send."""
+    first = "lift run-dev --variant stock --dtype fp16"
+    with pytest.raises(RuntimeError, match="job FAILED") if rc else contextlib.nullcontext():
+        kernel.run(first, {first: rc})
+    waits = []
+    stopped = re.escape(f"preflight {CHECK!r} was stopped and is not tried again")
+    with pytest.raises(RuntimeError, match=stopped):
+        kernel.run("lift sync pull\nlift info", {CHECK: {"hang": True}, PUSH: [{"hang": True}] * 3},
+                   sleep=waits.append)
+    assert kernel.host.lines == [CHECK, PUSH, PUSH, PUSH] and waits == [60, 120]
+
+
 def test_the_attached_secrets_never_reach_the_saved_output(job_cell, capsys):
     """Kaggle saves the printed output with every version: a secret a command prints, even one split
     across two reads, is printed as ***; short values (a spend cap) are left alone."""
@@ -789,6 +955,17 @@ def test_the_attached_secrets_never_reach_the_saved_output(job_cell, capsys):
     printed = capsys.readouterr().out
     assert "token *** ok\r" in printed and "cap 150 ***" in printed
     assert not any(value in printed for value in SECRETS.values())
+
+
+def test_a_secret_across_the_megabyte_cut_is_masked_too(job_cell, capsys):
+    """A megabyte without a line end is printed rather than held, minus the tail a secret could still be
+    starting in: one that straddles that cut comes out masked."""
+    token = SECRETS["HF_TOKEN"].encode()
+    output = [b"x" * (1 << 20) + token[:6], token[6:] + b" ok\n"]
+    job_cell.run("lift info", {"lift info": {"output": output}})
+    printed = capsys.readouterr().out
+    assert "x*** ok\n" in printed and SECRETS["HF_TOKEN"] not in printed
+    assert printed.count("x") >= 1 << 20                            # nothing of the output is lost
 
 
 def test_a_line_silent_past_the_limit_is_stopped_and_fails_then_the_outputs_are_pushed(fast_watchdog):

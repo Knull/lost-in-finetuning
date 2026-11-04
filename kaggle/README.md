@@ -89,10 +89,14 @@ lift info
 - Lines run in `/kaggle/temp/lift`, which holds `data/`, `outputs/` and `validation/` just as the
   repo root does on the laptop. A relative path such as
   `validation/keys/second_judge/stock_dev.txt` means the same file.
-- The first failing line stops the job. A push is the exception: see below.
-- After every successful line except `lift sync ...` lines, the runner runs `lift sync push` as a
-  checkpoint. It pushes once more in `finally`, even after a failure or an interrupt, so the job
-  never needs its own push line.
+- The first failing line stops the job, with two exceptions. One is a push: see below. The other is
+  a `lift generate`, `lift judge` or `lift run-dev` line that exits 3: it is done, but skipped some
+  cells (stale, made in another precision, or judged by another judge) or had their AuditKIT record
+  refused, and it lists each with its remedy (Troubleshooting). Its checkpoint push and the next
+  lines still run, and the cell raises at the end. Any other line's exit 3 stops the job.
+- After every line that succeeds (or exits 3, as above), `lift sync ...` lines excepted, the runner
+  runs `lift sync push` as a checkpoint. It pushes once more in `finally`, even after a failure or
+  an interrupt, so the job never needs its own push line.
 - `lift sync` exits 0 when done, 1 on an error a retry may fix (not everything was transferred),
   2 on a problem no retry fixes, and 3 when some files conflicted: a push puts their local copies
   under `conflicts/<stamp>/` in the runs repo and a pull keeps them, so nothing is lost.
@@ -102,9 +106,10 @@ lift info
   is missing or public, a secret is missing, or `BRANCH` has no `lift sync`. A `lift sync` line in
   `JOB` also exits 2 for its own bad arguments (a typo, an inline comment, an `--only` path that
   matches nothing). An exit 2 is never retried, and no further line runs. After the check's or a
-  push's, no push runs either, since it would fail the same way. After any other `lift sync`
-  line's (a pull, `status`, a `check` in `JOB`), the final push still runs: an exit 2 returns at
-  once, so trying costs seconds.
+  plain `lift sync push`'s (the runner's own, or such a line in `JOB`), no push runs either: the
+  final push is that very command, and would fail the same way. After any other `lift sync` line's
+  in `JOB` (a pull, `status`, a `check`, a push with more words), the final push still runs: an
+  exit 2 returns at once, so trying costs seconds.
 - Apart from an exit 2, a push never stops the job: a failed one is reported, and the next push
   sends whatever is still missing. A failed pull, like any failing line, ends the job.
 - At the end the cell raises if any line or push did not succeed, an exit 3 included, so a
@@ -115,9 +120,15 @@ its output copied to the cell as it comes. The limits are set at the top of cell
 - A line that prints nothing for 45 minutes (`MAX_SILENT_MINUTES`) is hung: it is stopped and
   fails, and the final push still runs. Raise the limit for a step that is silent longer by design.
 - A `lift sync` command that runs longer than 30 minutes (`PUSH_LIMIT_MINUTES`) is stopped. A push
-  is then tried again, as above; a stopped pull, check or status is not, and ends the job like a
-  failing line (the final push still runs). huggingface_hub sets no network timeout, so one stalled
-  read would otherwise hold the session, and the week's GPU quota, until Kaggle's 12-hour limit.
+  is then tried again, as above, up to about 1.5 hours in all; a stopped pull, check or status is
+  not, and ends the job like a failing line (the final push still runs). huggingface_hub sets no
+  network timeout, so one stalled read would otherwise hold the session, and the week's GPU quota,
+  until Kaggle's 12-hour limit.
+- The final push gets one try after a stall when no line but `lift sync` has run in this kernel (a
+  committed run whose check or first pull stalled, say): the kernel made nothing to push. Running
+  cell 2 again does not reset that, so after an earlier job in the same kernel a stalled final push
+  is tried again as usual. To push what a kernel restart left behind, run cell 2 with `JOB` set to
+  `lift sync push`, whose stalls are tried again.
 - Kaggle saves the printed output with every version, so the cell prints `***` in place of any
   attached secret (8 characters or more) that a command prints.
 - Stopping a command sends it SIGINT, so lift can close its files, and SIGKILL to its whole process
@@ -141,8 +152,18 @@ long stage into several lines.
 ## Jobs on a T4 x2
 
 - **fp16 everywhere.** Every `lift generate`, `lift judge` and `lift run-dev` line takes
-  `--dtype fp16`. The loader refuses bf16 on a GPU without native bf16, so a missing flag fails
-  loudly. The dtype is part of the cache key, so fp16 outputs never mix with bf16 ones.
+  `--dtype fp16`, and so does a `lift restart` line, as lift prints it here. The loader refuses
+  bf16 on a GPU without native bf16, so a missing flag fails loudly. The dtype is part of the cache
+  key, so fp16 outputs never mix with bf16 ones. These lines are for the T4 alone: on a GPU with
+  native bf16 (compute capability 8 or more, such as Colab's A100 or L4), generate, judge and
+  run-dev refuse any `--dtype` but bf16, since fp16 runs exist only for the T4's licence.
+- **Leave Colab's bf16 cells out.** Output paths hold no dtype, so an fp16 run over a variant
+  Colab started meets its bf16 cells, which are the reported ones. Give the line `--sets` and
+  `--langs` that leave them out, in several lines if need be: the variant's files under
+  `outputs/generations/` in the runs repo show which cells exist. A bf16 cell left in is refused
+  as made in another precision, listed, and the line exits 3. Never restart such a cell from here:
+  a restart would discard its bf16 outputs, so `lift restart --dtype fp16` refuses it, with nothing
+  moved, unless `--force` is given, which is never right here.
 - **Two GPUs.** A T4 x2 is two separate 16 GB devices. The generator runs on `cuda:0` and the judge
   on `cuda:1`: `--judge-device auto` (run-dev and smoke) and `--device auto` (judge) pick `cuda:1`
   when there are two GPUs. In `lift run-dev`, both work at the same time.
@@ -168,8 +189,10 @@ The first jobs go in this order:
    and `.md`) and to the runs repo:
    - `gate0-fp16.json`, PASS: T4 fp16 numbers may be reported for the Global revision it names,
      but only while the bf16 `gate0.json` it compared against (Colab, all checks run) passes for
-     that revision too, with at least 200 prompts compared. Without both, lift refuses to load
-     fp16 labels, so `lift run-dev --dtype fp16` exits 1 with no AuditKIT record.
+     that revision too and is still that run, with at least 200 prompts compared, and only for
+     cells made under the comparison's harness, decoding settings and GPU class (a T4). A bf16
+     re-run or a harness change therefore needs a new comparison. Without all of this, lift refuses
+     to load fp16 labels, so `lift run-dev --dtype fp16` writes no AuditKIT record and exits 3.
    - `gate0-fp16.json`, FAIL with the decision "fp16 failed": a valid comparison missed the 95%
      rule, or the fp16 run was not finite. T4 runs are never reported, and everything runs in
      bf16 on Colab.
@@ -195,6 +218,9 @@ The first jobs go in this order:
    lift generate --variant stock --split dev --dtype fp16 --device cuda:0
    lift judge --variant stock --split dev --dtype fp16 --device cuda:1
    ```
+
+   If Colab has made some of stock's cells already, add `--sets` and `--langs` that leave them
+   out (above).
 
 ## Where files live
 
@@ -235,21 +261,30 @@ secrets getter, and the `lift_env` path in cell 2.
   a torch release between two sessions changes the stack. A finished cell is reused as it is, but
   `lift generate`, `lift judge` and `lift run-dev` refuse to append to a half-done cell under
   another stack (`StaleOutputError`), because one file never mixes stacks. They go on with the
-  other cells, then exit 1 and print a `lift restart` line for each refused cell. Put that line
+  other cells, then exit 3 and print a `lift restart` line for each refused cell. Put that line
   in `JOB` right after `lift sync pull` and run the job once:
 
   ```
   lift sync pull
-  lift restart --variant stock --split dev --sets harmful --langs hi
+  lift restart --variant stock --split dev --sets harmful --langs hi --dtype fp16
   lift run-dev --variant stock --dtype fp16
   ```
 
-  `lift restart` moves the cell's generations and judgements (with `--judge`, only that judge's
-  judgements) under `outputs/.aside/`, which is never synced, and leaves empty files in their
-  place. The checkpoint push after it then replaces the runs repo's copies, and the job
-  regenerates that cell and reuses the others. Take the line out of `JOB` afterwards: every run
-  of it starts the cell over. Moving a file aside by hand does not work, because the job's own
-  `lift sync pull` brings it back.
+  `lift restart` moves the cell's generations, judgements and AuditKIT records (with `--judge`,
+  only that judge's judgements and records) under `outputs/.aside/`, which is never synced, and
+  leaves empty files in their place; an empty record is retired, and readers skip it. The
+  checkpoint push after it then replaces the runs repo's copies, and the job regenerates that cell
+  and reuses the others. A restart without `--judge` also empties the other judges' judgements,
+  which `lift run-dev` does not refill: its log names the line that does, such as
+  `lift judge ... --judge second` with P04's `--keys` list, to add to `JOB` after the line that
+  regenerates the cell. Take the restart line out of `JOB` afterwards: every run of it starts the
+  cell over. Moving a file aside by hand does not work, because the job's own `lift sync pull`
+  brings it back.
+- **`lift restart` keeps another precision's cells.** `--dtype` names the precision the cell is
+  made again in (bf16 when it is left out, so the T4's line carries `--dtype fp16`). A cell whose
+  generations were made in another precision is refused, since a restart would discard them: the
+  line exits 1 with nothing moved, and the job stops there. `--force` sets them aside all the same:
+  never use it here on a bf16 cell (Jobs on a T4 x2).
 - **Two GPUs.** Running the generator and the judge in the same session halves the cost per
   variant.
 - **Quota.** Check the remaining GPU quota (30 h a week per account) before a long job.
@@ -285,12 +320,23 @@ secrets getter, and the `lift_env` path in cell 2.
   `invalid choice: 'sync'` (or `'check'`): `BRANCH` predates P02. Then rerun cell 1, which reads
   the secrets and clones `BRANCH` again. A `lift sync` line in `JOB` with bad arguments (a typo,
   an inline comment, an `--only` path that matches nothing) exits 2 too: fix the line. After the
-  check's or a push's exit 2 no further push ran, so the outputs since the last push are only in
-  `/kaggle/temp/lift`: once it is fixed, and before the session ends, run cell 2 with `JOB` set to
-  `lift sync push`.
-- **A line exits 1 and lists `lift restart ...` lines for stale cells.** A half-done cell was
-  started under another stack (torch, transformers or the GPU class). Put the `lift restart` lines
-  in `JOB` right after `lift sync pull`, run the job once, then take them out (Habits).
+  check's or a plain `lift sync push`'s exit 2 no further push ran, so the outputs since the last
+  push are only in `/kaggle/temp/lift`: once it is fixed, and before the session ends, run cell 2
+  with `JOB` set to `lift sync push`.
+- **A line exits 3 and lists skipped cells.** `lift generate`, `lift judge` and `lift run-dev`
+  finish the other cells, then list each skipped cell with its remedy. The job went on with the
+  next lines.
+  - A stale cell, started under another stack (torch, transformers or the GPU class): put its
+    `lift restart` line in `JOB` right after `lift sync pull`, run the job once, then take it out
+    (Habits).
+  - A cell made in another precision (bf16, by Colab): leave it out with `--sets` and `--langs`,
+    and never restart it from here (Jobs on a T4 x2).
+  - A cell judged by another judge: run the line with the judge the message names (its id shows
+    the dtype and mode), or start that judge's judgements over with the `lift restart ... --judge`
+    line it prints, as for a stale cell.
+  - A refused AuditKIT record: its error, above the list, says why; on a T4 it is most often the
+    fp16 licence, which does not cover the cell (step 3 of the first jobs above). The judgements
+    are written, so once that is fixed, the next run of the line writes the record.
 - **`NotImplementedError: P01` in a line.** `BRANCH` lacks P01 (`p02-harness` alone). Use a ref
   with both P01 and P02 and rerun cell 1.
 - **`unpinned revisions in configs/project.yaml ...`.** The pin step has not reached this
@@ -298,9 +344,15 @@ secrets getter, and the `lift_env` path in cell 2.
 - **`... failed on all 3 attempts`.** A `lift sync` command kept failing or kept stalling (the Hub
   or the network). Outputs since the last good push exist only in this session: before it ends,
   run cell 2 again with `JOB` set to `lift sync push`.
+- **`... was stopped and is not tried again`.** A `lift sync` command stalled past
+  `PUSH_LIMIT_MINUTES` (the Hub or the network). A stopped pull, check or status ends the job: run
+  it again later. A stopped final push with "no line but lift sync has run in this kernel" had
+  nothing of this kernel's to send.
 - **`... was stopped: no output for ...`.** The line printed nothing for `MAX_SILENT_MINUTES` and
   was most likely hung (a stalled download, a deadlock between the generator and the judge). Run
   the job again: generation and judging resume by cache key. If the step is silent that long by
   design, raise `MAX_SILENT_MINUTES` at the top of cell 2.
-- **`... exited 3 (conflicts ...)`.** Files changed both here and on the Hub since the last sync.
-  Nothing is lost (see Habits); `lift sync status` on any machine shows the conflicts.
+- **`... exited 3 (conflicts or unpaired files ...)`.** Files changed both here and on the Hub since
+  the last sync, or judgements or AuditKIT records no longer pair with their cell's generations.
+  Nothing is lost (see Habits); `lift sync status` on any machine shows both, and the summary names
+  the `lift restart ... --judge ROLE` line for unpaired files.
