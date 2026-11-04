@@ -16,6 +16,22 @@ a row find nothing new.
 - Every finding needs a failing test that reproduces it before the fix lands.
 - A finding that can't be shown with a test goes in the report as "suspected" with the reason.
 
+## Post-merge items to close first
+
+P01, P02 and P04 were merged on Nov 4. The merge itself already:
+- fixed two stale tests (P02's fake GlotLID predates P01's Hindi label folding; P04's file check
+  predates P02's isolated test tree);
+- switched the judge pipeline to GlotLID's top 5 (P01 decisions item 43).
+
+Still open, each with a failing test first:
+1. P04's judgement readers must skip, or refuse, a judgement whose output hash (P02's field) no
+   longer matches the generation under the same key.
+2. P01's `lift data spotcheck-sheets` and `apply-spotchecks` must write and read under
+   `paths.validation_dir()` (`LIFT_VALIDATION_DIR`), as P04's sheets do, so remote runtimes work.
+3. `tests/test_kaggle.py::test_setup_cell_clones_with_the_token_only_in_a_header` fails when the
+   parent environment already has `GIT_CONFIG_*` variables (some sandboxes set them). Isolate the
+   test's environment; check whether the setup cell should also strip inherited `GIT_CONFIG_*`.
+
 ## Check at least these
 
 - **Data.**

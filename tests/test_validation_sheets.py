@@ -319,7 +319,8 @@ def test_write_sheet_defuses_formulas_and_writes_bom_and_lf(tmp_path):
     rows = read_csv(path)
     assert rows[:2] == [["# see validation/guidelines.md"], ["item_id", "text"]]
     assert rows[2:] == [[f"id{i}", c] for i, c in enumerate(safe)]
-    assert [p.name for p in tmp_path.iterdir()] == ["s.csv"]      # no temporary file left behind
+    # no temporary file left behind (lift-tree is the isolated data/output tree from conftest.py)
+    assert [p.name for p in tmp_path.iterdir() if p.name != "lift-tree"] == ["s.csv"]
 
 
 @pytest.mark.parametrize("n", [None, 20])
