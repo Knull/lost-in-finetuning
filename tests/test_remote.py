@@ -1955,6 +1955,38 @@ def test_watch_checks_the_runs_repo_before_a_push_retry_and_keeps_the_vm_when_it
     assert runs_repo_check.calls == [True] * 4
 
 
+# Review 6, Y2: watch's runs repo check before a push retry had no bound (huggingface_hub's client sets no
+# timeout). A Hub reply that stalled held watch in it for ever while the VM billed: no exit code, no banner,
+# and on Windows no Ctrl+C either.
+def test_watch_keeps_the_vm_when_the_runs_repo_check_never_answers(tmp_path, monkeypatch):
+    from lift import sync
+
+    stalled = threading.Event()  # the check answers only when the test ends
+    monkeypatch.setattr(sync, "preflight", lambda *, write=True: stalled.wait(60), raising=False)
+    monkeypatch.setattr(remote, "RUNS_REPO_CHECK_WAIT", 0.2)
+    fake, ctx = setup(tmp_path, [done_log(PUSH_FAILED)], rescue_rc=0)
+    started_vm(fake, ctx, "lift-hang")
+    result: list[int] = []
+    watcher = threading.Thread(target=lambda: result.append(remote.watch("lift-hang", ctx=ctx)), daemon=True)
+    try:
+        watcher.start()
+        watcher.join(10)
+        assert not watcher.is_alive(), "watch still waits for the runs repo check"
+        text = ctx.out.getvalue()
+        assert result == [6] and "KEEPS RUNNING" in text and "no answer within 0.2 s" in text
+        assert fake.server and fake.rescues == [] and "upload" not in fake.calls and "stop" not in fake.calls
+        record = manifest("lift-hang")
+        assert record["rc"] == 6 and record.get("vm_released") is not True and "rescue_push" not in record
+        # launch has the same bound: no answer is a transient error (1), before any VM exists.
+        fake.calls.clear()
+        with pytest.raises(remote.RemoteError, match="no answer within") as err:
+            remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-hang2"), ctx)
+        assert err.value.code == 1 and fake.calls == []
+    finally:
+        stalled.set()
+        watcher.join(10)
+
+
 # Review 5, X13: watch that keeps the VM on purpose, billing, with outputs no push sent, exited 1 (also the
 # code of a failed line whose VM is released) with no banner, so a caller that looks for 4 left it billing.
 # 4's advice (lift remote stop) would throw the outputs away: the keep has a code of its own.
