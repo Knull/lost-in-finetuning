@@ -42,10 +42,14 @@ Jobs are launched from the laptop with `lift remote`, which drives Google's Cola
    ```powershell
    $env:GITHUB_TOKEN = "<the read-only token>"
    $env:LIFT_RUNS_REPO = "<hf-user>/lift-runs"
-   $env:HF_TOKEN = "<a write token>"          # or run `hf auth login` once
+   $env:HF_TOKEN = "<a write token>"          # or `hf auth login` once, with a WRITE token
    $env:OPENAI_API_KEY = "<key>"              # or ANTHROPIC_API_KEY: frontier-judge jobs only
    $env:LIFT_JUDGE_MAX_USD = "<cap>"          # spend cap for frontier-judge jobs
    ```
+
+   `hf auth login` must store a WRITE token for the runs repo too, not the read token that
+   downloads the models: the job's pushes use it, and so does the push retry of
+   `lift remote watch`.
 
 7. **Check the runs repo**: `lift sync check --write` says whether it exists, is private and takes
    this token's writes. `lift remote` runs the same check before it creates any VM.
@@ -88,7 +92,7 @@ run, never an older one:
 | File | Written by | What it is |
 | --- | --- | --- |
 | `gate0.json` and `gate0.md` | `lift smoke` (bf16, on the A100; a T4, which has no bf16, is refused with exit 2 and no report) | The verdict, PASS or FAIL. A failed re-run replaces an earlier PASS: a model that does not load, or any failed required check, is a full FAIL. A run on a reduced sample (`--n-precision` under 200 or `--n-dry` under 20) whose checks pass is INCOMPLETE and never replaces this file. |
-| `gate0-fp16.json` and `.md` | `lift smoke --compare-dtype fp16` (on a T4) | The fp16-vs-bf16 verdict. A T4 number counts only while this says PASS, with at least 200 prompts compared, and the bf16 `gate0.json` it compared against says PASS too and is still that run (its precision digest), both for the same Global revision that made the cell, and only for cells made under the comparison's harness, decoding settings and GPU class. So a bf16 re-run or a harness change needs a new comparison. `lift.judge.pipeline` refuses an fp16 cell otherwise, so pull both files before reading T4 labels. |
+| `gate0-fp16.json` and `.md` | `lift smoke --compare-dtype fp16` (on a T4) | The fp16-vs-bf16 verdict. A T4 number counts only while this says PASS, with at least 200 prompts compared, and the bf16 `gate0.json` it compared against says PASS too and is still that run (its precision digest), both for the same Global revision that made the cell, and only for cells made under the comparison's harness, decoding settings and GPU class (the generator's and the judge's). So a bf16 re-run needs a new comparison, and a harness change needs the full bf16 Gate 0 run again first, then a new comparison. `lift.judge.pipeline` refuses an fp16 cell otherwise, so pull both files before reading T4 labels. |
 | `gate0-partial.json`, `gate0-fp16-partial.json` | either, when incomplete | `--skip` removed a required check, or a required check did not run (`"not_run": true`: no room for the judge on one GPU, or nothing valid to compare the fp16 run with: no passing bf16 `gate0.json` for the same Global revision, or a different number of prompts, or fewer than 200). It never passes and never replaces the full file. |
 
 What it does:
@@ -130,8 +134,10 @@ What it does:
 6. If the job's final push still failed, `lift remote` tries once more itself, unless that push
    exited 2. It uploads the secrets again and runs job.py in push mode, which runs one
    `lift sync push` and writes its own last line. It does the same for a job that ended with no
-   last line after running lines. If the outputs still could not be pushed, it prints a loud
-   warning that the outputs since the last successful push are lost.
+   last line after running lines, but never on a VM the Colab CLI has lost (reclaimed, or its
+   record gone), which no upload or exec reaches. A first Ctrl+C during the retry only says that it
+   goes on; the second stops the VM at once. If the outputs still could not be pushed, it prints a
+   loud warning that the outputs since the last successful push are lost.
 7. Stops the VM, then checks with `colab sessions` that it is gone. This also happens on Ctrl+C,
    on any error, and after `--max-hours` (default 12).
 
@@ -140,11 +146,12 @@ Exit codes (also in `lift remote --help`):
 | Code | Meaning |
 | --- | --- |
 | 0 | The job succeeded, its outputs are pushed, and the VM is released. A push that hit conflicts counts as pushed; `lift remote` says so. |
-| 1 | A job line failed, or a generate, judge or run-dev line exited 3 (done, but some cells were skipped: the job ran its other lines, and its log lists each cell with its remedy); or the job's status is unknown; or the runs repo check met a transient error (nothing was created: try again); or `watch` kept the VM for a push retry that its shell lacks the secrets for. |
+| 1 | A job line failed, or a generate, judge or run-dev line exited 3 (done, but some cells were skipped: the job ran its other lines, and its log lists each cell with its remedy); or the job's status is unknown; or the runs repo check met a transient error (nothing was created: try again). |
 | 2 | `lift remote` refused to start: bad options, no login, a missing secret, a runs repo that is missing, not private or not writable with this token, or a job that another `lift remote` on this machine follows already (`watch` names its pid). Nothing was created or changed. |
 | 3 | The job could not be set up: `colab new` or the secrets upload failed, or job.py's spec, secrets, python, fetch, pip or sync-check step did; or a `lift sync` call on the VM exited 2 before anything was lost. |
 | 4 | The VM could not be confirmed released and may still be billing. This overrides every other code. `lift remote stop` returns 0 or 4. |
-| 5 | The job ended, but its outputs could not be pushed: its final push failed, and so did the retry from the laptop (none is tried for a push that exited 2). |
+| 5 | The job ended, but its outputs could not be pushed: its final push failed, and so did the retry from the laptop (none is tried for a push that exited 2, or on a VM the Colab CLI has lost). |
+| 6 | `watch` kept the VM running, and billing, on purpose: it holds outputs that no push sent. A push retry is due that its shell cannot run (secrets missing, the runs repo check failed, or the retry's push exited 2: the banner says what to set, then rerun `lift remote watch <name>`), or `--no-stop` kept it. `lift remote stop <name>` releases it, and the outputs with it. |
 | 130 | Interrupted (Ctrl+C). |
 
 Afterwards, `lift sync pull` brings the results to the laptop.
@@ -161,11 +168,14 @@ Afterwards, `lift sync pull` brings the results to the laptop.
   (the VM's proxy failing), it is tried again 15 and 30 s later, then every 2 minutes while
   `lift remote` waits, and the waits count from when it went up: a failed upload never stops the VM
   sooner. When nothing ran yet (a Ctrl+C before the job started, or before its log appeared),
-  `lift remote` says that nothing was lost.
+  `lift remote` says that nothing was lost. While `lift remote` already waits for the job's final
+  push (at the cap, or after an error) or runs its push retry, a first Ctrl+C only says that the
+  wait goes on; the second stops the VM at once.
 - **`--max-hours`.** The job stops itself the same way 30 minutes before the cap (a quarter of the
   cap when that is shorter), so its final push fits. At the cap, `lift remote` reads the log once
   more, then asks the job to stop and waits as for Ctrl+C, also when that request cannot be
-  uploaded: the job has usually stopped itself by then and is pushing.
+  uploaded: the job has usually stopped itself by then and is pushing. A first Ctrl+C during that
+  wait only says that it goes on; the second stops the VM at once.
 - **Hung commands.** job.py kills a line (or a setup step such as `pip install`) that prints nothing
   for `--max-silent-minutes` (default 45): it fails, and after a line the final push still runs. A
   `lift sync pull` killed this way is not tried again: its line fails like any other, so a stalled
@@ -185,7 +195,9 @@ exits 1. Any other failing line still ends the job. A cell is skipped when:
   `lift restart --variant stock --split dev --sets harmful --langs hi` (with `--judge second`, or
   `--judge primary`, when only that judge's file is stale). Rerun the job with each printed restart
   line right after `lift sync pull` (it moves the copies the pull brought), then the line that
-  exited 3:
+  exited 3. For a `lift judge` line, the listing also names the `lift generate` line that must come
+  first, and for a `--keys` line it says when P04's key list must be drawn again first (a changed
+  prompt changes its key):
 
   ```powershell
   lift remote --gpu A100 --job "lift sync pull; lift restart --variant stock --split dev --sets harmful --langs hi; lift run-dev --variant stock"
@@ -227,8 +239,11 @@ Notes:
   arguments with single quotes. Start every job with `lift sync pull`, since the VM starts empty.
 - **Dry run.** `--dry-run` prints the plan, with secrets masked, and calls nothing.
 - **From Claude Code.** Start `lift remote` with `run_in_background`, because foreground commands
-  stop at 10 minutes, and check its exit code (table above): a 4 means a VM may still be billing.
-  Keep the laptop awake for the whole run.
+  stop at 10 minutes, and check its exit code (table above): a 4 means a VM may still be billing,
+  and a 6 means `watch` kept one running on purpose, billing, with outputs on it that no push sent.
+  After a 6, set what its banner names in the same command line (each tool call runs in a new
+  shell) and run `lift remote watch <name>` again, or `lift remote stop <name>` to give the outputs
+  up. Keep the laptop awake for the whole run.
 
 ## What happens to secrets
 
@@ -256,20 +271,26 @@ Notes:
   that process ends, a crash included), so `watch` is refused with exit 2 and that process's pid
   while another one follows. Otherwise `lift remote watch <name>` prints the log again and stops the
   VM when the job ends, after one push retry if the job's final push failed (not with exit 2). That
-  retry needs `HF_TOKEN` (or `hf auth login`) and `LIFT_RUNS_REPO` in watch's shell, which a new
-  PowerShell window lacks (step 6 sets them per session); `GITHUB_TOKEN` is not needed. Without
-  them, watch says so when it starts, and when a retry is due it keeps the VM, with the outputs on
-  it (exit 1), and names what to set: then run watch again, or `lift remote stop <name>` to give the
-  outputs up. `--no-stop` leaves the VM running: a failed final push then exits 1, not 5, since the
-  outputs are still on the VM, and `lift remote watch <name>` without `--no-stop` retries the push,
-  then stops it. If the manifest says the VM is already released, watch only prints the log as last
-  downloaded and returns the recorded code; it never replaces a recorded job status with a weaker
-  one, and it reads the record again before a push retry and before its last write, so what
-  another process recorded meanwhile (a release, the job's status, a retry that pushed) is kept. An
+  retry runs with watch's own shell: it needs a WRITE token for the runs repo in `HF_TOKEN` (or from
+  `hf auth login`, logged in with a WRITE token, not the read token that downloads the models) and
+  `LIFT_RUNS_REPO`, which a new PowerShell window lacks (step 6 sets them per session);
+  `GITHUB_TOKEN` is not needed. Before the retry, watch checks the runs repo as a launch does
+  (`lift sync check --write`). When the secrets are missing (watch says so when it starts), that
+  check fails, or the retry's push exits 2, watch keeps the VM, with the outputs on it, and prints a
+  banner that names what to set (exit 6): then run watch again, or `lift remote stop <name>` to
+  give the outputs up. A VM the Colab CLI has lost (reclaimed, or its record gone) gets no retry,
+  since nothing reaches it: watch stops it, by its endpoint if need be, and outputs that a failed
+  final push left on it are reported lost (exit 5). `--no-stop` leaves the VM running: a failed
+  final push then exits 6, not 5, since the outputs are still on the VM, and
+  `lift remote watch <name>` without `--no-stop` retries the push, then stops it. If the manifest
+  says the VM is already released, watch only prints the log as last downloaded and returns the
+  recorded code; it never replaces a recorded job status with a weaker one, and it reads the record
+  again before a push retry and before its last write, so what another process recorded meanwhile
+  (a release, the job's status, a retry that pushed) is kept. An
   unexpected error in watch is handled as in a launch: the job is asked to stop and push, and the
   VM is still stopped (not with `--no-stop`). `lift remote stop <name>` stops the VM straight away,
   by its recorded endpoint even if the CLI has lost its own record; once it confirms the release,
-  the recorded code becomes the run's own. A recorded 4 is answered, and outputs that `--no-stop`
+  the recorded code becomes the run's own. A recorded 4 or 6 is answered, and outputs that watch
   left on the VM after a failed final push go with it: the record says 5, and stop prints the
   warning that they are lost.
 - **A VM without a recorded endpoint.** This happens with no manifest (the job was launched from
