@@ -1874,8 +1874,12 @@ def format_stats(st: Mapping[str, Any]) -> str:
         lines.append("missing files: " + ", ".join(st["missing"]))
     if st.get("sft"):
         d = st["sft"]["decision"]
-        lines.append(f"sft: N = {d['rows']} rows per candidate (target {d['rows_target']}"
-                     + (f", limited by {d['limited_by']})" if d.get("limited_by") else ")"))
+        if d.get("rows") is not None:
+            lines.append(f"sft: N = {d['rows']} rows per candidate (target {d['rows_target']}"
+                         + (f", limited by {d['limited_by']})" if d.get("limited_by") else ")"))
+        else:
+            lines.append(f"sft: rows per variant, target {d['rows_target']}, no equal-size rule: "
+                         + ", ".join(f"{k} {v}" for k, v in sorted(d["rows_by_variant"].items())))
         for k, v in st["sft"]["variants"].items():
             lines.append(f"  {k}: {v['rows']} of {v['curated']} curated (training pool {v['train_pool']})")
     else:

@@ -38,10 +38,11 @@ counts as aya / indicalign:
 4. ``build_candidates``: CuratorKIT's no-API path on each training pool (``run_curatorkit``): schema
    gate, exact then MinHash dedup (0.85 on character 3-grams; the first copy in row-id order stays;
    the ``raw`` stress pool skips dedup), cleaning with strip_html and collapse_whitespace off:
-   790 -> 679 (raw 788) / 10,144 -> 9,958. Then the pre-registered equal-size rule: N =
-   min(train.yaml rows, aya dedup, indicalign dedup) = 679, limited by aya and far below 3,000;
-   both candidates AND the aya raw sample take N rows by sha256 rank. The build logs a warning and
-   report.json records the decision.
+   790 -> 679 (raw 788) / 10,144 -> 9,958. Then the row counts: since Nov 4 (decisions item 47,
+   ``equal_size: false``) each variant takes min(train.yaml rows, its own curated rows) by sha256
+   rank, so aya trains on 679 and indicalign on 3,000, and the stress recipe's raw sample is
+   indicalign's. The Nov 3 rule (``equal_size: true``: every variant takes min(rows, aya dedup,
+   indicalign dedup) = 679) stays available. report.json records the decision.
 
 Files under the data dir (training rows use the messages format TRL's SFTTrainer reads):
     interim/sft/{cand}/{variant}/input.jsonl             CuratorKIT input {id, instruction, output}
@@ -52,7 +53,8 @@ Files under the data dir (training rows use the messages format TRL's SFTTrainer
     sft/{cand}/{variant}/curatorkit/                     LF copies of CuratorKIT's manifest.json,
                                                          rejected.jsonl, lexsi_provenance.json + summary
     sft/report.json                                      every stage count and the N decision
-variant is ``dedup`` (both candidates) or ``raw`` (aya, stress recipe). The utility records go to
+variant is ``dedup`` (both candidates) or ``raw`` (the stress candidate,
+train.yaml ``stress.candidate``). The utility records go to
 prompts/utility_hi.jsonl through build.py. CuratorKIT's own files carry run timestamps (manifest.json:
 run_timestamp, wall_clock_seconds and its provenance's created_at; lexsi_provenance.json:
 created_at; rejected.jsonl: each row's provenance_chain timestamps), so interim/sft/ and the
@@ -585,12 +587,19 @@ def build_candidates(train_pools: Mapping[str, Any], *,
                      pool_counts: Mapping[str, Mapping[str, int]] | None = None,
                      cfg: Mapping[str, Any] | None = None, train_cfg: Mapping[str, Any] | None = None,
                      curate: Curate | None = None) -> dict:
-    """Curate and sample every variant (aya/dedup, indicalign/dedup, aya/raw) under the equal-size
-    rule, write sft_dir()/report.json and return it.
+    """Curate and sample every variant (each candidate deduplicated, plus the stress candidate raw),
+    write sft_dir()/report.json and return it.
+
+    Row counts (train.yaml): with ``equal_size`` true, every variant takes N = min(rows, each
+    candidate's deduplicated count), the Nov 3 rule. With ``equal_size`` false (the default since
+    Nov 4, decisions item 47), each variant takes min(rows, its own curated count).
 
     ``train_pools`` is exclude_heldout's result; ``pool_counts`` (load_pools' counters, by source)
     fills the loaded and dropped counts of the report. curate None -> run_curatorkit. The report:
-    {"decision": {"rows_target", "rows": N, "limited_by": candidate | None}, "seed",
+    {"decision": {"rows_target", "equal_size", "rows": N | None (None unless equal_size),
+                  "rows_by_variant": {"aya/dedup": n, ...},
+                  "limited_by": candidate | None (equal_size) or [variants under the target] | None},
+     "seed",
      "sources": {name: {loaded, dropped, pool, held_out, near_dup_excluded, near_dup_of, train_pool}},
      "variants": {"aya/dedup": selection.json without ids, ...}}.
     """
@@ -601,26 +610,42 @@ def build_candidates(train_pools: Mapping[str, Any], *,
     plan = _variants(train_cfg)
     curated = {(name, variant): _curate(name, variant, _rows(train_pools[name]), curate)
                for name, variant in plan}
-    sizes = {name: len(curated[(name, "dedup")][0]) for name in train_cfg["candidates"]}
-    n = min(target, *sizes.values())
-    limited_by = None if n == target else min(sizes, key=lambda k: sizes[k])
-    if n < 1:
-        raise ValueError(f"no SFT rows left to train on: curated sizes {sizes}")
-    if n < target:
-        log.warning("SFT candidates use %d rows, below the target %d (limited by %s, curated sizes %s): "
-                    "both candidates and the %s raw sample take %d (equal-size rule)",
-                    n, target, limited_by, sizes, train_cfg["stress"]["candidate"], n)
-    for (name, variant), (rows, _) in curated.items():
-        if len(rows) < n:
-            raise ValueError(f"{name}/{variant} has {len(rows)} curated rows, fewer than N = {n}")
+    equal = bool(train_cfg.get("equal_size", True))
+    if equal:
+        sizes = {name: len(curated[(name, "dedup")][0]) for name in train_cfg["candidates"]}
+        n = min(target, *sizes.values())
+        limited_by: Any = None if n == target else min(sizes, key=lambda k: sizes[k])
+        if n < 1:
+            raise ValueError(f"no SFT rows left to train on: curated sizes {sizes}")
+        if n < target:
+            log.warning("SFT candidates use %d rows, below the target %d (limited by %s, curated sizes %s): "
+                        "both candidates and the %s raw sample take %d (equal-size rule)",
+                        n, target, limited_by, sizes, train_cfg["stress"]["candidate"], n)
+        for (name, variant), (rows, _) in curated.items():
+            if len(rows) < n:
+                raise ValueError(f"{name}/{variant} has {len(rows)} curated rows, fewer than N = {n}")
+        counts = {key: n for key in plan}
+    else:
+        n = None
+        counts = {key: min(target, len(curated[key][0])) for key in plan}
+        empty = [f"{name}/{variant}" for (name, variant), c in counts.items() if c < 1]
+        if empty:
+            raise ValueError(f"no SFT rows left to train on for {', '.join(empty)}")
+        short = [f"{name}/{variant}" for (name, variant), c in counts.items() if c < target]
+        limited_by = short or None
+        if short:
+            log.warning("SFT variants below the target %d rows (no equal-size rule): %s", target,
+                        ", ".join(f"{name}/{variant} {c}" for (name, variant), c in counts.items()))
     variants = {}
     for name, variant in plan:
         rows, summary = curated[(name, variant)]
-        selection = _write_variant(name, variant, rows, n, rows_target=target, seed=seed,
-                                   train_pool=len(_rows(train_pools[name])), summary=summary)
+        selection = _write_variant(name, variant, rows, counts[(name, variant)], rows_target=target,
+                                   seed=seed, train_pool=len(_rows(train_pools[name])), summary=summary)
         variants[f"{name}/{variant}"] = {k: v for k, v in selection.items() if k != "ids"}
     report = {
-        "decision": {"rows_target": target, "rows": n, "limited_by": limited_by},
+        "decision": {"rows_target": target, "equal_size": equal, "rows": n,
+                     "rows_by_variant": {f"{name}/{variant}": c for (name, variant), c in counts.items()},
+                     "limited_by": limited_by},
         "seed": seed,
         "sources": {name: _source_report(_rows(pool), pool[1] if isinstance(pool, tuple) else [],
                                          (pool_counts or {}).get(name))

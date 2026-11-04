@@ -26,15 +26,15 @@ is logged in `docs/decisions.md` with its date and reason.
 ReSta reference.
 
 **Adapter.** Hindi instruction SFT on about 3,000 deduplicated rows. LoRA r 16, alpha 32,
-LR 2e-4, 2 epochs, chat template on, loss on assistant tokens only. Three seeds. (Aya has only
-679 usable Hindi rows, so under the equal-size rule both candidates train on 679:
-`docs/decisions.md` item 23, Nov 4.)
+LR 2e-4, 2 epochs, chat template on, loss on assistant tokens only. Three seeds. Aya has only
+679 usable Hindi rows, so it trains on 679 and IndicAlign on 3,000 (`docs/decisions.md` items 23
+and 47, Nov 4).
 
 - There are two data candidates: Aya Dataset Hindi rows and one non-Aya Hindi set (IndicAlign).
   We pick between them by dev utility win rate only, never by drift.
 - A stress recipe (LR 4e-4, 3 epochs, undeduplicated rows, seed 1) is used only if the standard
-  recipe does not drift, and is labelled as a stress test. It takes 679 of Aya's 788
-  undeduplicated rows (item 23).
+  recipe does not drift, and is labelled as a stress test. It takes 3,000 of IndicAlign's
+  undeduplicated rows (item 47).
 
 **Evaluation languages.** English and Hindi (primary); Chinese and Spanish (transfer, natively
 validated); Arabic and Thai (exploratory).
