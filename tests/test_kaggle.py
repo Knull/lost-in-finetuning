@@ -414,7 +414,8 @@ def setup_cell(monkeypatch):
         monkeypatch.setattr(shutil, "rmtree", lambda path, **kwargs: state.removed.append(path))
         state.ns = {"__name__": "__main__"}
         with mock.patch.dict(os.environ):
-            for name in (*HIDDEN, *LIFT_DIRS):
+            # The parent's own git settings (some sandboxes set GIT_CONFIG_*) are not the cell's.
+            for name in [*HIDDEN, *LIFT_DIRS, *(n for n in os.environ if n.startswith("GIT_CONFIG"))]:
                 os.environ.pop(name, None)
             os.environ.update(environ or {})
             try:
@@ -480,6 +481,23 @@ def test_setup_cell_clones_with_the_token_only_in_a_header(setup_cell):
     repo = clone_cmd[-1]
     assert setup_cell.removed == [repo]  # a re-run re-clones; nothing else is deleted
     assert bootstrap_cmd == ["bash", f"{repo}/kaggle/bootstrap.sh"]
+
+
+def test_the_clone_reads_no_git_config_the_runtime_left_in_the_environment(setup_cell):
+    # GIT_CONFIG_PARAMETERS and GIT_CONFIG_KEY_n/VALUE_n past the cell's count would be read with its one
+    # header (a second AUTHORIZATION header, a URL rewrite): the clone gets only its own. Neither
+    # os.environ nor bootstrap.sh, which may need the runtime's settings, loses them.
+    runtime = {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+               "GIT_CONFIG_VALUE_0": "AUTHORIZATION: basic c3RhbGU=",
+               "GIT_CONFIG_KEY_1": "url.https://mirror.invalid/.insteadOf", "GIT_CONFIG_VALUE_1": "https://github.com/",
+               "GIT_CONFIG_PARAMETERS": "'http.extraheader=AUTHORIZATION: basic c3RhbGU='"}
+    setup_cell.run(SECRETS, environ=runtime)
+    (_, _, clone_env), (_, _, bootstrap_env) = setup_cell.calls
+    assert {k: v for k, v in clone_env.items() if k.startswith("GIT_CONFIG")} == {
+        "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {_auth(SECRETS['GITHUB_TOKEN'])}"}
+    assert {k: v for k, v in bootstrap_env.items() if k.startswith("GIT_CONFIG")} == runtime
+    assert {k: v for k, v in setup_cell.env.items() if k.startswith("GIT_CONFIG")} == runtime
 
 
 def test_setup_cell_stops_before_cloning_when_a_required_secret_is_missing(setup_cell):

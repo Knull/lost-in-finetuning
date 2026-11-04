@@ -50,7 +50,9 @@ A markdown cell on top repeats the usage and the T4 rule. Then come two code cel
   `/kaggle/temp/lift/{data,outputs,validation}`, outside `/kaggle/working` (see below).
 - It shallow-clones the repo into `/kaggle/temp/lift/repo`. The token goes only into an HTTP
   header, set through `GIT_CONFIG_*` variables of that one git process, with
-  `GIT_TERMINAL_PROMPT=0`. It never goes into the URL, the command line or `.git/config`. If the
+  `GIT_TERMINAL_PROMPT=0`; any `GIT_CONFIG_PARAMETERS` or `GIT_CONFIG_COUNT/KEY_n/VALUE_n` the
+  runtime set are left out of that process (not out of `os.environ` or `bootstrap.sh`), so git reads
+  that one header. It never goes into the URL, the command line or `.git/config`. If the
   clone fails, the error shows git's message with the token redacted. Rerunning the cell deletes
   and re-clones only the clone.
 - It runs `kaggle/bootstrap.sh`:
