@@ -2,7 +2,7 @@
 
 Planned modules (one per prompt, so sessions never collide):
     info.py        lift info                                                  (done)
-    data.py        lift data build|stats|spotcheck-sheets|apply-spotchecks    (P01)
+    data.py        lift data build|stats|spotcheck-sheets|apply-spotchecks    (done)
     run.py         lift smoke|generate|judge|run-dev                          (P02)
     sync.py        lift sync push|pull                                        (P02)
     train.py       lift train|parity|utility|belebele|heldout-loss|gate       (P03)

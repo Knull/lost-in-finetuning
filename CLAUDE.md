@@ -159,8 +159,10 @@ six languages, so pairing, splitting and clustering all go by pid.
     ReStaTrainer or RefusalDirectionTrainer.
   - On Kaggle/Colab, `pip uninstall -y torchao` if SafeTune imports fail.
 - **CuratorKIT 0.1.22.** The no-API path is `Curator(CuratorConfig(dataset=..., dedup="minhash",
-  clean=True, export_formats=["sft_messages"], output_dir=...)).run()`. Keep its manifest.json,
-  rejected.jsonl and lexsi_provenance.json, and don't run its English toxicity gate on Hindi.
+  clean=True, export_formats=["messages"], output_dir=...)).run()`. The format is `messages`
+  (it writes `sft_messages.jsonl`); an unknown format only warns and exports nothing. Keep its
+  manifest.json, rejected.jsonl and lexsi_provenance.json, and don't run its English toxicity
+  gate on Hindi.
 - **AuditKIT 1.1.3.** `auditkit.evaluate(model=<callable list[str]->list[str]>, prompts=...,
   metrics=...)`; pairwise metrics cover the win rate. Never use its `paired_bootstrap`: it
   resamples uncentred differences and returns no intervals. `lift.stats` replaces it.
@@ -171,13 +173,24 @@ six languages, so pairing, splitting and clustering all go by pid.
   (500 rows) have `instruction` = the ENGLISH source and `instruction_translated` = the target
   text. The en harmful file has only `instruction`. Rows align by index across languages.
 - **Train and val files.** `*_{train,val}_translated_{lang}` have `instruction` = the TRANSLATED
-  text and no English field. Their English sources are in `dataset/splits/`.
+  text and no English field. Their English sources are in `dataset/splits/`, row for row, except
+  zh harmless train and val: they are a different draw that lines up with no English file
+  (`sources.polyrefuse.misaligned`, docs/decisions.md).
 - **Missing sets.** There is no Hindi anywhere and no zh harmless test. The translation job
-  makes both, with Google Translate, the tool PolyRefuse itself used.
+  makes them, and zh harmless train from its English source, with Google Translate, the tool
+  PolyRefuse itself used. Harmless val is unused.
 
 ## Status
 
 - **Implemented and tested.** config, io, paths, schemas, cachekey, splits, selection,
   stats.paired, stats.agreement, judge.labels, manifest, cli and `lift info`.
+- **P01 (data):** lang (GlotLID), data.polyrefuse, data.translate, data.sources, data.sft,
+  data.build, data.text and `lift data build|stats|spotcheck-sheets|apply-spotchecks`.
+  - Read prompts with `lift.data.build.load_prompts(set, lang, split)`.
+  - Each module's docstring holds the verified facts about its source.
+  - The splits are frozen in `data/splits/` (Nov 4). The 8 files that need Google Translate
+    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) wait for the
+    translation job. The SFT candidates have 679 rows each
+    (`data/sft/{cand}/{variant}/sft_messages.jsonl`; N is `decision.rows` in `data/sft/report.json`).
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

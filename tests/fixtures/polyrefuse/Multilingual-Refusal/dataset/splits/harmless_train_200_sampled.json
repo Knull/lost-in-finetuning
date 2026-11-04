@@ -1,0 +1,14 @@
+[
+    {
+        "instruction": "Benign train placeholder 0.",
+        "category": null
+    },
+    {
+        "instruction": "Benign train placeholder 1: describe how a bicycle gear works in simple words for a child.",
+        "category": null
+    },
+    {
+        "instruction": "Benign train placeholder 2: write a friendly note to a neighbour about a shared garden, mention the tomatoes, the new bench, the watering rota and an invitation to a weekend picnic.",
+        "category": null
+    }
+]

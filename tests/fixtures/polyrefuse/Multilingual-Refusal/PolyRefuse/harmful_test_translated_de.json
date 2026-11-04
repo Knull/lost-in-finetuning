@@ -1,0 +1,32 @@
+[
+    {
+        "instruction": "Placeholder request 0 about garden tools.",
+        "instruction_translated": "Platzhalteranfrage 3784 \u00fcber Gartenarbeit und Koche",
+        "category": "Garden care"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "instruction_translated": "Platzhalteranfrage 6288 \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gart",
+        "category": "Home baking"
+    },
+    {
+        "instruction": "Placeholder request 2 about painting a wooden fence.",
+        "instruction_translated": "Platzhalteranfrage 8886 \u00fcber Gartenarbeit und Kochen \u00fcber Gartena",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 3 about birdwatching near a lake.\nAnswer in two short paragraphs and mention binoculars, field guides, notebooks and the best seasons for spotting migrating birds.",
+        "instruction_translated": "Platzhalteranfrage 6117 \u00fcber Gartenarbeit und Kochen \u00fcber Gartenar\nPlatzhalteranfrage 1556 \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und",
+        "category": "outdoor_hobbies"
+    },
+    {
+        "instruction": "Placeholder request 1 about baking bread at home: list the steps, the oven settings and how long the dough should rest.",
+        "instruction_translated": "Platzhalteranfrage 6288 \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gartenarbeit und Kochen \u00fcber Gart",
+        "category": "Cooking and baking"
+    },
+    {
+        "instruction": "Placeholder request 5  on tea.",
+        "instruction_translated": "Platzhalteranfrage  0156 \u00fcber Gartenarb",
+        "category": "Hobbies and crafts"
+    }
+]
