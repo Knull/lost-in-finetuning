@@ -18,9 +18,15 @@ colab/README.md has the operator's view):
 - The job must get to push its outputs. On Ctrl+C or at ``--max-hours``, lift remote uploads
   /content/lift_job.stop and waits up to STOP_WAIT for the job's last line, longer (up to PUSH_WAIT)
   while the job's log shows a push still running: job.py stops the running line and still runs its
-  final push. When that push fails (but not with lift sync's exit 2, which no retry fixes), or the job
-  ends with no last line after running lines, lift remote tries a push once more itself (job.py in
-  push mode) before it stops the VM.
+  final push. A stop request that does not go up is tried again while lift remote waits; it never
+  cuts the wait short. When that push fails (but not with lift sync's exit 2, which no retry fixes),
+  or the job ends with no last line after running lines, lift remote tries a push once more itself
+  (job.py in push mode) before it stops the VM. watch keeps the VM instead when its shell lacks what
+  that push needs (HF_TOKEN and the runs repo; push mode never fetches, so not GITHUB_TOKEN).
+- One lift remote process at a time follows a job: launch and watch hold
+  outputs/manifests/remote-<name>.lock (an OS lock, gone with its process), and a second follower is
+  refused with the holder's pid. The record is read again before a push retry and before the last
+  write, so a release, a job status or a push retry that another process recorded is kept.
 - ``colab stop`` exits 0 for a name the CLI has forgotten, so ``finally`` stops the VM and then checks
   that ``colab sessions`` no longer lists its endpoint, which is saved to
   outputs/manifests/remote-<name>.json right after ``colab new``. Without an endpoint, a VM the CLI
@@ -72,8 +78,11 @@ SECRET_VARS = ("HF_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"
 OPTIONAL_VARS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LIFT_JUDGE_MAX_USD")
 MIN_SECRET_LEN = 8  # as in colab/job.py: shorter values (a spend cap) are settings, not secrets
 START_TIMEOUT = 900.0  # no job log this long after launch means the job never started
+FIRST_LINE_SECONDS = 120.0  # job.py's setup (fetch, pip install) runs at least this long before a line
 STALE_AFTER = 1200.0  # job.py logs a heartbeat every 5 minutes, so 20 silent minutes mean it is dead
 STOP_WAIT = 900.0  # after a stop request, how long the job gets for its final push and last line
+STOP_TRIES = 3  # the stop request's first tries, 15 and 30 s apart (like the secrets upload)
+STOP_RETRY_EVERY = 120.0  # then one more try every 2 minutes while lift remote waits for the job
 # colab/job.py's push schedule (a test keeps these equal): it kills a push running PUSH_LIMIT_SECONDS
 # (SIGKILL KILL_GRACE_SECONDS after its SIGINT) and waits PUSH_DELAYS between the tries.
 JOB_PUSH_LIMIT, JOB_KILL_GRACE, JOB_PUSH_DELAYS = 1800, 30, (60, 180, 360)
@@ -99,10 +108,13 @@ EXIT_CODES = """\
 exit codes:
   0    the job succeeded, its outputs are pushed and the VM is released (a push that hit
        conflicts counts: the VM's copies are under conflicts/ in the runs repo, and it says so)
-  1    a job line failed, or the job's status is unknown; or the runs repo check met a transient
-       error (nothing was created: try again)
-  2    lift remote refused to start: bad options, no login, a missing secret, or a runs repo that
-       is missing, not private or not writable with this token (nothing was created)
+  1    a job line failed, or a generate, judge or run-dev line exited 3 (done, but some cells were
+       skipped: the job ran its other lines, and its log lists each cell with its remedy); or the
+       job's status is unknown; or the runs repo check met a transient error (nothing was created:
+       try again); or watch kept the VM for a push retry that this shell lacks the secrets for
+  2    lift remote refused to start: bad options, no login, a missing secret, a runs repo that is
+       missing, not private or not writable with this token, or a job that another lift remote on
+       this machine follows already (nothing was created or changed)
   3    the job could not be set up: colab new or the secrets upload failed, or job.py's spec,
        secrets, python, fetch, pip or sync-check step; or a lift sync call on the VM exited 2 (a
        problem no retry can fix) before anything was lost
@@ -445,9 +457,9 @@ def job_margin(max_hours: float) -> float:
 
 def exec_timeout(max_hours: float) -> int:
     """``colab exec --timeout``: past --max-hours and the longest wait for a stopped job (the VM is
-    stopped by then), capped for Windows. Its expiry never stops the job; it only ends the client's
-    wait."""
-    return min(int(max_hours * 3600 + PUSH_WAIT) + 900, TIMEOUT_CAP)
+    stopped by then: a stop request that went up only at the end of STOP_WAIT, then PUSH_WAIT from
+    there), capped for Windows. Its expiry never stops the job; it only ends the client's wait."""
+    return min(int(max_hours * 3600 + STOP_WAIT + PUSH_WAIT) + 900, TIMEOUT_CAP)
 
 
 def new_args(name: str, gpu: str, high_mem: bool) -> list[str]:
@@ -491,9 +503,11 @@ class Masker:
         return text
 
 
-def gather_secrets(ctx: Context) -> tuple[dict[str, str], list[str]]:
-    """The values the VM needs, from this shell, and the names of the required ones that are missing.
-    HF_TOKEN may also come from ``hf auth login``. None of them is ever printed."""
+def gather_secrets(ctx: Context, *, fetch: bool = True) -> tuple[dict[str, str], list[str]]:
+    """The values the VM needs, from this shell, and the names of the required ones that are missing:
+    the runs repo and HF_TOKEN for any push, GITHUB_TOKEN only when the VM fetches the repo (a launch;
+    the push retry of watch never fetches, so it is sent when set but never required). HF_TOKEN may
+    also come from ``hf auth login``. None of them is ever printed."""
     from lift import config
 
     env = ctx.environ
@@ -503,7 +517,7 @@ def gather_secrets(ctx: Context) -> tuple[dict[str, str], list[str]]:
     for var in ("GITHUB_TOKEN", runs_var):
         if env.get(var):
             values[var] = env[var]
-        else:
+        elif fetch or var != "GITHUB_TOKEN":
             missing.append(var)
     hf = env.get("HF_TOKEN") or ctx.hf_token()
     if hf:
@@ -589,6 +603,98 @@ def load_manifest(name: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         raise RemoteError(f"{path} is not a JSON object")
     return data
+
+
+def recorded_now(name: str, fallback: dict[str, Any]) -> dict[str, Any]:
+    """The record as on disk now, or ``fallback`` when it cannot be read: another lift remote process
+    (lift remote stop, or a follower that held no lock) may have written it since it was loaded."""
+    try:
+        return load_manifest(name) or fallback
+    except (OSError, ValueError, RemoteError):
+        return fallback
+
+
+def lock_path(name: str) -> Path:
+    """The job's follower lock, next to its manifest (*.lock files are never synced)."""
+    return manifests_dir() / f"remote-{name}.lock"
+
+
+LOCK_BYTE = 1 << 20  # the byte a follower locks on Windows: past its note, which others read
+
+
+def _os_lock(fd: int) -> None:
+    """Lock ``fd`` without waiting: an OSError when another open handle holds the lock. The OS drops a
+    lock with its process, so a crashed follower leaves none behind."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, LOCK_BYTE, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _os_unlock(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, LOCK_BYTE, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _lock_holder(fd: int) -> str:
+    """Who holds the lock, from the note its holder wrote: its role, pid and start."""
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        note = json.loads(os.read(fd, 4096).decode("utf-8"))
+        return f"lift remote {note['role']} (pid {int(note['pid'])}, since {note['since']})"
+    except (OSError, ValueError, KeyError, TypeError):
+        return "another lift remote process (its note cannot be read)"
+
+
+@contextmanager
+def follower_lock(name: str, role: str, ctx: Context) -> Iterator[str | None]:
+    """Hold the job's lock (lock_path) while this process follows it: one follower per job, so a second
+    one can neither write over the first one's record nor retry its push. Yields None when this
+    process holds it, else who does. A lock file that cannot be opened (a read-only folder) is
+    reported, and the run goes on without it."""
+    path = lock_path(name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+    except OSError as e:
+        say(ctx, f"note: cannot open {path} ({type(e).__name__}): following the job without its lock")
+        yield None
+        return
+    try:
+        try:
+            _os_lock(fd)
+        except OSError:
+            yield _lock_holder(fd)
+            return
+        try:
+            note = {"pid": os.getpid(), "role": role, "since": iso(ctx.clock())}
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, json.dumps(note).encode("utf-8"))
+        except OSError:
+            pass  # the lock holds without its note
+        try:
+            yield None
+        finally:
+            try:
+                os.ftruncate(fd, 0)
+                _os_unlock(fd)
+            except OSError:
+                pass  # closing the file below lets go of it all the same
+    finally:
+        os.close(fd)
 
 
 def read_endpoint(config_dir: Path, name: str) -> str | None:
@@ -695,26 +801,38 @@ def rescuable(status: dict[str, Any]) -> bool:
     return push_failed(status) and status.get("push_rc") != SYNC_REFUSED
 
 
+def partial_lines(status: dict[str, Any]) -> list[int]:
+    """The lines (0-based, as job.py counts them) that exited 3: done, but some cells were skipped."""
+    lines = status.get("partial_lines")
+    return [i for i in lines if isinstance(i, int)] if isinstance(lines, list) else []
+
+
 def lines_ok(status: dict[str, Any]) -> bool:
-    """Every line ran and succeeded. job.py turns a failed push into the job's rc, so a status whose
-    only failure is the push counts too: the push is judged on its own."""
+    """Every line ran and succeeded, none of them with cells skipped (exit 3). job.py turns a failed
+    push into the job's rc, so a status whose only failure is the push counts too: the push is judged
+    on its own."""
     if status.get("failed_step") is not None or status.get("failed_line") is not None:
         return False
-    if status.get("stopped") or status.get("sync_refused"):
+    if status.get("stopped") or status.get("sync_refused") or partial_lines(status):
         return False
     rc = status.get("rc")
     return (rc == 0 and not isinstance(rc, bool)) or push_failed(status)
+
+
+def pushed(rescue: dict[str, Any] | None) -> bool:
+    """Whether a push retry's status says it pushed (0, or 3 with the conflicting copies kept)."""
+    return isinstance(rescue, dict) and rescue.get("push_rc") in PUSHED
 
 
 def exit_code(status: dict[str, Any] | None, *, outcome: str = "done", released: bool | None = True,
               rescue: dict[str, Any] | None = None) -> int:
     """lift remote's exit code (EXIT_CODES): 4 while the VM may run, then 5 when the outputs could not
     be pushed (``rescue`` is the push retry's status), 130 after Ctrl+C, 3 when the job could not be
-    set up or lift sync refused it (exit 2), 1 when a line failed or the status is unknown, else 0."""
+    set up or lift sync refused it (exit 2), 1 when a line failed or skipped cells (exit 3) or the
+    status is unknown, else 0."""
     if released is not True:
         return EXIT_NOT_RELEASED
-    rescued = rescue is not None and rescue.get("push_rc") in PUSHED
-    if status is not None and push_failed(status) and not rescued:
+    if status is not None and push_failed(status) and not pushed(rescue):
         return EXIT_NOT_PUSHED
     if outcome == "interrupted":
         return EXIT_INTERRUPTED
@@ -741,6 +859,10 @@ def describe(status: dict[str, Any]) -> str:
         parts.append(f"failed at {status['failed_step']}")
     if isinstance(status.get("failed_line"), int):
         parts.append(f"line {status['failed_line'] + 1} failed")
+    partial = partial_lines(status)
+    if partial:
+        parts.append(f"line{'s' if len(partial) > 1 else ''} {', '.join(str(i + 1) for i in partial)} "
+                     "exited 3: done, but some cells were skipped (the log lists each with its remedy)")
     if status.get("sync_refused"):
         parts.append(f"lift sync exited 2 at {status['sync_refused']}: a problem no retry can fix (the log "
                      "says which)")
@@ -837,8 +959,10 @@ class Follower:
         self.colab, self.name, self.endpoint, self.ctx, self.masker = colab, name, endpoint, ctx, masker
         self.local = log_path(name)
         self.local.parent.mkdir(parents=True, exist_ok=True)
+        self.had_copy = self.local.is_file()  # fetched by an earlier follower (the launch, before a watch)
         self.printer = LogPrinter(ctx.out, masker)
-        self.seen_log = False
+        self.seen_log = self.looked = False
+        self.blind = False  # the last look for the log failed, rather than finding it or finding none
         self.size = -1
         self.data = b""  # the log as last downloaded
         self.restart(None)
@@ -849,6 +973,21 @@ class Follower:
     def lines_ran(self) -> bool:
         return job_lines_ran(self.data)
 
+    def job_may_have_run(self) -> bool:
+        """Whether a job line can have run, as far as this follower knows. job.py writes its log first
+        thing, and its setup takes minutes, so only this rules it out: no copy of the log was ever
+        fetched (now, or by an earlier follower), the last look for it found none (or none came yet,
+        within FIRST_LINE_SECONDS of the start), and job.py said nothing on the exec client's output
+        either, where it reports a log it could not open."""
+        if self.had_copy or self.seen_log or self.blind:
+            return True
+        if not self.looked and self.ctx.clock() - self.started > FIRST_LINE_SECONDS:
+            return True
+        try:
+            return JOB_NOTE.search(exec_log_path(self.name).read_bytes()) is not None
+        except OSError:
+            return False
+
     def restart(self, handle: Handle | None, accept: Accept = is_job_status) -> None:
         """Wait from now on for a new last line, written by the cell behind ``handle``."""
         self.handle, self.accept = handle, accept
@@ -856,14 +995,17 @@ class Follower:
         self.grace = self.failures = 0
         self.started = self.grown_at = self.ctx.clock()
 
-    def follow(self, deadline: float, poll: float) -> tuple[str, dict[str, Any] | None]:
+    def follow(self, deadline: float, poll: float,
+               each: Callable[[], None] | None = None) -> tuple[str, dict[str, Any] | None]:
         """Poll until a last line is found or ``deadline``; then read the log once more, since the job
-        may have finished while nobody looked."""
+        may have finished while nobody looked. ``each`` runs after every wait, before the look."""
         check_every = max(1, round(600 / poll))  # `colab sessions` about every 10 minutes
         polls = 0
         while self.ctx.clock() < deadline:
             self.ctx.sleep(poll)
             polls += 1
+            if each is not None:
+                each()
             outcome = (self._download() or self._exec_status() or self._check_exec()
                        or self._check_vm(polls % check_every == 0))
             if outcome:
@@ -872,6 +1014,8 @@ class Follower:
 
     def _download(self) -> tuple[str, dict[str, Any] | None] | None:
         res = self.colab.call(*download_args(self.name))
+        self.looked = True
+        self.blind = res.rc != 0 and "File or directory not found" not in res.out
         if res.rc == 0:
             self.failures = 0
             self.seen_log = True
@@ -950,22 +1094,62 @@ class Follower:
         return None
 
 
-def send_stop(colab: Colab, name: str, reason: str, ctx: Context, masker: Masker) -> bool:
-    """Upload content/lift_job.stop, which job.py looks for every few seconds. Returns whether it went
-    through."""
-    fd, tmp = tempfile.mkstemp(prefix="lift-stop-", suffix=".txt")
+def send_stop(colab: Colab, name: str, reason: str, ctx: Context, masker: Masker,
+              attempts: int = 1) -> bool:
+    """Upload content/lift_job.stop, which job.py looks for every few seconds: ``attempts`` tries, 15
+    and 30 s apart, like the secrets upload. Returns whether it went through; never raises an OSError
+    (a temp file that cannot be written is a failed try)."""
+    try:
+        fd, tmp = tempfile.mkstemp(prefix="lift-stop-", suffix=".txt")
+    except OSError as e:
+        say(ctx, f"the stop request could not be written here: {type(e).__name__}")
+        return False
     try:
         with os.fdopen(fd, "w", encoding="ascii", newline="\n") as f:
             f.write(reason + "\n")
-        for attempt in (1, 2):
+        for attempt in range(1, attempts + 1):
             res = colab.call(*upload_args(name, tmp, REMOTE_STOP))
             if res.rc == 0:
                 return True
-            say(ctx, f"the stop request did not go up (try {attempt}/2, rc {res.rc}): "
-                     f"{tail(res.out, masker)}")
+            say(ctx, f"the stop request did not go up (rc {res.rc}): {tail(res.out, masker)}")
+            if attempt < attempts:
+                ctx.sleep(15 * 2 ** (attempt - 1))
+        return False
+    except OSError as e:
+        say(ctx, f"the stop request could not be written here: {type(e).__name__}")
         return False
     finally:
-        Path(tmp).unlink(missing_ok=True)
+        try:
+            Path(tmp).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+class StopRequest:
+    """The stop request of one wind-down: sent with a short backoff, then tried again every
+    STOP_RETRY_EVERY while lift remote waits for the job (``retry``, run between two looks at the log),
+    so a VM proxy that fails for a while never cuts the wait short. ``since`` is when it went up (when
+    it was first tried, until then): the waits count from there."""
+
+    def __init__(self, colab: Colab, name: str, reason: str, ctx: Context, masker: Masker):
+        self.colab, self.name, self.reason, self.ctx, self.masker = colab, name, reason, ctx, masker
+        self.asked = ctx.clock()
+        self.sent_at: float | None = None
+        self.next_try = self.asked
+
+    def send(self, attempts: int) -> bool:
+        if send_stop(self.colab, self.name, self.reason, self.ctx, self.masker, attempts):
+            self.sent_at = self.ctx.clock()
+        else:
+            self.next_try = self.ctx.clock() + STOP_RETRY_EVERY
+        return self.sent_at is not None
+
+    def retry(self) -> None:
+        if self.sent_at is None and self.ctx.clock() >= self.next_try and self.send(1):
+            say(self.ctx, f"the stop request went up, {hms(self.sent_at - self.asked)} after the first try")
+
+    def since(self) -> float:
+        return self.asked if self.sent_at is None else self.sent_at
 
 
 def wind_down(colab: Colab, follower: Follower, reason: str, ctx: Context, masker: Masker,
@@ -973,21 +1157,30 @@ def wind_down(colab: Colab, follower: Follower, reason: str, ctx: Context, maske
     """Ask the job to stop, then wait up to STOP_WAIT for its last line: job.py stops the running line
     (never a push), skips the rest and runs its final push. While its log then shows a push still
     running (job.py kills a stalled one only after 30 minutes, and tries it again), wait on, up to
-    PUSH_WAIT after the request. A KeyboardInterrupt here, a second Ctrl+C, is the caller's: it stops
-    the VM at once."""
-    if not send_stop(colab, follower.name, reason, ctx, masker):
-        say(ctx, "could not ask the job to stop: the VM is stopped now")
-        return "stop-failed", None
-    asked, poll = ctx.clock(), min(poll, 30.0)
-    say(ctx, f"asked the job to stop ({reason}); waiting up to {STOP_WAIT / 60:.0f} minutes for its final "
-             f"push, up to {PUSH_WAIT / 60:.0f} while its log shows a push running")
-    outcome, status = follower.follow(asked + STOP_WAIT, poll)
+    PUSH_WAIT after the request. A request that does not go up never cuts the wait short (the job
+    also stops itself at its deadline, 30 minutes before --max-hours): it is tried again while lift
+    remote waits, and the waits count from when it went up. A KeyboardInterrupt here, a second Ctrl+C,
+    is the caller's: it stops the VM at once."""
+    poll = min(poll, 30.0)
+    request = StopRequest(colab, follower.name, reason, ctx, masker)
+    wait = (f"up to {STOP_WAIT / 60:.0f} minutes for its final push and last line, up to "
+            f"{PUSH_WAIT / 60:.0f} while its log shows a push running")
+    if request.send(STOP_TRIES):
+        say(ctx, f"asked the job to stop ({reason}); waiting {wait}")
+    else:
+        say(ctx, f"could not ask the job to stop ({reason}) yet: trying again every "
+                 f"{STOP_RETRY_EVERY / 60:.0f} minutes while waiting {wait}")
+    outcome, status = follower.follow(request.since() + STOP_WAIT, poll, each=request.retry)
+    if outcome == "timeout" and request.since() + STOP_WAIT > ctx.clock():  # it went up late: a full wait
+        outcome, status = follower.follow(request.since() + STOP_WAIT, poll)
     if outcome == "timeout" and follower.pushing():
         say(ctx, f"the job's log shows a push still running: waiting for it, up to {PUSH_WAIT / 60:.0f} "
                  "minutes after the stop request")
-        outcome, status = follower.follow(asked + PUSH_WAIT, poll)
+        outcome, status = follower.follow(request.since() + PUSH_WAIT, poll, each=request.retry)
     if outcome == "timeout":
-        say(ctx, f"no last line from the job within {hms(ctx.clock() - asked)} of the stop request")
+        unsent = "" if request.sent_at is not None else ", which never went up"
+        say(ctx, f"no last line from the job within {hms(ctx.clock() - request.asked)} of the stop "
+                 f"request{unsent}")
     return outcome, status
 
 
@@ -1043,19 +1236,37 @@ def lost_alarm(ctx: Context, name: str, status: dict[str, Any], rescue: dict[str
         say(ctx, line)
 
 
-def kept_on_vm(ctx: Context, name: str, status: dict[str, Any], rescue: dict[str, Any] | None) -> None:
-    """watch --no-stop after a failed final push: the outputs are still on the VM it leaves running."""
-    say(ctx, "the job's final push failed: the outputs since its last successful push are still on the VM, "
-             "which keeps running (--no-stop)")
-    if status.get("push_rc") == SYNC_REFUSED:
+def push_needs() -> str:
+    """What the push retry needs in its shell. Push mode never fetches, so GITHUB_TOKEN is not needed."""
+    from lift import config
+
+    return f"HF_TOKEN (or `hf auth login`) and {config.get('storage.runs_repo_env', 'LIFT_RUNS_REPO')}"
+
+
+def kept_on_vm(ctx: Context, name: str, status: dict[str, Any] | None, rescue: dict[str, Any] | None,
+               missing: list[str] | None = None) -> None:
+    """The VM keeps running with outputs on it that no push sent: watch --no-stop after a failed final
+    push, or watch from a shell that lacks what a push retry that is due needs (``missing``)."""
+    why = f"this shell lacks {', '.join(missing)}" if missing else "--no-stop"
+    if status and push_failed(status):
+        say(ctx, "the job's final push failed: the outputs since its last successful push are still on the "
+                 f"VM, which keeps running ({why})")
+    else:
+        say(ctx, "the job never reported its end after running lines: its outputs since its last successful "
+                 f"push may be only on the VM, which keeps running ({why})")
+    end = f"lift remote stop {name} releases the VM without that retry, and the outputs with it"
+    if missing:
+        say(ctx, f"  {missing_message(missing)}. Then lift remote watch {name} retries the push from this "
+                 f"laptop and stops the VM; {end}")
+    elif status and status.get("push_rc") == SYNC_REFUSED:
         say(ctx, "  the push exited 2, a problem no retry can fix (the log says which), so lift remote does "
                  f"not retry it; lift remote stop {name} releases the VM, and the outputs with it")
     elif rescue is not None:
         say(ctx, f"  the push retry from this laptop failed already; lift remote stop {name} releases the "
                  "VM, and the outputs with it")
     else:
-        say(ctx, f"  lift remote watch {name} retries the push from this laptop, then stops the VM; lift "
-                 f"remote stop {name} releases the VM without that retry, and the outputs with it")
+        say(ctx, f"  lift remote watch {name} retries the push from this laptop (its shell needs "
+                 f"{push_needs()}), then stops the VM; {end}")
 
 
 # --- stopping -------------------------------------------------------------------------------------
@@ -1241,7 +1452,10 @@ def launch(opts: Launch, ctx: Context | None = None) -> int:
     check_runs_repo(ctx, Masker(secrets))
     if not any(shlex.split(line)[:3] == ["lift", "sync", "pull"] for line in lines):
         say(ctx, "note: no `lift sync pull` line, so the VM has no data/ or outputs/ from the runs repo")
-    return _run(colab, ctx, opts, gpu, spec, secrets)
+    with follower_lock(name, "launch", ctx) as holder:
+        if holder is not None:
+            raise RemoteError(f"{name} is followed already by {holder}: pick another --name")
+        return _run(colab, ctx, opts, gpu, spec, secrets)
 
 
 def unpinned_warning(lines: list[str]) -> str | None:
@@ -1368,6 +1582,44 @@ class RunState:
     rescue: dict[str, Any] | None = None
     error_code: int | None = None
     forced: bool = False
+    follower: Follower | None = None
+    retry_needs: list[str] = field(default_factory=list)  # a due push retry lacks these here: VM kept
+
+
+def reread(name: str, manifest: dict[str, Any], state: RunState) -> dict[str, Any]:
+    """The record as on disk now (recorded_now), keeping in ``state`` what another process recorded
+    there that this run does not know: the job's status (with its outcome, unless an error or a second
+    Ctrl+C cut this run short) and a push retry that pushed."""
+    record = recorded_now(name, manifest)
+    if state.status is None and isinstance(record.get("job"), dict):
+        state.status = record["job"]
+        if state.error_code is None and not state.forced:
+            state.outcome = record.get("outcome") or "done"
+    if pushed(record.get("rescue_push")) and not pushed(state.rescue):
+        state.rescue = record["rescue_push"]
+    return record
+
+
+def forced_note(state: RunState) -> str:
+    """The closing word after a second Ctrl+C, which stopped the VM at once."""
+    if not state.handles:
+        return "interrupted before the job was started, so nothing was lost"
+    if state.follower is not None and not state.follower.job_may_have_run():
+        return ("interrupted before the job's log appeared: the VM was stopped at once, before any job line "
+                "could run, so nothing was lost")
+    return "interrupted: the VM was stopped at once, so the outputs since the last successful push are lost"
+
+
+def unreported_note(state: RunState) -> str:
+    """The closing word on a run whose job never reported its end."""
+    if pushed(state.rescue):
+        return (f"the job never reported its end ({state.outcome}), but the push retry from here pushed what "
+                "was on the VM")
+    if state.follower is not None and not state.follower.job_may_have_run():
+        return (f"the job never started: no job log appeared ({state.outcome}), so no job line ran and "
+                "nothing was lost")
+    return (f"the job never reported its end ({state.outcome}), so the outputs since its last successful "
+            "push may be lost")
 
 
 def _run(colab: Colab, ctx: Context, opts: Launch, gpu: str, spec: JobSpec, secrets: dict[str, str]) -> int:
@@ -1396,29 +1648,28 @@ def _run(colab: Colab, ctx: Context, opts: Launch, gpu: str, spec: JobSpec, secr
         state.error_code = EXIT_FAILED if state.handles else EXIT_SETUP
     finally:
         released = _clean_up(colab, ctx, name, state)  # before any closing message: printing cannot stop it
+        record = manifest
+        if state.new_called:  # a release, status or push retry another process recorded is kept
+            record = reread(name, manifest, state)
+            released = True if record.get("vm_released") is True else released
         code = final_code(state.status, outcome=state.outcome, released=released, rescue=state.rescue,
                           error_code=state.error_code)
         if state.new_called:
             end = ctx.clock()
-            manifest.update(endpoint=state.endpoint, finished=iso(end), wall_seconds=round(end - started, 1),
-                            outcome=state.outcome, rc=code, error_code=state.error_code, job=state.status,
-                            vm_released=released, rescue_push=state.rescue)
+            record.update(endpoint=state.endpoint, finished=iso(end), wall_seconds=round(end - started, 1),
+                          outcome=state.outcome, rc=code, error_code=state.error_code, job=state.status,
+                          vm_released=released, rescue_push=state.rescue)
             with _sigint_ignored():
                 try:
-                    write_manifest(path, manifest)
+                    write_manifest(path, record)
                 except OSError as e:
                     say(ctx, f"could not write {path}: {type(e).__name__}")
     if state.forced:
-        say(ctx, "interrupted: the VM was stopped at once, so the outputs since the last successful push "
-                 "are lost")
+        say(ctx, forced_note(state))
     elif state.error_code is not None:
         say(ctx, state.outcome)
-    elif state.status is None and state.rescue is not None and state.rescue.get("push_rc") in PUSHED:
-        say(ctx, f"the job never reported its end ({state.outcome}), but the push retry from here pushed "
-                 "what was on the VM")
     elif state.status is None and state.handles:
-        say(ctx, f"the job never reported its end ({state.outcome}), so the outputs since its last "
-                 "successful push may be lost")
+        say(ctx, unreported_note(state))
     if code == EXIT_NOT_PUSHED:
         lost_alarm(ctx, name, state.status or {}, state.rescue)
     say(ctx, f"exit code {code}; log {log_path(name)}")
@@ -1458,7 +1709,7 @@ def _drive(colab: Colab, ctx: Context, opts: Launch, gpu: str, spec: JobSpec, se
     write_manifest(path, manifest)
     say(ctx, f"VM ready (endpoint {state.endpoint}); manifest {path}")
     upload_secrets(colab, name, secrets, ctx, masker)
-    follower = Follower(colab, name, state.endpoint, ctx=ctx, masker=masker)
+    follower = state.follower = Follower(colab, name, state.endpoint, ctx=ctx, masker=masker)
     handle = colab.spawn(*exec_args(name, spec, exec_timeout(opts.max_hours)), log_path=exec_log_path(name))
     state.handles.append(handle)
     follower.restart(handle)
@@ -1483,26 +1734,32 @@ def _drive(colab: Colab, ctx: Context, opts: Launch, gpu: str, spec: JobSpec, se
             say(ctx, "--max-hours reached without the job's last line")
             state.outcome = "max-hours"
             outcome, state.status = wind_down(colab, follower, "max-hours", ctx, masker, opts.poll)
+    record = reread(name, manifest, state)  # what another process recorded meanwhile is kept
     if state.status is not None:
         say(ctx, describe(state.status))
-    why = retry_reason(state.status, outcome, follower)
+    taken = record.get("rescue_push") is not None or record.get("vm_released") is True  # by another run
+    why = None if taken else retry_reason(state.status, outcome, follower)
     if why:
         end_exec(handle, finished=state.status is not None)
         state.rescue = rescue_push(colab, follower, spec, secrets, ctx, masker, opts.poll, state.handles,
                                    why=why)
-    elif state.status is not None and push_failed(state.status):
+    elif state.status is not None and push_failed(state.status) and not rescuable(state.status):
         say(ctx, "the job's final push exited 2, a problem no retry can fix: no retry from here")
+
+
+def _end_clients(state: RunState) -> None:
+    for handle in state.handles:
+        try:
+            end_exec(handle, finished=state.outcome == "done")
+        except Exception:  # a client that cannot be ended must not keep the VM
+            pass
 
 
 def _clean_up(colab: Colab, ctx: Context, name: str, state: RunState) -> bool | None:
     """End every exec client, then stop the VM and check it is gone. Never raises: whatever happened
     before, the VM must be released. True also when no VM was ever asked for."""
     with _sigint_ignored():
-        for handle in state.handles:
-            try:
-                end_exec(handle, finished=state.outcome == "done")
-            except Exception:  # a client that cannot be ended must not keep the VM
-                pass
+        _end_clients(state)
         if not state.new_called:
             return True
         try:
@@ -1522,17 +1779,36 @@ def watch(name: str, *, poll: float = 45.0, max_hours: float | None = None, stop
     handled as in launch: a job that may still run is asked to stop and push, the VM is still
     released (unless ``stop`` is False), and 4 and 5 still reach the exit code. ``max_hours`` counts
     from now; by default the launch's cap still holds. A manifest that says the VM is released only
-    gets its log printed again, and a recorded job status is never replaced by a weaker outcome."""
+    gets its log printed again, and a recorded job status is never replaced by a weaker outcome.
+
+    The push retry needs only HF_TOKEN and the runs repo in this shell (push mode never fetches): when
+    one is due and they are missing, the VM is kept, with the outputs on it (exit 1), and the message
+    says what to set. A job that another lift remote process on this machine follows (its lock) is
+    refused (2) with that process's pid, before anything is called or written."""
     ctx = ctx or Context()
     check_name(name)
     manifest = load_manifest(name)
     if manifest is None:
         raise RemoteError(f"no {manifest_path(name)}: watch needs the manifest of a job started here")
     check_limits(12.0 if max_hours is None else max_hours, poll)
-    secrets, missing = gather_secrets(ctx)
+    secrets, missing = gather_secrets(ctx, fetch=False)
     masker = Masker(secrets)
     if manifest.get("vm_released") is True:
         return replay(ctx, name, manifest, masker)
+    with follower_lock(name, "watch", ctx) as holder:
+        if holder is not None:
+            raise RemoteError(f"{name} is followed already by {holder}, on this machine: wait for that "
+                              "process to end, or end it (the VM keeps running without it), then run lift "
+                              f"remote watch {name} again. Its log is fetched to {log_path(name)}")
+        manifest = recorded_now(name, manifest)  # the follower before this one may have recorded the end
+        if manifest.get("vm_released") is True:
+            return replay(ctx, name, manifest, masker)
+        return _watch(ctx, name, manifest, secrets, missing, masker, poll, max_hours, stop)
+
+
+def _watch(ctx: Context, name: str, manifest: dict[str, Any], secrets: dict[str, str], missing: list[str],
+           masker: Masker, poll: float, max_hours: float | None, stop: bool) -> int:
+    """watch, once this process holds the job's lock."""
     colab = ready_colab(ctx)
     if max_hours is not None:
         deadline = ctx.clock() + max_hours * 3600
@@ -1541,6 +1817,9 @@ def watch(name: str, *, poll: float = 45.0, max_hours: float | None = None, stop
         deadline = start + float(manifest.get("max_hours", 12)) * 3600
     state = RunState(outcome="watching", endpoint=manifest.get("endpoint"), new_called=True)
     say(ctx, f"watching {name} (endpoint {state.endpoint}); Ctrl+C stops the watching, not the VM")
+    if missing and stop:
+        say(ctx, f"note: a push retry cannot run from this shell ({missing_message(missing)}). If one is "
+                 "due, the VM is kept for it, with the outputs on it")
     try:
         _follow_watched(colab, ctx, name, manifest, secrets, missing, masker, deadline, poll, stop, state)
     except KeyboardInterrupt:
@@ -1557,9 +1836,11 @@ def _follow_watched(colab: Colab, ctx: Context, name: str, manifest: dict[str, A
                     missing: list[str], masker: Masker, deadline: float, poll: float, stop: bool,
                     state: RunState) -> None:
     """watch's part between its first and its last colab call, kept in ``state`` as it goes: watch
-    stops the VM whatever happens here. An unexpected error while following asks the job, which may
-    still run, to stop and push first, as launch does; with ``stop`` False it ends the watching."""
-    follower = Follower(colab, name, state.endpoint, ctx=ctx, masker=masker)
+    stops the VM whatever happens here (or keeps it, see _end_watch). An unexpected error while
+    following asks the job, which may still run, to stop and push first, as launch does; with
+    ``stop`` False it ends the watching. The record is read again before the retry decision: no retry
+    when another process tried one already or released the VM."""
+    follower = state.follower = Follower(colab, name, state.endpoint, ctx=ctx, masker=masker)
     try:
         ended, state.status = follower.follow(deadline, poll)
     except Exception as e:
@@ -1575,16 +1856,17 @@ def _follow_watched(colab: Colab, ctx: Context, name: str, manifest: dict[str, A
             state.outcome = "max-hours"
             if stop:
                 ended, state.status = wind_down(colab, follower, "max-hours", ctx, masker, poll)
-    recorded = manifest.get("job")
-    if state.status is None and isinstance(recorded, dict):
-        say(ctx, f"no last line now ({state.outcome}); keeping the job status recorded before")
-        state.outcome, state.status = manifest.get("outcome") or "done", recorded
+    was, had = state.outcome, state.status is not None
+    record = reread(name, manifest, state)
+    if not had and state.status is not None:
+        say(ctx, f"no last line now ({was}); keeping the job status recorded before")
     if state.status is not None:
         say(ctx, describe(state.status))
-    retried = manifest.get("rescue_push") is not None  # an earlier watch or launch tried it already
-    why = retry_reason(state.status, ended, follower) if stop and not retried else None
+    taken = record.get("rescue_push") is not None or record.get("vm_released") is True  # by another run
+    why = retry_reason(state.status, ended, follower) if stop and not taken else None
     if why and missing:
-        say(ctx, f"the push cannot be retried from here: {missing_message(missing)}")
+        state.retry_needs = list(missing)
+        say(ctx, f"{why}, but this shell cannot retry the push: the VM is kept, with the outputs on it")
     elif why:
         spec = JobSpec(manifest.get("repo") or DEFAULT_REPO, manifest.get("ref") or DEFAULT_REF, (), name)
         state.rescue = rescue_push(colab, follower, spec, secrets, ctx, masker, poll, state.handles, why=why)
@@ -1594,46 +1876,49 @@ def _follow_watched(colab: Colab, ctx: Context, name: str, manifest: dict[str, A
 
 def _end_watch(colab: Colab, ctx: Context, name: str, manifest: dict[str, Any], stop: bool,
                state: RunState) -> int:
-    """Stop the VM (unless ``stop`` is False), then record the run and return its code. A recorded job
-    status outlives an error that cut the watching short, and so does a recorded error code."""
-    recorded = manifest.get("job")
-    if state.status is None and isinstance(recorded, dict):
-        state.status = recorded
+    """Stop the VM, unless ``stop`` is False or a push retry is due that this shell cannot run (then
+    the outputs stay on it: exit 1, not 5), then record the run and return its code. The record is
+    read again first, and what another process recorded meanwhile is kept: a release (the VM is not
+    stopped again), the job's status, a push retry that pushed. A recorded job status outlives an error
+    that cut the watching short, and so does a recorded error code."""
+    record = reread(name, manifest, state)
     if state.rescue is not None:
-        manifest["rescue_push"] = state.rescue
-    error_code = state.error_code if state.error_code is not None else manifest.get("error_code")
-    manifest.update(outcome=state.outcome, job=state.status, error_code=error_code, watched=iso(ctx.clock()))
-    released: bool | None = True  # for the code: --no-stop keeps the VM on purpose
-    if stop:
-        released = _clean_up(colab, ctx, name, state)  # before any closing message: printing cannot stop it
-        manifest.update(vm_released=released, finished=iso(ctx.clock()),
-                        endpoint=manifest.get("endpoint") or state.endpoint)
-        if released is True and isinstance(manifest.get("started_epoch"), int | float):
-            manifest["wall_seconds"] = round(ctx.clock() - manifest["started_epoch"], 1)  # released here
+        record["rescue_push"] = state.rescue
+    error_code = state.error_code if state.error_code is not None else record.get("error_code")
+    record.update(outcome=state.outcome, job=state.status, error_code=error_code, watched=iso(ctx.clock()))
+    keep = not stop or bool(state.retry_needs)
+    released: bool | None = True  # for the code: a VM kept on purpose, or released by another process
+    if keep:  # for a push retry this shell cannot run, kept_on_vm (below) says what to do
+        if not stop:
+            say(ctx, f"--no-stop: the VM keeps running; lift remote stop {name} releases it")
+    elif record.get("vm_released") is True:
+        _end_clients(state)
+        say(ctx, "another lift remote process released the VM meanwhile (its record says so)")
     else:
-        say(ctx, f"--no-stop: the VM keeps running; lift remote stop {name} releases it")
+        released = _clean_up(colab, ctx, name, state)  # before any closing message: printing cannot stop it
+        record.update(vm_released=released, finished=iso(ctx.clock()),
+                      endpoint=record.get("endpoint") or state.endpoint)
+        if released is True and isinstance(record.get("started_epoch"), int | float):
+            record["wall_seconds"] = round(ctx.clock() - record["started_epoch"], 1)  # released here
     code = final_code(state.status, outcome=state.outcome, released=released,
-                      rescue=manifest.get("rescue_push"), error_code=error_code)
-    kept = not stop and code == EXIT_NOT_PUSHED  # not lost: they are on the VM it leaves running
-    if kept:
+                      rescue=record.get("rescue_push"), error_code=error_code)
+    kept = keep and (code == EXIT_NOT_PUSHED or bool(state.retry_needs))  # not lost: still on the VM
+    if kept and code == EXIT_NOT_PUSHED:
         code = EXIT_FAILED
-    manifest["rc"] = code
+    record["rc"] = code
     with _sigint_ignored():
         try:
-            write_manifest(manifest_path(name), manifest)
+            write_manifest(manifest_path(name), record)
         except OSError as e:
             say(ctx, f"could not write {manifest_path(name)}: {type(e).__name__}")
     if state.error_code is not None:
         say(ctx, state.outcome)
-    elif state.status is None and stop:
-        pushed = state.rescue is not None and state.rescue.get("push_rc") in PUSHED
-        say(ctx, f"the job never reported its end ({state.outcome}), " + (
-            "but the push retry from here pushed what was on the VM" if pushed
-            else "so the outputs since its last successful push may be lost"))
+    elif state.status is None and not keep:
+        say(ctx, unreported_note(state))
     if kept:
-        kept_on_vm(ctx, name, state.status or {}, manifest.get("rescue_push"))
+        kept_on_vm(ctx, name, state.status, record.get("rescue_push"), state.retry_needs)
     elif code == EXIT_NOT_PUSHED:
-        lost_alarm(ctx, name, state.status or {}, manifest.get("rescue_push"))
+        lost_alarm(ctx, name, state.status or {}, record.get("rescue_push"))
     return code
 
 
@@ -1683,6 +1968,7 @@ def stop(name: str, *, endpoint: str | None = None, ctx: Context | None = None) 
     with _sigint_ignored():
         released = release(colab, name, endpoint, ctx)
     if manifest is not None:
+        manifest = recorded_now(name, manifest)  # a follower may have written it during the release
         manifest.update(vm_released=released, stopped=iso(ctx.clock()))
         job = manifest.get("job")
         if released is True and (manifest.get("rc") == EXIT_NOT_RELEASED or isinstance(job, dict)):
