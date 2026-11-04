@@ -1147,6 +1147,21 @@ def interrupting_sleep(ctx, *at: int):
     return sleep
 
 
+def ctrl_c_sleep(ctx, *at: int):
+    """ctx.sleep that advances the fake clock and presses Ctrl+C on the given calls: a real SIGINT, which
+    the default handler turns into a KeyboardInterrupt, as at the console."""
+    naps: list[float] = []
+    clock = ctx.clock
+
+    def sleep(seconds):
+        naps.append(seconds)
+        clock.now += seconds
+        if len(naps) in at:
+            signal.raise_signal(signal.SIGINT)
+
+    return sleep
+
+
 def test_ctrl_c_before_the_job_line_still_stops_the_vm(tmp_path):
     fake, ctx = setup(tmp_path)
     ctx.sleep = interrupting_sleep(ctx, 2)
@@ -1697,6 +1712,77 @@ def test_ctrl_c_tries_the_stop_request_again_while_it_waits(tmp_path):
     assert "since the last successful push are lost" in text
 
 
+def retry_pushes_at(fake: FakeColab, n: int) -> None:
+    """The push retry's last line (push rc 0) shows from the n-th download of the log on."""
+    fake.rescue_rc = None
+    fake.on_download = lambda count: setattr(fake, "rescue_rc", 0) if count >= n else None
+
+
+# Review 5, X3: a first Ctrl+C during the push retry from here, or during the wait for the job's final push
+# at --max-hours or after an error, stopped the VM at once and the push with it, although lift remote had
+# said that Ctrl+C asks the job to stop and push and that only a second one stops the VM at once.
+def test_a_first_ctrl_c_during_the_push_retry_lets_it_go_on(tmp_path):
+    failed = done_log({**PUSH_FAILED, "ran": 1})
+    fake, ctx = setup(tmp_path, [failed])
+    fake.handle.rc = 0
+    retry_pushes_at(fake, 3)
+    ctx.sleep = ctrl_c_sleep(ctx, 2)  # sleep 1: the job's poll; sleep 2: the push retry's first poll
+    before = signal.getsignal(signal.SIGINT)
+    opts = remote.Launch(gpu="A100", job="lift run-dev --variant stock", name="lift-x3r")
+    assert remote.launch(opts, ctx) == 0
+    text = ctx.out.getvalue()
+    assert len(fake.rescues) == 1 and fake.server == {}
+    assert manifest("lift-x3r")["rescue_push"]["push_rc"] == 0
+    assert "the push retry goes on" in text and "Ctrl+C again stops the VM at once" in text
+    assert "ARE LOST" not in text and signal.getsignal(signal.SIGINT) is before
+    # The second Ctrl+C stops the VM at once.
+    fake, ctx = setup(tmp_path / "twice", [failed])
+    fake.handle.rc = 0
+    retry_pushes_at(fake, 4)
+    ctx.sleep = ctrl_c_sleep(ctx, 2, 3)
+    assert remote.launch(replace_opts(opts, name="lift-x3s"), ctx) == 5
+    text = ctx.out.getvalue()
+    assert fake.server == {} and "stopped at once" in text and "ARE LOST" in text
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_a_first_ctrl_c_in_the_wait_at_max_hours_or_after_an_error_lets_the_final_push_end(tmp_path):
+    stopped = {**OK, "rc": 1, "failed_line": 0, "stopped": "deadline reached", "installed": True, "ran": 1}
+    before = signal.getsignal(signal.SIGINT)
+    for name, presses in (("lift-x3m", (62,)), ("lift-x3n", (62, 64))):
+        fake, ctx = setup(tmp_path / name, [b""])
+        t0 = ctx.clock()
+        done_at = t0 + 3600 + 600  # stopped at its own deadline, its final push ends 10 minutes past the cap
+        fake.on_download = lambda n, fake=fake, ctx=ctx, t0=t0, done_at=done_at: setattr(
+            fake, "logs", [deadline_log(t0, ctx.clock(), done_at, stopped)])
+        ctx.sleep = ctrl_c_sleep(ctx, *presses)  # 60 polls to the cap, then the wind-down's polls
+        opts = remote.Launch(gpu="A100", job="lift run-dev --variant stock", name=name, max_hours=1.0,
+                             poll=60)
+        rc = remote.launch(opts, ctx)
+        text = ctx.out.getvalue()
+        assert fake.server == {} and signal.getsignal(signal.SIGINT) is before
+        if len(presses) == 1:
+            assert rc == 1 and ctx.clock() >= done_at and manifest(name)["job"] == stopped
+            assert manifest(name)["outcome"] == "max-hours" and "are lost" not in text
+            assert "goes on" in text and "Ctrl+C again stops the VM at once" in text
+        else:
+            assert rc == 130 and ctx.clock() < done_at and "since the last successful push are lost" in text
+    # After an unexpected error the job is asked to stop and push the same way; a first Ctrl+C lets it.
+    answered = {**OK, "rc": 130, "failed_line": 1, "stopped": "stop file: error", "installed": True}
+
+    def explode(n):
+        if n == 2:
+            raise RuntimeError("a bug while reading the log")
+
+    fake, ctx = setup(tmp_path / "error", [None, LOG_START], on_download=explode)
+    fake.on_upload = answer_the_stop_file(fake, answered)
+    ctx.sleep = ctrl_c_sleep(ctx, 3)  # the wind-down's first poll
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-x3e"), ctx) == 1
+    record = manifest("lift-x3e")
+    assert record["job"] == answered and record["outcome"].startswith("error: RuntimeError")
+    assert "goes on" in ctx.out.getvalue() and fake.server == {}
+
+
 def test_lift_remote_knows_job_py_push_schedule(job):
     assert remote.JOB_PUSH_LIMIT == job.PUSH_LIMIT_SECONDS and remote.JOB_KILL_GRACE == job.KILL_GRACE_SECONDS
     assert remote.JOB_PUSH_DELAYS == job.PUSH_DELAYS
@@ -1768,11 +1854,11 @@ def test_the_last_line_counts_when_it_came_only_through_the_exec_output(tmp_path
 def test_watch_no_stop_never_calls_outputs_on_the_running_vm_lost(tmp_path):
     fake, ctx = setup(tmp_path, [done_log(PUSH_FAILED)])
     started_vm(fake, ctx, "lift-ns")
-    assert remote.watch("lift-ns", stop=False, ctx=ctx) == 1
+    assert remote.watch("lift-ns", stop=False, ctx=ctx) == 6
     text = ctx.out.getvalue()
     assert fake.server and fake.rescues == [] and "ARE LOST" not in text
     assert "still on" in text and "lift remote watch lift-ns" in text
-    assert manifest("lift-ns")["rc"] == 1
+    assert manifest("lift-ns")["rc"] == 6
     # It says what that retry needs in its shell (review 4, W1).
     assert "HF_TOKEN" in text and "LIFT_RUNS_REPO" in text
 
@@ -1788,7 +1874,7 @@ def test_watch_keeps_the_vm_when_this_shell_cannot_retry_the_push(tmp_path, envi
     fake, ctx = setup(tmp_path, [done_log(PUSH_FAILED)], environ=environ, rescue_rc=0,
                       hf_token=lambda: cached)
     started_vm(fake, ctx, "lift-ws")
-    assert remote.watch("lift-ws", ctx=ctx) == 1
+    assert remote.watch("lift-ws", ctx=ctx) == 6
     text = ctx.out.getvalue()
     assert fake.server and fake.rescues == [] and "stop" not in fake.calls and "ARE LOST" not in text
     assert f"missing {lacking}:" in text and "GITHUB_TOKEN" not in text
@@ -1796,7 +1882,7 @@ def test_watch_keeps_the_vm_when_this_shell_cannot_retry_the_push(tmp_path, envi
     assert "still on the VM" in text and "lift remote stop lift-ws" in text
     assert "lift remote watch lift-ws retries the push" in text
     record = manifest("lift-ws")
-    assert record["rc"] == 1 and record.get("vm_released") is not True and record["job"] == PUSH_FAILED
+    assert record["rc"] == 6 and record.get("vm_released") is not True and record["job"] == PUSH_FAILED
     # From a shell with HF_TOKEN and LIFT_RUNS_REPO (no GITHUB_TOKEN: push mode never fetches) it retries.
     ctx.environ = {"HF_TOKEN": HF, "LIFT_RUNS_REPO": RUNS}
     ctx.out = io.StringIO()
@@ -1810,12 +1896,12 @@ def test_watch_keeps_the_vm_for_an_unreported_end_this_shell_cannot_push(tmp_pat
     ran = LOG_START + job_note(5, "$ lift run-dev --variant stock   (line 1/1)")
     fake, ctx = setup(tmp_path, [ran], environ={}, rescue_rc=0)
     started_vm(fake, ctx, "lift-wn")
-    assert remote.watch("lift-wn", ctx=ctx) == 1  # the log stops growing: stale, after lines ran
+    assert remote.watch("lift-wn", ctx=ctx) == 6  # the log stops growing: stale, after lines ran
     text = ctx.out.getvalue()
     assert fake.server and fake.rescues == [] and "stop" not in fake.calls
     assert "may be only on the VM" in text and "missing LIFT_RUNS_REPO, HF_TOKEN:" in text
     record = manifest("lift-wn")
-    assert record["outcome"] == "stale" and record["rc"] == 1 and record.get("vm_released") is not True
+    assert record["outcome"] == "stale" and record["rc"] == 6 and record.get("vm_released") is not True
 
 
 def test_watch_never_retries_a_final_push_that_exited_2(tmp_path):
@@ -1827,9 +1913,97 @@ def test_watch_never_retries_a_final_push_that_exited_2(tmp_path):
     # --no-stop: the outputs are still on the VM, and no command would push them.
     fake, ctx = setup(tmp_path / "keep", [done_log(refused)], rescue_rc=0)
     started_vm(fake, ctx, "lift-w2y")
-    assert remote.watch("lift-w2y", stop=False, ctx=ctx) == 1 and fake.rescues == [] and fake.server
+    assert remote.watch("lift-w2y", stop=False, ctx=ctx) == 6 and fake.rescues == [] and fake.server
     text = ctx.out.getvalue()
     assert "still on the VM" in text and "lift remote stop lift-w2y" in text and "ARE LOST" not in text
+
+
+# Review 5, X1 and contract O: watch retried the push with this shell's token and runs repo unchecked. A
+# read token (`hf auth login` caches the one that downloads the models), a revoked one or a typo in
+# LIFT_RUNS_REPO made the retry exit 2, and watch then released the VM that held the only copy (exit 5).
+def test_watch_checks_the_runs_repo_before_a_push_retry_and_keeps_the_vm_when_it_cannot_push(
+        tmp_path, runs_repo_check):
+    fake, ctx = setup(tmp_path, [done_log(PUSH_FAILED)], environ={"LIFT_RUNS_REPO": RUNS}, rescue_rc=0,
+                      hf_token=lambda: HF)
+    started_vm(fake, ctx, "lift-wt")
+    runs_repo_check.errors.append(sync_error("the token cannot write the runs repo (it is a read token): "
+                                             "pushing needs a WRITE token for the runs repo", permanent=True))
+    assert remote.watch("lift-wt", ctx=ctx) == 6
+    text = ctx.out.getvalue()
+    assert runs_repo_check.calls == [True] and fake.rescues == [] and fake.server and "stop" not in fake.calls
+    assert "read token" in text and "`hf auth login` with a WRITE token" in text and "ARE LOST" not in text
+    assert "lift remote watch lift-wt retries the push" in text and "lift remote stop lift-wt" in text
+    record = manifest("lift-wt")
+    assert record["rc"] == 6 and record.get("vm_released") is not True and record.get("rescue_push") is None
+    # A transient error keeps it too: nothing is lost by trying again later.
+    ctx.out = io.StringIO()
+    runs_repo_check.errors.append(sync_error("could not reach the Hub (ConnectionError)", permanent=False))
+    assert remote.watch("lift-wt", ctx=ctx) == 6 and fake.rescues == [] and fake.server
+    assert "try again" in ctx.out.getvalue()
+    # The check passes, but the retry's push exits 2 (what the check cannot see): the VM is kept, and the
+    # retry is not recorded as tried, so the next watch tries again.
+    ctx.out = io.StringIO()
+    fake.rescue_rc = 2
+    assert remote.watch("lift-wt", ctx=ctx) == 6
+    assert len(fake.rescues) == 1 and fake.server and "stop" not in fake.calls
+    assert "exited 2" in ctx.out.getvalue() and manifest("lift-wt").get("rescue_push") is None
+    # From a shell whose token can push, the next watch pushes them and releases the VM.
+    ctx.out = io.StringIO()
+    fake.rescue_rc = 0
+    assert remote.watch("lift-wt", ctx=ctx) == 0
+    assert len(fake.rescues) == 2 and fake.server == {} and manifest("lift-wt")["rescue_push"]["push_rc"] == 0
+    assert runs_repo_check.calls == [True] * 4
+
+
+# Review 5, X13: watch that keeps the VM on purpose, billing, with outputs no push sent, exited 1 (also the
+# code of a failed line whose VM is released) with no banner, so a caller that looks for 4 left it billing.
+# 4's advice (lift remote stop) would throw the outputs away: the keep has a code of its own.
+def test_watch_that_keeps_the_vm_for_its_outputs_exits_6_with_a_banner(tmp_path):
+    fake, ctx = setup(tmp_path, [done_log(PUSH_FAILED)], environ={}, hf_token=lambda: HF)
+    started_vm(fake, ctx, "lift-kb")
+    assert remote.watch("lift-kb", ctx=ctx) == 6 == remote.EXIT_KEPT
+    text = ctx.out.getvalue()
+    assert fake.server and "!" * 78 in text and "KEEPS RUNNING" in text and "MAY STILL BE RUNNING" not in text
+    assert manifest("lift-kb")["rc"] == 6
+    # lift remote stop then gives the run its own code: the outputs went with the VM (5).
+    ctx.out = io.StringIO()
+    assert remote.stop("lift-kb", ctx=ctx) == 0 and fake.server == {}
+    assert manifest("lift-kb")["rc"] == 5 and "ARE LOST" in ctx.out.getvalue()
+    # A job that never reported its end after running lines, kept for the same reason: 6, then 1 once stopped.
+    ran = LOG_START + job_note(5, "$ lift run-dev --variant stock   (line 1/1)")
+    fake, ctx = setup(tmp_path / "unreported", [ran], environ={})
+    started_vm(fake, ctx, "lift-ku")
+    assert remote.watch("lift-ku", ctx=ctx) == 6 and fake.server and "KEEPS RUNNING" in ctx.out.getvalue()
+    assert remote.stop("lift-ku", ctx=ctx) == 0 and manifest("lift-ku")["rc"] == 1
+    # The README's advice for scripts and Claude Code names the code.
+    advice = " ".join(readme().split("**From Claude Code.**", 1)[1].split("\n\n", 1)[0].split())
+    assert "a 4 means" in advice and "a 6 means" in advice and "lift remote watch" in advice
+
+
+# Review 5, X14: watch kept a VM that the Colab CLI reports lost, for a push retry that no upload or exec can
+# reach, said its outputs were still on it, and never ran release()'s check and stop by endpoint.
+@pytest.mark.parametrize("environ", [{}, SECRETS], ids=["no-secrets", "secrets"])
+@pytest.mark.parametrize("gone", ["reclaimed", "pruned"])
+def test_watch_never_keeps_or_retries_a_vm_the_colab_cli_has_lost(tmp_path, gone, environ, runs_repo_check):
+    name = "lift-gone"
+    fake, ctx = setup(tmp_path, environ=dict(environ), rescue_rc=0, hf_token=lambda: HF)
+    started_vm(fake, ctx, name, job=PUSH_FAILED, outcome="done", rc=6)  # kept earlier for a push retry
+    if gone == "reclaimed":
+        fake.server.clear()
+        fake.logs = [remote.Result(1, f"[colab] Session '{name}' appears to be lost (404/401).\n")]
+    else:  # the CLI pruned its record; the server still runs the VM
+        fake.save({})
+        fake.logs = [remote.Result(1, f"[colab] Session '{name}' not found.\n")]
+    assert remote.watch(name, ctx=ctx) == 5
+    text = ctx.out.getvalue()
+    assert fake.server == {} and fake.rescues == [] and "upload" not in fake.calls
+    assert runs_repo_check.calls == []
+    assert "no push retry can reach it" in text and "ARE LOST" in text
+    assert "KEEPS RUNNING" not in text and "still on the VM" not in text
+    record = manifest(name)
+    assert record["rc"] == 5 and record["vm_released"] is True
+    if gone == "pruned":  # release() found it by its endpoint, and stopped it there
+        assert fake.config_files and fake.calls[-2:] == ["stop", "sessions"]
 
 
 # Review 2, R31: watch replayed exit 4 after `lift remote stop` had confirmed the release.
@@ -1917,7 +2091,7 @@ def test_watch_after_an_unexpected_error_still_exits_4_when_the_vm_stays(tmp_pat
 def test_stop_after_watch_no_stop_reports_the_outputs_it_releases_as_lost(tmp_path):
     fake, ctx = setup(tmp_path, [done_log(PUSH_FAILED)], rescue_rc=0)
     started_vm(fake, ctx, "lift-nss")
-    assert remote.watch("lift-nss", stop=False, ctx=ctx) == 1 and fake.server
+    assert remote.watch("lift-nss", stop=False, ctx=ctx) == 6 and fake.server
     assert "lift remote stop lift-nss releases the VM without that retry" in ctx.out.getvalue()
     ctx.out = io.StringIO()
     assert remote.stop("lift-nss", ctx=ctx) == 0 and fake.server == {} and fake.rescues == []
@@ -2270,7 +2444,7 @@ def test_cli_help_works(capsys):
     assert "--gpu" in text and "--max-hours" in text and "--no-stop" in text and "--endpoint" in text
     assert "--max-silent-minutes" in text
     # The exit codes are documented where a script author looks.
-    for code in ("0 ", "1 ", "2 ", "3 ", "4 ", "5 ", "130 "):
+    for code in ("0 ", "1 ", "2 ", "3 ", "4 ", "5 ", "6 ", "130 "):
         assert re.search(rf"^\s+{code}", text, flags=re.MULTILINE), code
 
 
@@ -2528,7 +2702,7 @@ def test_readme_explains_the_gate0_report_names():
 def test_the_readme_exit_code_table_matches_lift_remote_help():
     table = re.findall(r"^\| (\d+) \|", readme(), flags=re.MULTILINE)
     codes = re.findall(r"^  (\d+) ", remote.EXIT_CODES, flags=re.MULTILINE)
-    assert table == codes == ["0", "1", "2", "3", "4", "5", "130"]
+    assert table == codes == ["0", "1", "2", "3", "4", "5", "6", "130"]
 
 
 # Review 3, V19 and contract E: the README said gate0-fp16.json alone licenses T4 numbers.
@@ -2571,3 +2745,15 @@ def test_readme_covers_skipped_cells_the_stop_request_and_watch():
     assert "exited 3" in row
     for words in ("exited 3", "another lift remote"):
         assert words in " ".join(remote.EXIT_CODES.split()), words
+    # Review 5: watch checks this shell's token before its push retry, and keeps the VM when it cannot
+    # push (X1, X13): `hf auth login` must hold a write token. A first Ctrl+C at the cap or during the push
+    # retry lets the wait go on (X3), here and in --help.
+    for words in ("WRITE token", "lift sync check --write", "exits 2", "exit 6", "lost"):
+        assert words in after_sleep, words
+    assert "`hf auth login` once, with a WRITE token" in text
+    cap = section("- **`--max-hours`.**", "\n- **")
+    from lift.commands import remote as remote_cmd
+
+    for words_in in (ctrl_c, cap, " ".join(remote_cmd.EXAMPLES.split())):
+        assert "first Ctrl+C" in words_in and "goes on" in words_in, words_in
+    assert "push retry" in ctrl_c and "push retry" in " ".join(remote_cmd.EXAMPLES.split())
