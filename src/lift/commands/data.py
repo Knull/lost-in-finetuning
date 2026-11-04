@@ -10,8 +10,10 @@ Google refused this IP, wait 30 minutes or more; a streak: ten items in a row fa
 or service errors, check the network), a file was skipped because of the block, or items a rerun can
 translate are missing: rerun to resume from the cache; 1 on an ImportError (a missing package: torch
 and transformers for --fallback-engine nllb, checked before anything is written; deep-translator,
-fasttext), and on any other error, which stops the build with a traceback (a split file that no
-longer matches the sources, a PolyRefuse clone at another commit, an NLLB failure).
+fasttext), on a TranslationSetupError (the Cloud Translation API key unset, or the API refusing it:
+one line, no traceback; the items before it are cached), and on any other error, which stops the
+build with a traceback (a split file that no longer matches the sources, a PolyRefuse clone at another
+commit, an NLLB failure).
 ``lift data apply-spotchecks``: 0 when applied (or nothing new), 1 when the sheet or the
 translation cache is refused (SheetError), a file is missing or a package (GlotLID's fasttext) is,
 all before a verdict is stored; 3 when the rebuild lost records (listed; the verdicts are stored,
@@ -47,20 +49,30 @@ def _setup() -> None:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
+def _import_error(e: ImportError) -> int:
+    hint = "" if "pip install" in str(e) else " (pip install -e \".[data]\" installs the data packages)"
+    log.error("%s%s", e, hint)
+    return 1
+
+
 def _build(args: argparse.Namespace) -> int:
     _setup()
     from lift.paths import prompts_dir
 
     try:
         from lift.data.build import BuildContext, blocked_advice, build_all, build_state
-
+        from lift.data.translate import TranslationSetupError
+    except ImportError as e:
+        return _import_error(e)
+    try:
         ctx = BuildContext.default(skip_translation=args.skip_translation, cache_only=args.cache_only,
                                    retranslate_failed=args.retranslate_failed,
                                    fallback_engine=args.fallback_engine)
         summary = build_all(only=args.only, langs=args.langs, ctx=ctx)
     except ImportError as e:                 # check_nllb's (with its install hint), deep-translator, fasttext
-        hint = "" if "pip install" in str(e) else " (pip install -e \".[data]\" installs the data packages)"
-        log.error("%s%s", e, hint)
+        return _import_error(e)
+    except TranslationSetupError as e:       # no Cloud Translation key, or the API refusing it
+        log.error("translation cannot run: %s", e)
         return 1
     totals = summary["totals"]
     print(f"{totals['files']} files, {totals['records']} records; {totals['lid_failures']} GlotLID "

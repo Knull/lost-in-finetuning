@@ -440,7 +440,11 @@ def test_build_context_defaults_and_checks():
     ctx = build.BuildContext.default(skip_translation=True)
     assert ctx.cfg is config.load("project") and ctx.train_cfg is config.load("train")
     assert ctx.skip_translation and ctx.lid is None and ctx.hub is None
-    assert ctx.backend("google") is ctx.backend("google")             # one backend, made on its first call
+    engine = translate.primary_engine(ctx.cfg)                         # google_cloud (decisions item 48)
+    assert ctx.backend(engine) is ctx.backend(engine)                 # one backend, made on its first call
+    other = next(e for e in translate.GOOGLE_ENGINES if e != engine)
+    with pytest.raises(ValueError, match="not this build's translation.engine"):
+        ctx.backend(other)                                            # one translator, one engine name
     with pytest.raises(ValueError, match="exclude each other"):
         build.BuildContext.default(cache_only=True, retranslate_failed=True)
     with pytest.raises(ValueError, match="fallback engine"):

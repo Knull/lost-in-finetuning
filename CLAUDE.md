@@ -136,7 +136,9 @@ six languages, so pairing, splitting and clustering all go by pid.
   with its remedy); the runners go on with the next line.
 - **Secrets.** `HF_TOKEN` (with accepted access to tiny-aya-global and tiny-aya-base),
   `GITHUB_TOKEN` (remote runtimes clone this private repo), the judge API key with its spend cap
-  `LIFT_JUDGE_MAX_USD` (per lift process), and `LIFT_RUNS_REPO`.
+  `LIFT_JUDGE_MAX_USD` (per lift process), `LIFT_RUNS_REPO`, and `GOOGLE_TRANSLATE_API_KEY` (the
+  Cloud Translation API, only for `lift data build` runs that translate). Set them with a hidden
+  prompt, never typed or pasted on a command line or into a chat.
 - **Pinned revisions.** `lift generate`, `lift judge` and `lift run-dev` refuse a revision that is
   not a commit sha; Gate 0 (`lift smoke`) resolves and prints the shas to pin. Pin them in
   configs/project.yaml with a dated decisions.md entry, then commit and push to the ref the GPU
@@ -199,7 +201,9 @@ six languages, so pairing, splitting and clustering all go by pid.
   (`sources.polyrefuse.misaligned`, docs/decisions.md).
 - **Missing sets.** There is no Hindi anywhere and no zh harmless test. The translation job
   makes them, and zh harmless train from its English source, with Google Translate, the tool
-  PolyRefuse itself used. Harmless val is unused.
+  PolyRefuse itself used, reached through the Cloud Translation API (engine `google_cloud`,
+  records `google-cloud-v2`; decisions item 48: the web endpoint refused the laptop and Colab).
+  Harmless val is unused.
 
 ## Status
 
@@ -210,10 +214,12 @@ six languages, so pairing, splitting and clustering all go by pid.
   - Read prompts with `lift.data.build.load_prompts(set, lang, split)`.
   - Each module's docstring holds the verified facts about its source.
   - The splits are frozen in `data/splits/` (Nov 4). The 8 files that need Google Translate
-    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) wait for the
-    translation job. The SFT variants are aya/dedup (679 rows), indicalign/dedup (3,000) and
-    indicalign/raw (3,000, the stress recipe), in `data/sft/{cand}/{variant}/sft_messages.jsonl`;
-    the counts are `decision.rows_by_variant` in `data/sft/report.json` (decisions item 47).
+    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) wait for
+    `lift data build --only harmful easy_benign hard_benign` with `GOOGLE_TRANSLATE_API_KEY` set
+    (about 15 minutes on the laptop, no GPU). The SFT variants are aya/dedup (679 rows),
+    indicalign/dedup (3,000) and indicalign/raw (3,000, the stress recipe), in
+    `data/sft/{cand}/{variant}/sft_messages.jsonl`; the counts are `decision.rows_by_variant` in
+    `data/sft/report.json` (decisions item 47).
 - **P02 (harness).** models.load/generate/variants (stock, adapter), train.merge, prompts,
   judge.qwen3guard, judge.frontier (safety), judge.pipeline, audit.record_safety, sync, gate0, and
   `lift smoke|generate|judge|run-dev|restart|sync|remote`, with colab/job.py and kaggle/runner.ipynb.

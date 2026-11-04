@@ -36,6 +36,7 @@ data = [
   "datasets>=3.0,<6",
   "huggingface_hub>=0.26",
   "deep-translator>=1.11",
+  "requests>=2.31",              # the Cloud Translation API backend (lift.data.translate)
   # fasttext 0.9.3 does not build on Windows; fasttext-wheel 0.9.2 ships wheels and provides the
   # same module. Its predict() breaks under numpy 2, which lift.lang avoids (see its docstring).
   "fasttext>=0.9.3; platform_system != 'Windows'",

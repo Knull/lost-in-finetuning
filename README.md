@@ -43,7 +43,7 @@ validated); Arabic and Thai (exploratory).
 
 | Set | Source | Per language |
 | --- | --- | --- |
-| Harmful | PolyRefuse harmful test; Hindi translated with Google Translate | 172 dev / 400 final |
+| Harmful | PolyRefuse harmful test; Hindi translated with Google Translate (Cloud Translation API, `docs/decisions.md` item 48) | 172 dev / 400 final |
 | Harmful, human-written | Aya Red-teaming, Hindi | final only (check on the primary endpoint) |
 | Easy benign | PolyRefuse harmless test; Hindi and Chinese translated | 200 dev / 300 final |
 | Hard benign | OR-Bench-Hard-1K sample, translated into 5 languages | 100 fit / 100 dev / 200 final |

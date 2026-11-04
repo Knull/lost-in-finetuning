@@ -58,6 +58,14 @@ languages:
   belebele: {en: eng_Latn, hi: hin_Deva, zh: zho_Hans, es: spa_Latn, ar: arb_Arab, th: tha_Thai}
   google_translate: {hi: hi, zh: zh-CN, es: es, ar: ar, th: th}
 
+# How every new machine translation is made (lift.data.translate). Nov 4 (docs/decisions.md item 48):
+# Google Translate through the Cloud Translation API v2 (NMT), because the web endpoint ("google",
+# through deep-translator) refused the laptop and a Colab VM with HTTP 429. Records say
+# "google-cloud-v2". The key is read from api_key_env, never from a file.
+translation:
+  engine: google_cloud
+  api_key_env: GOOGLE_TRANSLATE_API_KEY
+
 generation:
   template: default              # Tiny Aya's chat template, default preamble kept
   do_sample: false
