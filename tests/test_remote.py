@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import errno
 import importlib.util
 import io
 import json
@@ -61,6 +62,33 @@ def no_real_world(monkeypatch, tmp_path):
         monkeypatch.setenv(var, str(home))
     for var in (*SECRETS, "ANTHROPIC_API_KEY", "LIFT_JUDGE_MAX_USD"):
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def runs_repo_check(monkeypatch):
+    """lift remote checks the runs repo with lift.sync.preflight(write=True) before `colab new`. No test
+    reaches the Hub, so it is stubbed: it records each call's ``write`` and raises what a test puts in
+    ``errors``."""
+    from lift import sync
+
+    calls: list[bool] = []
+    errors: list[Exception] = []
+
+    def preflight(*, write=True):
+        calls.append(write)
+        if errors:
+            raise errors.pop(0)
+
+    monkeypatch.setattr(sync, "preflight", preflight, raising=False)
+    return types.SimpleNamespace(calls=calls, errors=errors)
+
+
+def sync_error(message: str, *, permanent: bool) -> Exception:
+    from lift import sync
+
+    error = sync.SyncError(message)
+    error.permanent = permanent
+    return error
 
 
 @pytest.fixture(scope="module")
@@ -152,21 +180,25 @@ def command_key(argv: list[str]) -> str:
     if argv[0] == "nvidia-smi":
         return "nvidia-smi"
     assert argv[:2] == [PY, "-m"], argv
+    if argv[2:] == ["lift", "sync", "--help"]:
+        return "lift-check"  # job.py's setup check, kept apart from the job's own lift commands
     return f"{argv[2]} {' '.join(argv[3:])}" if argv[2] == "lift" else f"pip {argv[3]}"
 
 
 class FakeVM:
     """subprocess.Popen as job.py sees it on the VM: records each call and answers by command. An rc
     given as a list is used up call by call (its last value repeats); ``procs`` hands out special
-    processes, one per call, before the plain ones."""
+    processes, one per call, before the plain ones. The checkout brings the ref's constraints.txt
+    unless ``constraints`` is False (a ref older than it)."""
 
-    def __init__(self, root: Path, *, rcs=None, outputs=None, hook=None, procs=None):
+    def __init__(self, root: Path, *, rcs=None, outputs=None, hook=None, procs=None, constraints=True):
         self.root = root
         self.rcs = {key: (list(rc) if isinstance(rc, list) else rc) for key, rc in (rcs or {}).items()}
         self.outputs = {"git rev-parse": f"{SHA}\n".encode(),
                         "nvidia-smi": b"NVIDIA A100-SXM4-40GB, 40960 MiB\n", **(outputs or {})}
         self.hook = hook
         self.procs = {key: list(queue) for key, queue in (procs or {}).items()}
+        self.constraints = constraints
         self.calls: list[dict] = []
         self.secrets_file_at_first_call = None
 
@@ -176,6 +208,9 @@ class FakeVM:
         assert stdin is subprocess.DEVNULL and stdout is subprocess.PIPE and stderr is subprocess.STDOUT
         key = command_key(argv)
         self.calls.append({"argv": list(argv), "cwd": cwd, "env": dict(env), "key": key, "kwargs": kwargs})
+        if key == "git checkout" and self.constraints:
+            (self.root / "lift").mkdir(exist_ok=True)
+            (self.root / "lift" / "constraints.txt").write_text("transformers==5.22.1\n", encoding="utf-8")
         if self.hook:
             self.hook(key)
         if self.procs.get(key):
@@ -189,17 +224,21 @@ class FakeVM:
         return [c["key"] for c in self.calls if c["key"].startswith(prefix)]
 
 
+def job_env(lines, spec_extra=None) -> dict:
+    """The kernel environment `lift remote` gives job.py: the job spec, base64 JSON."""
+    spec = {**remote.JobSpec("Knull/lost-in-finetuning", "main", tuple(lines), "job-1").to_dict(),
+            **(spec_extra or {})}
+    return {"LIFT_JOB_B64": base64.b64encode(json.dumps(spec).encode()).decode(), "PATH": "/usr/bin"}
+
+
 def run_job(job, root: Path, lines, *, vm=None, secrets=SECRETS, environ=None, version=(3, 12, 4),
             out=None, heartbeat=0, spec_extra=None, **job_kwargs):
     root.mkdir(exist_ok=True)
     if secrets is not None:
         (root / ".lift_secrets.json").write_text(json.dumps(secrets), encoding="utf-8")
-    spec = {**remote.JobSpec("Knull/lost-in-finetuning", "main", tuple(lines), "job-1").to_dict(),
-            **(spec_extra or {})}
     vm = vm or FakeVM(root)
     out = out or io.StringIO()
-    env = {"LIFT_JOB_B64": base64.b64encode(json.dumps(spec).encode()).decode(), "PATH": "/usr/bin",
-           **(environ or {})}
+    env = {**job_env(lines, spec_extra), **(environ or {})}
     status = job.main(root=str(root), environ=env, popen=vm, python=PY, version_info=version,
                       heartbeat=heartbeat, out=out, **job_kwargs)
     return status, vm, out.getvalue()
@@ -270,7 +309,9 @@ def test_job_runs_lines_in_order_with_checkpoints_and_one_final_push(job, tmp_pa
                                 "lift run-dev --variant stock", "lift sync push"]
     repo = os.path.join(str(root), "lift")
     pip = next(c for c in vm.calls if c["key"] == "pip install")
-    assert pip["argv"] == [PY, "-m", "pip", "install", "-q", "-e", repo + "[gpu,data,eval]"]
+    constraints = os.path.join(repo, "constraints.txt")
+    assert pip["argv"] == [PY, "-m", "pip", "install", "-q", "-c", constraints, "-e",
+                           repo + "[gpu,data,eval]"]
     assert next(c for c in vm.calls if c["key"] == "pip uninstall")["argv"][-1] == "torchao"
     assert all(c["cwd"] == repo for c in vm.calls if c["key"].startswith("lift "))
 
@@ -534,6 +575,178 @@ def test_masker_catches_secrets_split_across_chunks(job):
     assert all(b"SECRE" not in piece for piece in written)
 
 
+# Review 2, R1: a ref without `lift sync` (main before P02 merged) ran its lines and reported the
+# outputs of a job that never ran as lost.
+def test_job_refuses_a_ref_without_lift_sync_before_any_line(job, tmp_path):
+    root = tmp_path / "content"
+    usage = b"usage: lift [-h] {info} ...\nlift: error: argument command: invalid choice: 'sync'\n"
+    vm = FakeVM(root, rcs={"lift-check": 2}, outputs={"lift-check": usage})
+    status, vm, _ = run_job(job, root, ["lift sync pull", "lift smoke"], vm=vm)
+    assert status["failed_step"] == "sync-check" and status["rc"] == 3 and status["installed"] is False
+    assert vm.keys("lift ") == [] and status["push_rc"] is None
+    log = log_bytes(root)
+    assert b"lift sync" in log and b"P01 and P02" in log and b"invalid choice" in log
+    assert remote.exit_code(status) == remote.EXIT_SETUP
+    # The check runs right after the install, before any line.
+    root = tmp_path / "ok"
+    status, vm, _ = run_job(job, root, ["lift info"])
+    keys = vm.keys()
+    assert keys.index("lift-check") == keys.index("pip uninstall") + 1 < keys.index("lift info")
+    assert status["rc"] == 0 and status["installed"] is True
+
+
+# Contract 7: the GPU runtimes install with the ref's constraints.txt. Review 3, V14: a ref pushed
+# without the (then untracked) file was blamed on a missing P01/P02 first.
+def test_job_refuses_a_ref_without_constraints(job, tmp_path):
+    root = tmp_path / "content"
+    status, vm, _ = run_job(job, root, ["lift info"], vm=FakeVM(root, constraints=False))
+    assert status["failed_step"] == "install" and status["rc"] == 3 and status["installed"] is False
+    assert vm.keys("pip") == [] and vm.keys("lift ") == []
+    log = log_bytes(root)
+    assert b"commit constraints.txt to the ref" in log and b"P01 and P02" in log
+    assert log.index(b"commit constraints.txt") < log.index(b"P01 and P02")
+
+
+# Contract 1 (review 2, R25/R34): lift sync exits 2 for a problem no retry can fix; job.py tried it again
+# like a transient error, idling the GPU for 10 minutes per push.
+def test_job_never_retries_a_sync_exit_2_and_ends_the_job(job, tmp_path):
+    root = tmp_path / "content"
+    naps = []
+    vm = FakeVM(root, rcs={"lift sync push": [2]})
+    status, vm, _ = run_job(job, root, ["lift smoke", "lift info"], vm=vm, sleep=naps.append)
+    # The checkpoint push after line 1 exits 2: no second try, no next line; the final push is tried once.
+    assert vm.keys("lift ") == ["lift smoke", "lift sync push", "lift sync push"] and naps == []
+    assert status["sync_refused"] == "the checkpoint push after line 1/2"
+    assert status["rc"] == 2 and status["push_rc"] == 2 and status["failed_line"] is None
+    assert b"no retry can fix" in log_bytes(root)
+    # The smoke outputs exist only on the VM, and lift remote must not retry that push either.
+    assert remote.push_failed(status) and remote.exit_code(status) == remote.EXIT_NOT_PUSHED
+
+
+def test_a_pull_line_is_tried_again_on_1_and_a_2_ends_the_job_at_once(job, tmp_path, monkeypatch):
+    monkeypatch.setattr(job, "PUSH_DELAYS", (0.001, 0.001, 0.001), raising=False)
+    root = tmp_path / "flaky"
+    status, vm, _ = run_job(job, root, ["lift sync pull", "lift smoke"],
+                            vm=FakeVM(root, rcs={"lift sync pull": [1, 0]}))
+    assert vm.keys("lift ") == ["lift sync pull", "lift sync pull", "lift smoke", "lift sync push"]
+    assert status["rc"] == 0 and status["failed_line"] is None
+    root = tmp_path / "refused"
+    status, vm, _ = run_job(job, root, ["lift sync pull", "lift smoke"],
+                            vm=FakeVM(root, rcs={"lift sync pull": [2]}))
+    # Not tried again, no next line, and no final push: only lift sync ran, so nothing new is on the VM.
+    assert vm.keys("lift ") == ["lift sync pull"]
+    assert status["rc"] == 2 and status["failed_line"] == 0 and status["ran"] == 0
+    assert status["sync_refused"] == "line 1/2 (lift sync pull)" and status["push_rc"] is None
+    # Not "outputs lost": the runs repo refused before anything ran.
+    assert not remote.push_failed(status) and remote.exit_code(status) == remote.EXIT_SETUP
+
+
+# Review 3, V11: a pull killed for silence (a stalled Hub read) was tried 3 more times: about 3 hours of
+# an idle A100 at the defaults before the job failed, instead of one --max-silent-minutes.
+def test_a_pull_killed_as_hung_ends_the_job_without_another_try(job, tmp_path, monkeypatch):
+    monkeypatch.setattr(job, "PUSH_DELAYS", (0.001, 0.001, 0.001), raising=False)
+    root = tmp_path / "content"
+    hangs = [HangingProc(b"pulling\n"), HangingProc(b"pulling\n")]
+    vm = FakeVM(root, procs={"lift sync pull": hangs})
+    status, vm, _ = run_job(job, root, ["lift sync pull", "lift run-dev --variant stock"], vm=vm,
+                            heartbeat=0.01, spec_extra={"max_silent_minutes": 0.005})
+    assert vm.keys("lift ") == ["lift sync pull"] and hangs[0].signals == [signal.SIGINT]
+    assert status["failed_line"] == 0 and status["killed"].startswith("no output for")
+    assert status["rc"] == 130 and status["ran"] == 0 and status["push_rc"] is None
+    assert b"trying again" not in log_bytes(root)
+
+
+# Review 2, R16: a stop request during the wait before another checkpoint try did not cut the wait (up
+# to 360 s), and another checkpoint try ran before the final push.
+def test_a_stop_request_cuts_a_checkpoint_retry_wait_and_ends_its_tries(job, tmp_path):
+    root = tmp_path / "content"
+    clock = FakeClock(time.time())
+    naps = []
+
+    def sleep(seconds):
+        naps.append(seconds)
+        clock.sleep(seconds)
+        (root / "lift_job.stop").write_text("ctrl-c\n", encoding="ascii")  # Ctrl+C on the laptop now
+
+    vm = FakeVM(root, rcs={"lift sync push": [1, 0]})
+    status, vm, _ = run_job(job, root, ["lift smoke", "lift info"], vm=vm, sleep=sleep, clock=clock)
+    assert naps == [job.TICK_SECONDS]  # the stop request is seen at the next look, not after 60 s
+    assert vm.keys("lift ") == ["lift smoke", "lift sync push", "lift sync push"]  # no 2nd checkpoint try
+    assert status["stopped"] == "stop file: ctrl-c" and status["checkpoint_push_failures"] == 1
+    assert status["push_rc"] == 0
+
+
+def test_a_stop_request_never_cuts_the_final_push_wait(job, tmp_path):
+    root = tmp_path / "content"
+    naps = []
+    def hook(key):  # the stop request comes while the only line runs
+        if key == "lift info":
+            (root / "lift_job.stop").write_text("ctrl-c\n", encoding="ascii")
+
+    vm = FakeVM(root, rcs={"lift sync push": [1, 0]}, hook=hook)
+    status, vm, _ = run_job(job, root, ["lift info"], vm=vm, sleep=naps.append)
+    assert naps == [job.PUSH_DELAYS[0]] and vm.keys("lift sync push") == ["lift sync push"] * 2
+    assert status["push_rc"] == 0
+
+
+class FullDiskLog:
+    """The job log once the VM's disk is full: every write fails with ENOSPC."""
+
+    def write(self, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def flush(self):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def close(self):
+        pass
+
+
+# Review 2, R19: a failing log write escaped every handler, so the final push never ran and no last
+# line was written.
+def test_a_full_disk_still_gets_the_final_push_and_the_last_line_out(job, tmp_path):
+    root = tmp_path / "content"
+    root.mkdir()
+    (root / ".lift_secrets.json").write_text(json.dumps(SECRETS), encoding="utf-8")
+    vm = FakeVM(root)
+    out = io.StringIO()
+    env = job_env(["lift sync pull", "lift run-dev --variant stock"])
+    run = job.Job(root=str(root), environ=env, popen=vm, python=PY, version_info=(3, 12, 4), heartbeat=0,
+                  out=out)
+    vm.hook = lambda key: setattr(run, "_log", FullDiskLog()) if key.startswith("lift run-dev") else None
+    status = run.run()
+    assert vm.keys("lift ") == ["lift sync pull", "lift run-dev --variant stock", "lift sync push"]
+    assert status["rc"] == 0 and status["push_rc"] == 0 and status["log_dropped"] > 0
+    assert b"@@LIFT_DONE" not in log_bytes(root)
+    text = out.getvalue()
+    assert text.count("cannot be written") == 1
+    # The last line went to the kernel's output, which `colab exec` relays to the laptop's exec log.
+    assert remote.find_status(text.encode()) == status
+    assert not any(secret in text for secret in SECRETS.values())
+
+
+# Review 2, R32: a `lift sync push` line mid-job ran as a plain line: an exit 1 was not tried again and
+# an exit 3 (done, with conflicts) stopped the job.
+def test_an_explicit_push_line_runs_as_a_push_and_never_stops_the_job(job, tmp_path, monkeypatch):
+    monkeypatch.setattr(job, "PUSH_DELAYS", (0.001, 0.001, 0.001), raising=False)
+    lines = ["lift sync pull", "lift generate --variant stock --split dev", "lift sync push",
+             "lift judge --variant stock --split dev"]
+    root = tmp_path / "flaky"  # pushes: the checkpoint (0), the line (1, then 0), the final one (0)
+    status, vm, _ = run_job(job, root, lines, vm=FakeVM(root, rcs={"lift sync push": [0, 1, 0]}))
+    assert vm.keys("lift ") == ["lift sync pull", "lift generate --variant stock --split dev",
+                                "lift sync push", "lift sync push", "lift sync push",
+                                "lift judge --variant stock --split dev", "lift sync push"]
+    assert status["rc"] == 0 and status["failed_line"] is None and status["checkpoint_push_failures"] == 0
+    root = tmp_path / "conflict"
+    status, vm, _ = run_job(job, root, lines, vm=FakeVM(root, rcs={"lift sync push": [0, 3, 0]}))
+    assert "lift judge --variant stock --split dev" in vm.keys("lift ")
+    assert status["rc"] == 0 and status["failed_line"] is None and status["push_conflicts"] == 1
+    root = tmp_path / "down"  # a push line that keeps failing is reported, like a checkpoint push
+    status, vm, _ = run_job(job, root, lines, vm=FakeVM(root, rcs={"lift sync push": [0, 1, 1, 1, 1, 0]}))
+    assert "lift judge --variant stock --split dev" in vm.keys("lift ")
+    assert status["rc"] == 0 and status["checkpoint_push_failures"] == 1
+
+
 # --- lift remote ----------------------------------------------------------------------------------
 
 
@@ -685,7 +898,7 @@ class FakeColab:
 
 def setup(tmp_path, logs=(), *, environ=None, logged_in=True, hf_token=None, **fake_kwargs):
     config_dir = tmp_path / "colab-cli"
-    config_dir.mkdir(exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
     if logged_in:
         (config_dir / "token.json").write_text("{}", encoding="utf-8")
     fake = FakeColab(config_dir, logs, **fake_kwargs)
@@ -723,7 +936,7 @@ def test_launch_runs_new_upload_exec_poll_stop_sessions(tmp_path):
     assert fake.argvs[1] == [EXE, "new", "-s", "lift-t1", "--gpu", "A100"]
     exec_argv = fake.argvs[3]
     assert exec_argv[1:8] == ["exec", "-s", "lift-t1", "-f", str(remote.JOB_FILE), "--timeout",
-                              str(12 * 3600 + 1800)]
+                              str(12 * 3600 + int(remote.PUSH_WAIT) + 900)]  # past the longest wait
     assert exec_argv[8] == "--env" and exec_argv[9].startswith("LIFT_JOB_B64=")
     spec = json.loads(base64.b64decode(exec_argv[9].split("=", 1)[1]))
     # The job stops itself 30 minutes before --max-hours, so its final push fits.
@@ -820,16 +1033,41 @@ def test_upload_failure_deletes_the_temp_file_and_stops_the_vm(tmp_path):
     assert manifest("lift-t4")["vm_released"] is True and manifest("lift-t4")["outcome"].startswith("error")
 
 
-def test_stop_runs_even_after_an_exception(tmp_path):
+# Review 2, R30: an unexpected error while following stopped the VM at once, with no stop request (so
+# no final push), and escaped as a traceback (exit 1) even when the VM could not be released (4).
+def test_an_unexpected_error_asks_the_job_to_stop_and_push_then_returns_a_code(tmp_path):
     def explode(n):
         if n == 2:
-            raise RuntimeError("the laptop lost its network")
+            raise RuntimeError("a bug while reading the log")
 
     fake, ctx = setup(tmp_path, [None, LOG_START], on_download=explode)
-    with pytest.raises(RuntimeError, match="network"):
-        remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-t5"), ctx)
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-t5"), ctx) == 1
+    assert [u["remote"] for u in fake.uploads] == ["content/.lift_secrets.json", STOP_FILE]
     assert fake.calls[-2:] == ["stop", "sessions"] and fake.handle.killed and fake.server == {}
-    assert manifest("lift-t5")["vm_released"] is True
+    record = manifest("lift-t5")
+    assert record["vm_released"] is True and record["outcome"].startswith("error: RuntimeError")
+    assert record["rc"] == 1
+
+
+def test_an_unexpected_error_still_exits_4_when_the_vm_cannot_be_released(tmp_path, monkeypatch):
+    def explode(n):
+        if n == 2:
+            raise RuntimeError("a bug while reading the log")
+
+    fake, ctx = setup(tmp_path, [None, LOG_START], on_download=explode, stop_rc=1)
+    monkeypatch.setattr(remote, "Context", lambda *args, **kwargs: ctx)
+    assert main(["remote", "--gpu", "A100", "--job", "lift info", "--name", "lift-t5b"]) == 4
+    assert fake.server and manifest("lift-t5b")["rc"] == 4
+    assert "MAY STILL BE RUNNING" in ctx.out.getvalue()
+
+
+def test_a_colab_cli_that_cannot_start_is_a_failed_call():
+    # `uv tool install google-colab-cli==<v> --force` replaces colab.exe while a job runs.
+    def missing(argv, **kwargs):
+        raise FileNotFoundError(2, "The system cannot find the file specified", argv[0])
+
+    res = REAL_RUN(remote.SubprocessRunner({}, run=missing), [EXE, "download"], timeout=5)
+    assert res.rc is None and "FileNotFoundError" in res.out
 
 
 def answer_the_stop_file(fake: FakeColab, status: dict):
@@ -1071,6 +1309,395 @@ def test_a_broken_stdout_never_keeps_the_vm_running(tmp_path):
     assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-p1"), ctx) == 0
     assert fake.calls[-2:] == ["stop", "sessions"] and fake.server == {}
     assert manifest("lift-p1")["vm_released"] is True
+
+
+# Contract 1 (review 2, R25/R34): nothing checked the runs repo before paying for a VM, so a read-only
+# token was found only by the job's first push, hours later.
+def test_launch_checks_the_runs_repo_before_any_vm(tmp_path, runs_repo_check, capsys, monkeypatch):
+    fake, ctx = setup(tmp_path, [done_log(OK)])
+    monkeypatch.setattr(remote, "Context", lambda *args, **kwargs: ctx)
+    fake.handle.rc = 0
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-pf"), ctx) == 0
+    assert runs_repo_check.calls == [True] and fake.calls[0] == "sessions"
+    # A problem no retry can fix refuses (2); a transient error exits 1; both before any VM exists.
+    for permanent, code in ((True, 2), (False, 1)):
+        runs_repo_check.errors.append(sync_error(f"the runs repo {RUNS} is not private", permanent=permanent))
+        fake.calls.clear()
+        with pytest.raises(remote.RemoteError) as err:
+            remote.launch(remote.Launch(gpu="A100", job="lift info"), ctx)
+        assert err.value.code == code and fake.calls == [] and "runs repo" in str(err.value)
+        assert RUNS not in str(err.value)  # masked like every other value sent to the VM
+    runs_repo_check.errors.append(sync_error("HTTP 403: this token cannot write", permanent=True))
+    assert main(["remote", "--gpu", "A100", "--job", "lift info", "--name", "lift-pf2"]) == 2
+    assert "cannot write" in capsys.readouterr().err
+    runs_repo_check.errors.append(ModuleNotFoundError("no huggingface_hub", name="huggingface_hub"))
+    with pytest.raises(remote.RemoteError, match=r"\.\[sync\]") as err:
+        remote.launch(remote.Launch(gpu="A100", job="lift info"), ctx)
+    assert err.value.code == 2
+    # --dry-run calls nothing: it says the runs repo would be checked.
+    calls = len(runs_repo_check.calls)
+    opts = remote.Launch(gpu="A100", job="lift info", name="lift-pf3", dry_run=True)
+    assert remote.launch(opts, ctx) == 0 and len(runs_repo_check.calls) == calls
+    assert "lift sync check --write" in ctx.out.getvalue()
+
+
+def replace_opts(opts: remote.Launch, **changes) -> remote.Launch:
+    from dataclasses import replace
+
+    return replace(opts, **changes)
+
+
+# Review 2, R6: the dev eval was launched with configs/project.yaml still unpinned, and refused on the
+# VM after about 10 A100-minutes.
+def test_eval_lines_warn_while_this_laptops_revisions_are_unpinned(tmp_path, monkeypatch):
+    from lift import config
+
+    fake, ctx = setup(tmp_path)
+    opts = remote.Launch(gpu="A100", job="lift sync pull; lift run-dev --variant stock", name="lift-pin",
+                         dry_run=True)
+    assert remote.launch(opts, ctx) == 0  # a warning, not a refusal
+    text = ctx.out.getvalue()
+    assert "unpinned" in text and "models.global.revision = 'main'" in text and "ref's copy" in text
+    # Gate 0 itself needs no pin.
+    ctx.out = io.StringIO()
+    assert remote.launch(replace_opts(opts, job="lift sync pull; lift smoke", name="lift-pin2"), ctx) == 0
+    assert "unpinned" not in ctx.out.getvalue()
+    # A real launch warns too, and runs.
+    fake, ctx = setup(tmp_path / "real", [done_log(OK)])
+    fake.handle.rc = 0
+    run = remote.Launch(gpu="A100", job="lift judge --variant stock --split dev", name="lift-pin3")
+    assert remote.launch(run, ctx) == 0 and "unpinned" in ctx.out.getvalue()
+    # Pinned to the shas Gate 0 printed: no warning.
+    view = config.load("project")
+    for entry in (view["models"]["global"], view["models"]["base"], view["judges"]["safety_primary"]):
+        entry["revision"] = SHA
+    ctx.out = io.StringIO()
+    assert remote.launch(replace_opts(opts, name="lift-pin4"), ctx) == 0
+    assert "unpinned" not in ctx.out.getvalue()
+    # Advice only: revisions it cannot read never block a launch.
+    real_get = config.get
+
+    def unreadable(dotted, *args, **kwargs):
+        if dotted.endswith(".revision"):
+            raise ValueError("a malformed entry")
+        return real_get(dotted, *args, **kwargs)
+
+    monkeypatch.setattr(config, "get", unreadable)
+    assert remote.launch(replace_opts(opts, name="lift-pin5"), ctx) == 0
+    assert "could not read configs/project.yaml" in ctx.out.getvalue()
+
+
+# Review 3, V13/V18: the warning checked a fixed list of entries. After P04's judge swap it named the
+# frontier primary (no revision) on every eval line, and never the unpinned local second judge.
+def test_the_pin_warning_checks_what_each_lines_command_refuses():
+    from lift import config
+
+    view = config.load("project")  # every revision "main"; Qwen3Guard is the primary judge
+    warn = remote.unpinned_warning
+    generate = warn(["lift sync pull", "lift generate --variant stock --split dev"])
+    assert "line 2 (lift generate): models.global.revision = 'main'" in generate
+    assert "judges." not in generate and "models.base" not in generate
+    judge = warn(["lift judge --variant stock --split dev"])  # lift judge pins only its judge
+    assert "judges.safety_primary.revision = 'main'" in judge and "models.global" not in judge
+    both = warn(["lift sync pull", "lift run-dev --variant stock"])
+    assert "models.global.revision" in both and "judges.safety_primary.revision" in both
+    assert warn(["lift judge --judge=second --variant stock --split dev"]) is None  # frontier: no revision
+    assert warn(["lift run-dev --variant stock --sets"]) is None  # refused by argparse, before any pin
+    # After P04's swap: the frontier judge is primary, Qwen3Guard the second judge.
+    qwen = view["judges"]["safety_primary"]
+    view["judges"]["safety_primary"] = {"provider": "anthropic", "model": "claude-sonnet-5-5",
+                                        "rubric": "configs/rubrics/safety_v1.md"}
+    view["judges"]["safety_second"] = qwen
+    view["models"]["global"]["revision"] = SHA
+    assert warn(["lift sync pull", "lift run-dev --variant stock"]) is None
+    second = warn(["lift sync pull", "lift judge --variant stock --split dev --judge second"])
+    assert "line 2 (lift judge): judges.safety_second.revision = 'main'" in second
+    assert "safety_primary" not in second
+    qwen["revision"] = SHA
+    assert warn(["lift judge --judge second --variant stock --split dev"]) is None
+    # An entry without a revision key is skipped, never an error.
+    del view["models"]["global"]["revision"]
+    assert warn(["lift generate --variant stock --split dev"]) is None
+
+
+# Contract 1: a final push that exited 2 (a problem no retry can fix) is never retried from here either.
+def test_lift_remote_never_retries_a_final_push_that_exited_2(tmp_path):
+    refused = {**PUSH_FAILED, "rc": 2, "push_rc": 2, "ran": 1, "sync_refused": "the final push"}
+    fake, ctx = setup(tmp_path, [done_log(refused)], rescue_rc=0)
+    fake.handle.rc = 0
+    rc = remote.launch(remote.Launch(gpu="A100", job="lift run-dev --variant stock", name="lift-x2"), ctx)
+    assert rc == 5 and fake.rescues == [] and fake.server == {}
+    text = ctx.out.getvalue()
+    assert "ARE LOST" in text and "exited 2" in text and "so did the retry" not in text
+
+
+# Review 2, R1: a push that exits 2 is never "outputs lost" when no line ran.
+def test_a_sync_refusal_before_any_line_is_a_setup_failure(tmp_path):
+    status = {"rc": 2, "push_rc": None, "failed_line": 0, "failed_step": None, "installed": True, "ran": 0,
+              "sync_refused": "line 1/2 (lift sync pull)"}
+    fake, ctx = setup(tmp_path, [done_log(status)])
+    fake.handle.rc = 0
+    rc = remote.launch(remote.Launch(gpu="A100", job="lift sync pull; lift smoke", name="lift-x3"), ctx)
+    assert rc == 3 and fake.rescues == [] and "ARE LOST" not in ctx.out.getvalue()
+    assert "no retry can fix" in ctx.out.getvalue()
+    check = {"rc": 3, "push_rc": None, "failed_line": None, "failed_step": "sync-check", "installed": False}
+    assert remote.exit_code(check) == remote.EXIT_SETUP
+
+
+def clock_text(seconds: float) -> str:
+    return remote.hms(seconds).rjust(8, "0")
+
+
+def job_note(t: float, message: str) -> bytes:
+    """One of job.py's own log lines, as it writes them, t seconds past 10:00:00."""
+    return f"[lift-job] {clock_text(36000 + t)} {message}\n".encode()
+
+
+def pushing_log(minutes: float, *, done_at: float | None = None, status: dict | None = None) -> bytes:
+    """The job log ``minutes`` after a stop request, its final push stalled: job.py's stop note, the first
+    try, then a heartbeat every 5 minutes that says the push runs. At ``done_at`` the job's last line."""
+    data = LOG_START + job_note(1, "stop file: ctrl-c: stopping the job; its final push still runs")
+    data += job_note(30, "lift sync push (final, try 1/4)")
+    for i in range(1, int(minutes // 5) + 1):
+        alive, pushing = remote.hms(3 * 3600 + 300 * i), remote.hms(300 * i)
+        data += job_note(300 * i + 30, f"alive {alive}: final push, the push has run for {pushing}")
+    if done_at is not None and minutes >= done_at:
+        data += b"@@LIFT_DONE " + json.dumps(status, sort_keys=True).encode() + b"\n"
+    return data
+
+
+def stop_and_push_slowly(fake: FakeColab, ctx: remote.Context, **log) -> dict:
+    """After the stop request, every download returns ``pushing_log`` for the minutes since then. Returns
+    a dict that gets "at": the stop request's time."""
+    asked: dict = {}
+
+    def on_upload(target):
+        if target == STOP_FILE:
+            asked["at"] = ctx.clock.now
+
+    def on_download(n):
+        if "at" in asked:
+            fake.logs = [pushing_log((ctx.clock.now - asked["at"]) / 60, **log)]
+
+    fake.on_upload, fake.on_download = on_upload, on_download
+    return asked
+
+
+# Review 2, R16: after Ctrl+C lift remote stopped the VM after STOP_WAIT (15 minutes), while job.py's own
+# final push (it kills a stalled try at 30 minutes, then tries again) was still running.
+def test_ctrl_c_waits_while_the_log_shows_the_final_push_running(tmp_path):
+    stopped = {**OK, "rc": 130, "failed_line": 1, "stopped": "stop file: ctrl-c", "installed": True}
+    fake, ctx = setup(tmp_path, [LOG_START])
+    ctx.sleep = interrupting_sleep(ctx, 3)
+    asked = stop_and_push_slowly(fake, ctx, done_at=31, status=stopped)
+    rc = remote.launch(remote.Launch(gpu="A100", job="lift sync pull; lift run-dev --variant stock",
+                                     name="lift-pw"), ctx)
+    assert rc == 130 and fake.server == {} and fake.rescues == []
+    assert ctx.clock.now - asked["at"] >= 31 * 60  # the VM was stopped only after the job's last line
+    assert manifest("lift-pw")["job"] == stopped and "may be lost" not in ctx.out.getvalue()
+
+
+def test_the_wait_for_a_running_push_has_a_bound(tmp_path):
+    fake, ctx = setup(tmp_path, [LOG_START])
+    ctx.sleep = interrupting_sleep(ctx, 3)
+    asked = stop_and_push_slowly(fake, ctx)  # the push never ends
+    rc = remote.launch(remote.Launch(gpu="A100", job="lift run-dev --variant stock", name="lift-pb"), ctx)
+    assert remote.STOP_WAIT < ctx.clock.now - asked["at"] <= remote.PUSH_WAIT + 60
+    assert rc == 130 and fake.server == {} and manifest("lift-pb")["job"] is None
+    assert "may be lost" in ctx.out.getvalue()
+
+
+def test_lift_remote_knows_job_py_push_schedule(job):
+    assert remote.JOB_PUSH_LIMIT == job.PUSH_LIMIT_SECONDS and remote.JOB_KILL_GRACE == job.KILL_GRACE_SECONDS
+    assert remote.JOB_PUSH_DELAYS == job.PUSH_DELAYS
+    one_stalled_try = job.PUSH_LIMIT_SECONDS + job.KILL_GRACE_SECONDS + sum(job.PUSH_DELAYS)
+    assert remote.STOP_WAIT < one_stalled_try and one_stalled_try + 600 <= remote.PUSH_WAIT == 3300
+    assert remote.exec_timeout(12) >= 12 * 3600 + remote.PUSH_WAIT
+
+
+def test_job_pushing_reads_what_job_py_logs(job, tmp_path):
+    root = tmp_path / "content"
+    seen = []
+
+    def heartbeat_logged():
+        log = log_bytes(root)
+        if b"the push has run for" in log:
+            seen.append(log)
+        return bool(seen)
+
+    vm = FakeVM(root, procs={"lift sync push": [WaitingProc(b"pushed\n", heartbeat_logged)]})
+    status, _, _ = run_job(job, root, ["lift run-dev --variant stock"], vm=vm, heartbeat=0.02)
+    assert status["push_rc"] == 0 and seen and remote.job_pushing(seen[0])
+    log = log_bytes(root)
+    assert not remote.job_pushing(log)  # the job's last line ends it
+    assert remote.job_lines_ran(log)
+    assert not remote.job_pushing(log[:log.index(b"line 1/1 ok")])
+    assert not remote.job_lines_ran(LOG_START + job_note(5, "$ lift sync pull   (line 1/2)"))
+
+
+# Review 2, R16: a job that ended without its last line got no push retry, although its log showed
+# lines had run.
+def test_a_job_that_ended_without_its_last_line_gets_a_push_retry(tmp_path):
+    ran = LOG_START + job_note(5, "$ lift run-dev --variant stock   (line 1/1)")
+    fake, ctx = setup(tmp_path, [ran], rescue_rc=0)
+    fake.handle.rc = 0  # the job cell ended (job.py crashed) without its last line
+    opts = remote.Launch(gpu="A100", job="lift run-dev --variant stock", name="lift-nm")
+    assert remote.launch(opts, ctx) == 1
+    assert len(fake.rescues) == 1 and manifest("lift-nm")["rescue_push"]["push_rc"] == 0
+    text = ctx.out.getvalue()
+    assert "may be lost" not in text and "the push retry from here pushed" in text
+    # Only lift sync lines ran: nothing new is on the VM, so no retry.
+    synced = LOG_START + job_note(5, "$ lift sync pull   (line 1/2)")
+    fake, ctx = setup(tmp_path / "sync-only", [synced], rescue_rc=0)
+    fake.handle.rc = 0
+    opts = remote.Launch(gpu="A100", job="lift sync pull; lift info", name="lift-nm2")
+    assert remote.launch(opts, ctx) == 1
+    assert fake.rescues == []
+
+
+# Review 2, R19: with the VM's disk full, job.py's last line can reach the laptop only through the exec
+# client's output.
+def test_the_last_line_counts_when_it_came_only_through_the_exec_output(tmp_path):
+    fake, ctx = setup(tmp_path, [LOG_START])
+
+    def on_download(n):
+        if n == 3:
+            with open(remote.exec_log_path("lift-xo"), "ab") as f:
+                f.write(b"[lift-job] 10:00:09 the job log cannot be written (OSError): ...\n")
+                f.write(b"@@LIFT_DONE " + json.dumps(OK, sort_keys=True).encode() + b"\n")
+
+    fake.on_download = on_download
+    remote.exec_log_path("lift-xo").parent.mkdir(parents=True, exist_ok=True)
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-xo"), ctx) == 0
+    assert manifest("lift-xo")["job"] == OK and manifest("lift-xo")["outcome"] == "done"
+
+
+# Review 2, R20: `watch --no-stop` called the outputs on a VM it leaves running lost, and exited 5.
+def test_watch_no_stop_never_calls_outputs_on_the_running_vm_lost(tmp_path):
+    fake, ctx = setup(tmp_path, [done_log(PUSH_FAILED)])
+    started_vm(fake, ctx, "lift-ns")
+    assert remote.watch("lift-ns", stop=False, ctx=ctx) == 1
+    text = ctx.out.getvalue()
+    assert fake.server and fake.rescues == [] and "ARE LOST" not in text
+    assert "still on" in text and "lift remote watch lift-ns" in text
+    assert manifest("lift-ns")["rc"] == 1
+
+
+def test_watch_never_retries_a_final_push_that_exited_2(tmp_path):
+    refused = {**PUSH_FAILED, "rc": 2, "push_rc": 2, "ran": 1, "sync_refused": "the final push"}
+    fake, ctx = setup(tmp_path, [done_log(refused)], rescue_rc=0)
+    started_vm(fake, ctx, "lift-w2x")
+    assert remote.watch("lift-w2x", ctx=ctx) == 5 and fake.rescues == [] and fake.server == {}
+    assert "exited 2" in ctx.out.getvalue() and "so did the retry" not in ctx.out.getvalue()
+    # --no-stop: the outputs are still on the VM, and no command would push them.
+    fake, ctx = setup(tmp_path / "keep", [done_log(refused)], rescue_rc=0)
+    started_vm(fake, ctx, "lift-w2y")
+    assert remote.watch("lift-w2y", stop=False, ctx=ctx) == 1 and fake.rescues == [] and fake.server
+    text = ctx.out.getvalue()
+    assert "still on the VM" in text and "lift remote stop lift-w2y" in text and "ARE LOST" not in text
+
+
+# Review 2, R31: watch replayed exit 4 after `lift remote stop` had confirmed the release.
+def test_watch_after_a_confirmed_stop_returns_the_runs_own_code(tmp_path):
+    fake, ctx = setup(tmp_path, [done_log(OK)], stop_rc=1)
+    fake.handle.rc = 0
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-w4"), ctx) == 4
+    fake.stop_rc = 0
+    assert remote.stop("lift-w4", ctx=ctx) == 0 and fake.server == {}
+    assert manifest("lift-w4")["rc"] == 0
+    assert remote.watch("lift-w4", ctx=ctx) == 0
+    # A refusal's own code comes back too: here the secrets never went up (3).
+    fake, ctx = setup(tmp_path / "upload", upload_rc=1, stop_rc=1)
+    assert remote.launch(remote.Launch(gpu="A100", job="lift info", name="lift-w5"), ctx) == 4
+    fake.stop_rc = 0
+    assert remote.stop("lift-w5", ctx=ctx) == 0 and manifest("lift-w5")["rc"] == 3
+
+
+def cannot_start(argv, *, log_path):
+    """FakeColab.spawn while colab.exe is being replaced (`uv tool install ... --force`)."""
+    raise FileNotFoundError(2, "The system cannot find the file specified", argv[0])
+
+
+# Review 3, V3: an unexpected error in watch escaped before the release: no `colab stop`, no alarm, a
+# traceback (exit 1), and the VM billing on.
+def test_watch_releases_the_vm_when_the_push_retry_cannot_start(tmp_path, monkeypatch):
+    fake, ctx = setup(tmp_path, [done_log(PUSH_FAILED)], rescue_rc=0)
+    started_vm(fake, ctx, "lift-wx")
+    fake.spawn = cannot_start
+    monkeypatch.setattr(remote, "Context", lambda *args, **kwargs: ctx)
+    assert main(["remote", "watch", "lift-wx"]) == 5
+    assert fake.server == {} and fake.calls[-2:] == ["stop", "sessions"]
+    record = manifest("lift-wx")
+    assert record["rc"] == 5 and record["vm_released"] is True
+    assert record["rescue_push"]["push_rc"] is None and "FileNotFoundError" in record["rescue_push"]["error"]
+    text = ctx.out.getvalue()
+    assert "push retry cannot start" in text and "ARE LOST" in text and "so did the retry" in text
+
+
+def test_watch_asks_the_job_to_stop_and_push_after_an_unexpected_error(tmp_path):
+    stopped = {**OK, "rc": 130, "failed_line": 1, "stopped": "stop file: error", "installed": True}
+    fake, ctx = setup(tmp_path, [LOG_START])
+    started_vm(fake, ctx, "lift-we")
+    fake.on_upload = answer_the_stop_file(fake, stopped)
+
+    def locked(n):  # e.g. a virus scanner holding the fresh copy of the log
+        if n == 2:
+            raise PermissionError(13, "The process cannot access the file", "remote-lift-we.log")
+
+    fake.on_download = locked
+    assert remote.watch("lift-we", ctx=ctx) == 1
+    assert [u["remote"] for u in fake.uploads] == [STOP_FILE] and fake.uploads[0]["data"] == b"error\n"
+    assert fake.server == {} and fake.calls[-2:] == ["stop", "sessions"]
+    record = manifest("lift-we")
+    assert record["outcome"].startswith("error: PermissionError") and record["job"] == stopped
+    assert record["rc"] == 1 and record["vm_released"] is True
+
+
+def test_watch_after_an_unexpected_error_still_exits_4_when_the_vm_stays(tmp_path, monkeypatch):
+    fake, ctx = setup(tmp_path, [LOG_START], stop_rc=1)
+    started_vm(fake, ctx, "lift-w4x")
+
+    def broken(n):  # every download from the second on: the wait for the stopped job fails too
+        if n >= 2:
+            raise RuntimeError("a bug while reading the log")
+
+    fake.on_download = broken
+    monkeypatch.setattr(remote, "Context", lambda *args, **kwargs: ctx)
+    assert main(["remote", "watch", "lift-w4x"]) == 4
+    assert fake.server and "MAY STILL BE RUNNING" in ctx.out.getvalue()
+    record = manifest("lift-w4x")
+    assert record["rc"] == 4 and record["outcome"].startswith("error: RuntimeError")
+    assert record["vm_released"] is False
+    # --no-stop: the error ends the watching only; the VM and the recorded job status stay.
+    fake, ctx = setup(tmp_path / "keep", [LOG_START], on_download=broken)
+    started_vm(fake, ctx, "lift-w4k", job=OK, outcome="done")
+    assert remote.watch("lift-w4k", stop=False, ctx=ctx) == 1
+    assert fake.server and STOP_FILE not in [u["remote"] for u in fake.uploads]
+    record = manifest("lift-w4k")
+    assert record["job"] == OK and record["rc"] == 1 and record["outcome"].startswith("error: RuntimeError")
+
+
+# Review 3, V12: `lift remote stop` after `watch --no-stop` released the outputs still on the VM with no
+# alarm, and the record kept saying 1.
+def test_stop_after_watch_no_stop_reports_the_outputs_it_releases_as_lost(tmp_path):
+    fake, ctx = setup(tmp_path, [done_log(PUSH_FAILED)], rescue_rc=0)
+    started_vm(fake, ctx, "lift-nss")
+    assert remote.watch("lift-nss", stop=False, ctx=ctx) == 1 and fake.server
+    assert "lift remote stop lift-nss releases the VM without that retry" in ctx.out.getvalue()
+    ctx.out = io.StringIO()
+    assert remote.stop("lift-nss", ctx=ctx) == 0 and fake.server == {} and fake.rescues == []
+    text = ctx.out.getvalue()
+    assert "ARE LOST" in text and "no retry from here pushed them" in text
+    assert manifest("lift-nss")["rc"] == 5
+    ctx.out = io.StringIO()
+    assert remote.watch("lift-nss", ctx=ctx) == 5
+    # A run whose outputs were pushed keeps its code, and no alarm.
+    fake, ctx = setup(tmp_path / "ok", [done_log(OK)])
+    started_vm(fake, ctx, "lift-nso")
+    assert remote.watch("lift-nso", stop=False, ctx=ctx) == 0
+    ctx.out = io.StringIO()
+    assert remote.stop("lift-nso", ctx=ctx) == 0 and manifest("lift-nso")["rc"] == 0
+    assert "ARE LOST" not in ctx.out.getvalue()
 
 
 def test_parse_job():
@@ -1365,8 +1992,9 @@ def notebook_cell(marker: str) -> str:
     return cell
 
 
-def run_notebook_job(monkeypatch, tmp_path, lines, rcs=None):
-    """Run the README's job cell with a fake subprocess.run; returns the lift commands it ran."""
+def run_notebook_job(monkeypatch, tmp_path, lines, rcs=None, ran=None):
+    """Run the README's job cell with a fake subprocess.run; returns the lift commands it ran (also
+    appended to ``ran``, which survives the cell's final raise)."""
     cell = notebook_cell('JOB = """')
     cell = re.sub(r'JOB = """.*?"""', lambda m: 'JOB = """\n' + "\n".join(lines) + '\n"""', cell, count=1,
                   flags=re.S)
@@ -1374,7 +2002,7 @@ def run_notebook_job(monkeypatch, tmp_path, lines, rcs=None):
     cell = cell.replace('"/content/lift_job.log"', repr(str(tmp_path / "job.log")))
     queues = {key: list(value) for key, value in (rcs or {}).items()}
     env = {"HF_TOKEN": HF, "PATH": "x"}
-    ran = []
+    ran = [] if ran is None else ran
 
     def fake_run(argv, **kwargs):
         assert argv[:3] == [sys.executable, "-m", "lift"] and kwargs["env"] is env
@@ -1444,3 +2072,108 @@ def test_notebook_setup_cell_keeps_the_secrets_from_git_and_pip(monkeypatch):
         assert not any(secret in arg for arg in argv for secret in (GH, HF, OAI))
     assert all(scope["ENV"][name] == value for name, value in SECRETS.items())
     assert not any(os.environ.get(name) == value for name, value in SECRETS.items())
+
+
+# Review 2, R32 and contract 1, in the notebook fallback: sync lines run like job.py runs them.
+def test_notebook_fallback_runs_sync_lines_like_job_py(monkeypatch, tmp_path):
+    lines = ["lift sync pull", "lift generate --variant stock --split dev", "lift sync push",
+             "lift judge --variant stock --split dev"]
+    # A pull that exits 1 is tried again; a push line is tried again and never stops the job.
+    rcs = {"lift sync pull": [1, 0], "lift sync push": [0, 1, 0]}
+    ran = run_notebook_job(monkeypatch, tmp_path, lines, rcs)
+    assert ran == ["lift sync pull", "lift sync pull", "lift generate --variant stock --split dev",
+                   "lift sync push", "lift sync push", "lift sync push",
+                   "lift judge --variant stock --split dev", "lift sync push"]
+    ran = run_notebook_job(monkeypatch, tmp_path, lines, {"lift sync push": [0, 3, 0]})  # conflicts: reported
+    assert "lift judge --variant stock --split dev" in ran
+    # A sync call that exits 2 is never tried again and fails the job at once. Only the pull ran, so
+    # there is nothing to push.
+    ran = []
+    with pytest.raises(RuntimeError, match="no retry can fix"):
+        run_notebook_job(monkeypatch, tmp_path, lines, {"lift sync pull": [2]}, ran=ran)
+    assert ran == ["lift sync pull"]
+    ran = []
+    with pytest.raises(RuntimeError, match="no retry can fix"):
+        run_notebook_job(monkeypatch, tmp_path, lines, {"lift sync push": [2]}, ran=ran)
+    # The checkpoint push exits 2: the job ends there, and the final push is tried once.
+    assert ran == ["lift sync pull", "lift generate --variant stock --split dev", "lift sync push",
+                   "lift sync push"]
+
+
+# Contract 7: the notebook installs like the other GPU runtimes, with the ref's constraints.txt.
+def test_notebook_setup_cell_installs_with_the_constraints(monkeypatch):
+    cell = notebook_cell("userdata")
+    google = types.ModuleType("google")
+    colab = types.ModuleType("google.colab")
+    colab.userdata = types.SimpleNamespace(get=lambda name: SECRETS[name])
+    google.colab = colab
+    monkeypatch.setitem(sys.modules, "google", google)
+    monkeypatch.setitem(sys.modules, "google.colab", colab)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: calls.append(list(argv))
+                        or subprocess.CompletedProcess(argv, 0))
+    scope = {"__name__": "__main__"}
+    exec(compile(cell, "README:setup cell", "exec"), scope)
+    (pip,) = [argv for argv in calls if argv[1:4] == ["-m", "pip", "install"]]
+    i = pip.index("-c")
+    repo = scope["REPO"]
+    assert pip[i + 1] == f"{repo}/constraints.txt" and pip[-2:] == ["-e", f"{repo}[gpu,data,eval]"]
+
+
+# --- colab/README.md ------------------------------------------------------------------------------
+
+
+def readme() -> str:
+    return README_PATH.read_text(encoding="utf-8")
+
+
+# Review 2, R1 and contract 6: "use --ref p02-harness" pointed GPU jobs at a ref whose P01 loaders are stubs.
+def test_readme_sends_gpu_jobs_to_a_ref_with_p01_and_p02():
+    text = readme()
+    assert "--ref p02-harness" not in text and "p01-data" in text and "P01 and P02" in text
+    assert "lift sync check --write" in text
+
+
+# Review 2, R6: no runner doc showed the pin step between Gate 0 and the dev eval.
+def test_the_pin_step_sits_between_gate0_and_the_dev_eval():
+    from lift.commands import remote as remote_cmd
+
+    section = readme().split("## Running a job", 1)[1].split("What it does", 1)[0]
+    for text in (section, remote_cmd.EXAMPLES):
+        between = text[text.index("lift smoke"):text.index("lift run-dev --variant stock")]
+        assert "configs/project.yaml" in between and "decisions.md" in between, text
+        assert "commit" in between and "push" in between and "--ref" in between, text
+
+
+# Review 2, R9 and contract 5: the docs never said what gate0.json, gate0-fp16.json and -partial mean.
+def test_readme_explains_the_gate0_report_names():
+    text = readme()
+    for name in ("gate0.json", "gate0-fp16.json", "gate0-partial.json", "gate0-fp16-partial.json"):
+        assert name in text, name
+    assert "--skip" in text and "not_run" in text
+
+
+def test_the_readme_exit_code_table_matches_lift_remote_help():
+    table = re.findall(r"^\| (\d+) \|", readme(), flags=re.MULTILINE)
+    codes = re.findall(r"^  (\d+) ", remote.EXIT_CODES, flags=re.MULTILINE)
+    assert table == codes == ["0", "1", "2", "3", "4", "5", "130"]
+
+
+# Review 3, V19 and contract E: the README said gate0-fp16.json alone licenses T4 numbers.
+def test_readme_says_what_an_fp16_licence_needs():
+    row = next(line for line in readme().splitlines() if line.startswith("| `gate0-fp16.json`"))
+    for words in ("PASS", "`gate0.json`", "same Global revision", "at least 200 prompts"):
+        assert words in row, words
+
+
+# Review 3, V11: what happens to a silent sync line.
+def test_readme_says_a_hung_pull_is_not_tried_again():
+    section = readme().split("**Hung commands.**", 1)[1].split("\n- **", 1)[0].split("\n\n", 1)[0]
+    assert "`lift sync pull`" in section and "not tried again" in section
+
+
+# Contract A: a line refused for a stale cell names its `lift restart` line, which goes right after the pull.
+def test_readme_says_how_to_restart_a_stale_cell():
+    text = readme()
+    assert "lift restart --variant" in text and "outputs/.aside/" in text and "--judge second" in text
+    assert re.search(r'--job "lift sync pull; lift restart [^";]+; lift run-dev [^";]+"', text)
