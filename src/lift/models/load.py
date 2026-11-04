@@ -197,10 +197,11 @@ def encode_chat_turn(tokenizer: Any, user_text: str, assistant_text: str) -> tup
     supervises exactly ``ids[n_prompt:]`` (lift.train.lora) and the held-out loss scores exactly them
     (lift.models.loglik), so the two can never disagree on what "assistant tokens" are.
 
-    Raises if either text holds a control-token string, if the template does not render the answer
-    right after the generation prompt, if the answer renders to no tokens, or if tokenizing the answer
-    apart from the prompt would change any id (the ids are the template's own tokenization of the
-    whole conversation)."""
+    The ids are the template's own tokenization of the whole conversation, so the answer is tokenized in
+    context. Raises if either text holds a control-token string, if the template does not render the
+    answer right after the generation prompt, if the conversation's ids do not start with exactly the
+    prompt's ids (a merge across the boundary would make the supervised tokens differ from what the
+    model sees at generation time), or if the answer renders to no tokens."""
     found = sorted(t for t in control_tokens(tokenizer) if t in assistant_text)
     if found:
         raise ValueError(f"the answer text contains control tokens {found}; the chat template would treat "
@@ -215,13 +216,13 @@ def encode_chat_turn(tokenizer: Any, user_text: str, assistant_text: str) -> tup
     if not full.startswith(prompt_text):
         raise ValueError("the chat template does not render the assistant's answer right after the "
                          "generation prompt, so the answer tokens cannot be told from the prompt's")
-    answer_ids = list(tokenizer(full[len(prompt_text):], add_special_tokens=False)["input_ids"])
-    if not answer_ids:
-        raise ValueError("the assistant's answer renders to no tokens")
     full_ids = list(tokenizer(full, add_special_tokens=False)["input_ids"])
-    if full_ids != prompt_ids + answer_ids:
-        raise ValueError("tokenizing the answer apart from the prompt changes the ids at their boundary; "
-                         "the supervised tokens would not be the template's")
+    if full_ids[:len(prompt_ids)] != prompt_ids:
+        raise ValueError("the conversation's token ids do not start with the prompt's: the tokenizer merges "
+                         "across the end of the generation prompt, so the supervised tokens would not follow "
+                         "what the model sees at generation time")
+    if len(full_ids) == len(prompt_ids):
+        raise ValueError("the assistant's answer renders to no tokens")
     return full_ids, len(prompt_ids)
 
 
