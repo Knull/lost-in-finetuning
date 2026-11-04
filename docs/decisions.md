@@ -216,6 +216,89 @@ known language. No model output existed yet.
     - `fasttext` 0.9.3 does not build there, so the data extra installs `fasttext-wheel` 0.9.2
       instead.
     - `lift.lang` calls the low-level predict with the trailing newline that fastText needs.
+## Nov 3, 2026 (P02 harness): details the plan left open, pinned before any run
+
+Numbered from 27, because P04 uses 16 and P01 uses 17 to 26 (their branches were open at the same
+time).
+
+27. **Gate 0 pass rules.** The README lists Gate 0's checks but not every threshold.
+    - **Preamble.** One BOS; the default preamble present and identical across prompts; the
+      tokenizer transformers builds gives the same ids as the checkpoint's own tokenizer.json on every
+      dev and final prompt of every set (as chat text, compared per language) plus three probes, and
+      any disagreement fails; every dev and final prompt fits the context with 256 new tokens.
+    - **Precision** (bf16 on an A100). Every decoder-layer output and every logit is finite on 200
+      dev prompts plus their greedy outputs, teacher-forced. The max |activation| per layer is
+      reported, and layers above the fp16 maximum (65,504) are flagged.
+    - **fp16 vs bf16**, only needed if a T4 run would be reported. The fp16 run (generator and judge
+      both fp16 on the T4) must be finite as above, and its final labels must agree with the bf16
+      run on at least 95% of the same 200 prompts. Exact token agreement is reported but not
+      required: fp16 and bf16 round differently, so long greedy outputs are expected to diverge.
+    - **Dry run.** Every one of the 360 prompts has exactly one generation and one judgement, and no
+      judge output fails to parse. A parse failure stops the gate until it is understood.
+    - **Merge parity.** A random LoRA (r 16, alpha 32, the training targets) on Global, merged vs
+      unmerged, token for token in fp32 on 20 dev prompts. This is the README's merged-adapter parity
+      before a real adapter exists; P03 repeats it for every adapter.
+    - **Verdicts.** PASS needs every required check run and passed. A failed check, or a model that
+      does not load, is FAIL and replaces the earlier report (gate0.json, gate0-fp16.json). A check
+      that could not run (one GPU too small for the judge beside the generator, or no valid bf16
+      run to compare with: none, a failed one, another revision, other decoding settings, or fewer
+      than 200 prompts) is NOT RUN, and the run is INCOMPLETE, written as gate0-partial.json or
+      gate0-fp16-partial.json; so is a run with a required check skipped. "fp16 failed: T4 runs
+      are never reported" needs a real comparison under 95% or a non-finite fp16 run. The bf16
+      Gate 0 is refused on a GPU without native bf16 (a T4), so it never overwrites the A100's. A
+      reference run on a reduced sample (under 200 precision prompts, or under 20 dry-run prompts
+      per cell) whose checks pass is INCOMPLETE too; a check that fails on any sample is a FAIL.
+    - **The fp16 licence.** An fp16 cell is read for reporting only while gate0-fp16.json passes
+      (with its fp16 check, on at least 200 prompts) and the bf16 Gate 0 it compared against
+      (gate0.json) passes and is still that run (the digest of its precision outputs and labels),
+      both for the Global revision that made the cell, and only for cells made under the
+      comparison's harness, decoding settings and GPU class (of the generator and of the
+      Qwen3Guard judge). A bf16 re-run therefore needs a new comparison, and a harness change needs
+      the full bf16 Gate 0 first, then a new comparison. A reference run's precision outputs only
+      replace the ones gate0.json vouches for when it writes a full report (a --skip, reduced or
+      stopped run leaves them). fp16 runs are refused on a GPU with native bf16. Its AuditKIT record
+      is named `...-fp16.json`.
+28. **Counting new tokens.** `n_new_tokens`, which the "fewer than 5 new tokens" unclear rule reads,
+    counts the output's content tokens: special tokens such as `<|START_RESPONSE|>` and the
+    end-of-turn token are excluded. `hit_cap` means no end-of-turn token within 256 new tokens. Stop
+    tokens are the checkpoint's eos ids plus every Cohere end-of-turn token in the vocabulary:
+    Global's generation_config.json is byte-identical to Base's, so its eos id alone may not end a
+    chat turn.
+29. **Frontier judge sampling.** Anthropic's Messages API (version 2026-10-21, the current SDK
+    default) rejects `temperature` on every model, so an Anthropic second judge runs at the
+    provider's default sampling. An OpenAI judge runs at temperature 0, and a model that rejects it
+    fails the preflight call instead of silently dropping it. Every call is cached by its request
+    hash, so reruns reproduce, and the judge id records the sampling setting. Provider refusals are
+    recorded as judge failures and reported; no fallback model ever judges in its place.
+30. **Adapter hash.** It covers the weights (sha256 of adapter_model.safetensors) and the
+    adapter_config.json fields that change what the weights do (rank, alpha, target modules), not
+    the weights file alone. Paths and version strings are left out, so a copy hashes the same.
+31. **Second-judge sample.** P04's lists are the canonical path:
+    `lift judge --judge second --keys validation/keys/second_judge/{variant}_{split}.txt` (with
+    the `--sets/--langs` P04 prints). `--sample 0.10` reproduces their random part exactly: for each
+    (set, split), ceil(0.10 x the number of pids) prompt ids ranked by sha256(seed:second:set:split:pid),
+    the same prompts in every language and variant, so the second judge's view stays paired by pid.
+    Every item in the validation sheets is added. With `--keys`, every generations file that holds a
+    listed key is judged; an explicit `--sets/--langs` narrows that (P04 prints one line per group
+    over one list), and the keys left outside are logged as counts. A listed key that is in none of
+    the variant's generations files (regenerated, or a typo) stops `lift judge` unless
+    `--allow-missing` is given.
+32. **Library versions and stacks.** GPU runtimes install with `constraints.txt` (transformers
+    5.22.1, tokenizers 0.23.3, accelerate 1.15.0, peft 0.21.2, safetensors 0.8.0, huggingface_hub
+    2.4.0, hf_xet 1.8.0, openai 3.43.0, anthropic 2.4.0); torch stays the runtime's own CUDA build.
+    Every generation and every Qwen3Guard judgement records its stack (torch, transformers, GPU
+    class), and one file never holds two stacks: a finished cell is reused under another stack,
+    appending to an unfinished one is refused, and sync refuses to merge two stacks into one file.
+    A refused cell is made again with `lift restart` (its files go to the unsynced outputs/.aside/
+    and empty ones take their place, so the next push replaces the Hub's copies; its AuditKIT
+    records are retired the same way, as empty files); the other cells of the run go on, and
+    `lift generate`, `judge` and `run-dev` exit 3 listing each skipped cell with its remedy. A cell
+    made in another precision, or judged by another judge, is skipped without a restart line, and
+    `lift restart` refuses a cell of another precision unless `--force`. Sync pairs judgements and
+    records with their cell by content (key, pid and output hash; the records' key and label
+    hashes): one that does not pair is held back, or reported with exit 3, with its restart line.
+    Two arms of a paired comparison may run on different stacks (logged), but their chat template
+    and decoding settings must match.
 
 ## Nov 3, 2026 (evening): after the organisers' announcements, still before any run
 

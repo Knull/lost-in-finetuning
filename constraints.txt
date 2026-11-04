@@ -1,0 +1,17 @@
+# Exact versions for the GPU runtimes, which install with
+#   pip install -c constraints.txt -e ".[gpu,data,eval]"
+# (colab/job.py, the notebook fallback in colab/README.md, kaggle/bootstrap.sh).
+# These are the versions the harness was written and tested against (docs/toolkit-notes.md); the
+# full set resolves for Linux with safetune 0.1.12. Every generation records torch, transformers
+# and the GPU class, and a cell generated under one stack is never appended to under another, so
+# a silent upgrade between two sessions would stop a resumed run. torch is left to the runtime:
+# Colab's preinstalled CUDA build matches its driver (the version is still recorded).
+transformers==5.22.1
+tokenizers==0.23.3
+accelerate==1.15.0
+peft==0.21.2
+safetensors==0.8.0
+huggingface_hub==2.4.0
+hf_xet==1.8.0
+openai==3.43.0
+anthropic==2.4.0
