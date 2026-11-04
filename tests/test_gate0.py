@@ -344,6 +344,7 @@ def test_run_gate0_end_to_end_on_cpu(stock, prompt_store, tiny_model_dir, isolat
     assert "PASS" in md and TEXTS["en"] not in md and b"\r" not in md_path.read_bytes()
     assert result["dtype"] == "bf16"                  # the configured dtype, here on CPU
     assert (isolated_dirs / "outputs" / "gate0" / "bf16" / "precision" / "generations").is_dir()
+    assert not (isolated_dirs / "outputs" / "gate0" / "bf16" / "precision.new").exists()    # moved into place
     assert result["incomplete"] == [] and gate0.report_name(result) == "gate0"
 
 
@@ -373,13 +374,12 @@ def test_a_check_that_raises_is_recorded_and_the_gate_goes_on(prompt_store, tiny
 
 
 def test_fp16_compare_reads_the_reference_run(stock, prompt_store, tiny_model_dir, fp32_configured,
-                                              reference_passed, cpu_sized):
+                                              cpu_sized):
     """The comparison run looks for the reference dtype's precision run and pairs the same prompts."""
     kw = dict(device="cpu", model_id=str(tiny_model_dir), revision="local", lid=FakeLID(), n_precision=18,
               skip=["preamble", "throughput", "dry_run", "parity"], resolve_pins=False, max_new_tokens=6)
-    reference = gate0.run_gate0(judge=FakeJudge(), **kw)
-    assert reference["checks"]["precision"]["pass"]
-    reference_passed()
+    reference, name, _ = _gate(tiny_model_dir, judge=FakeJudge())   # a full report: its outputs stay
+    assert name == "gate0" and reference["checks"]["precision"]["pass"]
     # The candidate run: same prompts in another dtype (bf16 on CPU here), compared against fp32.
     cand = gate0.run_gate0(judge=FakeJudge(), compare_dtype="bf16", **kw)
     fp = cand["checks"]["fp16"]
@@ -498,8 +498,8 @@ def test_fp16_without_a_valid_comparison_decides_nothing(prompt_store, tiny_mode
     from lift.paths import metrics_dir
 
     if damage is not None:
-        reference = gate0.run_gate0(model_id=str(tiny_model_dir), judge=FakeJudge(), **CANDIDATE)
-        assert reference["checks"]["precision"]["pass"]
+        reference, name, _ = _gate(tiny_model_dir, judge=FakeJudge())
+        assert name == "gate0" and reference["checks"]["precision"]["pass"]
         damage()
     reference_passed()                                # gate0.json vouches for what is there, damage and all
     licence = metrics_dir() / "gate0-bf16.json"
@@ -519,11 +519,9 @@ def test_fp16_without_a_valid_comparison_decides_nothing(prompt_store, tiny_mode
 
 
 def test_a_valid_comparison_under_95_percent_is_the_fp16_verdict(prompt_store, tiny_model_dir,
-                                                                 fp32_configured, reference_passed,
-                                                                 cpu_sized):
-    reference = gate0.run_gate0(model_id=str(tiny_model_dir), judge=FakeJudge(), **CANDIDATE)
-    assert reference["checks"]["precision"]["pass"]
-    reference_passed()
+                                                                 fp32_configured, cpu_sized):
+    reference, name, _ = _gate(tiny_model_dir, judge=FakeJudge())
+    assert name == "gate0" and reference["checks"]["precision"]["pass"]
     cand = gate0.run_gate0(model_id=str(tiny_model_dir), judge=HarmfulJudge(), compare_dtype="bf16",
                            **CANDIDATE)
     fp = cand["checks"]["fp16"]
@@ -597,6 +595,54 @@ def test_a_plain_smoke_on_a_t4_is_refused_and_writes_nothing(prompt_store, tiny_
     assert not (output_dir() / "gate0").exists()
 
 
+# --- a size under 1 is a refused configuration (review 5: X17) -------------------------------------------
+
+
+@pytest.fixture
+def a100(monkeypatch):
+    """torch.cuda reporting one A100 (compute capability 8.0: native bf16), on a CPU build."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (8, 0))
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device=None: "NVIDIA A100-SXM4-40GB")
+
+
+def _passing_record():
+    from lift.paths import ensure, metrics_dir
+
+    record = ensure(metrics_dir()) / "gate0.json"
+    record.write_text(json.dumps({"pass": True, "revisions": {"global": "a" * 40}}), encoding="utf-8")
+    return record, record.read_bytes()
+
+
+@pytest.mark.parametrize("size", [{"n_dry": 0}, {"n_precision": 0}, {"batch_sizes": ()},
+                                  {"batch_sizes": (8, 0)}],
+                         ids=["n-dry-0", "n-precision-0", "no-batch-sizes", "batch-size-0"])
+def test_a_size_under_one_is_refused_and_writes_nothing(prompt_store, tiny_model_dir, size):
+    """X17: `lift smoke --n-dry 0` (meant as 'no dry run'; --skip dry_run is the way) or --n-precision 0 made
+    its check raise: a FAIL, so a full verdict that replaced the passing gate0.json, and with it the T4
+    licence. Like an unknown --skip, a size under 1 is a refused configuration: ValueError before any check,
+    nothing written."""
+    from lift.paths import output_dir
+
+    record, pulled = _passing_record()
+    with pytest.raises(ValueError, match=r"must be at least 1 \(leave a check out with --skip\)"):
+        gate0.run_gate0(model_id=str(tiny_model_dir), judge=FakeJudge(), **{**GATE, **size})
+    assert record.read_bytes() == pulled and not (output_dir() / "gate0").exists()
+
+
+def test_lift_smoke_refuses_a_size_under_one(a100, monkeypatch):
+    """The job line `lift smoke --n-dry 0` on an A100 exits 2 (a refused configuration) and writes no
+    report."""
+    from lift.cli import main
+    from lift.paths import output_dir
+
+    record, pulled = _passing_record()
+    monkeypatch.setattr("lift.manifest.git_sha", lambda: "test")
+    for flags in (["--n-dry", "0"], ["--n-precision", "0"]):
+        assert main(["smoke", *flags]) == 2, flags
+    assert record.read_bytes() == pulled and not (output_dir() / "gate0").exists()
+
+
 # --- a comparison counts only against a passing reference, on 200 prompts, same decoding (contract E) -----
 
 
@@ -647,29 +693,31 @@ def test_fp16_needs_a_passing_reference_gate0_of_this_revision(prompt_store, tin
 
 
 def test_a_quick_comparison_on_fewer_prompts_is_no_licence(prompt_store, tiny_model_dir, fp32_configured,
-                                                           reference_passed):
-    """--n-precision 50 on the T4 against the larger reference run: each cell's draw is a prefix of one
-    seeded permutation, so all 50 pair, and every label agrees. Agreement on 50 prompts is not
-    decisions.md 27's 200, so it is no licence (V15)."""
-    gate0.run_gate0(model_id=str(tiny_model_dir), judge=HarmfulJudge(), **{**CANDIDATE, "n_precision": 72})
-    reference_passed()
+                                                           monkeypatch):
+    """--n-precision 50 on the T4 against the full reference run (decisions.md 27's 200 prompts; 72 in this
+    CPU analogue): each cell's draw is a prefix of one seeded permutation, so all 50 pair, and every label
+    agrees. Agreement on fewer prompts than the pinned sample is no licence (V15)."""
+    monkeypatch.setattr(gate0, "N_PRECISION", 72)
+    monkeypatch.setattr(gate0, "N_DRY", 1)
+    _, name, _ = _gate(tiny_model_dir, n_precision=72)
+    assert name == "gate0"
     cand = gate0.run_gate0(model_id=str(tiny_model_dir), judge=HarmfulJudge(), compare_dtype="bf16",
                            **{**CANDIDATE, "n_precision": 50})
     fp = cand["checks"]["fp16"]
     assert fp["n"] == 50 and fp["n_reference"] == 72 and fp["invalid"] == {} and not fp["missing_labels"]
     assert fp["label_agreement"] == 1.0
     assert fp["not_run"] and fp["comparable"] is False
-    assert fp["reason"] == "50 prompts, under the 200 decisions.md 27 requires"
+    assert fp["reason"] == "50 prompts, under the 72 decisions.md 27 requires"
     assert cand["incomplete"] == ["fp16"] and gate0.report_name(cand) == "gate0-bf16-partial"
     assert cand["checks"]["precision"]["pass"]       # contract K is the reference run's: here fp16 decides
 
 
 def test_runs_with_other_decoding_are_not_comparable(prompt_store, tiny_model_dir, fp32_configured,
-                                                     reference_passed, cpu_sized):
+                                                     cpu_sized):
     """Another cap (or stop set) changes outputs and labels for reasons other than precision: the pairs
     are made from other inputs (meta.decoding), never 'fp16 failed' (V17)."""
-    gate0.run_gate0(model_id=str(tiny_model_dir), judge=FakeJudge(), **{**CANDIDATE, "max_new_tokens": 4})
-    reference_passed()
+    _, name, _ = _gate(tiny_model_dir, judge=FakeJudge(), max_new_tokens=4)
+    assert name == "gate0"
     cand = gate0.run_gate0(model_id=str(tiny_model_dir), judge=FakeJudge(), compare_dtype="bf16", **CANDIDATE)
     fp = cand["checks"]["fp16"]
     assert fp["invalid"] == {"decoding": 18} and fp["not_run"] and fp["comparable"] is False
@@ -678,7 +726,7 @@ def test_runs_with_other_decoding_are_not_comparable(prompt_store, tiny_model_di
 
 
 # --- the comparison pairs with the outputs gate0.json passed; a reduced reference decides nothing ---------
-# (review 4: W2, W6, W7; contracts J and K)
+# (review 4: W2, W6, W7; contracts J and K. Review 5: X5; contract N)
 
 NON_REQUIRED = ["preamble", "throughput", "dry_run", "parity"]
 
@@ -699,12 +747,15 @@ def _harness_fix(monkeypatch):
     monkeypatch.setattr(generate, "HARNESS_VERSION", generate.HARNESS_VERSION + 1)
 
 
-def _stopped_in_the_dry_run(monkeypatch, tiny_model_dir):
-    """A reference re-run stopped after its precision check (watchdog, --max-hours, Ctrl+C): no report."""
+def _stopped_inside_the_precision_check(monkeypatch, tiny_model_dir):
+    """A reference re-run stopped inside its precision check, after 5 of its 18 cells (the watchdog's SIGINT,
+    --max-hours or Ctrl+C): no report is written."""
     real = gate0.generate_and_judge
 
     def run(variant, judge, prompts, root, **kw):
-        if root.name == "dry_run":
+        if root.name != "dry_run":
+            cells = sorted(gate0._by_cell(prompts).items())[:5]
+            real(variant, judge, [p for _, cell in cells for p in cell], root, **kw)
             raise KeyboardInterrupt
         return real(variant, judge, prompts, root, **kw)
 
@@ -714,41 +765,63 @@ def _stopped_in_the_dry_run(monkeypatch, tiny_model_dir):
     monkeypatch.setattr(gate0, "generate_and_judge", real)
 
 
-@pytest.mark.parametrize("skip, fixed", [(["dry_run", "parity"], True), (None, True),
-                                         (["throughput", "dry_run", "parity"], False)],
-                         ids=["skip-dry-run", "stopped", "same-code"])
-def test_a_comparison_pairs_only_with_the_outputs_gate0_json_passed(prompt_store, tiny_model_dir,
-                                                                     fp32_configured, cpu_sized, monkeypatch,
-                                                                     skip, fixed):
-    """W2: gate0.json passed. After a harness fix the reference Gate 0 is re-run with checks skipped
-    (gate0-partial.json; the skipped dry run could have failed), or is stopped after its precision check
-    (no report; the job's push still sends its outputs). Its precision outputs replace the ones gate0.json
-    passed, which still says PASS. The comparison pairs fine with them, but nothing vouches for them: NOT
-    RUN, INCOMPLETE, -partial. A re-run of the same code makes the very outputs gate0.json passed, so the
-    comparison stands."""
+@pytest.mark.parametrize("event", ["reduced", "stopped", "skip-after-a-fix"])
+def test_a_reference_run_without_a_full_report_keeps_the_outputs_gate0_json_passed(
+        prompt_store, tiny_model_dir, fp32_configured, cpu_sized, monkeypatch, event):
+    """X5, contract N: gate0.json passed with the digest of its precision outputs, and the job pushed both.
+    A later reference run that writes no gate0.json (a quick `lift smoke --n-precision 9` on the same code,
+    a run stopped inside its precision check, a --skip run after a harness fix) used to replace those
+    outputs, and the job's push sent them: every T4 comparison was then NOT RUN until a full A100 run. Its
+    outputs now wait in precision.new, which only a full report moves into place: the outputs gate0.json
+    passed stay, and the comparison pairs with them. On the same code it passes; after a harness fix its
+    pairs are made under another harness, so it waits for a full reference run on the new code."""
     from lift.paths import metrics_dir
 
     _, name, passed = _gate(tiny_model_dir)
     assert name == "gate0" and passed["pass"]
-    if fixed:
-        _harness_fix(monkeypatch)
-    if skip is None:
-        _stopped_in_the_dry_run(monkeypatch, tiny_model_dir)
+    reference = gate0.gate0_dir("fp32") / "precision"
+    kept = reference / "keep.txt"
+    kept.write_text("x", encoding="utf-8")
+    if event == "stopped":
+        _stopped_inside_the_precision_check(monkeypatch, tiny_model_dir)
     else:
-        _, name, _ = _gate(tiny_model_dir, skip=skip)
-        assert name == "gate0-partial"
+        if event == "skip-after-a-fix":
+            _harness_fix(monkeypatch)
+        _, name, _ = _gate(tiny_model_dir, **({"n_precision": 9} if event == "reduced"
+                                              else {"skip": ["dry_run", "parity"]}))
+        assert name == "gate0-partial" and not reference.with_name("precision.new").exists()
     assert json.loads((metrics_dir() / "gate0.json").read_text(encoding="utf-8")) == passed
+    assert kept.exists() and gate0.precision_digest(reference) == passed["checks"]["precision"]["digest"]
     cand, name, _ = _gate(tiny_model_dir, compare_dtype="bf16", skip=NON_REQUIRED)
     fp = cand["checks"]["fp16"]
-    assert fp["n"] == 18 and fp["invalid"] == {} and fp["label_agreement"] == 1.0     # the pairs are fine
-    if not fixed:
-        assert fp["comparable"] and name == "gate0-bf16" and cand["decision"] == gate0.DECISION["pass"]
+    assert fp["n"] == 18 and fp["reference_digest"] == passed["checks"]["precision"]["digest"]
+    if event == "skip-after-a-fix":
+        assert fp["not_run"] and "harness" in fp["invalid"] and name == "gate0-bf16-partial", fp.get("reason")
+        assert gate0.DECISION["pass"] not in cand["decision"] and "re-run the fp32 Gate 0" in cand["decision"]
         return
-    assert fp.get("not_run") and fp["comparable"] is False, (name, fp.get("reason"))
-    assert "the fp32 precision outputs here are not the ones gate0.json passed" in fp["reason"]
-    assert cand["failed"] == [] and cand["incomplete"] == ["fp16"] and name == "gate0-bf16-partial"
-    assert gate0.DECISION["pass"] not in cand["decision"] and "re-run the fp32 Gate 0" in cand["decision"]
-    assert fp["reference_digest"] != passed["checks"]["precision"]["digest"]
+    assert fp["comparable"] and name == "gate0-bf16" and cand["decision"] == gate0.DECISION["pass"]
+    if event == "stopped":     # what it left in precision.new never moves into place, even on a full report
+        assert reference.with_name("precision.new").exists()
+        _, name, _ = _gate(tiny_model_dir, judge=FakeJudge(fail_every=5),
+                           skip=["preamble", "precision", "throughput", "parity"])
+        assert name == "gate0" and kept.exists() and not reference.with_name("precision.new").exists()
+
+
+def test_a_full_reference_report_replaces_the_outputs_pass_or_fail(prompt_store, tiny_model_dir,
+                                                                    fp32_configured, cpu_sized, monkeypatch):
+    """Contract N's other side: a full report, a FAIL too, is the verdict on its own precision outputs, so
+    they replace the earlier ones and gate0.json's digest names what is on disk. Here the re-run follows a
+    harness fix and fails its dry run (unparseable judge answers)."""
+    _, _, passed = _gate(tiny_model_dir)
+    reference = gate0.gate0_dir("fp32") / "precision"
+    (reference / "keep.txt").write_text("x", encoding="utf-8")
+    _harness_fix(monkeypatch)
+    result, name, failed = _gate(tiny_model_dir, judge=FakeJudge(fail_every=5),
+                                 skip=["preamble", "throughput", "parity"])
+    assert name == "gate0" and failed["failed"] == ["dry_run"] and result["checks"]["precision"]["pass"]
+    digest = failed["checks"]["precision"]["digest"]
+    assert digest != passed["checks"]["precision"]["digest"] and gate0.precision_digest(reference) == digest
+    assert not (reference / "keep.txt").exists() and not reference.with_name("precision.new").exists()
 
 
 def test_the_licence_names_the_reference_run_and_the_settings_it_compared(prompt_store, tiny_model_dir,

@@ -8,14 +8,16 @@ Checks (each PASS, FAIL or NOT RUN; numbers go to outputs/metrics/gate0.json and
   precision   200 dev prompts mixed across languages and sets, generated and judged in the run dtype
               (bf16 on an A100). A teacher-forced pass over prompt + output checks that every hidden
               state and logit is finite and records the max |activation| per layer. Its digest
-              (``precision_digest``) names the outputs and labels the verdict is about.
+              (``precision_digest``) names the outputs and labels the verdict is about. The reference
+              run makes them in gate0/<dtype>/precision.new, which replaces gate0/<dtype>/precision
+              only with a full report (gate0.json, PASS or FAIL), so a later --skip, reduced or stopped
+              run never replaces the outputs gate0.json judged (``_settle``).
   fp16        only with --compare-dtype fp16, on a T4: the same 200 prompts in fp16 against the stored
               bf16 run (pulled from the runs repo): greedy output agreement and judge-label agreement.
               This decides whether T4 runs can ever be reported, so it counts only against a bf16 Gate 0
               that passed (gate0.json) for the same revision, on all of at least 200 prompts made with
               the same inputs and decoding settings, and only with the very outputs that Gate 0 judged
-              (its checks.precision.digest): a later --skip, reduced or stopped bf16 run replaces those
-              outputs but never gate0.json. It records that digest and the pairs' harness and decoding,
+              (its checks.precision.digest). It records that digest and the pairs' harness and decoding,
               which the licence holds every fp16 cell to (check_dtype_licence).
   throughput  batch sizes 8, 16 and 32 at real prompt lengths: prompts/sec, tokens/sec, peak memory.
   dry_run     20 prompts x 6 languages x 3 sets through generate and judge: exactly one generation
@@ -36,9 +38,10 @@ decisions.md 27 pins (--n-precision under 200, --n-dry under 20): a quick check 
 Any failure is a full verdict, gate0.json (gate0-fp16.json for the comparison run), so a failed
 re-run replaces an earlier PASS; a failure on a reduced sample is one too. A run that is only
 incomplete (--skip, NOT RUN) is written as gate0-partial.json (gate0-fp16-partial.json) and never
-replaces the full record. A refused configuration writes nothing: --compare-dtype fp16 on a GPU
-with native bf16, and the reference gate (no --compare-dtype) on one without (a T4), whose failed
-load would replace the A100's gate0.json.
+replaces the full record. A refused configuration writes nothing: a size under 1 (--n-dry 0 would
+make the dry run raise, a FAIL; --skip leaves a check out), --compare-dtype fp16 on a GPU with native
+bf16, and the reference gate (no --compare-dtype) on one without (a T4), whose failed load would
+replace the A100's gate0.json.
 
 Pass thresholds that the README leaves open are pinned in docs/decisions.md (Nov 3, P02):
 the fp16 run passes if every activation is finite and its final labels agree with bf16 on at least
@@ -305,8 +308,8 @@ def precision_digest(root: Path) -> str:
     """Which run a precision verdict is about: sha256 of the sorted (set, lang, pid, key, sha256(output),
     label) of every generation under ``root``, with its judgement's label ("missing" without one).
     gate0.json records it (checks.precision.digest) and a comparison recomputes it over the reference
-    outputs on disk, so outputs a later --skip, reduced or stopped run put there, which write no
-    gate0.json, never pass for the run gate0.json passed."""
+    outputs on disk, so outputs other than the ones gate0.json passed (a copy not pushed or pulled with
+    it) never pass for that run."""
     from lift.io import sha256_obj, sha256_text
     from lift.models.generate import read_generations
     from lift.schemas import JudgementRecord
@@ -448,8 +451,8 @@ def reference_gate_problem(revision: str, reference: str, *, digest: str) -> str
     """Why the reference run's own Gate 0 verdict (outputs/metrics/gate0.json) cannot back a comparison
     with the reference outputs on disk, whose ``precision_digest`` is ``digest``, or None: it must be
     there, pass, be for ``revision``, and have judged those very outputs (its checks.precision.digest).
-    A comparison against a failed, missing or stale reference proves nothing, nor does one against
-    outputs a later --skip, reduced or stopped run put there (none of them writes gate0.json), and
+    A comparison against a failed, missing or stale reference proves nothing, nor does one against other
+    outputs than those (a later --skip, reduced or stopped run never replaces them: ``_settle``), and
     check_dtype_licence would refuse its licence."""
     path = metrics_dir() / "gate0.json"
     name = f"the {reference} Gate 0 ({path.name})"
@@ -468,8 +471,8 @@ def reference_gate_problem(revision: str, reference: str, *, digest: str) -> str
     if passed is None:
         return f"{name} records no checks.precision.digest (an older Gate 0): what it judged is unknown"
     if passed != digest:
-        return (f"the {reference} precision outputs here are not the ones {path.name} passed: a later "
-                f"--skip, reduced or stopped {reference} run replaced them, or they were not pulled with it")
+        return (f"the {reference} precision outputs here are not the ones {path.name} passed: the two were "
+                "not pushed or pulled together")
     return None
 
 
@@ -662,15 +665,17 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
     """Run every check not in ``skip`` and return the full result (``write_report`` saves it).
 
     A refused configuration raises ValueError before any check, so nothing is written: an unknown
-    check, --compare-dtype fp16 on a GPU with native bf16, or the reference gate (no ``compare_dtype``)
-    on one without (a T4), whose failed load would otherwise be a full FAIL replacing the A100's
-    gate0.json, and with it the fp16 licence. An unusable ``device`` raises from torch.
+    check, a size under 1 (``n_precision``, ``n_dry`` or a batch size: its check would raise, a FAIL
+    replacing gate0.json, and with it the fp16 licence), --compare-dtype fp16 on a GPU with native bf16,
+    or the reference gate (no ``compare_dtype``) on one without (a T4), whose failed load would
+    otherwise be a full FAIL replacing the A100's gate0.json. An unusable ``device`` raises from torch.
     Otherwise there is always a result to write: a check that raises is recorded as a failure with
     its error and the gate goes on; a revision that cannot be resolved or a model that cannot load
     is the failed "load" check; every check draws its own prompts, so missing prompt files (or a P01
     stub) fail the checks that need them. The reference gate's precision and dry run on fewer prompts
     than decisions.md 27 pins (``n_precision`` under ``N_PRECISION``, ``n_dry`` under ``N_DRY``) are
-    NOT RUN unless they failed (``_reduced``).
+    NOT RUN unless they failed (``_reduced``), and its precision outputs replace the stored ones only
+    when the result is a full report (``_settle``).
     ``model_id``/``revision``, ``judge``, ``lid`` and ``max_new_tokens`` are for tests (a tiny local
     model, fakes, short outputs); the real gate decodes the locked 256 new tokens. ``resolve_pins``
     also resolves Base's and the primary judge's revisions for the pin list (``pin_revisions``).
@@ -683,6 +688,11 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
     unknown = set(skip) - set(CHECKS)
     if unknown:
         raise ValueError(f"unknown checks {sorted(unknown)}; choose from {CHECKS}")
+    sizes = {"--n-precision": [n_precision], "--n-dry": [n_dry], "--batch-sizes": list(batch_sizes)}
+    small = [f"{flag} {' '.join(map(str, v)) or '(none)'}" for flag, v in sizes.items()
+             if not v or min(v) < 1]
+    if small:
+        raise ValueError(f"{', '.join(small)}: every size must be at least 1 (leave a check out with --skip)")
     base_dtype = config.get("generation.dtype")
     dtype = compare_dtype or base_dtype
     if compare_dtype and compare_dtype == base_dtype:
@@ -747,8 +757,9 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
         # tied_lm_head False would mean the judge is not numerically the model Qwen evaluated.
         result["judge"] = {"id": judge.judge_id, "info": getattr(judge, "info", None)}
 
+    staging = None if compare_dtype else _fresh(gate0_dir(dtype) / "precision.new")    # see _settle
     if {"precision", "fp16"} & needs_judge:
-        root = gate0_dir(dtype) / "precision"
+        root = staging or gate0_dir(dtype) / "precision"
 
         def precision() -> dict[str, Any]:
             _fresh(root)
@@ -793,7 +804,10 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
         attempt("parity", lambda: check_parity(
             model_id, rev, mixed_sample(N_PARITY, split="dev", seed=SEED + 3), device=device,
             max_new_tokens=max_new_tokens))
-    return decide(result)
+    decide(result)
+    if staging is not None:
+        _settle(staging, replace=report_name(result) == "gate0")
+    return result
 
 
 def _reduced(check: dict[str, Any], n: int, pinned: int) -> dict[str, Any]:
@@ -809,11 +823,27 @@ def _reduced(check: dict[str, Any], n: int, pinned: int) -> dict[str, Any]:
 def _fresh(path: Path) -> Path:
     """``path``, emptied. A check that runs starts with it: Gate 0 tests the code as it is now, so this
     dtype's earlier outputs are discarded rather than resumed (a fixed parser must re-judge). The
-    reference run (another dtype) and the outputs of a check that does not run are kept."""
+    reference run (another dtype), the outputs of a check that does not run and the precision outputs
+    gate0.json passed (a reference run empties its staging dir instead: ``_settle``) are kept."""
     if path.exists():
         log.info("removing the previous Gate 0 outputs in %s", path)
         shutil.rmtree(path, ignore_errors=True)
     return path
+
+
+def _settle(staging: Path, *, replace: bool) -> None:
+    """A reference run's precision outputs, made in ``staging`` (gate0/<dtype>/precision.new), replace
+    gate0/<dtype>/precision only when its report is a full verdict (gate0.json, PASS or FAIL: ``replace``),
+    which records their digest; otherwise they are deleted. So a --skip, reduced or stopped run never
+    replaces the outputs gate0.json passed, which the fp16 comparison pairs with (``reference_gate_problem``),
+    and the job's push has no others to send in their place. A stopped run leaves ``staging`` behind,
+    never synced nor read: the next reference run empties it before its own precision check."""
+    if replace and staging.exists():
+        staging.rename(_fresh(staging.with_name("precision")))
+    elif staging.exists():
+        log.info("discarding %s: the report is not a full verdict, so the outputs gate0.json passed stay",
+                 staging)
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _primary_judge(device: str, judge_device: str | None,
