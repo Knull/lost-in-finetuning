@@ -29,8 +29,9 @@ OUTPUTS = [f"placeholder output number {i}" for i in range(6)]
 WRONG_LANG = [False, False, False, False, True, False]
 HIT_CAP = [True, False, False, True, False, False]
 GUARD_ID = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
-META = {"run_config": "rc0", "model_rev": "c" * 40, "harness": 1, "torch": "2.15.0", "transformers": "5.22.1",
-        "gpu": "NVIDIA A100-SXM4-40GB"}
+META = {"run_config": "rc0", "model_rev": "c" * 40, "harness": 1, "template": "9" * 16, "decoding": "d" * 16,
+        "torch": "2.15.0", "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB"}
+STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}     # the judge's
 
 
 @pytest.fixture
@@ -56,7 +57,8 @@ def write_cell(dtype: str = "bf16") -> None:
             hit_cap=HIT_CAP[i], seconds=0.1, meta={"dtype": dtype, **META}))
         flags = UnclearFlags(too_short=False, repetitive=False, garbled=False, wrong_lang=WRONG_LANG[i],
                              lid_top=[("hin_Deva", 0.9)])
-        native = {"label_loose": LOOSE[i], **({"judge_failure": "unparseable"} if FAILED[i] else {})}
+        native = {"label_loose": LOOSE[i], "stack": STACK,
+                  **({"judge_failure": "unparseable"} if FAILED[i] else {})}
         judgements.append(JudgementRecord(
             key=key, variant=variant, pid=pid, lang=lang, set=set_name, split=split,
             judge=f"{GUARD_ID}#{dtype}#strict", judge_label=LABELS[i], label=LABELS[i], flags=flags,
@@ -98,29 +100,75 @@ def test_lift_metadata_records_the_loose_rate_failures_and_provenance(cell):
     assert lift["harmful_rate_loose"] == LOOSE.count("harmful") / 6 != lift["harmful_rate"]
     assert lift["n_judge_failures"] == 1
     assert lift["provenance"] == {"dtype": ["bf16"], "run_config": ["rc0"], "model_rev": ["c" * 40],
-                                  "harness": ["1"], "torch": ["2.15.0"], "transformers": ["5.22.1"],
-                                  "gpu": ["NVIDIA A100-SXM4-40GB"]}
+                                  "harness": ["1"], "template": ["9" * 16], "decoding": ["d" * 16],
+                                  "torch": ["2.15.0"], "transformers": ["5.22.1"],
+                                  "gpu": ["NVIDIA A100-SXM4-40GB"], "judge_stack": [stable_json(STACK)]}
 
 
 def test_a_judge_without_a_loose_reading_records_none(cell):
     path = pipeline.judgements_path("qwen3guard", *CELL)
     rows = list(read_jsonl(path))
-    write_jsonl(path, [{**r, "native": {}} for r in rows])
+    write_jsonl(path, [{**r, "native": {"stack": STACK}} for r in rows])
     lift = auditkit.RunResult.load(str(audit.record_safety(*CELL))).metadata["lift"]
     assert lift["harmful_rate_loose"] is None and lift["n_judge_failures"] == 0
-    write_jsonl(path, [{**r, "native": {}} if i else r for i, r in enumerate(rows)])
+    write_jsonl(path, [{**r, "native": {"stack": STACK}} if i else r for i, r in enumerate(rows)])
     with pytest.raises(ValueError, match="1 of 6 judgements have a loose label"):
         audit.record_safety(*CELL)
 
 
-def test_a_cell_in_another_precision_needs_an_explicit_dtype(cell):
+def write_licence(n: int = 200, **fields):
+    """outputs/metrics/gate0-fp16.json as Gate 0's T4 comparison run writes it (its fp16 check compared
+    ``n`` prompts), and the passing bf16 Gate 0 it compared against (gate0.json); only the fields the
+    licence reads."""
+    metrics_dir().mkdir(parents=True, exist_ok=True)
+    reference = {"dtype": "bf16", "pass": True, "revisions": {"global": "c" * 40}}
+    (metrics_dir() / "gate0.json").write_text(json.dumps(reference), encoding="utf-8")
+    fp16 = {"pass": True, "comparable": True, "n": n}
+    doc = {"dtype": "fp16", "reference_dtype": "bf16", "pass": True,
+           "checks": {"precision": {"pass": True}, "fp16": fp16}, "revisions": {"global": "c" * 40}, **fields}
+    (metrics_dir() / "gate0-fp16.json").write_text(json.dumps(doc), encoding="utf-8")
+
+
+def test_a_cell_in_another_precision_needs_gate0s_licence_and_gets_its_own_file(cell):
+    from lift.commands import run as run_cmd
+
     write_cell("fp16")                                                # a T4 run, judged on the T4
     with pytest.raises(ValueError, match="6 generations are not in bf16"):
         audit.record_safety(*CELL)
-    assert not (metrics_dir() / "auditkit").exists()
-    path = audit.record_safety(*CELL, dtype="fp16")                   # only for a precision Gate 0 licensed
+    with pytest.raises(ValueError, match=r"gate0-fp16\.json"):        # naming the dtype is no licence
+        audit.record_safety(*CELL, dtype="fp16")
+    write_licence(**{"pass": False})                                  # Gate 0's fp16 check failed
+    refused: list[str] = []
+    run_cmd._record(*CELL, dtype="fp16", refused=refused)             # lift judge / run-dev --dtype fp16
+    assert refused == ["harmful_hi_dev"] and not (metrics_dir() / "auditkit").exists()
+
+    write_licence()
+    path = audit.record_safety(*CELL, dtype="fp16")
+    assert path == metrics_dir() / "auditkit" / "qwen3guard" / "adapter" / "harmful_hi_dev-fp16.json"
+    full = audit.record_safety(*CELL, dtype="fp16", text="full")
+    assert full == path.with_name("harmful_hi_dev-fp16.full.json")
+    assert sorted(p.name for p in path.parent.iterdir()) == ["harmful_hi_dev-fp16.full.json",
+                                                             "harmful_hi_dev-fp16.json"]
     lift = auditkit.RunResult.load(str(path)).metadata["lift"]
     assert lift["provenance"]["dtype"] == ["fp16"] and lift["judge_id"] == f"{GUARD_ID}#fp16#strict"
+    write_cell()
+    assert audit.record_safety(*CELL, dtype="bf16") == path.with_name("harmful_hi_dev.json")
+
+
+def test_a_licence_from_fewer_than_200_prompts_writes_no_record(cell):
+    """Review 3, V26: a quick ``lift smoke --n-precision 18`` pair on both sides passes Gate 0, but
+    decisions.md 27 compares 200 prompts, so no fp16 cell gets a reportable -fp16 record from it."""
+    from lift.commands import run as run_cmd
+
+    write_cell("fp16")
+    write_licence(n=18)
+    with pytest.raises(ValueError, match=r"checks\.fp16\.n is 18: the comparison must cover at least 200"):
+        audit.record_safety(*CELL, dtype="fp16")
+    refused: list[str] = []
+    run_cmd._record(*CELL, dtype="fp16", refused=refused)
+    assert refused == ["harmful_hi_dev"] and not (metrics_dir() / "auditkit").exists()
+    write_licence(n=200)
+    assert audit.record_safety(*CELL, dtype="fp16").name == "harmful_hi_dev-fp16.json"
 
 
 def test_unknown_label_raises(cell, monkeypatch):

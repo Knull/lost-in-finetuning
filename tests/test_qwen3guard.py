@@ -432,6 +432,23 @@ def test_constructor_refuses_bad_setups(tok):
 
 
 @pytest.mark.torch
+def test_the_pipeline_adapter_stamps_every_judgement_with_the_judges_stack(tok, monkeypatch):
+    """Through lift.judge.pipeline's adapter, each judgement carries generate.stack of the judge's device
+    (labels from two torch/transformers versions or GPU classes are never mixed), failures included."""
+    from lift.judge.pipeline import JudgeItem, Qwen3GuardAdapter
+    from lift.models.generate import stack
+
+    monkeypatch.setattr(qg, "greedy_batch", CannedGreedy(tok, CANNED))
+    adapter = Qwen3GuardAdapter(make_judge(tok), strict=True, device="cpu", dtype="fp32")
+    prompts, responses = make_pairs(4)                         # item 3's output is malformed
+    pairs = enumerate(zip(prompts, responses, strict=True))
+    items = [JudgeItem(f"{i:064d}", p, r, "en") for i, (p, r) in pairs]
+    outcomes = adapter.judge(items)
+    assert [o.native["stack"] for o in outcomes] == [stack("cpu")] * 4
+    assert outcomes[3].native["judge_failure"] and adapter.stack == stack("cpu")
+
+
+@pytest.mark.torch
 def test_real_decoding_on_a_tiny_model_maps_every_pair_back(tok, tiny_guard):
     prompts, responses = make_pairs(5)
     one = make_judge(tok, tiny_guard, batch_size=1, max_new_tokens=6).judge(prompts, responses)
