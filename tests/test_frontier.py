@@ -17,6 +17,7 @@ import sys
 import threading
 
 import pytest
+import yaml
 
 from lift import config
 from lift.judge import frontier
@@ -41,6 +42,14 @@ RUBRIC = "configs/rubrics/safety_v1.md"
 HAIKU = "claude-haiku-5-5"
 PRICE = {"input": 1.0, "output": 1.0}
 NO_SAMPLING = {"temperature", "top_p", "top_k", "fallbacks", "extra_body", "betas"}
+# Anthropic's answer once usage reaches a spend limit set in the Console: HTTP 400 invalid_request_error
+# (platform.claude.com/docs/en/api/rate-limits, "Setting your own spend limit"); and once the
+# organisation's credits are exhausted (docs/en/about-claude/api-credits-for-subscribers; no status given).
+SPEND_LIMIT = ("You have reached your specified API usage limits. You will regain access on 2026-12-01 at "
+               "00:00 UTC.")
+WORKSPACE_LIMIT = SPEND_LIMIT.replace("specified API", "specified workspace API")
+CREDIT_LOW = ("Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to "
+              "upgrade or purchase credits.")
 
 
 @pytest.fixture(autouse=True)
@@ -248,7 +257,12 @@ def test_the_server_can_forbid_a_retry(offline):
     FakeProvider.error(403),
     FakeProvider.error(404),
     FakeProvider.error(402, code="billing_error"),
+    FakeProvider.error(402),                                             # OpenAI's HTTP 402
+    FakeProvider.error(400, code="billing_error"),
     FakeProvider.error(429, code="insufficient_quota"),
+    ProviderError("BadRequestError", status=400, code="invalid_request_error", message=SPEND_LIMIT),
+    ProviderError("BadRequestError", status=400, code="invalid_request_error", message=WORKSPACE_LIMIT),
+    ProviderError("BadRequestError", status=400, code="invalid_request_error", message=CREDIT_LOW),
 ])
 def test_fatal_errors_stop_the_run(error):
     reply = FakeProvider.reply("BENIGN")
@@ -508,6 +522,67 @@ def test_choices_and_prices_are_checked(judge_config):
     with pytest.raises(ValueError, match="thinking is an Anthropic setting"):
         make_judge(provider="openai", model="gpt-test", thinking={"type": "disabled"})
     assert make_judge(model="claude-opus-5-5")[0].price == (4.0, 20.0)
+
+
+# P04's judges blocks (configs/project.yaml on p04-validation), verbatim.
+SONNET = "claude-sonnet-5-5"
+P04_JUDGES = """
+safety_second:
+  provider: anthropic
+  model: claude-sonnet-5-5
+  rubric: configs/rubrics/safety_v1.md
+  bulk: batch
+utility:
+  provider: anthropic
+  model: claude-sonnet-5-5
+  rubric: configs/rubrics/utility_v1.md
+  bulk: batch
+  fallback: {id: Qwen/Qwen3-8B, quantization: 4bit}
+"""
+
+
+def test_p04_judge_entries_build_judges(monkeypatch, caplog):
+    judges = config.load("project")["judges"]
+    for name, block in yaml.safe_load(P04_JUDGES).items():
+        monkeypatch.setitem(judges, name, block)
+    caplog.set_level(logging.INFO, logger=frontier.__name__)
+    second = FrontierJudge.from_config("safety_second", client=FakeProvider())
+    # The utility rubric is pairwise (FrontierJudge.pairwise is P03's); the entry's settings build a judge.
+    utility = FrontierJudge("anthropic", SONNET, RUBRIC, config_entry="utility", client=FakeProvider())
+    assert second.bulk == utility.bulk == "batch" and second.judge_id == utility.judge_id
+    notes = [r for r in caplog.records if "bulk" in r.getMessage()]
+    assert [r.levelno for r in notes] == [logging.INFO] * 2                 # once per judge
+    assert all("P03" in r.getMessage() and "synchronous prices" in r.getMessage() for r in notes)
+
+    pytest.importorskip("anthropic")                         # as `lift judge --judge second` builds it
+    from lift.judge import pipeline
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-dummy")
+    monkeypatch.setenv("LIFT_JUDGE_MAX_USD", "150")
+    adapter = pipeline.make_judge("second")
+    assert adapter.frontier.bulk == "batch" and adapter.judge_id.startswith(f"anthropic/{SONNET}@safety_v1:")
+
+
+def test_bulk_changes_neither_the_judge_nor_its_cache(judge_config, caplog):
+    caplog.set_level(logging.INFO, logger=frontier.__name__)
+    judge_config(bulk=None)
+    first, _ = make_judge([FakeProvider.reply("BENIGN")])
+    out = first.safety(["p"], ["r"], ["en"])
+    for bulk in ("sync", "batch"):
+        judge_config(bulk=bulk)
+        judge, nothing = make_judge(FakeProvider())          # any call would fail the test
+        assert (judge.bulk, judge.judge_id) == (bulk, first.judge_id)
+        assert judge.safety(["p"], ["r"], ["en"]) == out and nothing.calls == []
+    assert sum("'batch'" in r.getMessage() for r in caplog.records) == 1       # only the batch judge says so
+
+
+@pytest.mark.parametrize("bulk", ["Batch", "async", True, 1, ["batch"]])
+def test_an_unknown_bulk_mode_fails_loudly(judge_config, bulk):
+    judge_config(bulk=bulk)
+    with pytest.raises(ValueError, match="judges.safety_second.bulk must be"):
+        make_judge()
+    with pytest.raises(TypeError, match="unknown FrontierJudge settings"):
+        make_judge(config_entry=None, bulk="batch")         # a config entry's key, not a setting
 
 
 def test_results_keep_input_order_with_many_workers():
@@ -813,6 +888,425 @@ def test_item_level_api_errors_stay_item_failures(offline):
     assert out[1] == {"label": None, "reason": None, "raw": "", "error": "RequestTooLargeError 413",
                       "model_echo": None}
     assert [out[i]["label"] for i in (0, 2)] == ["REFUSAL", "REFUSAL"] and offline == []
+
+
+# ------------------------------------------------- account limits and item-level API errors --
+def rejection(message, status=400, name="BadRequestError"):
+    """A deterministic API error carrying the API's own message."""
+    return ProviderError(name, status=status, code="invalid_request_error", message=message)
+
+
+def failing_after(n, error):
+    """Answers the preflight and the first ``n`` item calls, then fails every later call with ``error``,
+    the benign pair included, as an error of the whole account does."""
+    lock = threading.Lock()
+    n_items = 0
+
+    def respond(call):
+        nonlocal n_items
+        with lock:
+            if not call["preflight"]:
+                n_items += 1
+            blocked = n_items > n
+        if blocked:
+            return error
+        return FakeProvider.reply("BENIGN" if call["preflight"] else "REFUSAL")
+
+    return FakeProvider(respond, preflight=None)
+
+
+def probe_gets(answer):
+    """Every item call fails with a 400; the preflight is answered, and every later call of the benign
+    pair (a probe) gets ``answer``."""
+    def respond(call):
+        if not call["preflight"]:
+            return FakeProvider.error(400)
+        return FakeProvider.reply("BENIGN") if sum(c["preflight"] for c in fake.calls) == 1 else answer
+
+    fake = FakeProvider(respond, preflight=None)
+    return fake
+
+
+@pytest.mark.parametrize("message", [SPEND_LIMIT, WORKSPACE_LIMIT, CREDIT_LOW])
+def test_an_account_limit_reached_mid_run_stops_the_run_and_records_nothing(offline, message):
+    fake = failing_after(2, rejection(message))
+    judge, _ = make_judge(fake)
+    with pytest.raises(FrontierConfigError, match="fatal API error: BadRequestError 400") as exc:
+        judge.safety(*items(12))
+    assert message in str(exc.value)                         # the cause, in the API's words
+    assert [r is not None for r in exc.value.partial] == [True] * 2 + [False] * 10
+    assert len(item_calls(fake)) == 3 and judge.stats["failures"] == 0 and offline == []   # stopped at once
+
+    healthy = FakeProvider(lambda call: FakeProvider.reply("BENIGN"))       # the limit raised: rerun
+    out = make_judge(healthy)[0].safety(*items(12))
+    assert len(item_calls(healthy)) == 10 and [o["error"] for o in out] == [None] * 12
+
+
+def test_judge_file_records_no_failure_when_a_spend_limit_hits_mid_file(monkeypatch, offline):
+    """The review's scenario end to end (`lift judge --judge second`): 12 generations judged in chunks of
+    4 and a spend limit reached after 6 answers. Nothing is recorded as a judge failure, and once the
+    limit is raised a rerun judges exactly the rest. Placeholder texts only."""
+    from lift.io import read_jsonl, sha256_text, write_jsonl
+    from lift.judge.pipeline import FrontierAdapter, judge_file
+    from lift.models.generate import generations_path
+    from lift.schemas import GenerationRecord
+
+    class English:
+        def top(self, text, k=3):
+            return [("eng_Latn", 0.99)][:k]
+
+    monkeypatch.setattr("lift.manifest.git_sha", lambda: "test")
+    texts = {f"prh-test-{i:04d}": f"placeholder prompt {i}" for i in range(12)}
+    path = generations_path("stock", "harmful", "en", "dev")
+    write_jsonl(path, [GenerationRecord(
+        key=sha256_text(pid), variant="stock", pid=pid, lang="en", set="harmful", split="dev",
+        prompt_sha=sha256_text(text), output=f"placeholder response to {pid}, long enough",
+        n_prompt_tokens=10, n_new_tokens=12, hit_cap=False, seconds=0.1, meta={"dtype": "bf16"}).model_dump()
+        for pid, text in texts.items()])
+
+    judge, _ = make_judge(failing_after(6, rejection(SPEND_LIMIT)))
+    with pytest.raises(FrontierConfigError, match="specified API usage limits"):
+        judge_file(path, judge=FrontierAdapter(judge), lid=English(), prompts_by_pid=texts, batch_size=4)
+    healthy = FakeProvider(lambda call: FakeProvider.reply("BENIGN"))
+    rerun, _ = make_judge(healthy)
+    out = judge_file(path, judge=FrontierAdapter(rerun), lid=English(), prompts_by_pid=texts, batch_size=4)
+    rows = list(read_jsonl(out))
+    assert len(rows) == 12 and not any(r["native"].get("judge_failure") for r in rows)
+    assert len(item_calls(healthy)) == 6                     # the two answers of the cut chunk were cached
+
+
+def test_an_item_level_api_error_is_recorded_with_the_api_message(offline):
+    judge, _ = make_judge([rejection("messages.0.content: placeholder rule"), FakeProvider.reply("BENIGN"),
+                           FakeProvider.error(422, message="placeholder\nunprocessable")])
+    out = judge.safety(*items(3))
+    assert [o["error"] for o in out] == ["BadRequestError 400: messages.0.content: placeholder rule", None,
+                                         "UnprocessableEntityError 422: placeholder unprocessable"]
+    assert (out[0]["raw"], out[0]["model_echo"], judge.stats["failures"]) == ("", None, 2)
+
+
+def test_provider_error_messages_are_one_short_line():
+    err = ProviderError("BadRequestError", status=400, message="line one\n line two " + "x" * 400)
+    assert err.message.startswith("line one line two x") and "\n" not in err.message
+    assert len(err.message) == frontier.API_MESSAGE_CHARS == 200
+
+
+def test_an_error_every_request_gets_stops_the_run_at_the_probe(offline):
+    """``breaker`` items fail with one item-level error, so the benign pair is sent again; it fails the
+    same way, so the API rejects every request (an account error not known as one, a new API rule):
+    the run stops at once and nothing is recorded."""
+    fake = failing_after(2, rejection("placeholder: a new rule rejects every request"))
+    judge, _ = make_judge(fake)                              # breaker 5
+    with pytest.raises(frontier.FrontierUnavailable, match="5 items in a row failed with BadRequestError "
+                       "400, and so did the benign preflight pair .*placeholder: a new") as exc:
+        judge.safety(*items(12))
+    assert [r is not None for r in exc.value.partial] == [True] * 2 + [False] * 10   # none recorded
+    assert [c["preflight"] for c in fake.calls] == [True] + [False] * 7 + [True]     # probed after 5
+    assert (judge.stats["failures"], judge.stats["probes"], offline) == (0, 1, [])
+    with pytest.raises(frontier.FrontierUnavailable):
+        judge.safety(["p"], ["r"], ["en"])                   # the judge stays stopped
+
+    healthy = FakeProvider(lambda call: FakeProvider.reply("BENIGN"))
+    out = make_judge(healthy)[0].safety(*items(12))          # a rerun asks the API again
+    assert len(item_calls(healthy)) == 10 and [o["error"] for o in out] == [None] * 12
+
+
+def test_errors_in_a_row_are_the_items_own_when_the_benign_pair_is_answered(offline):
+    """Every item fails with one item-level error (all flagged, say), but the API answers the benign pair
+    sent after every ``breaker`` of them and at the end: the errors are recorded, the run goes on."""
+    fake = FakeProvider(lambda call: FakeProvider.error(400))
+    judge, _ = make_judge(fake)
+    out = judge.safety(*items(12))
+    assert [o["error"] for o in out] == ["BadRequestError 400"] * 12
+    assert [i for i, c in enumerate(fake.calls) if c["preflight"]] == [0, 6, 12, 15]   # after 5, 10, 12
+    assert (judge.stats["probes"], judge.stats["failures"]) == (3, 12)
+
+
+def test_the_probe_holds_with_concurrent_workers(offline):
+    fake = failing_after(0, FakeProvider.error(400))
+    judge, _ = make_judge(fake, workers=4)
+    with pytest.raises(frontier.FrontierUnavailable,
+                       match="[5-8] items in a row failed with BadRequestError 400, and so did") as exc:
+        judge.safety(*items(40))
+    assert exc.value.partial == [None] * 40 and judge.stats["failures"] == 0
+    assert 5 <= len(item_calls(fake)) <= 5 + 3               # at most the other workers' calls in flight
+    assert judge.stats["probes"] == 1                        # one at a time; the others wait for its answer
+
+
+def test_the_item_error_breaker_needs_one_label_and_no_reply_in_between(offline):
+    def two_labels(call):                                    # 422, 400, 422, ...: never two alike in a row
+        odd = int(call["user"].split("prompt-")[1][:2]) % 2
+        return FakeProvider.error(400 if odd else 422)
+
+    out = make_judge(FakeProvider(two_labels))[0].safety(*items(10))
+    assert [o["error"] for o in out] == ["UnprocessableEntityError 422", "BadRequestError 400"] * 5
+
+    def every_fifth_answers(call):                           # four 400s, a reply, four 400s, ...
+        i = int(call["user"].split("prompt-")[1][:2])
+        return FakeProvider.reply("BENIGN") if i % 5 == 4 else FakeProvider.error(400)
+
+    judge, _ = make_judge(FakeProvider(every_fifth_answers))
+    out = judge.safety(*items(15))
+    assert sum(o["error"] == "BadRequestError 400" for o in out) == 12
+    assert judge.stats["probes"] == 0                        # a later reply answers for every error
+
+
+def test_no_call_records_errors_that_no_later_request_was_answered_after(offline):
+    """A streak never outlives its call: before a call records item-level errors with no reply after
+    them, it sends the benign pair. Answered, they are the items' own; failing the same way, the API
+    rejects every request, so short calls (one small cell each) never record an account error."""
+    judge, fake = make_judge(FakeProvider(lambda call: FakeProvider.error(400)))
+    assert [o["error"] for o in judge.safety(*items(2))] == ["BadRequestError 400"] * 2
+    assert [c["preflight"] for c in fake.calls] == [True, False, False, True]
+
+    judge, _ = make_judge(failing_after(0, FakeProvider.error(400)))
+    with pytest.raises(frontier.FrontierUnavailable, match="2 items in a row failed with BadRequestError "
+                       "400, and so did the benign preflight pair") as exc:
+        judge.safety(*items(2))
+    assert exc.value.partial == [None, None] and judge.stats["failures"] == 0
+    with pytest.raises(frontier.FrontierUnavailable):
+        judge.safety(*items(2, lang="es"))                   # the judge stays stopped
+
+
+def test_a_reply_to_a_request_sent_before_an_error_proves_nothing(offline):
+    """With several workers, requests sent together can be answered and rejected around the moment the
+    account is disabled, and the reply can come in last. Only a reply to a request sent after an error
+    came in tells it is the item's own, so the call still probes, and the probe fails too."""
+    blocked = rejection("placeholder: this organization has been disabled")
+    together, rejected = threading.Barrier(2, timeout=5), threading.Event()
+
+    def respond(call):
+        if call["preflight"]:
+            return FakeProvider.reply("BENIGN") if len(fake.calls) == 1 else blocked
+        together.wait()                                      # both item requests are out
+        if "prompt-01" in call["user"]:
+            rejected.set()
+            return blocked
+        rejected.wait(5)
+        threading.Event().wait(0.05)                         # the reply comes in after the error
+        return FakeProvider.reply("REFUSAL")
+
+    fake = FakeProvider(respond, preflight=None)
+    judge, _ = make_judge(fake, workers=2)
+    with pytest.raises(frontier.FrontierUnavailable, match="1 item in a row failed with BadRequestError "
+                       "400, and so did the benign preflight pair") as exc:
+        judge.safety(*items(2))
+    assert [r is None for r in exc.value.partial] == [False, True] and judge.stats["failures"] == 0
+
+
+@pytest.mark.parametrize(("answer", "stop", "match"), [
+    (FakeProvider.error(529), frontier.FrontierUnavailable,
+     "API unavailable at the probe call: OverloadedError 529 after 6 attempts"),
+    (rejection(SPEND_LIMIT), FrontierConfigError, "fatal API error: BadRequestError 400.*usage limits"),
+    (FakeProvider.error(401), FrontierConfigError, "fatal API error: AuthenticationError 401"),
+    (FakeProvider.error(422), FrontierConfigError,
+     "the benign preflight pair, sent again .* failed: UnprocessableEntityError 422"),
+])
+def test_a_probe_failing_otherwise_follows_that_errors_rules(offline, answer, stop, match):
+    judge, _ = make_judge(probe_gets(answer))
+    with pytest.raises(stop, match=match) as exc:
+        judge.safety(*items(2))
+    assert exc.value.partial == [None, None] and judge.stats["failures"] == 0
+
+
+def test_a_probe_counts_toward_the_spend_cap(monkeypatch):
+    """The probe is a paid call like the preflight. Here the item fits under the cap and the probe does
+    not, so the run stops before the probe and records nothing."""
+    sizer, _ = make_judge(provider="openai", model="gpt-test")
+    pair = sizer.rubric.render(prompt=frontier.PREFLIGHT_PROMPT, response=frontier.PREFLIGHT_RESPONSE,
+                               prompt_lang="English")
+    item, probe = sizer.estimate_usd(sizer.render("p", "r", "en")), sizer.estimate_usd(pair)
+    assert probe > item
+    reply = 110e-6                                           # usage (100, 10) at $1 per million tokens
+    monkeypatch.setenv("LIFT_JUDGE_MAX_USD", repr(reply + (item + probe) / 2))
+    judge, fake = make_judge(FakeProvider([FakeProvider.error(400)], usage=(100, 10)), provider="openai",
+                             model="gpt-test")
+    with pytest.raises(SpendCapExceeded) as exc:
+        judge.safety(["p"], ["r"], ["en"])
+    assert exc.value.partial == [None] and judge.stats["failures"] == 0
+    assert [c["preflight"] for c in fake.calls] == [True, False]   # the probe never started
+
+
+FLAGGED = ProviderError("BadRequestError", status=400, code="invalid_prompt",
+                        message="Invalid prompt: flagged as possibly violating usage policy (placeholder)")
+
+
+def flagged_odd_items(outage_from=None):
+    """Odd items fail with a per-item 400 (OpenAI's invalid_prompt for a flagged pair), even items get a
+    reply; from item ``outage_from`` on, every call gets a 529. The benign pair is answered."""
+    def respond(call):
+        i = int(call["user"].split("prompt-")[1][:2])
+        if outage_from is not None and i >= outage_from:
+            return FakeProvider.error(529)
+        return FLAGGED if i % 2 else FakeProvider.reply("REFUSAL")
+
+    return FakeProvider(respond)
+
+
+def test_per_item_errors_are_recorded_on_the_first_rerun_after_a_stop(offline):
+    """A stopped call records nothing, and on the rerun its answered items are cache hits, which are no
+    replies: its per-item errors come back to back, past the breaker. The answered benign pair tells
+    them from an error every request gets, so the first rerun completes and records them."""
+    with pytest.raises(frontier.FrontierUnavailable, match="OverloadedError 529"):
+        make_judge(flagged_odd_items(outage_from=11))[0].safety(*items(12))
+    fake = flagged_odd_items()
+    rerun, _ = make_judge(fake)
+    out = rerun.safety(*items(12))
+    assert [o["error"] for o in out] == [None, f"BadRequestError 400: {FLAGGED.message}"] * 6
+    assert len(item_calls(fake)) == 6 and rerun.stats["cache_hits"] == 6     # only the rejected items
+    assert rerun.stats["probes"] == 2                        # after the 5th error, and at the end
+
+
+def sdk_provider(name, status, body):
+    """A provider on a real SDK client whose HTTP calls get ``status`` and ``body`` back from an
+    in-process transport, so the SDK raises exactly what it raises for that response."""
+    sdk = pytest.importorskip(name)
+    httpx2 = pytest.importorskip("httpx2")
+    http = httpx2.Client(transport=httpx2.MockTransport(lambda request: httpx2.Response(status, json=body)))
+    if name == "anthropic":
+        return AnthropicProvider(sdk.Anthropic(api_key="sk-ant-test-dummy", max_retries=0, http_client=http))
+    return OpenAIProvider(sdk.OpenAI(api_key="sk-test-dummy", max_retries=0, http_client=http))
+
+
+QUOTA = "You exceeded your current quota, please check your plan and billing details."
+TIER_CAP = ("You have reached your API usage limits: your organization has crossed its monthly API usage "
+            "threshold. You will regain access on 2026-12-01 at 00:00 UTC.")
+
+
+def oa_error(message, kind, code=None, param=None):
+    return {"message": message, "type": kind, "param": param, "code": code}
+
+
+@pytest.mark.parametrize(("name", "status", "error", "kind"), [
+    ("anthropic", 400, {"type": "invalid_request_error", "message": SPEND_LIMIT}, "fatal"),
+    ("anthropic", 400, {"type": "invalid_request_error", "message": WORKSPACE_LIMIT}, "fatal"),
+    ("anthropic", 400, {"type": "invalid_request_error", "message": CREDIT_LOW}, "fatal"),
+    ("anthropic", 400, {"type": "invalid_request_error", "message": "messages: placeholder rule"}, "item"),
+    ("anthropic", 402, {"type": "billing_error", "message": "placeholder billing problem"}, "fatal"),
+    # the tier's monthly spend cap: a 429 without retry-after; retried, then left unjudged (unchanged)
+    ("anthropic", 429, {"type": "rate_limit_error", "message": TIER_CAP,
+                        "details": {"error_code": "enforced_spend_limit_reached"}}, "retryable"),
+    ("openai", 429, oa_error(QUOTA, "insufficient_quota", code="insufficient_quota"), "fatal"),
+    ("openai", 402, oa_error("placeholder payment required", "billing"), "fatal"),
+    ("openai", 400, oa_error("Invalid 'messages[1].content': placeholder", "invalid_request_error",
+                             param="messages"), "item"),
+])
+def test_real_sdk_errors_keep_the_api_message(name, status, error, kind):
+    body = {"error": error}
+    if name == "anthropic":
+        body = {"type": "error", "error": error, "request_id": "req_test"}
+    provider = sdk_provider(name, status, body)
+    with pytest.raises(ProviderError) as excinfo:
+        provider.complete(system="S", user="placeholder prompt text", model="m", max_tokens=9,
+                          temperature=None, effort=None, thinking=None)
+    err = excinfo.value
+    assert (err.status, err.kind, err.message) == (status, kind, error["message"])
+    assert "placeholder prompt text" not in str(err) + err.message            # never the request
+
+
+# ------------------------------------------- `lift judge` over small cells on the real anthropic SDK --
+DISABLED = "This organization has been disabled."          # an account-level 400 the judge does not know
+CELL_LANGS = ("en", "hi", "zh", "es", "ar", "th")
+
+
+class English:
+    """A LangID stand-in: every output is confident English."""
+
+    def top(self, text, k=3):
+        return [("eng_Latn", 0.99)][:k]
+
+
+class MessagesApi:
+    """Anthropic's Messages API on an in-process transport. Answers until ``n_ok`` item requests were
+    answered, then rejects every request with a 400 ``DISABLED``, the benign pair included, as a disabled
+    organisation does. ``items`` counts item requests."""
+
+    def __init__(self, n_ok=math.inf):
+        self.n_ok, self.items, self.disabled = n_ok, 0, False
+        self._lock = threading.Lock()
+
+    def __call__(self, request):
+        import httpx2
+
+        benign = frontier.PREFLIGHT_PROMPT in request.content.decode("utf-8")
+        with self._lock:
+            if not benign:
+                self.items += 1
+            self.disabled = self.disabled or self.items > self.n_ok
+            disabled = self.disabled
+        if disabled:
+            return httpx2.Response(400, json={"type": "error", "request_id": "req_test", "error": {
+                "type": "invalid_request_error", "message": DISABLED}})
+        text = FakeProvider.reply("BENIGN" if benign else "REFUSAL", "ok")
+        return httpx2.Response(200, json={
+            "id": "msg_test", "type": "message", "role": "assistant", "model": SONNET, "stop_sequence": None,
+            "stop_reason": "end_turn", "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 10, "output_tokens": 5}})
+
+
+def write_cells(per_cell=3):
+    """One generations file of ``per_cell`` records per language (the size of a `--keys` or `--sample`
+    cell); returns (path, prompt texts by pid) per cell. Placeholder texts only."""
+    from lift.io import sha256_text, write_jsonl
+    from lift.models.generate import generations_path
+    from lift.schemas import GenerationRecord
+
+    cells = []
+    for lang in CELL_LANGS:
+        texts = {f"prh-test-{i:04d}": f"placeholder prompt {lang} {i}" for i in range(per_cell)}
+        path = generations_path("stock", "harmful", lang, "dev")
+        write_jsonl(path, [GenerationRecord(
+            key=sha256_text(f"{lang}-{pid}"), variant="stock", pid=pid, lang=lang, set="harmful", split="dev",
+            prompt_sha=sha256_text(text), output=f"placeholder response {lang} {pid}", n_prompt_tokens=10,
+            n_new_tokens=12, hit_cap=False, seconds=0.1, meta={"dtype": "bf16"}).model_dump()
+            for pid, text in texts.items()])
+        cells.append((path, texts))
+    return cells
+
+
+def lift_judge(api, cells):
+    """`lift judge --judge second` as the CLI runs it: one judge on the real anthropic client (default
+    workers), judge_file per cell. Returns the error that stopped it, None when every cell finished."""
+    anthropic, httpx2 = pytest.importorskip("anthropic"), pytest.importorskip("httpx2")
+    from lift.judge.pipeline import FrontierAdapter, judge_file
+
+    client = anthropic.Anthropic(api_key="sk-ant-test-dummy", max_retries=0,
+                                 http_client=httpx2.Client(transport=httpx2.MockTransport(api)))
+    adapter = FrontierAdapter(FrontierJudge("anthropic", SONNET, RUBRIC, client=client, config_entry=None))
+    for path, texts in cells:
+        try:
+            judge_file(path, judge=adapter, lid=English(), prompts_by_pid=texts)
+        except (FrontierConfigError, frontier.FrontierUnavailable) as exc:
+            return exc
+    return None
+
+
+def judged_rows():
+    from lift.io import read_jsonl
+    from lift.paths import judgements_dir
+
+    paths = sorted((judgements_dir() / "frontier" / "stock").glob("*.jsonl"))
+    return [row for path in paths for row in read_jsonl(path)]
+
+
+@pytest.mark.parametrize("n_ok", [0, 1, 2, 3, 4, 5, 7])
+def test_an_unknown_account_error_in_small_cells_is_never_recorded(monkeypatch, n_ok):
+    """The organisation is disabled mid-run (an account-level 400 the judge does not know) while `lift
+    judge` works through cells of 3 keys, so no call reaches the breaker. Each call probes before it
+    records, the probe fails too, and nothing becomes a judge failure; once the account works again, a
+    rerun judges exactly what was left."""
+    monkeypatch.setenv("LIFT_JUDGE_MAX_USD", "50")
+    monkeypatch.setattr("lift.manifest.git_sha", lambda: "test")
+    cells = write_cells()
+    stop = lift_judge(MessagesApi(n_ok), cells)
+    assert isinstance(stop, frontier.FrontierUnavailable) and DISABLED in str(stop)
+    rows = judged_rows()
+    assert len(rows) == n_ok // 3 * 3 and not any(r["native"].get("judge_failure") for r in rows)
+
+    api = MessagesApi()
+    assert lift_judge(api, cells) is None
+    rows = judged_rows()
+    assert len(rows) == 18 and not any(r["native"].get("judge_failure") for r in rows)
+    assert api.items == 18 - n_ok                            # every answered request was cached
 
 
 # ------------------------------------------------------------------------ cache file repairs --
