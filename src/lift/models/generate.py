@@ -19,7 +19,16 @@ Behaviour:
   outputs/generations/{variant}/{set}_{lang}_{split}.jsonl as each batch finishes. On restart, keys
   already present are skipped (resumable across sessions); a record for the same pid under a
   different key (stale translation, other dtype, other template) raises instead of mixing.
-- ``meta`` carries dtype, GPU name, device, batch size and, for CAST wrappers, ``gate_fired``.
+- One file is one configuration and one stack. ``meta.run_config`` digests the inputs (everything in
+  the cache key but the prompt) and never differs within a file. ``meta.stack`` digests torch,
+  transformers and the GPU class: a finished file is reused under any stack (a session may resolve a
+  newer patch release), but records are never appended under another stack than the file's.
+- Every such refusal is a StaleOutputError naming the ``lift restart`` line that starts the cell over
+  (``restart_cell``): a job line right after ``lift sync pull``. Moving the file aside by hand does not
+  work: sync never deletes, so the job's pull brings the runs repo's copy back.
+- ``meta`` carries dtype, GPU name, device, batch size, the provenance (model revision, harness,
+  template, the stack, ``decoding``: the decoding settings without the dtype, ``run_config``) and, for
+  CAST wrappers, ``gate_fired``.
 - Every run writes a manifest (lift.manifest) with prompts/sec and tokens/sec.
 """
 
@@ -27,29 +36,115 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from lift import config
 from lift.cachekey import generation_key
 from lift.io import append_jsonl, read_jsonl, sha256_obj, sha256_text
 from lift.models.variants import LoadedVariant
-from lift.paths import generations_dir
+from lift.paths import generations_dir, judgements_dir, output_dir
 from lift.schemas import GenerationRecord, PromptRecord
 
 log = logging.getLogger(__name__)
 
 HARNESS_VERSION = 1
+STACK_FIELDS = ("torch", "transformers", "gpu_capability")
+ASIDE_DIR = ".aside"       # in paths.output_dir(): what `lift restart` set aside; never synced (lift.sync)
 
 
 class StaleOutputError(RuntimeError):
-    """A generations file holds records whose keys no longer match the current inputs."""
+    """A cell's file holds records this run must not extend (made from other inputs, or under another
+    stack). ``command`` is the ``lift restart`` line that starts the cell over (None for a file no such
+    line covers); the message names it. The judge pipeline's refusals subclass it, so a command can skip
+    the cell and go on with the others."""
+
+    def __init__(self, message: str, *, command: str | None = None) -> None:
+        super().__init__(message)
+        self.command = command
 
 
 def generations_path(variant_name: str, set_name: str, lang: str, split: str) -> Path:
     return generations_dir() / variant_name / f"{set_name}_{lang}_{split}.jsonl"
+
+
+def restart_command(variant: str, set_name: str, lang: str, split: str, *, judge: str | None = None) -> str:
+    """The job line that starts one cell over (``restart_cell``); ``judge`` (a role) limits it to that
+    judge's judgements file."""
+    line = f"lift restart --variant {variant} --split {split} --sets {set_name} --langs {lang}"
+    return line + (f" --judge {judge}" if judge else "")
+
+
+def aside_root() -> Path:
+    """A new outputs/.aside/<UTC stamp> folder for one ``lift restart`` (suffixed if that one exists)."""
+    from datetime import UTC, datetime
+
+    base = output_dir() / ASIDE_DIR / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    path, n = base, 0
+    while path.exists():
+        n += 1
+        path = base.with_name(f"{base.name}-{n}")
+    return path
+
+
+class SetAside(NamedTuple):
+    """What ``restart_cell`` did with one file of the cell."""
+
+    path: Path                 # the cell's file, now empty
+    records: int | None        # records set aside; None: the file is not here (nothing done)
+    copy: Path | None          # where they went; None when the file held nothing
+
+
+def restart_cell(variant: str, set_name: str, lang: str, split: str, *, aside: Path,
+                 judge_dir: str | None = None) -> list[SetAside]:
+    """Start one cell over (``lift restart``): its generations file and every judgements file of it, or
+    only ``judge_dir``'s judgements file, are copied to the same path under ``aside`` and left empty.
+
+    Emptied, never removed: sync never deletes, so a removed file comes back from the runs repo at the
+    next pull, while an emptied one is a local edit the next push sends (an update), replacing the runs
+    repo's copy. generate and judge_file then fill it again (an empty file has no stack). The copy is
+    written before the file is emptied, so a kill in between loses nothing."""
+    name = f"{set_name}_{lang}_{split}.jsonl"
+    if judge_dir is not None:
+        files = [judgements_dir() / judge_dir / variant / name]
+    else:
+        top = judgements_dir()
+        roots = sorted(p for p in top.iterdir() if p.is_dir()) if top.is_dir() else []
+        files = [generations_path(variant, set_name, lang, split),
+                 *(p for root in roots if (p := root / variant / name).is_file())]
+    out = []
+    for path in files:
+        if not path.is_file():
+            out.append(SetAside(path, None, None))
+            continue
+        data = path.read_bytes()
+        copy = None
+        if data:
+            copy = aside / path.relative_to(output_dir())
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_bytes(data)
+            path.write_bytes(b"")
+        out.append(SetAside(path, sum(1 for line in data.splitlines() if line.strip()), copy))
+    return out
+
+
+def _cell_restart(out_path: Path, variant: str) -> str | None:
+    """The ``lift restart`` line of the cell whose generations file is ``out_path`` (every lift command
+    writes there), None for any other file (a test's, Gate 0's)."""
+    cell = out_path.stem.rsplit("_", 2)
+    if len(cell) != 3 or out_path.resolve() != generations_path(variant, *cell).resolve():
+        return None
+    return restart_command(variant, *cell)
+
+
+def _start_over(restart: str | None, out_path: Path) -> str:
+    if restart is None:
+        return f"move {out_path} aside (no lift restart line covers that file)"
+    return (f"run `{restart}` as a job line right after `lift sync pull`, followed by the line that failed "
+            "(once: it sets the cell's files aside and leaves them empty, so the next push replaces the runs "
+            "repo's copies)")
 
 
 def gen_config(variant: LoadedVariant, *, max_new_tokens: int | None = None) -> dict[str, Any]:
@@ -71,8 +166,9 @@ def gen_config(variant: LoadedVariant, *, max_new_tokens: int | None = None) -> 
 
 
 def stack(device: str) -> dict[str, str]:
-    """The software and GPU class a generation ran on. Not in the cache key (a library upgrade must
-    not silently re-key finished cells), but in ``run_config``: one file never mixes stacks."""
+    """The software and GPU class a generation runs on (``STACK_FIELDS``). Neither in the cache key nor
+    in ``run_config``, so a library upgrade never re-keys finished cells; ``generate`` keeps one stack
+    per file instead (``meta.stack``)."""
     from importlib import metadata
 
     out = {name: metadata.version(name) for name in ("torch", "transformers")}
@@ -85,15 +181,67 @@ def stack(device: str) -> dict[str, str]:
     return out
 
 
-def run_config_digest(variant: LoadedVariant, gen_cfg: dict[str, Any], env: dict[str, str]) -> str:
-    """Everything in the cache key except the prompt, plus the stack, so a generations file can prove
-    it holds one configuration, also for prompts outside the current run (a --limit run in another
-    dtype, or a resume after the runtime upgraded transformers or moved to another GPU class)."""
+def stack_digest(env: Mapping[str, Any]) -> str:
+    """16 hex of exactly the ``STACK_FIELDS`` of ``env`` (a ``stack()``, or a record's meta)."""
+    return sha256_obj({name: env.get(name) for name in STACK_FIELDS})[:16]
+
+
+def record_stack(meta: Mapping[str, Any]) -> str:
+    """A record's ``meta.stack``; older records without one are read by their torch, transformers and
+    GPU class."""
+    return str(meta.get("stack") or stack_digest(meta))
+
+
+def decoding_digest(gen_cfg: Mapping[str, Any]) -> str:
+    """16 hex of the decoding settings without the dtype (harness, do_sample, max_new_tokens, template,
+    stop_ids): the same for a bf16 and an fp16 run, so a precision comparison can check it."""
+    return sha256_obj({k: v for k, v in gen_cfg.items() if k != "dtype"})[:16]
+
+
+def run_config_digest(variant: LoadedVariant, gen_cfg: dict[str, Any]) -> str:
+    """The inputs: everything in the cache key except the prompt. A generations file holds one, also
+    for prompts outside the current run (a --limit run in another dtype is refused)."""
     from lift.cachekey import intervention_digest
 
     return sha256_obj({"model_rev": variant.model_rev, "adapter_hash": variant.adapter_hash,
                        "intervention": intervention_digest(variant.spec),
-                       "template_hash": variant.template_hash, "gen_cfg": gen_cfg, "stack": env})[:16]
+                       "template_hash": variant.template_hash, "gen_cfg": gen_cfg})[:16]
+
+
+def _was(records: Sequence[GenerationRecord], name: str) -> list[str]:
+    return sorted({str(r.meta.get(name)) for r in records})
+
+
+def _moved_fields(records: Sequence[GenerationRecord], env: Mapping[str, str]) -> list[str]:
+    """The ``STACK_FIELDS`` in which ``records`` differ from ``env``."""
+    return [name for name in STACK_FIELDS if _was(records, name) != [str(env.get(name))]]
+
+
+def stack_change(records: Sequence[GenerationRecord], env: Mapping[str, str]) -> str:
+    """How the stack of ``records`` differs from ``env`` ("transformers 5.22.1 -> 5.22.2"), or "" when
+    every record has this stack."""
+    current = stack_digest(env)
+    if all(record_stack(r.meta) == current for r in records):
+        return ""
+    moved = [f"{name} {'/'.join(_was(records, name))} -> {env.get(name)}"
+             for name in _moved_fields(records, env)]
+    return ", ".join(moved) or f"stack {sorted({record_stack(r.meta) for r in records})} -> {current}"
+
+
+def _resume_hint(moved: Collection[str]) -> str:
+    """Who can still finish a cell begun under another stack, by what moved (decision 32):
+    constraints.txt pins transformers, while torch is each runtime's own CUDA build."""
+    runtime = bool({"torch", "gpu_capability"} & set(moved))
+    if "transformers" in moved and runtime:
+        return ("Only the runtime and GPU class that began this cell (torch is the runtime's own CUDA "
+                "build), with constraints.txt installed (it pins transformers), can finish it.")
+    if "transformers" in moved:
+        return ("constraints.txt pins transformers: a runtime installed with it (pip install -c "
+                "constraints.txt) can finish this cell when that is the version that began it.")
+    if runtime:
+        return ("torch is the runtime's own CUDA build, so only the runtime and GPU class that began this "
+                "cell can finish it.")
+    return "Only the stack that began this cell can finish it."
 
 
 def record_key(variant: LoadedVariant, prompt: PromptRecord, gen_cfg: dict[str, Any]) -> str:
@@ -282,8 +430,9 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
                              f"context, e.g. {too_long[:5]}; nothing is truncated")
 
     env = stack(variant.device)
-    run_config = run_config_digest(variant, gen_cfg, env)
-    done: dict[tuple[str, str, str], str] = {}
+    run_config = run_config_digest(variant, gen_cfg)
+    restart = _cell_restart(out_path, variant.spec.name)
+    existing: list[GenerationRecord] = []
     if out_path.exists():
         if not resume:
             raise FileExistsError(f"{out_path} exists; pass resume=True or move it aside")
@@ -293,9 +442,10 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
         if any(r.variant != variant.spec.name for r in existing) or other:
             raise StaleOutputError(
                 f"{out_path} holds records made under another configuration (variant, dtype, template, "
-                f"model, adapter, harness version, torch/transformers version or GPU class), e.g. "
-                f"{other[:5]}. Move the file aside; one file is one configuration, outputs are never mixed.")
-        done = {prompt_id(r.set, r.lang, r.pid): r.key for r in existing}
+                f"model, adapter or harness version), e.g. {other[:5]}; one file is one configuration and "
+                "outputs are never mixed. Run with the file's configuration, or start the cell over: "
+                f"{_start_over(restart, out_path)}.", command=restart)
+    done = {prompt_id(r.set, r.lang, r.pid): r.key for r in existing}
 
     def ident(row: _Row) -> tuple[str, str, str]:
         return prompt_id(row.prompt.set, row.prompt.lang, row.prompt.pid)
@@ -303,20 +453,33 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
     stale = [row.prompt.pid for row in rows if ident(row) in done and done[ident(row)] != row.key]
     if stale:
         raise StaleOutputError(
-            f"{out_path}: {len(stale)} records were made with other inputs (prompt text, dtype, template, "
-            f"model or harness version), e.g. {stale[:5]}. Move the file aside; outputs are never mixed.")
+            f"{out_path}: {len(stale)} records were made from other inputs (a fixed prompt text, or another "
+            f"cache-key version), e.g. {stale[:5]}; outputs are never mixed. Start the cell over: "
+            f"{_start_over(restart, out_path)}.", command=restart)
     todo = sorted((row for row in rows if ident(row) not in done),
                   key=lambda row: (-len(row.ids), row.prompt.lang, row.prompt.pid))
+    moved = stack_change(existing, env)
+    if moved and todo:
+        raise StaleOutputError(
+            f"{out_path} was generated under another stack ({moved}); appending {len(todo)} records under "
+            f"this one would mix stacks in one file. {_resume_hint(_moved_fields(existing, env))} Otherwise "
+            f"start the cell over: {_start_over(restart, out_path)}. Finished cells are reused under any "
+            "stack.", command=restart)
 
     gpu = _device_name(variant.device)
     provenance = {"model_rev": variant.model_rev, "harness": HARNESS_VERSION,
-                  "template": variant.template_hash[:16], **env}
+                  "template": variant.template_hash[:16], **env, "stack": stack_digest(env),
+                  "decoding": decoding_digest(gen_cfg)}
     run = start_run("generate", variant=variant.spec.name, out_path=str(out_path), dtype=variant.dtype,
                     device=variant.device, gpu=gpu, gen_cfg=gen_cfg, n_prompts=len(rows),
                     n_resumed=len(rows) - len(todo), run_config=run_config, adapter_hash=variant.adapter_hash,
                     template_hash=variant.template_hash, **provenance) if manifest else None
     if not todo:
-        log.info("%s: all %d prompts already generated", out_path.name, len(rows))
+        if moved:
+            log.warning("%s: all %d prompts already generated, under another stack (%s); reused as they are",
+                        out_path.name, len(rows), moved)
+        else:
+            log.info("%s: all %d prompts already generated", out_path.name, len(rows))
         if run is not None:
             finish_run(run, status="ok", n_written=0)
         return out_path
