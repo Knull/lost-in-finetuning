@@ -44,10 +44,13 @@ Each language gets two sheets:
   - Use `ok` when the translation is correct.
   - Use `fixed` and fill `corrected` when you can repair it.
   - Use `bad` otherwise.
+- An item is on one of the two sheets only. A sample item carries no note, even when an
+  automatic check rejected it: judge the translation itself.
 
 Column rules, so the sheet can be read back:
 - Fill only `verdict`, `corrected` and `note`.
-- Leave `item_id`, `set`, `english` and `translation` exactly as they are.
+- Leave `item_id`, `set`, `english` and `translation` exactly as they are. A correction goes in
+  `corrected`, never in `translation`.
 - Use `corrected` only with `fixed`.
 - An empty `verdict` means "not checked", which is fine.
 
@@ -55,4 +58,5 @@ Save as **CSV UTF-8**:
 - **Google Sheets:** File > Download > Comma-separated values.
 - **Excel:** File > Save As > "CSV UTF-8 (Comma delimited)".
 
-Other CSV formats re-encode Hindi and Chinese, and the sheet is then rejected.
+A UTF-8 save with semicolons or tabs between the cells, as Excel writes in some locales, is fine
+too. Other CSV formats re-encode Hindi and Chinese, and the sheet is then rejected.
