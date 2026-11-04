@@ -25,9 +25,11 @@ Behaviour:
   newer patch release), but records are never appended under another stack than the file's.
 - Every such refusal is a StaleOutputError naming the ``lift restart`` line that starts the cell over
   (``restart_cell``): a job line right after ``lift sync pull``. Moving the file aside by hand does not
-  work: sync never deletes, so the job's pull brings the runs repo's copy back. A file made in another
-  precision than the run's is not stale and is never started over (that would discard it): it raises
-  OtherPrecisionError, whose remedy is the file's ``--dtype`` or leaving the cell out.
+  work: sync never deletes, so the job's pull brings the runs repo's copy back. ``keys_changed`` says
+  whether the cell made again may have other generation keys (not when only the stack moved), so a key
+  list drawn from the cell (P04's) is drawn again. A file made in another precision than the run's is
+  not stale and is never started over (that would discard it): it raises OtherPrecisionError, whose
+  remedy is the file's ``--dtype`` or leaving the cell out.
 - ``meta`` carries dtype, GPU name, device, batch size, the provenance (model revision, harness,
   template, the stack, ``decoding``: the decoding settings without the dtype, ``run_config``) and, for
   CAST wrappers, ``gate_fired``.
@@ -65,11 +67,14 @@ class StaleOutputError(RuntimeError):
     stack, or in another precision: ``OtherPrecisionError``). ``command`` is the ``lift restart`` line
     that starts the cell over (None for a file no such line covers, or that must not be started over);
     the message names it. The judge pipeline's refusals subclass it, so a command can skip the cell and
-    go on with the others."""
+    go on with the others. ``keys_changed`` is False only when the cell made again has the same
+    generation keys (only the stack moved: the key leaves it out); any other cause may change them (a
+    fixed prompt text, another configuration), so a key list drawn from the cell (P04's) is drawn again."""
 
-    def __init__(self, message: str, *, command: str | None = None) -> None:
+    def __init__(self, message: str, *, command: str | None = None, keys_changed: bool = True) -> None:
         super().__init__(message)
         self.command = command
+        self.keys_changed = keys_changed
 
 
 class OtherPrecisionError(StaleOutputError):
@@ -539,7 +544,7 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
             f"{out_path} was generated under another stack ({moved}); appending {len(todo)} records under "
             f"this one would mix stacks in one file. {_resume_hint(_moved_fields(existing, env))} Otherwise "
             f"start the cell over: {_start_over(restart, out_path)}. Finished cells are reused under any "
-            "stack.", command=restart)
+            "stack.", command=restart, keys_changed=False)
 
     gpu = _device_name(variant.device)
     provenance = {"model_rev": variant.model_rev, "harness": HARNESS_VERSION,

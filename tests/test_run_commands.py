@@ -441,13 +441,33 @@ def test_restart_refuses_a_cell_made_in_another_precision_unless_forced(caplog):
     assert "--force" in caplog.text and "bf16" in caplog.text           # the discarded precision is named
 
 
+def repo_layout(monkeypatch, isolated_dirs):
+    """A GPU runtime's layout: validation/ (here the test's own) at the root of the repo, so job lines name
+    P04's key lists relative to it."""
+    monkeypatch.setattr("lift.paths.REPO_ROOT", isolated_dirs.resolve())
+
+
+def p04_list(*pids, variant="stock", split="dev", cell=("harmful", "en")):
+    """P04's second-judge key list of ``variant``'s ``split`` (decisions.md 31), drawn now: the keys the
+    cell's generations file holds for ``pids``."""
+    from lift.models.generate import generations_path, read_generations
+    from lift.paths import validation_dir
+
+    path = validation_dir() / "keys" / "second_judge" / f"{variant}_{split}.txt"
+    held = {g.pid: g.key for g in read_generations(generations_path(variant, *cell, split))}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(held[pid] + "\n" for pid in pids), encoding="utf-8")
+    return path
+
+
 @pytest.mark.parametrize("swapped", [False, True])
 def test_a_whole_cell_restart_names_the_line_that_refills_the_second_judges_file(swapped, monkeypatch,
-                                                                                caplog):
+                                                                                caplog, isolated_dirs):
     # W9: a whole-cell restart also sets aside the second judge's judgements of the cell, and the line that
     # failed (run-dev, or generate and judge) never judges with the second judge. The log names the line
     # that refills it: P04's key list (decisions.md 31), the run's precision when it is not the default.
     # Swapped: P04's decision rule made the frontier judge primary, so the Qwen3Guard file is the second's.
+    # X9: a --keys line reads P04's list, which P04 draws again when the cell made again has new keys.
     from lift import config
     from lift.judge.pipeline import judge_dir
 
@@ -459,12 +479,15 @@ def test_a_whole_cell_restart_names_the_line_that_refills_the_second_judges_file
     for judge in ("qwen3guard", "frontier"):
         write_judgements(judge, "harmful", "hi", "dev")
     second = judgements_dir() / judge_dir("second") / "stock" / "harmful_hi_dev.jsonl"
-    monkeypatch.delenv("LIFT_VALIDATION_DIR")              # a GPU runtime's layout: validation/ in the repo
+    repo_layout(monkeypatch, isolated_dirs)
+    p04_list("har-0001", cell=("harmful", "hi"))
     refill = ("lift judge --variant stock --split dev --sets harmful --langs hi --judge second "
               "--keys validation/keys/second_judge/stock_dev.txt --dtype fp16")
     assert main([*RESTART, "--sets", "harmful", "--langs", "hi", "--dtype", "fp16"]) == 0
     assert f"  {second}: {refill}\n" in caplog.text
     assert "--judge primary" not in caplog.text and "lift run-dev" in caplog.text
+    assert ("only after P04 draws the key list again (lift validate second-judge-sample, then lift sync "
+            "push)") in caplog.text
     for role in ("primary", "second"):                     # one role's restart: the failed line refills it
         for judge in ("qwen3guard", "frontier"):
             write_judgements(judge, "harmful", "hi", "dev")
@@ -479,11 +502,33 @@ def test_the_refill_line_quotes_a_key_list_outside_the_repo():
 
     from lift.paths import validation_dir
 
+    listed = validation_dir() / "keys" / "second_judge" / "stock_dev.txt"
+    listed.parent.mkdir(parents=True)
+    listed.write_text("", encoding="utf-8")
     line = run_cmd._judge_line("stock", "harmful", "hi", "dev", role="second", dtype="bf16")
     words = shlex.split(line)
-    assert words[-2:] == ["--keys", str(validation_dir() / "keys" / "second_judge" / "stock_dev.txt")]
+    assert words[-2:] == ["--keys", str(listed)]
     assert "--dtype" not in words                          # generation.dtype is the default
     assert "--keys" not in run_cmd._judge_line("stock", "harmful", "hi", "dev", role="primary", dtype="bf16")
+
+
+def test_the_second_judges_refill_line_samples_while_p04_has_drawn_no_key_list(caplog):
+    # X9: before P04 exists the second judge runs with --sample; a refill line naming a list that does not
+    # exist would end in a FileNotFoundError. It names decisions.md 31's --sample 0.10 instead.
+    from lift.judge.pipeline import judge_dir
+
+    caplog.set_level(logging.INFO, logger="lift.run")
+    line = run_cmd._judge_line("stock", "harmful", "hi", "dev", role="second", dtype="fp16")
+    assert line == ("lift judge --variant stock --split dev --sets harmful --langs hi --judge second "
+                    "--sample 0.10 --dtype fp16")
+    write_generation("harmful", "hi", "dev")
+    for judge in ("qwen3guard", "frontier"):
+        write_judgements(judge, "harmful", "hi", "dev")
+    second = judgements_dir() / judge_dir("second") / "stock" / "harmful_hi_dev.jsonl"
+    assert main([*RESTART, "--sets", "harmful", "--langs", "hi"]) == 0
+    assert f"  {second}: lift judge --variant stock --split dev --sets harmful --langs hi --judge second " \
+           "--sample 0.10\n" in caplog.text
+    assert "--keys" not in caplog.text and "P04 draws" not in caplog.text
 
 
 def test_a_restart_retires_the_runs_repo_copies_of_a_cell_taken_over_in_another_precision(tmp_path,
@@ -681,6 +726,115 @@ def test_judge_lists_stale_other_precision_and_other_judge_cells_apart(monkeypat
         assert [c for c in ("en", "hi", "zh", "es") if f"harmful_{c}_dev" in text] == [own]
 
 
+@pytest.mark.parametrize("role", ["primary", "second"])
+def test_a_cell_made_in_another_precision_is_listed_as_such_whatever_refusal_came_first(role, monkeypatch,
+                                                                                       caplog):
+    # X7 / contract M: a T4 judge line (--dtype fp16) over Colab's bf16 cells. Whatever judge_file refused
+    # first (a stale cell, another judge's judgements, a file no line covers), each is listed as made in bf16
+    # with its --dtype remedy, never with a restart line: the T4 restarts in bf16 by default, so that line
+    # would discard Colab's outputs. The frontier second judge has no precision for judge_file to check.
+    # A cell made in the run's own precision keeps its kind and its line.
+    from lift.judge import pipeline
+
+    pin(judge=True)
+    for lang in ("en", "hi", "zh"):
+        write_generation("harmful", lang, "dev", dtype="bf16")
+    write_generation("harmful", "es", "dev", dtype="fp16")
+    line = "lift restart --variant stock --split dev --sets harmful --langs {}"
+    lines = {"en": line.format("en"), "hi": line.format("hi") + f" --judge {role}",
+             "es": line.format("es") + f" --judge {role} --dtype fp16"}
+    errors = {
+        "en": pipeline.StaleJudgementsError(f"prompt changed; run `{lines['en']}`", command=lines["en"]),
+        "hi": pipeline.MixedJudgesError(f"another judge; run `{lines['hi']}`", command=lines["hi"]),
+        "zh": pipeline.StaleJudgementsError("no restart line covers that file"),
+        "es": pipeline.StaleJudgementsError(f"another stack; run `{lines['es']}`", command=lines["es"]),
+    }
+
+    def judge_file(path, **kw):
+        raise errors[path.stem.split("_")[1]]
+
+    monkeypatch.setattr(pipeline, "judge_file", judge_file)
+    monkeypatch.setattr(pipeline, "make_judge", lambda *a, **kw: object())
+    monkeypatch.setattr(run_cmd, "_record", lambda *a, **kw: None)
+    argv = ["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "hi", "zh",
+            "es", "--judge", role, "--device", "cpu", "--dtype", "fp16"]
+    assert main(argv) == 3
+    precision = listing(caplog, "were made in another precision")
+    for lang in ("en", "hi", "zh"):
+        assert (f"  harmful_{lang}_dev: made in bf16: run it with --dtype bf16 where bf16 runs, or leave it "
+                "out with --sets/--langs\n") in precision
+        assert f"harmful_{lang}_dev: made in another precision, skipped" in caplog.text
+    assert lines["en"] not in caplog.text and lines["hi"] not in caplog.text      # not even in its error
+    assert listing(caplog, "hold another judge's judgements") == ""
+    assert listing(caplog, "were skipped as stale") == f"1 cells {run_cmd.SKIPPED['stale']}:\n" \
+                                                       f"  harmful_es_dev: {lines['es']}\n"
+
+
+def test_judge_keys_refuse_a_restarted_cell_before_counting_its_keys_as_missing(monkeypatch):
+    # X8: lift restart left harmful_en_dev empty, and the second judge's line runs right after it, as its
+    # listing said. The listed keys of that cell are in no file, which says nothing about the key list: the
+    # cell needs generating. It is refused with lift generate's message before the unknown-key check, also
+    # with --allow-missing (which would judge nothing and exit 0), with or without P04's --sets/--langs; so is
+    # a missing file an explicit --sets and --langs name. Nothing is loaded. When every listed key is found,
+    # an empty cell (say a restarted utility cell, which the second judge never reads) stops nothing.
+    from lift.judge import pipeline
+
+    keys = [write_generation("harmful", lang, "dev") for lang in ("en", "hi")]
+    listed = generations_dir().parent / "stock_dev.txt"
+    listed.write_text("".join(k + "\n" for k in keys), encoding="utf-8")
+    assert main([*RESTART, "--sets", "harmful", "--langs", "en"]) == 0
+    monkeypatch.setattr(pipeline, "make_judge", lambda *a, **kw: pytest.fail("the judge was loaded"))
+    second = ["judge", "--variant", "stock", "--split", "dev", "--judge", "second", "--keys", str(listed)]
+    refused = r"^1 generations files are missing or empty, e\.g\. \[[^]]*harmful_{}_dev\.jsonl"
+    for extra in ([], ["--allow-missing"], ["--sets", "harmful", "--langs", "en"],
+                  ["--sets", "harmful", "--langs", "en", "--allow-missing"]):
+        with pytest.raises(SystemExit) as exc:
+            main([*second, *extra])
+        message = str(exc.value.code)
+        assert re.search(refused.format("en"), message)
+        assert "run lift generate first" in message and "listed keys" not in message
+    with pytest.raises(SystemExit, match=refused.format("zh")):
+        main([*second, "--sets", "harmful", "--langs", "hi", "zh"])
+    # An empty cell no listed key can be in (every key is found) is no reason to stop the line.
+    write_generation("utility", "en", "dev")
+    assert main([*RESTART, "--sets", "utility", "--langs", "en"]) == 0
+    assert run_cmd._key_cells("stock", "dev", keys[1:], sets=None, langs=None, allow_missing=False) == [
+        ("harmful", "hi")]
+
+
+def test_a_judge_lines_whole_cell_restart_names_the_line_that_generates_the_cell_again(monkeypatch, caplog):
+    # X8: a whole-cell restart empties the generations too, and lift judge judges only what is there: its
+    # listing names the lift generate line (in the run's precision) to run before the line that failed, then
+    # the other judge's refill line (lift run-dev and lift generate make the cell themselves).
+    from lift.judge import pipeline
+
+    pin(judge=True)
+    write_generation("harmful", "en", "dev", dtype="fp16")
+    for judge in ("qwen3guard", "frontier"):
+        write_judgements(judge, "harmful", "en", "dev")
+    restart = "lift restart --variant stock --split dev --sets harmful --langs en --dtype fp16"
+    error = pipeline.StaleJudgementsError("1 generations were made from another prompt text", command=restart)
+
+    def judge_file(path, **kw):
+        raise error
+
+    monkeypatch.setattr(pipeline, "judge_file", judge_file)
+    monkeypatch.setattr(pipeline, "make_judge", lambda *a, **kw: object())
+    argv = ["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "--device",
+            "cpu", "--dtype", "fp16"]
+    assert main(argv) == 3
+    stale = listing(caplog, "were skipped as stale")
+    cell = "--variant stock --split dev --sets harmful --langs en"
+    assert (f"  harmful_en_dev: {restart}\n"
+            f"    first generate it again: lift generate {cell} --dtype fp16\n"
+            f"    and once it is generated again: lift judge {cell} --judge second --sample 0.10 "
+            "--dtype fp16\n") in stale
+    assert "followed by the lines under it where they say" in stale
+    skipped: dict[str, dict[str, str]] = {}                 # lift run-dev or lift generate: no generate line
+    run_cmd._skip(skipped, "stock", "harmful", "en", "dev", error, judged="primary", dtype="fp16")
+    assert "lift generate" not in skipped["stale"]["harmful_en_dev"]
+
+
 @pytest.mark.parametrize("argv", [
     ["generate", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "hi"],
     ["run-dev", "--variant", "stock", "--sets", "harmful", "--langs", "hi", "--judge-device", "cuda:0"],
@@ -817,6 +971,36 @@ def tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, sets, *, n=3):
     return ["run-dev", "--variant", "stock", "--langs", "en", "--device", "cpu", "--judge-device", "cpu"]
 
 
+class Frontier:
+    """Stands in for the frontier second judge (an API judge: no stack, no precision)."""
+
+    judge_id = "openai/placeholder-model@t0"
+    short = "frontier"
+
+    def judge(self, items):
+        from lift.judge.pipeline import JudgeOutcome
+
+        return [JudgeOutcome("refusal", {"label": "REFUSAL", "reason": "placeholder"}, "") for _ in items]
+
+
+def with_second_judge(monkeypatch):
+    """The frontier second judge (``Frontier``) configured beside the primary, the real Qwen3Guard adapter in
+    the precision it is built with."""
+    from lift import config
+    from lift.judge import pipeline
+
+    config.load("project")["judges"]["safety_second"].update(provider="openai", model="placeholder-model")
+    monkeypatch.setattr(pipeline, "make_judge", lambda role, **kw: (
+        guard(dtype=kw.get("dtype") or "bf16") if role == "primary" else Frontier()))
+
+
+def second_judged():
+    """How many judgements the second judge's file of stock harmful_en_dev holds."""
+    from lift.judge import pipeline
+
+    return len(pipeline.load_records("stock", "harmful", "en", "dev", judge="second", complete=False))
+
+
 @pytest.mark.torch
 def test_an_fp16_run_leaves_a_bf16_cell_alone_and_a_restart_needs_force(fake_prompt_files, tiny_model_dir,
                                                                          monkeypatch, caplog):
@@ -861,38 +1045,12 @@ def test_a_restarted_cells_second_judge_sample_is_refilled_by_the_line_both_logs
 
     from fakes import make_prompt
 
-    from lift import config
-    from lift.judge import pipeline
-    from lift.judge.pipeline import JudgeOutcome
-    from lift.models.generate import generations_path, read_generations
-    from lift.paths import validation_dir
-
-    class Frontier:
-        """Stands in for the frontier second judge (an API judge: no stack, no precision)."""
-
-        judge_id = "openai/placeholder-model@t0"
-        short = "frontier"
-
-        def judge(self, items):
-            return [JudgeOutcome("refusal", {"label": "REFUSAL", "reason": "placeholder"}, "") for _ in items]
-
     argv = tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, ("harmful",), n=4)
-    config.load("project")["judges"]["safety_second"].update(provider="openai", model="placeholder-model")
-    monkeypatch.setattr(pipeline, "make_judge",
-                        lambda role, **kw: guard() if role == "primary" else Frontier())
+    with_second_judge(monkeypatch)
     monkeypatch.setattr("lift.audit.record_safety", lambda *a, **kw: "record.json")
-    keys = validation_dir() / "keys" / "second_judge" / "stock_dev.txt"     # P04's list (decisions.md 31)
-
-    def p04_list():
-        keys.parent.mkdir(parents=True, exist_ok=True)
-        cell = generations_path("stock", "harmful", "en", "dev")
-        keys.write_text("".join(g.key + "\n" for g in read_generations(cell)[:2]), encoding="utf-8")
-
-    def second_judged():
-        return len(pipeline.load_records("stock", "harmful", "en", "dev", judge="second", complete=False))
 
     assert main([*argv, "--sets", "harmful"]) == 0
-    p04_list()
+    keys = p04_list("har-0", "har-1")                       # P04's list (decisions.md 31)
     assert main(["judge", "--variant", "stock", "--split", "dev", "--judge", "second", "--keys",
                  str(keys)]) == 0
     assert second_judged() == 2
@@ -912,9 +1070,147 @@ def test_a_restarted_cells_second_judge_sample_is_refilled_by_the_line_both_logs
     logged = re.search(r"frontier\S*harmful_en_dev\.jsonl: (lift judge [^\n]+)", caplog.text)
     assert logged and shlex.split(logged.group(1)) == refill
     assert main([*argv, "--sets", "harmful"]) == 0
-    p04_list()                                              # P04's list, drawn again for the new keys
+    p04_list("har-0", "har-1")                              # P04's list, drawn again for the new keys
     assert main(refill[1:]) == 0
     assert second_judged() == 2 and judged("stock", "harmful", "en") == 4
+
+
+@pytest.mark.torch
+def test_a_refill_line_waits_for_p04_to_draw_the_key_list_again_when_the_keys_changed(fake_prompt_files,
+                                                                                     tiny_model_dir,
+                                                                                     monkeypatch, caplog):
+    # X9: P04's list holds har-1, the prompt fixed after the second judge read the cell (every validated item
+    # is in it). The cell made again has a new key for it, so the refill line in run-dev's listing, and the
+    # restart's log, say to run it only after P04 draws the list again (run before, it would exit 1 and end
+    # a Colab job). Followed literally, the second judge's sample is back.
+    pytest.importorskip("torch")
+    import shlex
+
+    from fakes import make_prompt
+
+    argv = tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, ("harmful",), n=4)
+    with_second_judge(monkeypatch)
+    monkeypatch.setattr("lift.audit.record_safety", lambda *a, **kw: "record.json")
+    assert main([*argv, "--sets", "harmful"]) == 0
+    second = ["judge", "--variant", "stock", "--split", "dev", "--judge", "second", "--keys"]
+    assert main([*second, str(p04_list("har-1", "har-3"))]) == 0
+
+    fake_prompt_files[("harmful", "en")][1] = make_prompt("har-1", "en", "harmful", "dev", text="question 1b")
+    caplog.clear()
+    assert main([*argv, "--sets", "harmful"]) == 3
+    found = re.search(r"harmful_en_dev: (lift restart [^\n]+)\n    and once it is generated again, after P04 "
+                      r"draws the key list again \(lift validate second-judge-sample, then lift sync push\): "
+                      r"(lift judge [^\n]+)\n", listing(caplog, "were skipped as stale"))
+    assert found
+    restart, refill = found.group(1), shlex.split(found.group(2))
+    caplog.clear()
+    assert main(restart.split()[1:]) == 0
+    assert "run a --keys line only after P04 draws the key list again" in caplog.text
+    assert main([*argv, "--sets", "harmful"]) == 0
+    with pytest.raises(SystemExit, match="1 listed keys are in none"):        # P04's list, not drawn again
+        main(refill[1:])
+    p04_list("har-1", "har-3")                              # P04 draws it again: har-1's new key
+    assert main(refill[1:]) == 0
+    assert second_judged() == 2
+
+
+def test_a_refill_line_needs_no_new_key_list_when_the_cell_keeps_its_keys(monkeypatch, isolated_dirs):
+    # X9: a cell begun under another stack is made again under the same keys (the key leaves the stack out),
+    # so P04's list still holds and the refill line is plain; any other cause may change them.
+    from lift.models.generate import StaleOutputError
+
+    write_generation("harmful", "en", "dev")
+    write_judgements("frontier", "harmful", "en", "dev")
+    p04_list("har-0001")
+    repo_layout(monkeypatch, isolated_dirs)
+    restart = "lift restart --variant stock --split dev --sets harmful --langs en"
+    refill = ("lift judge --variant stock --split dev --sets harmful --langs en --judge second "
+              "--keys validation/keys/second_judge/stock_dev.txt")
+    redraw = ", after P04 draws the key list again (lift validate second-judge-sample, then lift sync push)"
+    for keys_changed, note in ((False, ""), (True, redraw)):
+        skipped: dict[str, dict[str, str]] = {}
+        exc = StaleOutputError("x", command=restart, keys_changed=keys_changed)
+        run_cmd._skip(skipped, "stock", "harmful", "en", "dev", exc, judged="primary", dtype="bf16")
+        remedy = f"{restart}\n    and once it is generated again{note}: {refill}"
+        assert skipped == {"stale": {"harmful_en_dev": remedy}}
+
+
+@pytest.mark.torch
+def test_the_second_judges_own_stale_line_followed_literally_judges_its_sample_again(fake_prompt_files,
+                                                                                     tiny_model_dir,
+                                                                                     monkeypatch, caplog):
+    # X8: after a translation fix (decision 9) the canonical second-judge line (decisions.md 31) finds the
+    # cell stale. Its listing names the whole-cell restart and, under it, the lift generate line a judge line
+    # needs (the restart empties the generations too), when to run the line that failed (P04's list may hold
+    # a changed key), and the primary judge's refill. Run too early, the judge line is refused with lift
+    # generate's message, also with --allow-missing, never as a stale key list. Followed literally, every
+    # judgement of the cell is back.
+    pytest.importorskip("torch")
+    from fakes import make_prompt
+
+    argv = tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, ("harmful",), n=4)
+    with_second_judge(monkeypatch)
+    monkeypatch.setattr("lift.audit.record_safety", lambda *a, **kw: "record.json")
+    assert main([*argv, "--sets", "harmful"]) == 0
+    second = ["judge", "--variant", "stock", "--split", "dev", "--judge", "second", "--keys",
+              str(p04_list("har-0", "har-3"))]
+    assert main(second) == 0 and second_judged() == 2
+
+    fake_prompt_files[("harmful", "en")][1] = make_prompt("har-1", "en", "harmful", "dev", text="question 1b")
+    caplog.clear()
+    assert main(second) == 3
+    found = re.search(r"harmful_en_dev: (lift restart [^\n]+)\n"
+                      r"    first generate it again: (lift generate [^\n]+)\n"
+                      r"    then the line that failed, after P04 draws the key list again \(lift validate "
+                      r"second-judge-sample, then lift sync push\)\n"
+                      r"    and once it is generated again: (lift judge [^\n]+)\n",
+                      listing(caplog, "were skipped as stale"))
+    assert found
+    restart, generate, refill = found.groups()
+    assert generate == "lift generate --variant stock --split dev --sets harmful --langs en"
+    assert refill == "lift judge --variant stock --split dev --sets harmful --langs en --judge primary"
+
+    assert main(restart.split()[1:]) == 0                   # the job: right after lift sync pull
+    for extra in ([], ["--allow-missing"]):                 # too early: the cell is empty
+        with pytest.raises(SystemExit, match="run lift generate first"):
+            main([*second, *extra])
+    assert main(generate.split()[1:]) == 0
+    p04_list("har-0", "har-3")                              # P04 draws the list again
+    assert main(second) == 0
+    assert main(refill.split()[1:]) == 0
+    assert second_judged() == 2 and judged("stock", "harmful", "en") == 4
+
+
+@pytest.mark.torch
+def test_a_t4_line_lists_a_bf16_cell_with_a_fixed_prompt_as_made_in_bf16(fake_prompt_files, tiny_model_dir,
+                                                                          monkeypatch, caplog):
+    # X7: Colab made harmful_en in bf16, then a translation was fixed (decision 9). On the T4, kaggle/README's
+    # separate-steps job (lift generate, then lift judge, both --dtype fp16) and the frontier second judge's
+    # line all list the cell as made in bf16, never with the restart line: the T4 restarts in bf16 by default,
+    # so following it would discard Colab's cell and let the T4's next fp16 line make it in fp16.
+    pytest.importorskip("torch")
+    from fakes import make_prompt
+
+    from lift.models.generate import generations_path
+
+    argv = tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, ("harmful",), n=3)
+    with_second_judge(monkeypatch)
+    monkeypatch.setattr("lift.audit.record_safety", lambda *a, **kw: "record.json")
+    assert main([*argv, "--sets", "harmful", "--dtype", "bf16"]) == 0               # Colab
+    cell = generations_path("stock", "harmful", "en", "dev")
+    bf16 = cell.read_bytes()
+    listed = p04_list("har-0", "har-1")
+    fake_prompt_files[("harmful", "en")][1] = make_prompt("har-1", "en", "harmful", "dev", text="question 1b")
+    t4 = ["--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "--device", "cpu",
+          "--dtype", "fp16"]
+    second = ["--judge", "second", "--keys", str(listed)]
+    for line in (["generate", *t4], ["judge", *t4], ["judge", *t4, *second]):
+        caplog.clear()
+        assert main(line) == 3
+        assert ("  harmful_en_dev: made in bf16: run it with --dtype bf16 where bf16 runs, or leave it out "
+                "with --sets/--langs\n") in listing(caplog, "were made in another precision")
+        assert listing(caplog, "were skipped as stale") == "" and "lift restart" not in caplog.text
+    assert cell.read_bytes() == bf16
 
 
 # --- lift smoke -------------------------------------------------------------------------------------------
