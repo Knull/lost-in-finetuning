@@ -2,6 +2,74 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 4, 2026 (night): P03 training, utility, Belebele and gate details, before any adapter was trained
+
+Pinned while writing P03 (branch p03-train). No adapter, utility verdict or Belebele score existed
+yet; Gate 0 had just passed on the A100. Numbered from 49.
+
+49. **How an adapter trains** (`lift.train.lora`, `lift train`).
+    - Assistant tokens are `lift.models.load.encode_chat_turn`'s answer part: the answer the template
+      writes after the generation prompt, closing tokens included (`<|END_RESPONSE|><|END_OF_TURN_TOKEN|>`
+      for Tiny Aya), so the model learns to stop. The held-out loss scores exactly these tokens.
+    - TRL 1.14.2 gets pre-tokenized rows (input_ids, labels with -100) and
+      `dataset_kwargs={"skip_prepare_dataset": True}`: left to prepare the data, it truncates and then
+      silently drops rows left with no supervised token. `loss_type` is pinned to "nll" (1.14.2's
+      default, "chunked_nll", patches the LM head's forward). trl 1.14.2 and datasets 5.1.0 are pinned
+      in constraints.txt.
+    - Rows are truncated to max_seq_len (1024), keeping the start; truncated rows are counted. A row
+      left with no supervised token (the preamble and a long user turn filling the window) stops the
+      run before the model loads, listing the rows. `--drop-unfit` drops exactly those rows and records
+      them; using it needs its own dated entry here. Likely candidates from the data: ind-05992,
+      ind-10921 and ind-11562 (3,137-character user turns) and ind-13814 (2,053).
+    - Seeds: `set_seed(seed)` for python, numpy and torch, and the data order from `data_seed = 1000 x
+      seed`. accelerate seeds epoch e's order with data_seed + e, so data_seed = seed would replay seed
+      2's first epoch as seed 1's second.
+    - Warm-up 0.03 is `warmup_steps=0.03` (transformers 5.22.1 has no warmup_ratio). The effective
+      batch stays 16 as per-device batch x accumulation; the loss is normalised over the accumulated
+      batch's tokens, so the split does not change the update.
+    - After saving: the adapter hash, an fp32 merge-parity check on 20 dev prompts (every token must
+      match, or the adapter is not registered), and a push of outputs/adapters/{name} at once. The
+      registry entry written on a GPU VM is lost with it (configs/ is not synced): on the laptop,
+      `lift sync pull` then `lift register-adapter NAME` writes the same entry from the pulled files,
+      and the entry is committed before any job evaluates the adapter.
+    - The stress adapter is adapter-indicalign-stress-s1 (item 47); prompts/P03_train.md's
+      adapter-aya-stress-s1 predates item 47.
+50. **Utility verdicts** (`lift utility`).
+    - Each pair is judged in both orders: candidate as A (order_ab) and as B (order_ba). A judge
+      failure in one order (a refusal, a reply unparseable after the reminder, an item-level API
+      error) is recorded (error_ab / error_ba) and scored as a tie in that order, so the pair stays in
+      the denominator (rule 3); every win rate is reported with the number of failed orders and its
+      bounds with failures counted as losses and as wins.
+    - UtilityVerdict gained optional fields (split, lang, both generation keys and output hashes, the
+      reasons and errors), so a verdict names the exact answers it judged. Verdicts live in
+      outputs/utility/{judge}/{variant}/utility_hi_{split}.jsonl and the AuditKIT record in
+      outputs/metrics/auditkit_utility/: lift.sync pairs anything under outputs/judgements/ or
+      outputs/metrics/auditkit/{judge}/{variant}/ with safety judgements and would hold these back.
+    - Hindi fidelity is the share of outputs whose top GlotLID label is in accept_labels.hi (the
+      is_lang share is reported beside it).
+51. **Message Batches.** Bulk frontier judging (the 10% second-judge sample and every utility pair)
+    goes through the Message Batches API as a cache pre-fill: one batch for a whole `lift judge` or
+    `lift utility` run, then the existing per-item code reads the cached replies, so batch and sync
+    judgements are the same and the judge id does not depend on the path. The rubric is sent as a
+    cached system block, but both rubric system messages are under Sonnet 5.5's 512-token minimum, so
+    no caching is expected (usage records it); the saving in item 16 is the batch's 50% alone.
+52. **Belebele and held-out loss** (`lift belebele`, `lift heldout-loss`).
+    - Belebele: exactly one BOS, then the frozen P/Q/A-D/Answer: text with the fields as published (no
+      stripping), no chat template. A letter's score is the log-probability of its tokens after
+      "Answer:" (the next-token log-probability when " A" is one token); ties go to the first letter
+      and are counted.
+    - Held-out loss: the utility dev split unless --split final (rule 1), per-token NLL of the
+      reference answer's assistant tokens, never truncated, pooled and by source (Aya references are
+      human-written, IndicAlign's are machine-translated).
+53. **Gates 1 and 2** (`lift gate`).
+    - Gate 1's gain check compares each seed-1 standard adapter's dev win rate (the point estimate, as
+      the README states it) with 0.55 and prints its interval; the judge check reads P04's
+      outputs/metrics/validation/gate1.json (missing means pending).
+    - Gate 2 reads the pair through `pipeline.paired_labels` (primary judge). n is every dev prompt
+      the cell holds, reported beside the README's 172; "at least 8 points" is checked in exact
+      arithmetic. Without `--candidate` it prints the branch for each candidate, since the candidate is
+      chosen from Gate 1.
+
 ## Nov 4, 2026 (afternoon): how we reach Google Translate, before any translation was made
 
 48. **Google Translate through the Cloud Translation API v2 (NMT), not the web endpoint.** The

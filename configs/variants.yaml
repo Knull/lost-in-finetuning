@@ -1,8 +1,12 @@
 # Registry of every model variant that goes through the harness. Each entry is a recipe applied at
 # load time (stock weights + adapter + intervention), not a stored checkpoint.
-# Adapter paths and hashes are filled in as adapters are trained (P03). Names:
+# Adapter entries are written by `lift train` (on the GPU VM, where the edit is lost with the VM) and by
+# `lift register-adapter NAME` on the laptop after `lift sync pull`, from the pulled adapter's
+# registration.json; commit the entry before any job evaluates the adapter (P03, decisions item 49).
+# Never edit an entry's method, adapter, seed, params or artifacts afterwards: they are in every cache key.
+# Names:
 #   stock
-#   adapter-{candidate}-{recipe}-s{seed}            e.g. adapter-aya-std-s1, adapter-aya-stress-s1
+#   adapter-{candidate}-{std|stress}-s{seed}        e.g. adapter-aya-std-s1, adapter-indicalign-stress-s1
 #   wiseft-l{lambda:.2f}-{adapter}                  e.g. wiseft-l0.50-adapter-aya-std-s1
 #   resta-a{alpha:.2f}-{adapter}
 #   cast-m{strength:.1f}-{adapter}

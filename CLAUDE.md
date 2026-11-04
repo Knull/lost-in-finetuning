@@ -64,7 +64,10 @@ src/lift/       config io paths schemas cachekey splits selection manifest cli  
   data/         polyrefuse translate sources sft build                            <- P01
   models/       load variants generate (P02), loglik (P03)
   judge/        labels qwen3guard frontier (safety) pipeline                      <- P02
+                frontier (pairwise, Message Batches), local_pairwise              <- P03
   train/        lora (P03), merge (P02)
+  utility.py    utility pairs, verdicts, win rate, Hindi fidelity                 <- P03
+  gates.py      Gates 1 and 2                                                     <- P03
   repair/       wiseft resta cast                                                 <- P05
   diagnose/     activations signatures                                            <- P06
   stats/        paired agreement (implemented)
@@ -94,6 +97,13 @@ six languages, so pairing, splitting and clustering all go by pid.
 - Prompts: `data/prompts/{set}_{lang}.jsonl`
 - Generations: `outputs/generations/{variant}/{set}_{lang}_{split}.jsonl`
 - Judgements: `outputs/judgements/{judge}/{variant}/{set}_{lang}_{split}.jsonl`
+- Utility verdicts: `outputs/utility/{judge}/{variant}/utility_hi_{split}.jsonl`; per-item
+  log-likelihood scores: `outputs/scores/{belebele,heldout_loss}/{variant}/*.jsonl`. Never put either
+  under outputs/judgements/ or outputs/metrics/auditkit/{judge}/{variant}/: lift.sync pairs those
+  with safety cells.
+- Metrics: `outputs/metrics/{utility,belebele,heldout_loss}/{variant}_{split}.json`,
+  `outputs/metrics/gate{0,1,2}.json`
+- Adapters: `outputs/adapters/{name}/` (name `adapter-{candidate}-{std|stress}-s{seed}`)
 - Run manifests (cost section): `outputs/manifests/*.json`
 
 ## Environment
@@ -223,5 +233,20 @@ six languages, so pairing, splitting and clustering all go by pid.
 - **P02 (harness).** models.load/generate/variants (stock, adapter), train.merge, prompts,
   judge.qwen3guard, judge.frontier (safety), judge.pipeline, audit.record_safety, sync, gate0, and
   `lift smoke|generate|judge|run-dev|restart|sync|remote`, with colab/job.py and kaggle/runner.ipynb.
+- **P03 (training and gain).** Implemented and tested offline:
+  - `lift train` (train.lora: TRL SFTTrainer + PEFT LoRA on pre-tokenized rows, loss on
+    `models.load.encode_chat_turn`'s answer tokens only, rows with no supervised token refused
+    before the model loads, fp32 merge parity, push of outputs/adapters/{name}) and
+    `lift register-adapter` (the laptop writes the configs/variants.yaml entry from the pulled
+    adapter's registration.json; commit it before any job evaluates the adapter).
+  - judge.frontier: `pairwise()` (configs/rubrics/utility_v1.md) and the Message Batches cache
+    pre-fill (`prefill_safety`, `prefill_pairwise`; batch state in
+    outputs/judge_cache/frontier/*.batches.jsonl). `lift judge --judge second` pre-fills the whole
+    run in one batch.
+  - `lift utility` (lift.utility: both orders, UtilityVerdicts in outputs/utility/, win rate,
+    Hindi fidelity, `audit.record_utility`; `--generate-only` on the GPU, `--judge-only` on the
+    laptop; judge.local_pairwise is the Qwen3-8B fallback, used only when asked for).
+  - `lift belebele` and `lift heldout-loss` (models.loglik; scores in outputs/scores/).
+  - `lift gate 1|2` (lift.gates; outputs/metrics/gate{1,2}.json and .md). Decisions 49-53.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.
