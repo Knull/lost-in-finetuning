@@ -2009,6 +2009,59 @@ def test_pull_only_never_merges_judgements_against_generations_it_left_out(tmp_p
     assert full.files == {GEN: "update", JUD: "merge"} and full.ok and keys_of(local(JUD)) == ["k1", "k2"]
 
 
+def rejudged_on_colab(tmp_path: Path, monkeypatch) -> tuple[FakeHub, str]:
+    """Colab judged the cell and pushed it with its AuditKIT record, and the laptop pulled everything. Colab
+    then judged it again with the primary judge (lift restart --judge primary, then judge: a fixed parser,
+    say) and pushed the same generations with new judgements and a new record. Ends on the laptop."""
+    hub, rec = FakeHub(), record_path()
+    g = [gen_row("k1", "p1", output="o1"), gen_row("k2", "p2", output="o2")]
+    machine(tmp_path / "colab", monkeypatch)
+    write(local(GEN), lines(*g))
+    write(local(JUD), judged(g))
+    write(local(rec), audit_record(g))
+    assert sync.push(api=hub).ok
+    machine(tmp_path / "laptop", monkeypatch)
+    assert sync.pull(api=hub).ok
+    machine(tmp_path / "colab", monkeypatch)
+    restart(judge_dir="qwen3guard")
+    write(local(JUD), judged(g, "harmful"))
+    write(local(rec), audit_record(g, "harmful"))
+    assert sync.push(api=hub).ok
+    machine(tmp_path / "laptop", monkeypatch)
+    return hub, rec
+
+
+@pytest.mark.parametrize("only", [["outputs/judgements"], ["outputs/generations", "outputs/judgements"]])
+def test_pull_only_never_checks_a_file_it_left_out_against_files_it_took(tmp_path, monkeypatch, only):
+    """`pull --only outputs/judgements` takes the Hub's judgements of a cell judged again, but not its record:
+    the old record here does not count them. Checked against them, it would be UNPAIRED with a restart line
+    that, followed, empties the Hub's valid judgements. It differs from the Hub's and the pull left it out, so
+    it is reported as not pulled (exit 3: pull without --only), which takes the Hub's record."""
+    hub, rec = rejudged_on_colab(tmp_path, monkeypatch)
+    valid = hub.files[JUD]
+    pulled = sync.pull(only, api=hub)
+    assert pulled.files == {JUD: "update", **({GEN: "same"} if "outputs/generations" in only else {})}
+    assert local(JUD).read_bytes() == valid and local(rec).read_bytes() != hub.files[rec]
+    assert not pulled.unpaired and pulled.unchecked == {rec: rec} and not pulled.ok
+    summary = pulled.summary()
+    assert f"  UNCHECKED {rec} (not pulled)" in summary and any("without --only" in line for line in summary)
+    assert not any("lift restart" in line for line in summary)
+    full = sync.pull(api=hub)
+    assert full.ok and full.files[rec] == "update" and local(rec).read_bytes() == hub.files[rec]
+    assert sync.push(api=hub).ok and hub.files[JUD] == valid
+
+
+def test_cli_pull_only_reports_a_file_it_left_out_without_a_restart_line(tmp_path, monkeypatch, capsys):
+    """The command form of the case above: exit 3 with the file not pulled, and no restart line to follow."""
+    hub, rec = rejudged_on_colab(tmp_path, monkeypatch)
+    serve(monkeypatch, hub)
+    assert run_cli(["sync", "pull", "--only", "outputs/judgements"]) == 3
+    out = capsys.readouterr().out
+    assert f"UNCHECKED {rec} (not pulled)" in out and "pull without --only" in out
+    assert "UNPAIRED" not in out and "lift restart" not in out
+    assert run_cli(["sync", "pull"]) == 0 and local(rec).read_bytes() == hub.files[rec]
+
+
 def test_push_only_generations_names_a_push_of_the_judgements_here_that_pair():
     """A cell made again here (lift restart, then generated and judged) goes up with --only
     outputs/generations. The Hub's judgements of the old outputs no longer pair, but the ones here do: the

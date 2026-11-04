@@ -6,8 +6,8 @@ copies went under conflicts/<utc-timestamp>/ in the runs repo; pull: the local c
 status: a pull or push would conflict), or judgements files or AuditKIT records here or on the Hub do
 not pair with their cell's generations (the summary names the line that settles them: the lift restart
 line that sets them aside, or the lift sync push that sends the copies here when those pair), or a
-pull could not check them because --only left out the files they were made from (pull without
---only), so a rerun changes nothing and runners report it without retrying; 1 a transient or unknown
+pull could not check them because --only left them, or the files they were made from, out (pull
+without --only), so a rerun changes nothing and runners report it without retrying; 1 a transient or unknown
 error: not everything was transferred, and a rerun is safe (sync compares content, so it resumes); 2 a
 problem no rerun fixes (SyncError.permanent: a token missing, rejected or not allowed, the runs repo
 missing or not private, LIFT_RUNS_REPO unset or malformed, HF_DEBUG set, a bad path; argparse's own
@@ -31,8 +31,8 @@ _EXIT_CODES = ("exit codes: 0 done; 3 done, but some files conflicted (push: the
                "pull or push would conflict), or judgements or AuditKIT records do not pair with their "
                "cell's generations (the summary names the line that settles them: a lift restart line, or "
                "a lift sync push that sends the copies here), or a pull could not check them because --only "
-               "left out what they were made from, so do not retry; 1 a transient or unknown error: not "
-               "everything was transferred, safe to rerun; 2 "
+               "left them, or what they were made from, out, so do not retry; 1 a transient or unknown "
+               "error: not everything was transferred, safe to rerun; 2 "
                "a problem no rerun fixes (a token missing, rejected or not allowed, the runs repo missing or "
                "not private, LIFT_RUNS_REPO unset or malformed, HF_DEBUG set, a bad argument): fix it, do "
                "not retry")

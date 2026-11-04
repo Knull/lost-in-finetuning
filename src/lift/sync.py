@@ -53,9 +53,9 @@ side changed since:
   not taken from the Hub (it goes with the Hub's generations); a merge of judgements that would not
   pair with the generations here is not written; and every judgements file and record of a cell the
   pull changed (kept in the sync state until a pull has reported it, so a retry after an error checks
-  it) that no longer pairs with the generations here is reported (``unpaired``). One whose generations,
-  or a record's judgements, --only left out of the pull while they differ here and on the Hub is
-  neither checked against them nor merged (``unchecked``: pull without --only).
+  it) that no longer pairs with the generations here is reported (``unpaired``). One that --only left
+  out of the pull, or whose generations, or a record's judgements, it left out, while that file differs
+  here and on the Hub is neither checked nor merged (``unchecked``: pull without --only).
 
 Push sends exactly the files it planned (new, updated, merged, forced) and the conflict copies,
 with ``create_commit``. Never upload_folder: it re-sends files nobody changed and guards only the
@@ -1209,8 +1209,8 @@ def _unpaired_here(cells: Iterable[tuple[str, str]], report: SyncReport,
     """Pull: the judgements files and AuditKIT records here of ``cells`` (those this pull changed, and those
     an earlier pull changed but never reported) that no longer pair with the cell's generations here go to
     ``report.unpaired`` (path -> restart line). A cell without generations here (a pull of judgements
-    alone) is left out. A file whose generations, or a record's judgements, this pull left out (--only)
-    while they differ here and on the Hub is not checked against them (``unpulled``): it goes to
+    alone) is left out. A file this pull left out (--only), or whose generations, or a record's judgements,
+    it left out, while that file differs here and on the Hub is not checked (``unpulled``): it goes to
     ``report.unchecked``."""
     for cell in sorted(cells):
         if (gen := _local_bytes(_generations_of(cell))) is None:
@@ -1228,10 +1228,12 @@ def _unpaired_here(cells: Iterable[tuple[str, str]], report: SyncReport,
 
 def _unpulled(path: str, prefixes: Sequence[str], tree: dict[str, Any],
               digest: Callable[[Path], Digest]) -> str | None:
-    """Pull: the first file ``path`` (a judgements file or AuditKIT record) was made from that this pull left
-    out (--only) while it differs here and on the Hub, None when there is none. The Hub's copy of ``path``
-    goes with the Hub's copy of that file, so checking it against the one here would name a wrong remedy."""
-    return next((s for s in _judged_from(path) or _recorded_from(path)
+    """Pull: ``path`` (a judgements file or AuditKIT record) itself, else the first file it was made from,
+    that this pull left out (--only) while it differs here and on the Hub; None when there is none. The
+    Hub's copies go together: checking a file against one the pull left out, or a file it left out against
+    the ones it took, would name a wrong remedy (a restart line that sets aside the valid files it took)."""
+    made_from = _judged_from(path) or _recorded_from(path)
+    return next((s for s in (path, *made_from)
                  if not _selected(s, prefixes) and not _same_as_hub(s, tree, digest)), None)
 
 
@@ -1294,8 +1296,8 @@ class SyncReport:
     # push: the same on the Hub, left there by this push (it does not send them) -> the line that settles
     # them: the restart line, or the push that sends the copy here when that one pairs (PUSH_FORCE, PUSH_ALL).
     unpaired_on_hub: dict[str, str] = field(default_factory=dict)
-    # pull: judgements files and AuditKIT records here not checked, because a file they were made from was
-    # left out of this pull (--only) and differs here and on the Hub -> that file (a merge is not written).
+    # pull: judgements files and AuditKIT records here not checked: they, or a file they were made from, were
+    # left out of this pull (--only) and differ here and on the Hub -> that file (no merge is written).
     unchecked: dict[str, str] = field(default_factory=dict)
     busy: list[str] = field(default_factory=list)        # changed here while sync ran: left as they are
 
@@ -1329,7 +1331,7 @@ class SyncReport:
         lines += [f"  CONFLICT {path}{self._notes(path)}" for path in self.conflicts]
         lines += [f"  UNPAIRED {path}" for path in sorted(self.unpaired) if self.files.get(path) != CONFLICT]
         lines += [f"  UNPAIRED {path} (on the Hub)" for path in sorted(self.unpaired_on_hub)]
-        lines += [f"  UNCHECKED {path} ({source} was not pulled)"
+        lines += [f"  UNCHECKED {path} ({'not pulled' if source == path else f'{source} was not pulled'})"
                   for path, source in sorted(self.unchecked.items()) if self.files.get(path) != CONFLICT]
         would = "would be " if self.dry_run else ""
         if kept := self.paths(KEEP):
@@ -1399,9 +1401,9 @@ class SyncReport:
             else:
                 lines.append(f"{gone}: run lift sync pull, then `{line}`, judge the cell again and push")
         if self.unchecked:
-            lines.append(f"  {_kinds(list(self.unchecked))} here were not checked: files they were made from "
-                         "differ here and on the Hub and were left out of this pull (--only). Run lift sync "
-                         "pull without --only, which checks them")
+            lines.append(f"  {_kinds(list(self.unchecked))} here were not checked: they, or files they were "
+                         "made from, differ here and on the Hub and were left out of this pull (--only). Run "
+                         "lift sync pull without --only, which checks them")
         return lines
 
 
@@ -1437,9 +1439,9 @@ def pull(subdirs: Sequence[str] = (), *, force: bool = False, api: Any = None) -
     that no longer pair (``report.unpaired``), leave ``report.ok`` False; ``force`` lets the remote copy
     win conflicts instead, keeping each replaced local copy under outputs/.sync-backup/<utc-timestamp>/<path>
     (``report.backups``). A cell the pull changes stays in the sync state until a pull has reported it, so a
-    retry after an error still checks it. A judgements file or record whose generations (or judgements) the
-    pull left out (--only) while they differ here and on the Hub is neither checked against them nor merged
-    (``report.unchecked``, which leaves ``report.ok`` False too)."""
+    retry after an error still checks it. A judgements file or record the pull left out (--only), or whose
+    generations (or judgements) it left out, while that file differs here and on the Hub is neither checked
+    nor merged (``report.unchecked``, which leaves ``report.ok`` False too)."""
     selected = select(subdirs)
     remote = _connect(api)
     tree = _remote_tree(remote)
