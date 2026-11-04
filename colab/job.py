@@ -19,11 +19,12 @@ without which nothing could be pulled or pushed; run each line as `python -m lif
 the first failure, with a `lift sync push` checkpoint after every line except sync lines and the last
 one; then, in `finally`, run the final `lift sync push` and write the status and the marker. The final
 push runs once a line other than a lift sync line ran: nothing else leaves new files on the VM. A
-generate, judge or run-dev line that exits 3 (done, but some cells were skipped: stale, made in another
-precision or judged by another judge; or their AuditKIT record was refused; each listed with its
+generate, judge, run-dev, utility, belebele or heldout-loss line that exits 3 (done, but some cells
+were skipped: stale, made in another precision or judged by another judge; or their AuditKIT record
+was refused; or they are left for a rerun, such as a Message Batch still running; each listed with its
 remedy) does not end the job: it is reported, the next lines run (they do not depend on those cells),
-and the job fails at the end ("partial_lines" in the status). Any other command's exit 3 is a
-failure like any other.
+and the job fails at the end ("partial_lines" in the status). Any other command's exit 3 (lift train
+and lift gate never exit 3) is a failure like any other.
 
 lift sync's exit code decides what follows. A pull or push that exits 1 (an error), or a push killed
 for running too long, is tried again, 4 tries in about 10 minutes; a pull killed for silence is not,
@@ -80,11 +81,13 @@ SYNC_REFUSED_RC = 2  # lift sync: a problem no retry can fix (the token, the run
 SYNC_CONFLICT_RC = 3  # lift sync: done, but conflicts (copies kept) or unpaired files (named in its summary)
 PUSHED = (0, SYNC_CONFLICT_RC)
 SETUP_FAILED_RC = 3  # lift remote's exit code for "the job could not be set up on the VM"
-# lift generate, judge and run-dev: done, but some cells were skipped or their AuditKIT record refused
-# (each listed with its remedy). The job goes on with its next lines and fails at the end; any other
-# command's 3 is a failure as before.
+# The commands whose exit 3 means done, but some cells were skipped (stale, made in another precision,
+# judged by another judge), had their AuditKIT record refused, or are left for a rerun (lift utility
+# --no-wait while its Message Batch runs), each listed with its remedy. The job goes on with its next
+# lines and fails at the end; any other command's 3 is a failure as before (lift train and lift gate
+# never exit 3). kaggle/runner.ipynb (CELL_COMMANDS) and colab/README.md (PARTIAL) hold the same list.
 PARTIAL_RC = 3
-PARTIAL_COMMANDS = ("generate", "judge", "run-dev")
+PARTIAL_COMMANDS = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss")
 REF_HINT = "GPU jobs need a ref with both P01 and P02 (colab/README.md, 'Code version')"
 STOPPED_RC = 1  # a stop request before a line started: the job did not finish
 MIN_SECRET_LEN = 8  # shorter values (a spend cap such as "20") are settings, not secrets: not masked
@@ -485,8 +488,9 @@ class Job:
             elif words[1] in PARTIAL_COMMANDS and rc == PARTIAL_RC and not self.killed:
                 status["partial_lines"].append(i)
                 self.note(f"{where} exited {rc} in {_hms(self.clock() - t)}: done, but some cells were "
-                          "skipped or their AuditKIT record refused (its listing above names each with its "
-                          "remedy); the next lines run, and the job fails at the end")
+                          "skipped, had their AuditKIT record refused or are left for a rerun (its listing "
+                          "above names each with its remedy); the next lines run, and the job fails at the "
+                          "end")
             elif not (rc == 0 or (sync and rc == SYNC_CONFLICT_RC)) or self.killed:
                 status["rc"], status["failed_line"], status["killed"] = rc or 1, i, self.killed
                 if self.stop_reason and (self.killed == self.stop_reason or sync):  # stopped, or tries cut
@@ -508,8 +512,8 @@ class Job:
         partial = status["partial_lines"]
         status["rc"] = PARTIAL_RC if partial else 0
         if partial:
-            self.note(f"{len(partial)} line(s) exited {PARTIAL_RC}, done but with cells skipped: line(s) "
-                      f"{', '.join(str(i + 1) for i in partial)}; the job fails")
+            self.note(f"{len(partial)} line(s) exited {PARTIAL_RC}, done but with cells skipped or left for "
+                      f"a rerun: line(s) {', '.join(str(i + 1) for i in partial)}; the job fails")
 
     def _refused(self, status, what):
         """A lift sync call exited 2: a problem no retry can fix (a token that cannot write, the runs repo

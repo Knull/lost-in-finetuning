@@ -90,11 +90,13 @@ lift info
   repo root does on the laptop. A relative path such as
   `validation/keys/second_judge/stock_dev.txt` means the same file.
 - The first failing line stops the job, with three exceptions. One is a push: see below. Another is
-  a `lift generate`, `lift judge` or `lift run-dev` line that exits 3: it is done, but skipped some
-  cells (stale, made in another precision, or judged by another judge) or had their AuditKIT record
-  refused, and it lists each with its remedy (Troubleshooting). Its checkpoint push and the next
-  lines still run, and the cell raises at the end. The third is a `lift sync` line that exits 3
-  (below): the next lines still run too. Any other line's exit 3 stops the job.
+  a `lift generate`, `lift judge`, `lift run-dev`, `lift utility`, `lift belebele` or
+  `lift heldout-loss` line that exits 3: it is done, but skipped some cells (stale, made in another
+  precision, or judged by another judge), had their AuditKIT record refused, or left some for a
+  rerun (`lift utility --no-wait` while its Message Batch runs), and it lists each with its remedy
+  (Troubleshooting). Its checkpoint push and the next lines still run, and the cell raises at the
+  end. The third is a `lift sync` line that exits 3 (below): the next lines still run too. Any other
+  line's exit 3 stops the job (`lift train` and `lift gate` never exit 3).
 - After every line that succeeds (or exits 3, as above), `lift sync ...` lines excepted, the runner
   runs `lift sync push` as a checkpoint. It pushes once more in `finally`, even after a failure or
   an interrupt, so the job never needs its own push line.
@@ -345,8 +347,8 @@ secrets getter, and the `lift_env` path in cell 2.
   only in `/kaggle/temp/lift`: once it is fixed, and before the session ends, run cell 2 with `JOB`
   set to `lift sync push`.
 - **A line exits 3 and lists skipped cells.** `lift generate`, `lift judge` and `lift run-dev`
-  finish the other cells, then list each skipped cell with its remedy. The job went on with the
-  next lines.
+  finish the other cells, then list each skipped cell with its remedy; `lift utility`,
+  `lift belebele` and `lift heldout-loss` do the same. The job went on with the next lines.
   - A stale cell, started under another stack (torch, transformers or the GPU class): put its
     `lift restart` line in `JOB` right after `lift sync pull`, run the job once, then take it out
     (Habits).
@@ -358,6 +360,12 @@ secrets getter, and the `lift_env` path in cell 2.
   - A refused AuditKIT record: its error, above the list, says why; on a T4 it is most often the
     fp16 licence, which does not cover the cell (step 3 of the first jobs above). The judgements
     are written, so once that is fixed, the next run of the line writes the record.
+  - A stale scores file of `lift belebele` or `lift heldout-loss`: its listing names the line that
+    starts it over, the same line with `--restart` (it sets the file aside under `outputs/.aside/`
+    and leaves it empty, as `lift restart` does).
+  - `lift utility --no-wait` whose Message Batch is still running: the batch keeps running at
+    Anthropic, and the push sends its state file; rerun the same line in a later job, after its
+    `lift sync pull`, to collect it.
 - **`NotImplementedError: P01` in a line.** `BRANCH` lacks P01 (`p02-harness` alone). Use a ref
   with both P01 and P02 and rerun cell 1.
 - **`unpinned revisions in configs/project.yaml ...`.** The pin step has not reached this
