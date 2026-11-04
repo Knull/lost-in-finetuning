@@ -10,7 +10,9 @@ Google refused this IP, wait 30 minutes or more; a streak: ten items in a row fa
 or service errors, check the network), a file was skipped because of the block, or items a rerun can
 translate are missing: rerun to resume from the cache; 1 on an ImportError (a missing package: torch
 and transformers for --fallback-engine nllb, checked before anything is written; deep-translator,
-fasttext). ``lift data apply-spotchecks``: 0 when applied (or nothing new), 1 when the sheet or the
+fasttext), and on any other error, which stops the build with a traceback (a split file that no
+longer matches the sources, a PolyRefuse clone at another commit, an NLLB failure).
+``lift data apply-spotchecks``: 0 when applied (or nothing new), 1 when the sheet or the
 translation cache is refused (SheetError), a file is missing or a package (GlotLID's fasttext) is,
 all before a verdict is stored; 3 when the rebuild lost records (listed; the verdicts are stored,
 and the files' reports say why). ``spotcheck-sheets``: 1 when a sheet exists (no --overwrite), a
@@ -151,7 +153,8 @@ def register(sub: argparse._SubParsersAction) -> None:
                                     "the splits and make the SFT candidates. Exit 0 when built (files "
                                     "--skip-translation left out are listed), 3 when translation was "
                                     "blocked or items a rerun can translate are missing (rerun to resume "
-                                    "from the cache), 1 when a package is missing.")
+                                    "from the cache), 1 when a package is missing or the build stops on "
+                                    "an error.")
     b.add_argument("--only", nargs="+", choices=SETS, metavar="SET",
                    help=f"build only these sets: {', '.join(SETS)}")
     b.add_argument("--langs", nargs="+", choices=langs, metavar="LANG",
