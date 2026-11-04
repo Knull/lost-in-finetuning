@@ -11,18 +11,22 @@ import argparse
 import sys
 
 EXAMPLES = """\
-examples (PowerShell, repo root, venv active):
-  lift remote --gpu A100 --job "lift sync pull; lift smoke"
-  lift remote --gpu A100 --job "lift sync pull; lift run-dev --variant stock"
-  lift remote --gpu A100 --ref p02-harness --job "lift sync pull; lift info" --dry-run
+examples (PowerShell, repo root, venv active; --ref must hold P01 and P02, see colab/README.md):
+  lift remote --gpu A100 --job "lift sync pull; lift smoke"                  # Gate 0
+  #   then pin: copy the 3 shas Gate 0 printed (gate0.json, 'revisions') into configs/project.yaml,
+  #   add a dated docs/decisions.md entry, commit, and push to the --ref the VM runs
+  lift remote --gpu A100 --job "lift sync pull; lift run-dev --variant stock"  # stock dev eval
+  lift remote --gpu A100 --job "lift sync pull; lift info" --dry-run
   lift remote watch lift-20261104-091500-ab12
   lift remote stop lift-20261104-091500-ab12
   lift remote stop lift-20261104-091500-ab12 --endpoint <a [?] endpoint from colab sessions>
 
-The job pushes its outputs after every line and once more at the end, also after a failure; a failed
-push is tried again, and once more from this laptop before the VM is stopped. The job stops itself 30
-minutes before --max-hours. Ctrl+C asks the job to stop and push, waits up to 15 minutes for it, then
-stops the VM; a second Ctrl+C stops the VM at once (the outputs since the last push are then lost).
+Before any VM, the runs repo is checked as `lift sync check --write` does. The job pushes its outputs
+after every line and once more at the end, also after a failure; a push that exits 1 is tried again,
+and once more from this laptop before the VM is stopped; one that exits 2 (a problem no retry can
+fix) never is. The job stops itself 30 minutes before --max-hours. Ctrl+C asks the job to stop and
+push, waits up to 15 minutes for it (up to 55 while its log shows a push running), then stops the
+VM; a second Ctrl+C stops the VM at once (the outputs since the last push are then lost).
 
 """
 
@@ -64,7 +68,8 @@ def register(sub: argparse._SubParsersAction) -> None:
                                  "into an A100)")
     p.add_argument("--job", help='lift lines separated by ";" or newlines, e.g. "lift sync pull; lift smoke"')
     p.add_argument("--ref", default=DEFAULT_REF,
-                   help=f"branch, tag or full commit sha for the VM to run (default {DEFAULT_REF}); push it")
+                   help=f"branch, tag or full commit sha for the VM to run (default {DEFAULT_REF}); push it. "
+                        "It must hold both P01 and P02 (colab/README.md, 'Code version')")
     p.add_argument("--repo", default=DEFAULT_REPO, help=f"GitHub owner/name (default {DEFAULT_REPO})")
     p.add_argument("--high-mem", action="store_true", help="ask for Colab's high-RAM machine shape")
     p.add_argument("--max-hours", type=float, default=12.0,
