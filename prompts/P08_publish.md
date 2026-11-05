@@ -48,8 +48,9 @@ Every command does a dry run by default, printing what it would upload, and uplo
      (`lift.validation.score.failure_kind`: the text before its first ":" or quote). The
      validation reports (`outputs/metrics/validation/*.json`, `checks.failure_reasons`) and
      `outputs/metrics/judge_decision.json` (`failure_reasons`) already count failures by that
-     kind, so they go in as they are. Upload files by name, never a folder: a `*.full.json` AuditKIT record, which holds every completion, can sit
-     beside the public one in `outputs/metrics/auditkit/`.
+     kind, so they go in as they are. Upload files by name, never a folder: a `*.full.json`
+     AuditKIT record, which holds every completion, can sit beside the public one in
+     `outputs/metrics/auditkit/`.
    - The raw completions (gated, manual approval): every judged output, refusals and benign
      answers included. Most outputs carry only Qwen3Guard's label, so no output is made public
      because of its label.
