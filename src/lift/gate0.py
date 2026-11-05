@@ -8,7 +8,9 @@ Checks (each PASS, FAIL or NOT RUN; numbers go to outputs/metrics/gate0.json and
               final prompt fits the context with 256 new tokens; the preamble's token length is reported.
   precision   200 dev prompts mixed across languages and sets, generated and judged in the run dtype
               (bf16 on an A100). A teacher-forced pass over prompt + output checks that every hidden
-              state and logit is finite and records the max |activation| per layer. Its digest
+              state and logit is finite and records the max |activation| per layer. A decode that goes
+              non-finite (generate refuses its batch: NonFiniteOutputError) fails the check with
+              all_finite False and its pids (decoding_nonfinite), as a non-finite scan does. Its digest
               (``precision_digest``) names the outputs and labels the verdict is about. The reference
               run makes them in gate0/<dtype>/precision.new, which replaces gate0/<dtype>/precision
               only with a full report (gate0.json, PASS or FAIL), so a later --skip, reduced or stopped
@@ -31,7 +33,9 @@ Checks (each PASS, FAIL or NOT RUN; numbers go to outputs/metrics/gate0.json and
 
 Decision rule (README, Gate 0): any failure means fix first. If the fp16 check fails, T4 runs are
 never reported and everything reported runs in bf16 on an A100/L4. The fp16 check fails only on a
-real result: a non-finite fp16 run, or a valid comparison under the agreement bar.
+real result: a non-finite fp16 run (a decode generate refused as non-finite, or a non-finite value
+in the generator's or the local judge's teacher-forced scan) or a valid comparison under the
+agreement bar.
 
 Verdicts. A check that raises is a FAIL with its error, and so is a model whose revision cannot be
 resolved or that cannot load (the "load" check), so a report is always written. A check that cannot
@@ -384,11 +388,12 @@ def compare_runs(reference_root: Path, candidate_root: Path, tokenizer: Any) -> 
     divergence, final-label agreement and kappa, harmful rate in each.
 
     The pairs are only valid if both runs saw the same prompt text, model revision, chat template,
-    harness, decoding settings (``meta.decoding``: cap, stop tokens) and judge (model, revision and
-    Controversial mode: only the precision may differ), so every mismatch is counted and listed in
-    ``invalid``: a stale reference run (a fixed translation, a harness fix, another cap) must be re-run
-    first. ``harness`` and ``decoding`` are the pairs' one setting (None when they hold several): the
-    fp16 licence covers only cells made with them."""
+    harness, decoding settings (``meta.decoding``: cap, stop tokens) and judge (model, revision, labelling
+    rules, which its id's rules tag names, and Controversial mode: only the precision may differ,
+    ``_judge_identity``), so every mismatch is counted and listed in ``invalid``: a stale reference run (a
+    fixed translation, a harness fix, another cap, other labelling rules) must be re-run first. ``harness``
+    and ``decoding`` are the pairs' one setting (None when they hold several): the fp16 licence covers only
+    cells made with them."""
     from lift.models.generate import read_generations
     from lift.schemas import JudgementRecord
     from lift.stats import cohens_kappa, mcnemar_exact
@@ -454,8 +459,8 @@ def _one_setting(rows: Sequence[dict[str, Any]], field: str) -> Any:
 def fp16_verdict(cmp: dict[str, Any], precision: dict[str, Any], n_precision: int, *,
                  reference: str, reference_problem: str | None) -> dict[str, Any]:
     """The fp16 check from ``compare_runs`` and the finished fp16 run's precision check (decisions.md,
-    entry 27). It fails only on a real result: a non-finite fp16 run (the generator's scan, or the local
-    judge's: the precision check's ``all_finite``), or a valid comparison under
+    entry 27). It fails only on a real result: a non-finite fp16 run (the generator's decode or scan, or
+    the local judge's scan: the precision check's ``all_finite``), or a valid comparison under
     ``FP16_MIN_LABEL_AGREEMENT``. Without a valid comparison (no reference run, other prompts, fewer
     than ``N_PRECISION``, missing labels, pairs made from other inputs, or a reference whose own Gate 0
     did not pass for this revision on these very outputs: ``reference_problem``, see
@@ -465,7 +470,8 @@ def fp16_verdict(cmp: dict[str, Any], precision: dict[str, Any], n_precision: in
     out["min_label_agreement"] = FP16_MIN_LABEL_AGREEMENT
     if precision.get("all_finite") is False:
         scans = {"generator": precision, "judge": precision.get("judge_scan") or {}}
-        parts = [part for part, s in scans.items() if s.get("hidden_nonfinite") or s.get("logits_nonfinite")]
+        parts = [part for part, s in scans.items()
+                 if s.get("hidden_nonfinite") or s.get("logits_nonfinite") or s.get("decoding_nonfinite")]
         where = f" ({' and '.join(parts)})" if parts else ""
         return {**out, "pass": False, "failure": f"non-finite values in the fp16 run{where}"}
     why = _not_comparable(cmp, n_precision, reference, reference_problem)
@@ -807,7 +813,8 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
             checks.update({check: dict(refusal) for check in CHECKS if check in needs_judge})
             needs_judge = set()
     if judge is not None:
-        # tied_lm_head False would mean the judge is not numerically the model Qwen evaluated.
+        # info's tied_lm_head records how the guard's head loaded; Qwen3GuardJudge already refused a config
+        # that ties it to embed_tokens with a head that loaded untied (False under an untied config is fine).
         result["judge"] = {"id": judge.judge_id, "info": getattr(judge, "info", None)}
 
     staging = None if compare_dtype else _fresh(gate0_dir(dtype) / "precision.new")    # see _settle
@@ -815,9 +822,20 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
         root = staging or gate0_dir(dtype) / "precision"
 
         def precision() -> dict[str, Any]:
+            from lift.models.generate import NonFiniteOutputError
+
             _fresh(root)
             sample = mixed_sample(n_precision, split="dev", seed=SEED)
-            run = generate_and_judge(stock, judge, sample, root, lid=lid, max_new_tokens=max_new_tokens)
+            try:
+                run = generate_and_judge(stock, judge, sample, root, lid=lid, max_new_tokens=max_new_tokens)
+            except NonFiniteOutputError as exc:
+                # decisions.md 27's real result, not a crash: the run is not finite (generate wrote nothing
+                # of that batch), so the reference fails its precision check and the fp16 run is "fp16 failed"
+                return {"pass": False, "all_finite": False, "decoding_nonfinite": exc.pids, "problems": [],
+                        "digest": precision_digest(root),
+                        "failure": (f"decoding went non-finite in {exc.dtype} for {len(exc.pids)} prompts of "
+                                    f"a batch, e.g. {exc.pids[:5]} (generate wrote nothing of that batch, "
+                                    "and the run stopped there)")}
             scan = activation_scan(stock.model, stock.tokenizer, precision_pairs(root), device=device)
             out = {**scan, **run, "digest": precision_digest(root),
                    "pass": scan["all_finite"] and not run["problems"]}
@@ -1044,6 +1062,8 @@ def _summary(check: str, c: dict[str, Any]) -> str:
                 f"of {c.get('context')}, {c.get('n_too_long')} too long, "
                 f"reference tokenizer {c.get('reference_tokenizer_agreement')}")
     if check == "precision":
+        if c.get("decoding_nonfinite"):
+            return str(c.get("failure"))
         js, failures = c.get("judge_scan"), (c.get("counts") or {}).get("judge_failures")
         judge = ""
         if js:

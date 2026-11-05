@@ -338,6 +338,29 @@ def test_restart_sets_exactly_the_cells_files_aside_and_leaves_them_empty(judge,
     assert "har-0001" not in caplog.text and "har-0000" not in caplog.text
 
 
+def test_restart_says_the_next_push_may_report_an_emptied_conflict_instead(caplog):
+    # W2-04 (R1-08): the next lift sync push replaces the runs repo's copies only when the Hub's copy has not
+    # changed since this machine's last sync; otherwise the push reports the emptied file as a conflict (a
+    # merge would fill it again), which lift sync push --force settles. The help and the log said it always
+    # replaced them.
+    caplog.set_level(logging.INFO, logger="lift.run")
+    restart_tree()
+    assert main([*RESTART, "--sets", "harmful", "--langs", "hi"]) == 0
+    [done] = [r.getMessage() for r in caplog.records if "the next lift sync push" in r.getMessage()]
+    for text in (done, " ".join(run_cmd.RESTART_HELP.split())):
+        assert "changed since this machine's last sync" in text and "lift sync push --force" in text, text
+        assert "emptied-file conflict" in text, text
+
+
+def test_skipped_judges_cells_name_the_restart_line_when_only_the_labelling_rules_differ():
+    # W2-04 (R1-12 follow-up): a judge id names its labelling rules too, and judgements made under other rules
+    # can never be finished with the file's judge, as no current judge applies them: only the role's lift
+    # restart --judge line remedies such a cell
+    head = " ".join(run_cmd.SKIPPED["judges"].split())
+    assert "labelling rules" in head and "--judge" in head and "the file's judge" in head
+    assert "its id names its precision and Controversial mode" not in head
+
+
 def test_restart_skips_files_that_are_not_here_and_a_second_run_finds_them_empty(caplog):
     from lift.models.generate import generations_path
 
@@ -642,6 +665,168 @@ def test_generate_skips_a_stale_cell_and_exits_3(fake_prompt_files, tiny_model_d
     assert len(gen.read_generations(gen.generations_path("stock", "harmful", "hi", "dev"))) == 3
     line = "lift restart --variant stock --split dev --sets harmful --langs en"
     assert f"harmful_en_dev: {line}\n" in caplog.text
+
+
+SHORT_PID = "prb-test-0003"         # the frozen final pid frozen_cell leaves out of easy_benign zh
+
+
+def frozen_cell(tmp_path, monkeypatch):
+    """data/splits/easy_benign.json (in tmp) freezing prb-test-0000..0003 as final, and easy_benign prompt
+    files the real lift.data.build.load_prompts reads: en holds every frozen pid, zh all but SHORT_PID, which
+    zh's report lists as an open wrong_lang translation failure (it awaits a reader's verdict, as
+    prb-test-0240 does on the real data). Placeholder texts."""
+    from fakes import make_prompt
+
+    from lift import splits
+    from lift.io import sha256_file
+    from lift.paths import prompts_dir
+
+    pids = [f"prb-test-{i:04d}" for i in range(4)]
+    monkeypatch.setattr(splits, "SPLITS_DIR", tmp_path / "splits")
+    splits.save_split("easy_benign", dict.fromkeys(pids, "final"), seed=0, sizes={"final": 4})
+    for lang in ("en", "zh"):
+        path = prompts_dir() / f"easy_benign_{lang}.jsonl"
+        write_jsonl(path, [make_prompt(p, lang, "easy_benign", "final", text=f"q {p}").model_dump(mode="json")
+                           for p in pids if lang == "en" or p != SHORT_PID])
+        failures = [{"pid": SHORT_PID, "rule": "wrong_lang", "detail": "top=jpn_Jpan 0.99",
+                     "engine": "google", "resolved": None}] if lang == "zh" else []
+        report = {"set": "easy_benign", "lang": lang, "file": path.name, "sha256": sha256_file(path),
+                  "translation_failures": failures, "exclusions": []}
+        reports = prompts_dir() / "reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        (reports / f"easy_benign_{lang}.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def short_remedy():
+    """frozen_cell's zh final remedy, as lift.data.build.load_prompts names it."""
+    from lift.data import build
+
+    return (f"1 translation failures await a reader's verdict on the failures sheet, e.g. ['{SHORT_PID}']: "
+            + build.reader_remedy(["zh"]))
+
+
+def test_a_short_cell_is_listed_with_its_remedy_whatever_precision_its_file_was_made_in():
+    # W2-01: a short cell's remedy is its prompt file's, on the laptop; it discards nothing, so it is listed
+    # as short with that remedy even when its generations file was made in another precision than the run's
+    from lift.data.build import ShortCellError
+
+    write_generation("easy_benign", "zh", "final", dtype="fp16")
+    exc = ShortCellError("easy_benign_zh: short", set_name="easy_benign", lang="zh", missing={"final": ["p"]},
+                         remedy="the remedy")
+    skipped: dict[str, dict[str, str]] = {}
+    run_cmd._skip(skipped, "stock", "easy_benign", "zh", "final", exc, judged=None, dtype="bf16")
+    assert skipped == {"short": {"easy_benign_zh_final": "the remedy"}}
+    assert run_cmd._listing(skipped) == [
+        f"1 cells {run_cmd.SKIPPED['short']}:\n  easy_benign_zh_final: the remedy\n"]
+    head = " ".join(run_cmd.SKIPPED["short"].split())
+    assert "reader's verdict" in head and "nothing was generated" in head
+
+
+@pytest.mark.torch
+def test_generate_skips_a_short_cell_lists_its_remedy_and_exits_3(tiny_model_dir, tmp_path, monkeypatch,
+                                                                  caplog):
+    # W2-01: a cell short of its frozen split (easy_benign zh final on the real data, until the zh reader's
+    # verdicts are applied) stopped `lift generate` with a traceback, so no later cell of the line ran. It is
+    # skipped and listed with its remedy now, and the line exits 3, as for a stale cell.
+    pytest.importorskip("torch")
+    from lift.models import generate as gen
+    from lift.models import variants
+
+    pin()
+    frozen_cell(tmp_path, monkeypatch)
+    real_build = variants.build_variant
+    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: real_build(
+        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)))
+    short_runs(monkeypatch)
+    argv = ["generate", "--variant", "stock", "--split", "final", "--sets", "easy_benign", "--langs", "zh",
+            "en", "--device", "cpu", "--dtype", "bf16"]
+    assert main(argv) == 3
+    assert not gen.generations_path("stock", "easy_benign", "zh", "final").exists()
+    assert len(gen.read_generations(gen.generations_path("stock", "easy_benign", "en", "final"))) == 4
+    assert listing(caplog, "are short of their frozen split") == (
+        f"1 cells {run_cmd.SKIPPED['short']}:\n  easy_benign_zh_final: {short_remedy()}\n")
+    assert "easy_benign_zh_final: short of its frozen split, skipped" in caplog.text
+
+
+FAULT = "a fault in {}, no fp16 overflow: report it (CLAUDE.md rule 9), never tune around it"
+
+
+def overflow_on(monkeypatch, call):
+    """greedy_batch marking every row of its ``call``-th batch non-finite (an fp16 overflow, as its check
+    marks it); the other batches decode as they do."""
+    from dataclasses import replace
+
+    from lift.models import generate as gen
+
+    real, calls = gen.greedy_batch, []
+
+    def greedy_batch(model, rows, **kw):
+        calls.append(len(rows))
+        outs = real(model, rows, **kw)
+        return [replace(o, nonfinite=True) for o in outs] if len(calls) == call else outs
+
+    monkeypatch.setattr(gen, "greedy_batch", greedy_batch)
+
+
+def test_a_non_finite_cell_is_listed_apart_with_its_remedy():
+    # W2-02: an fp16 cell that went non-finite is made in bf16 on an A100 or L4: its restart line first when
+    # its file holds fp16 records (with the refill lines of the judgements it sets aside, made in bf16), else
+    # nothing to set aside; in bf16 or fp32 it is a fault to report, no line
+    from lift.models.generate import NonFiniteOutputError
+
+    write_generation("harmful", "en", "dev", dtype="fp16")                 # an earlier batch's records
+    write_judgements("frontier", "harmful", "en", "dev")                    # the second judge's sample
+    line = "lift restart --variant stock --split dev --sets harmful --langs en --dtype fp16"
+    errors = {"held": ("en", NonFiniteOutputError(f"... `{line}` ...", pids=["har-0002"], dtype="fp16",
+                                                  command=line)),
+              "fresh": ("hi", NonFiniteOutputError("...", pids=["har-0001"], dtype="fp16")),
+              "bf16": ("zh", NonFiniteOutputError("...", pids=["har-0001"], dtype="bf16"))}
+    remedies = {}
+    for name, (lang, exc) in errors.items():
+        skipped: dict[str, dict[str, str]] = {}
+        run_cmd._skip(skipped, "stock", "harmful", lang, "dev", exc, judged=None, dtype=exc.dtype)
+        [(kind, cells)] = skipped.items()
+        assert (kind, list(cells)) == ("nonfinite", [f"harmful_{lang}_dev"]), name
+        remedies[name] = cells[f"harmful_{lang}_dev"]
+    cell = "--variant stock --split dev --sets harmful --langs en"
+    assert remedies["held"] == (f"{line}\n    and once it is generated again: lift judge {cell} --judge "
+                                "second --sample 0.10")
+    assert remedies["fresh"] == ("nothing to set aside: run the line that failed in bf16 on an A100 or L4 "
+                                 "(without --dtype)")
+    assert remedies["bf16"] == FAULT.format("bf16")
+    head = " ".join(run_cmd.SKIPPED["nonfinite"].split())
+    assert "nothing of that batch was written" in head and "made in bf16" in head and "rule 9" in head
+
+
+@pytest.mark.torch
+def test_generate_skips_a_non_finite_cell_lists_it_and_exits_3(fake_prompt_files, tiny_model_dir, monkeypatch,
+                                                               caplog):
+    # W2-02: a batch that went non-finite stopped `lift generate` (and the job: its exit was 1), so no later
+    # cell ran. NonFiniteOutputError is a StaleOutputError now: the cell is listed apart, the others go on,
+    # and the line exits 3.
+    pytest.importorskip("torch")
+    from fakes import make_prompt
+
+    from lift.models import generate as gen
+    from lift.models import variants
+
+    pin()
+    for lang in ("en", "hi"):
+        fake_prompt_files[("harmful", lang)] = [make_prompt(f"har-{i}", lang, "harmful", "dev", text=f"q {i}")
+                                                for i in range(3)]
+    real_build = variants.build_variant
+    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: real_build(
+        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)))
+    short_runs(monkeypatch)
+    overflow_on(monkeypatch, 1)                                         # harmful_en's one batch
+    argv = ["generate", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "hi",
+            "--device", "cpu", "--dtype", "bf16"]
+    assert main(argv) == 3
+    assert not gen.generations_path("stock", "harmful", "en", "dev").exists()
+    assert len(gen.read_generations(gen.generations_path("stock", "harmful", "hi", "dev"))) == 3
+    assert listing(caplog, "went non-finite") == (
+        f"1 cells {run_cmd.SKIPPED['nonfinite']}:\n  harmful_en_dev: {FAULT.format('bf16')}\n")
+    assert "harmful_en_dev: decoding went non-finite, skipped" in caplog.text
 
 
 @pytest.mark.parametrize("role", ["primary", "second"])
@@ -1425,6 +1610,35 @@ class TestRunCells:
         assert skipped == {"precision": {"harmful_hi_dev": (
             "made in fp16: run it with --dtype fp16 where fp16 runs, or leave it out with --sets/--langs")}}
         assert part.read_bytes() == before
+        assert [judged("stock", *c) for c in cells] == [3, 0, 3, 3]
+
+    @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
+    def test_a_short_cell_is_listed_with_its_remedy_and_the_others_go_on(self, tiny_model_dir, tmp_path,
+                                                                         monkeypatch, mode):
+        # W2-01: run-dev met a cell short of its frozen split with a traceback, so no later cell ran
+        from lift.models.variants import build_variant
+        from lift.schemas import VariantSpec
+
+        frozen_cell(tmp_path, monkeypatch)
+        short_runs(monkeypatch)
+        holder = {"variant": build_variant(VariantSpec(name="stock", method="stock"), device="cpu",
+                                           dtype="fp32", model_id=str(tiny_model_dir))}
+        skipped: dict[str, dict[str, str]] = {}
+        run_cmd.run_cells(holder, lambda: self.Judge(), [("easy_benign", "zh"), ("easy_benign", "en")],
+                          split="final", concurrent=mode == "concurrent", interleave=mode == "interleave",
+                          lid=self.LID(), skipped=skipped)
+        assert skipped == {"short": {"easy_benign_zh_final": short_remedy()}}
+        assert [judged("stock", "easy_benign", lang, "final") for lang in ("zh", "en")] == [0, 4]
+
+    @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
+    def test_a_cell_that_goes_non_finite_is_listed_and_the_others_go_on(self, setup, monkeypatch, mode):
+        # W2-02: a non-finite batch stopped run-dev (and the job), so no later cell ran
+        make_holder, cells = setup
+        short_runs(monkeypatch)
+        overflow_on(monkeypatch, 2)                                      # harmful_hi's one batch
+        skipped: dict[str, dict[str, str]] = {}
+        self.session(mode, make_holder, self.Judge(), cells, skipped=skipped)
+        assert skipped == {"nonfinite": {"harmful_hi_dev": FAULT.format("fp32")}}
         assert [judged("stock", *c) for c in cells] == [3, 0, 3, 3]
 
     @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])

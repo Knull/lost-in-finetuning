@@ -67,6 +67,8 @@ Reading:
   revision when pinned to a sha, the labelling rules now in force; for Qwen3Guard the precision and
   Controversial mode; for a frontier judge everything its id names but the API version, so the rubric's
   version and the sampling settings of the role's entry too: an edited rubric is another judge).
+  A variant that names an adapter (the adapter method, every repair) is read only when its entry pins
+  ``artifacts.adapter`` (lift register-adapter writes it), else its cell is refused naming the registry.
   ``dtype`` defaults to ``generation.dtype`` (one precision for every reported number); any other needs Gate
   0's licence (``check_dtype_licence``), because every ``--dtype`` run names its dtype: a comparison
   that paired with the bf16 Gate 0 run gate0.json records now, and a cell made under the harness and
@@ -516,11 +518,13 @@ def second_judge_pids(set_name: str, split: str, fraction: float, seed: int) -> 
     exactly): of the pids of that split in every language with a prompt file (a record marked
     ``extra.excluded`` left out), the first ceil(fraction x n) by ``_rank(seed, "second", set,
     split, pid)``. Drawn by pid, never by generation key (which differs per variant and language), so
-    the same prompts are drawn in every variant and language, whatever the file order."""
+    the same prompts are drawn in every variant and language, whatever the file order. Each language's
+    split is read as its file holds it (``allow_short``): this only pools pids, so one language short of
+    its frozen split (whose own cell lift generate refuses) never stops the draw in the others."""
     population: set[str] = set()
     for lang in config.get("languages.all"):
         try:
-            records = prompts.load(set_name, lang, split)
+            records = prompts.load(set_name, lang, split, allow_short=True)
         except FileNotFoundError:
             continue
         population.update(p.pid for p in records if not p.extra.get("excluded"))
@@ -1207,7 +1211,12 @@ def _made_otherwise(variant: str, gens: Sequence[GenerationRecord]) -> tuple[lis
 
 def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRecord], gpath: Path,
                 cell: tuple[str, str, str, str], *, role: str, complete: bool, dtype: str) -> None:
-    """Raise unless ``records`` can be reported (the rules are in the module docstring)."""
+    """Raise unless ``records`` can be reported (the rules are in the module docstring). A variant whose
+    spec names an adapter (the adapter method, every P05 repair) is read only under the adapter hash its
+    configs/variants.yaml entry pins (artifacts.adapter, which lift register-adapter writes), so the
+    per-cell adapter_hash check holds a repair arm and its adapter arm to one set of weights."""
+    from lift.models.variants import get_spec
+
     variant, set_name, lang, split = cell
     texts = {p.pid: p.text for p in prompts.load(set_name, lang, split)}
     gen_of = {g.key: g for g in gens}
@@ -1238,6 +1247,11 @@ def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRec
     problems = [f"{len(pids)} {what}, e.g. {sorted(pids)[:5]}" for pids, what in checks if pids]
     if unregistered:
         problems.append(unregistered)
+    elif (spec := get_spec(variant)).adapter and not spec.artifacts.get("adapter"):
+        problems.append(f"{variant}'s entry in configs/variants.yaml names adapter {spec.adapter} but pins "
+                        "no artifacts.adapter: a cell of a variant that names an adapter is read only under "
+                        "the hash its entry pins (`lift register-adapter` writes it), so that every arm made "
+                        "from that adapter comes from the same weights")
     problems += _one_configuration(gens, records, dtype)
     if dtype != str(config.get("generation.dtype")):
         problems += _licence_problems(dtype, gens, records, cell, role)

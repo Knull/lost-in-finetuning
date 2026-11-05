@@ -1187,6 +1187,60 @@ def test_a_judge_failure_in_the_compared_run_fails_it(twenty_compared, tiny_mode
     assert "; 1 judge failures" in gate0._summary("precision", precision)
 
 
+def goes_non_finite(monkeypatch):
+    """The next generation's first batch decodes non-finite in its first row (an fp16 overflow, as
+    greedy_batch's check marks it), so generate refuses it with NonFiniteOutputError."""
+    from dataclasses import replace
+
+    from lift.models import generate
+
+    real, state = generate.greedy_batch, {"marked": []}
+
+    def greedy_batch(model, rows, **kw):
+        outs = real(model, rows, **kw)
+        if state["marked"]:
+            return outs
+        state["marked"].append(len(rows))
+        return [replace(outs[0], nonfinite=True), *outs[1:]]
+
+    monkeypatch.setattr(generate, "greedy_batch", greedy_batch)
+    return state
+
+
+def test_a_compared_run_whose_decoding_goes_non_finite_is_the_fp16_failure(prompt_store, tiny_model_dir,
+                                                                          fp32_configured, cpu_sized,
+                                                                          monkeypatch):
+    """W2-02 (R1-25 follow-up): generate now refuses a batch that decodes non-finite (NonFiniteOutputError).
+    Raised inside the fp16 run's precision check, it made the check an error, the fp16 check NOT RUN ("the
+    precision run did not finish") and the decision "Fix first". It is decisions item 27's real result: the
+    precision check records all_finite False and the pids, so the verdict is "fp16 failed: T4 runs are never
+    reported". A reference run that goes non-finite fails its precision check the same way, not as an
+    error."""
+    _, name, _ = _gate(tiny_model_dir)
+    assert name == "gate0"
+    state = goes_non_finite(monkeypatch)
+    cand, name, written = _gate(tiny_model_dir, compare_dtype="bf16", skip=NON_REQUIRED)
+    precision, fp = cand["checks"]["precision"], cand["checks"]["fp16"]
+    assert state["marked"], "the decode never went non-finite"
+    assert "error" not in precision and precision["pass"] is False and precision["all_finite"] is False
+    [pid] = precision["decoding_nonfinite"]
+    assert isinstance(pid, str) and pid in precision["failure"]
+    assert fp["pass"] is False and not fp.get("not_run") and fp["failure"] == (
+        "non-finite values in the fp16 run (generator)")
+    assert cand["decision"] == gate0.DECISION["fp16_fail"] and cand["failed"] == ["fp16", "precision"]
+    assert name == "gate0-bf16" and written["pass"] is False
+
+    goes_non_finite(monkeypatch)                                       # and the reference run, on the A100
+    skip = ["preamble", "throughput", "dry_run", "parity"]
+    reference = gate0.run_gate0(model_id=str(tiny_model_dir), **{**GATE, "judge": HarmfulJudge(),
+                                                                  "skip": skip})
+    precision = reference["checks"]["precision"]
+    assert "error" not in precision and precision["pass"] is False and precision["all_finite"] is False
+    assert precision["decoding_nonfinite"] and reference["failed"] == ["precision"]
+    assert reference["decision"] == gate0.DECISION["fail"]
+    assert "decoding went non-finite" in gate0._summary("precision", precision)
+
+
 # --- judge identity in the fp16 comparison (R28) ----------------------------------------------------------
 
 GUARD = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
