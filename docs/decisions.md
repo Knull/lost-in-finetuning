@@ -5,9 +5,9 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 ## Nov 4-5, 2026 (night): P03 training, utility, Belebele and gate details, before any adapter was trained
 
 Pinned while writing P03 (branch p03-train). No adapter, utility verdict or Belebele score existed
-yet; Gate 0 had just passed on the A100. Numbered from 49.
+yet; Gate 0 had just passed on the A100. Numbered from 50 (item 49, the revision pins, came first on main).
 
-49. **How an adapter trains** (`lift.train.lora`, `lift train`).
+50. **How an adapter trains** (`lift.train.lora`, `lift train`).
     - Assistant tokens are `lift.models.load.encode_chat_turn`'s answer part: the answer the template
       writes after the generation prompt, closing tokens included (`<|END_RESPONSE|><|END_OF_TURN_TOKEN|>`
       for Tiny Aya), so the model learns to stop. The held-out loss scores exactly these tokens.
@@ -34,7 +34,7 @@ yet; Gate 0 had just passed on the A100. Numbered from 49.
       and the entry is committed before any job evaluates the adapter.
     - The stress adapter is adapter-indicalign-stress-s1 (item 47); prompts/P03_train.md's
       adapter-aya-stress-s1 predates item 47.
-50. **Utility verdicts** (`lift utility`).
+51. **Utility verdicts** (`lift utility`).
     - Each pair is judged in both orders: candidate as A (order_ab) and as B (order_ba). A judge
       failure in one order (a refusal, a reply unparseable after the reminder, an item-level API
       error) is recorded (error_ab / error_ba) and scored as a tie in that order, so the pair stays in
@@ -47,13 +47,13 @@ yet; Gate 0 had just passed on the A100. Numbered from 49.
       outputs/metrics/auditkit/{judge}/{variant}/ with safety judgements and would hold these back.
     - Hindi fidelity is the share of outputs whose top GlotLID label is in accept_labels.hi (the
       is_lang share is reported beside it).
-51. **Message Batches.** Bulk frontier judging (the 10% second-judge sample and every utility pair)
+52. **Message Batches.** Bulk frontier judging (the 10% second-judge sample and every utility pair)
     goes through the Message Batches API as a cache pre-fill: one batch for a whole `lift judge` or
     `lift utility` run, then the existing per-item code reads the cached replies, so batch and sync
     judgements are the same and the judge id does not depend on the path. The rubric is sent as a
     cached system block, but both rubric system messages are under Sonnet 5.5's 512-token minimum, so
     no caching is expected (usage records it); the saving in item 16 is the batch's 50% alone.
-52. **Belebele and held-out loss** (`lift belebele`, `lift heldout-loss`).
+53. **Belebele and held-out loss** (`lift belebele`, `lift heldout-loss`).
     - Belebele: exactly one BOS, then the frozen P/Q/A-D/Answer: text, no chat template. It is
       lm-evaluation-harness's Belebele template (`_default_template_yaml`, checked Nov 5): the question
       is stripped (`{{question.strip()}}`) and the passage and options go in as published. Item 10 said
@@ -63,7 +63,7 @@ yet; Gate 0 had just passed on the A100. Numbered from 49.
     - Held-out loss: the utility dev split unless --split final (rule 1), per-token NLL of the
       reference answer's assistant tokens, never truncated, pooled and by source (Aya references are
       human-written, IndicAlign's are machine-translated).
-53. **Gates 1 and 2** (`lift gate`).
+54. **Gates 1 and 2** (`lift gate`).
     - Gate 1's gain check compares each seed-1 standard adapter's dev win rate (the point estimate, as
       the README states it) with 0.55 and prints its interval; the judge check reads P04's
       outputs/metrics/validation/gate1.json (missing means pending).

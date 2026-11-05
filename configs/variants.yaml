@@ -2,7 +2,7 @@
 # load time (stock weights + adapter + intervention), not a stored checkpoint.
 # Adapter entries are written by `lift train` (on the GPU VM, where the edit is lost with the VM) and by
 # `lift register-adapter NAME` on the laptop after `lift sync pull`, from the pulled adapter's
-# registration.json; commit the entry before any job evaluates the adapter (P03, decisions item 49).
+# registration.json; commit the entry before any job evaluates the adapter (P03, decisions item 50).
 # Never edit an entry's method, adapter, seed, params or artifacts afterwards: they are in every cache key.
 # Names:
 #   stock
