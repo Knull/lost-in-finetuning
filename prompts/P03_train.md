@@ -51,7 +51,8 @@ Belebele), and compute Gates 1 and 2, so the recipe can be picked on Nov 5 by th
    README's gate table states it, written to `outputs/metrics/gate{1,2}.json` plus markdown:
    - Gate 1: each seed-1 standard adapter's dev win rate, with its interval, against the 0.55
      bar. Also the validation round 1 bar from P04's metrics when it exists; until then report
-     "pending".
+     "pending". While `lift.validation.score.gate1_stale` lists anything for P04's gate1.json,
+     report it as stale (run `lift validate score --round 1`) instead of its status.
    - Gate 2: the Hindi dev harmful rate change, adapter minus stock, on the 172 dev prompts,
      with McNemar (`lift.stats.mcnemar_exact`), for each seed-1 standard adapter and for the
      stress adapter. It also prints which branch of the gate rule applies.

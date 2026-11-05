@@ -50,12 +50,19 @@ for the judge that configs/project.yaml makes primary (``judges.safety_primary``
 not yet applied decision is reported, not acted on): {"status": "pass" | "fail" | "pending",
 "meets_bar", "judge_view", "judge_id", "items", "n", "agreement", "kappa", "not_labelled",
 "not_labelled_by_reason", "skipped", "superseded", "agreement_if_skipped", "kappa_if_skipped",
-"robust_to_skips", "skips_unbounded", ...}. It is pending while any Hindi round 1 row has no label
+"robust_to_skips", "skips_unbounded", "import_warnings", "inputs", "judgements_digest", "judge_pins",
+"git", ...}. It is pending while any Hindi round 1 row has no label
 and no 'skipped' note (``not_labelled`` counts those rows). Deliberate skips are left out of the
 verdict and counted, with the agreement range had they been labelled and, for up to 8 skipped
 rows, kappa's range over every labelling they could have had and whether each labelling gives the
 verdict the judged rows give (the whole bar, both halves); beyond 8, or while a skipped row has no
-judgement, those two are null and ``skips_unbounded`` says why.
+judgement, those two are null and ``skips_unbounded`` says why. ``import_warnings`` holds the Hindi
+sheet's import warnings. Only this command rewrites gate1.json, so it names what it was scored from:
+``inputs`` ({file: sha256} of round 1's keys, draw, and each imported round 1 sheet's labels and
+import record), ``judgements_digest`` (of the Hindi round 1 outputs and judgements) and
+``judge_pins``. ``gate1_stale(doc)`` checks them against the files and config here (labels imported
+again, items judged or generated again, the primary judge switched): P03's Gate 1 reports the
+verdict as stale while it lists anything.
 
 Each labelled item's output is looked up in its generations file. The harness regenerates a whole
 file when one of its prompts is fixed, and the other prompts come back under the same keys but
@@ -101,7 +108,7 @@ from pathlib import Path
 import yaml
 
 from lift import config, paths
-from lift.io import sha256_file, sha256_text
+from lift.io import sha256_file, sha256_obj, sha256_text
 from lift.judge.labels import final_label, map_frontier, map_qwen3guard
 from lift.schemas import LABELS, JudgementRecord
 from lift.stats.agreement import binary, cohens_kappa, meets_bar, percent_agreement
@@ -121,6 +128,7 @@ from lift.validation.sample import existing_rounds, load_round, sample_digest
 from lift.validation.store import (
     ValidateError,
     draw_path,
+    labels_dir,
     metrics_dir,
     normalise,
     read_json,
@@ -295,6 +303,9 @@ class Collected:
     judge_ids: dict[str, str | None]                     # qwen3guard / frontier -> judge id
     inputs: dict[str, str]                               # file -> sha256
     checks: dict = field(default_factory=dict)
+    # qwen3guard / frontier -> {generation key: the judgement scored}, of the main items
+    judgements: dict[str, dict[str, JudgementRecord]] = field(default_factory=dict)
+    pins: dict[str, str | None] = field(default_factory=dict)   # the judge pins it was collected under
 
 
 def _unlicensed(round_no: int, err: LicenceError) -> LicenceError:
@@ -492,7 +503,9 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
                      superseded=superseded, main_items=dict(Counter(it["lang"] for it in main)),
                      overlap=overlap,
                      judge_ids={"qwen3guard": judged.qwen3guard_id, "frontier": judged.frontier_id},
-                     inputs=inputs, checks=checks)
+                     inputs=inputs, checks=checks,
+                     judgements={"qwen3guard": judged.qwen3guard, "frontier": judged.frontier},
+                     pins={"qwen3guard": qwen3guard_judge, "frontier": frontier_judge})
 
 
 def _git() -> str:
@@ -610,7 +623,45 @@ def if_skipped(judged: Sequence[tuple[str, str]], skipped: Sequence[str | None],
     return out
 
 
-def gate1(col: Collected, bar: dict, created: str) -> dict:
+def _gate1_inputs(col: Collected) -> dict[str, str]:
+    """{file name: sha256} of the files Gate 1 was scored from: round 1's keys and draw, and the labels
+    and import record (labels/{sheet}.meta.json: skip reasons, warnings) of each imported round 1 sheet."""
+    sheets = sorted(name for name, info in col.sheets.items() if info["round"] == 1 and info["imported"])
+    names = {round_keys_path(1).name, draw_path(1).name, *(labels_path(name).name for name in sheets)}
+    inputs = {name: digest for name, digest in col.inputs.items() if name in names}
+    for name in sheets:
+        meta = labels_meta_path(name)
+        if meta.is_file():
+            inputs[meta.name] = sha256_file(meta)
+    return dict(sorted(inputs.items()))
+
+
+def _gate1_input_path(name: str) -> Path | None:
+    """Where a file named in gate1.json's ``inputs`` lives (``_gate1_inputs``)."""
+    for path in (round_keys_path(1), draw_path(1)):
+        if name == path.name:
+            return path
+    if name.startswith("round1_") and name.endswith((".jsonl", ".meta.json")):
+        return labels_dir() / name
+    return None
+
+
+def _gate1_judged(col: Collected, view: str) -> str:
+    """One sha256 of what Gate 1 scored from the outputs and judgements: for each Hindi round 1 main item,
+    by key, whether it was left out as superseded and the judgement of ``view``'s judge it carries (judge
+    id, label, output_sha; nulls while it has none)."""
+    found = col.judgements.get(VIEW_JUDGE.get(view, ""), {})
+    gone = {e["key"] for e, _, _ in col.superseded}
+    rows = []
+    for e, _, _ in [*col.rows, *col.unlabelled, *col.superseded]:
+        if e["round"] == 1 and e["lang"] == "hi":
+            rec = found.get(e["key"])
+            rows.append([e["key"], e["key"] in gone,
+                         *((rec.judge, rec.label, rec.output_sha) if rec else (None, None, None))])
+    return sha256_obj(sorted(rows, key=lambda row: row[0]))
+
+
+def gate1(col: Collected, bar: dict, created: str, *, git: str | None = None) -> dict:
     """Gate 1's validation check, "round 1 meets the bar in Hindi", for the judge that
     configs/project.yaml makes primary, from round 1's Hindi items alone.
 
@@ -621,10 +672,19 @@ def gate1(col: Collected, bar: dict, created: str) -> dict:
     they could have done had they been labelled: ``agreement_if_skipped`` (the agreement range),
     ``kappa_if_skipped`` (kappa's range over every labelling of up to ``SKIPS_ENUMERATED`` skipped rows)
     and ``robust_to_skips`` (whether every such labelling gives the bar verdict the judged items give),
-    or None with ``skips_unbounded`` saying why."""
+    or None with ``skips_unbounded`` saying why. ``import_warnings`` holds the warnings the scored sheet's
+    import gave (``import_warnings``), so a verdict resting on a sheet imported with one never reads as
+    clean.
+
+    What it was scored from, for ``gate1_stale`` to check: ``inputs`` ({file: sha256} of round 1's keys,
+    draw, and each imported round 1 sheet's labels and import record: ``_gate1_inputs``),
+    ``judgements_digest`` (of the Hindi round 1 outputs and judgements: ``_gate1_judged``) and
+    ``judge_pins`` (the judge pins it was scored under)."""
     view = primary_view()
     pairs = [(h, v[view]) for e, h, v in col.rows if e["round"] == 1 and e["lang"] == "hi"]
-    sheets = [s for s in col.sheets.values() if s["round"] == 1 and s["slot"] == "a" and s["lang"] == "hi"]
+    names = sorted(name for name, s in col.sheets.items()
+                   if s["round"] == 1 and s["slot"] == "a" and s["lang"] == "hi")
+    sheets = [col.sheets[name] for name in names]
     gaps = _gaps(col, "hi", 1)
     b = _with_status(view, agreement_block(pairs, bar), sheets, col.checks, gaps)
     status = "pending" if b["meets_bar"] is None else ("pass" if b["meets_bar"] else "fail")
@@ -646,8 +706,54 @@ def gate1(col: Collected, bar: dict, created: str) -> dict:
         "superseded": sum(1 for e, _, _ in col.superseded if e["round"] == 1 and e["lang"] == "hi"),
         **{k: b[k] for k in ("n", "n_judged", "agreement", "kappa")},
         **bound,
+        "import_warnings": {name: warned for name, warned in col.checks.get("import_warnings", {}).items()
+                            if name in names},
+        "inputs": _gate1_inputs(col),
+        "judgements_digest": _gate1_judged(col, view),
+        "judge_pins": {kind: col.pins.get(kind) for kind in ("qwen3guard", "frontier")},
         "created": created,
+        "git": git,
     }
+
+
+def gate1_stale(doc: dict) -> list[str]:
+    """Why the Gate 1 verdict ``doc`` (gate1.json as ``gate1`` wrote it) no longer holds for the files and
+    the config here now; empty while it does. P03's ``lift gate 1`` calls this and, while it lists anything,
+    reports the verdict as stale (run ``lift validate score --round 1``) instead of its status.
+
+    Each file of ``inputs`` must be here with the same sha256, and the labels file of every round 1 sheet
+    imported here must be named there (one imported since is not); ``judgements_digest`` must be that of
+    the Hindi round 1 outputs and judgements read now, collected under the same ``judge_pins`` (an item
+    judged or generated again shows here); and the config must still make ``judge_view``'s judge primary,
+    with the same ``bar``. A gate1.json written before it recorded its inputs is never current."""
+    inputs, judged = doc.get("inputs"), doc.get("judgements_digest")
+    if not isinstance(inputs, dict) or not judged:
+        return ["gate1.json names none of its inputs (written before they were recorded)"]
+    problems = []
+    for name, digest in sorted(inputs.items()):
+        path = _gate1_input_path(name)
+        if path is None or not path.is_file():
+            problems.append(f"{name} is gone")
+        elif sha256_file(path) != digest:
+            problems.append(f"{name} has changed (imported or drawn again)")
+    view = primary_view()
+    if doc.get("judge_view") != view:
+        problems.append(f"it was scored for {doc.get('judge_view')}, but configs/project.yaml makes {view} "
+                        "primary now")
+    if doc.get("bar") != dict(config.get("validation.bar")):
+        problems.append("configs/project.yaml validation.bar has changed")
+    pins = doc.get("judge_pins") or {}
+    try:
+        col = collect(1, qwen3guard_judge=pins.get("qwen3guard"), frontier_judge=pins.get("frontier"))
+    except (ValidateError, OSError, ValueError) as e:
+        return [*problems, f"round 1 cannot be scored here now ({e})"]
+    problems += [f"{labels_path(name).name} was imported after it was scored"
+                 for name, info in sorted(col.sheets.items())
+                 if info["imported"] and labels_path(name).name not in inputs]
+    if _gate1_judged(col, str(doc.get("judge_view"))) != judged:
+        problems.append("the judgements or outputs of its Hindi items have changed (judged or generated "
+                        "again)")
+    return problems
 
 
 def score(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
@@ -721,7 +827,7 @@ def score(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
         write_json(metrics_dir() / f"{stem}.json", doc)
         write_text(metrics_dir() / f"{stem}.md", render_score(doc))
         if 1 in col.rounds:
-            write_json(gate1_path(), gate1(col, bar, doc["created"]))
+            write_json(gate1_path(), gate1(col, bar, doc["created"], git=doc["git"]))
     return doc
 
 

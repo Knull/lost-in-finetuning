@@ -178,6 +178,27 @@ def test_gate1_is_written_whenever_round_1_is_scored_and_waits_for_unfinished_ro
     assert read_json(scoring.gate1_path())["status"] == "pass"
 
 
+def test_gate1_tells_when_a_hindi_output_it_scored_was_generated_again(tmp_path, monkeypatch):
+    # R2-12: an output regenerated with other text under its key leaves its item superseded and its
+    # judgements about another text. gate1.json was scored before that: gate1_stale says it no longer
+    # holds, and the next score counts the item as superseded.
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    import_truth(world)
+    scoring.score(1)
+    gate = read_json(scoring.gate1_path())
+    assert (gate["status"], gate["superseded"], scoring.gate1_stale(gate)) == ("pass", 0, [])
+    item = next(it for it in load_round(1)["items"] if it["lang"] == "hi")
+    cell = (item["variant"], item["set"], "hi", item["split"])
+    write_generations(world, *cell, [g.model_copy(update={"output": g.output + " (regenerated)"})
+                                     if g.key == item["key"] else g for g in world.generations[cell]])
+    stale = scoring.gate1_stale(gate)
+    assert len(stale) == 1 and "generated again" in stale[0]
+    scoring.score(1)
+    gate = read_json(scoring.gate1_path())
+    assert (gate["superseded"], scoring.gate1_stale(gate)) == (1, [])
+
+
 def test_redteam_keys_get_their_own_judge_command(tmp_path, monkeypatch):
     world = world_for(tmp_path, monkeypatch)
     red = write_prompts(world, "redteam", "hi", {"final": 30})
