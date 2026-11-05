@@ -35,6 +35,15 @@ sweep, apply the selection rule (overall and per repair family), and hand over t
      artifact through a check that refuses a declared sha256 the file no longer has, and have
      `build_variant` refuse a builder whose loaded hashes differ from `spec.artifacts`. A CAST fit
      re-run in place must change the keys or stop the run, never resume a cell under it.
+   - Every repair's registry entry pins its adapter (`artifacts.adapter`, as `lift
+     register-adapter` writes it). Since R1, the reporting door refuses a cell of a variant
+     that names an adapter without a pinned hash, and refuses a cell whose recorded adapter hash
+     is not the pin. That is how a repair arm and its adapter arm are known to come from the same
+     weights.
+   - A CAST wrapper's `generate` must pass `logits_processor` (with every other keyword) on to
+     the model's `generate`. The harness's non-finite watch (R1-25) refuses a wrapper that drops
+     it. A wrapper that decodes the batch in pieces is accepted, but then a NaN in any piece
+     refuses the whole batch.
    - ReSta depends on Base's weights, so Base's revision must reach the key (R1-04). The resta
      builder refuses a `models.base.revision` that is not a 40-hex sha (the `require_pinned` rule),
      and records that sha in the spec it builds (for example `artifacts.base`) and in the registry
