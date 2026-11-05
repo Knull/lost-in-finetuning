@@ -725,6 +725,87 @@ def test_generate_skips_a_short_cell_lists_its_remedy_and_exits_3(tiny_model_dir
     assert "easy_benign_zh_final: short of its frozen split, skipped" in caplog.text
 
 
+FAULT = "a fault in {}, no fp16 overflow: report it (CLAUDE.md rule 9), never tune around it"
+
+
+def overflow_on(monkeypatch, call):
+    """greedy_batch marking every row of its ``call``-th batch non-finite (an fp16 overflow, as its check
+    marks it); the other batches decode as they do."""
+    from dataclasses import replace
+
+    from lift.models import generate as gen
+
+    real, calls = gen.greedy_batch, []
+
+    def greedy_batch(model, rows, **kw):
+        calls.append(len(rows))
+        outs = real(model, rows, **kw)
+        return [replace(o, nonfinite=True) for o in outs] if len(calls) == call else outs
+
+    monkeypatch.setattr(gen, "greedy_batch", greedy_batch)
+
+
+def test_a_non_finite_cell_is_listed_apart_with_its_remedy():
+    # W2-02: an fp16 cell that went non-finite is made in bf16 on an A100 or L4: its restart line first when
+    # its file holds fp16 records (with the refill lines of the judgements it sets aside, made in bf16), else
+    # nothing to set aside; in bf16 or fp32 it is a fault to report, no line
+    from lift.models.generate import NonFiniteOutputError
+
+    write_generation("harmful", "en", "dev", dtype="fp16")                 # an earlier batch's records
+    write_judgements("frontier", "harmful", "en", "dev")                    # the second judge's sample
+    line = "lift restart --variant stock --split dev --sets harmful --langs en --dtype fp16"
+    errors = {"held": ("en", NonFiniteOutputError(f"... `{line}` ...", pids=["har-0002"], dtype="fp16",
+                                                  command=line)),
+              "fresh": ("hi", NonFiniteOutputError("...", pids=["har-0001"], dtype="fp16")),
+              "bf16": ("zh", NonFiniteOutputError("...", pids=["har-0001"], dtype="bf16"))}
+    remedies = {}
+    for name, (lang, exc) in errors.items():
+        skipped: dict[str, dict[str, str]] = {}
+        run_cmd._skip(skipped, "stock", "harmful", lang, "dev", exc, judged=None, dtype=exc.dtype)
+        [(kind, cells)] = skipped.items()
+        assert (kind, list(cells)) == ("nonfinite", [f"harmful_{lang}_dev"]), name
+        remedies[name] = cells[f"harmful_{lang}_dev"]
+    cell = "--variant stock --split dev --sets harmful --langs en"
+    assert remedies["held"] == (f"{line}\n    and once it is generated again: lift judge {cell} --judge "
+                                "second --sample 0.10")
+    assert remedies["fresh"] == ("nothing to set aside: run the line that failed in bf16 on an A100 or L4 "
+                                 "(without --dtype)")
+    assert remedies["bf16"] == FAULT.format("bf16")
+    head = " ".join(run_cmd.SKIPPED["nonfinite"].split())
+    assert "nothing of that batch was written" in head and "made in bf16" in head and "rule 9" in head
+
+
+@pytest.mark.torch
+def test_generate_skips_a_non_finite_cell_lists_it_and_exits_3(fake_prompt_files, tiny_model_dir, monkeypatch,
+                                                               caplog):
+    # W2-02: a batch that went non-finite stopped `lift generate` (and the job: its exit was 1), so no later
+    # cell ran. NonFiniteOutputError is a StaleOutputError now: the cell is listed apart, the others go on,
+    # and the line exits 3.
+    pytest.importorskip("torch")
+    from fakes import make_prompt
+
+    from lift.models import generate as gen
+    from lift.models import variants
+
+    pin()
+    for lang in ("en", "hi"):
+        fake_prompt_files[("harmful", lang)] = [make_prompt(f"har-{i}", lang, "harmful", "dev", text=f"q {i}")
+                                                for i in range(3)]
+    real_build = variants.build_variant
+    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: real_build(
+        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)))
+    short_runs(monkeypatch)
+    overflow_on(monkeypatch, 1)                                         # harmful_en's one batch
+    argv = ["generate", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "hi",
+            "--device", "cpu", "--dtype", "bf16"]
+    assert main(argv) == 3
+    assert not gen.generations_path("stock", "harmful", "en", "dev").exists()
+    assert len(gen.read_generations(gen.generations_path("stock", "harmful", "hi", "dev"))) == 3
+    assert listing(caplog, "went non-finite") == (
+        f"1 cells {run_cmd.SKIPPED['nonfinite']}:\n  harmful_en_dev: {FAULT.format('bf16')}\n")
+    assert "harmful_en_dev: decoding went non-finite, skipped" in caplog.text
+
+
 @pytest.mark.parametrize("role", ["primary", "second"])
 def test_judge_skips_a_stale_cell_and_exits_3(role, monkeypatch, caplog):
     # judge_file's refusal (a StaleOutputError) names the cell's restart line; lift judge lists it and
@@ -1525,6 +1606,17 @@ class TestRunCells:
                           lid=self.LID(), skipped=skipped)
         assert skipped == {"short": {"easy_benign_zh_final": short_remedy()}}
         assert [judged("stock", "easy_benign", lang, "final") for lang in ("zh", "en")] == [0, 4]
+
+    @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
+    def test_a_cell_that_goes_non_finite_is_listed_and_the_others_go_on(self, setup, monkeypatch, mode):
+        # W2-02: a non-finite batch stopped run-dev (and the job), so no later cell ran
+        make_holder, cells = setup
+        short_runs(monkeypatch)
+        overflow_on(monkeypatch, 2)                                      # harmful_hi's one batch
+        skipped: dict[str, dict[str, str]] = {}
+        self.session(mode, make_holder, self.Judge(), cells, skipped=skipped)
+        assert skipped == {"nonfinite": {"harmful_hi_dev": FAULT.format("fp32")}}
+        assert [judged("stock", *c) for c in cells] == [3, 0, 3, 3]
 
     @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
     def test_without_a_collector_the_other_cells_go_on_and_the_stale_ones_raise_at_the_end(self, setup,
