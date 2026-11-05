@@ -62,6 +62,10 @@ Jobs are launched from the laptop with `lift remote`, which drives Google's Cola
    [Environment]::SetEnvironmentVariable('LIFT_JUDGE_MAX_USD', '<cap>', 'User')
    ```
 
+   This form keeps each value in plain text in the registry (`HKCU\Environment`) until it is removed.
+   When you no longer need one, remove it in your own PowerShell window with
+   `[Environment]::SetEnvironmentVariable('NAME', $null, 'User')`.
+
    `hf auth login` must store a WRITE token for the runs repo too, not the read token that
    downloads the models: the job's pushes use it, and so does the push retry of
    `lift remote watch`.
