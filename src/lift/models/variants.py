@@ -135,8 +135,14 @@ def _build_adapter(spec: VariantSpec, ctx: BuildContext) -> LoadedVariant:
 
 
 def checked_adapter(spec: VariantSpec) -> tuple[Path, str]:
-    """The adapter's directory and hash, after checking the hash pinned in the registry (if any).
-    Repair builders (P05) start from this too."""
+    """The adapter's directory and hash, after checking the hash pinned in the registry (if any) and
+    the merge parity lift train recorded. An adapter whose registration.json (synced with it) records a
+    failed fp32 merge parity for this very hash must not be evaluated, whatever a registry holds
+    (CLAUDE.md rule 9; lift.train.lora.recorded_parity_failure): an fp16 parity on a T4 may have
+    registered it before the fp32 one failed, and this is the one path every adapter variant is built
+    through. Without a registration.json (the tests' adapters) only the pinned hash is checked. Repair
+    builders (P05) start from this too."""
+    from lift.train.lora import REGISTRATION, recorded_parity_failure
     from lift.train.merge import adapter_hash
 
     if not spec.adapter:
@@ -149,6 +155,13 @@ def checked_adapter(spec: VariantSpec) -> tuple[Path, str]:
     if pinned and pinned != digest:
         raise ValueError(f"{spec.name}: {directory} does not match the adapter hash pinned in "
                          "configs/variants.yaml; the files changed after registration")
+    failure = recorded_parity_failure(directory, digest)
+    if failure:
+        raise ValueError(f"{spec.name}: adapter {spec.adapter} (hash {digest[:12]}) failed fp32 merge "
+                         "parity: it must not be evaluated (CLAUDE.md rule 9). "
+                         f"{directory / REGISTRATION} records {failure}. Find the cause before anything "
+                         f"evaluates it; `lift register-adapter {spec.adapter}` on the laptop (after "
+                         "`lift sync pull`) removes its configs/variants.yaml entry")
     return directory, digest
 
 
