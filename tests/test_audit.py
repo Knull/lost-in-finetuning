@@ -135,16 +135,17 @@ def test_a_judge_without_a_loose_reading_records_none(cell):
 
 def write_licence(n: int = 200, digest: str = DIGEST, **fields):
     """outputs/metrics/gate0-fp16.json as Gate 0's T4 comparison run writes it (its fp16 check compared
-    ``n`` prompts with the bf16 run ``DIGEST``, under META's harness and decoding, on a T4), and the passing
-    bf16 Gate 0 it compared against (gate0.json, whose run is ``digest``); only the fields the licence
-    reads."""
+    ``n`` prompts with the bf16 run ``DIGEST``, under META's harness and decoding, on a T4, judged by the
+    configured primary judge in fp16), and the passing bf16 Gate 0 it compared against (gate0.json, whose
+    run is ``digest``); only the fields the licence reads."""
     metrics_dir().mkdir(parents=True, exist_ok=True)
     reference = {"dtype": "bf16", "pass": True, "checks": {"precision": {"pass": True, "digest": digest}},
-                 "revisions": {"global": "c" * 40}}
+                 "judge": {"id": f"{GUARD_ID}#{RULES}#bf16#strict"}, "revisions": {"global": "c" * 40}}
     (metrics_dir() / "gate0.json").write_text(json.dumps(reference), encoding="utf-8")
     fp16 = {"pass": True, "comparable": True, "n": n, "reference_digest": DIGEST, "harness": META["harness"],
             "decoding": META["decoding"]}
     doc = {"dtype": "fp16", "reference_dtype": "bf16", "pass": True, "gpu_capability": GPU_CLASS["fp16"],
+           "judge": {"id": f"{GUARD_ID}#{RULES}#fp16#strict"},
            "checks": {"precision": {"pass": True}, "fp16": fp16}, "revisions": {"global": "c" * 40}, **fields}
     (metrics_dir() / "gate0-fp16.json").write_text(json.dumps(doc), encoding="utf-8")
 
@@ -230,6 +231,25 @@ def test_no_fp16_record_from_a_judge_off_the_t4(cell, judged_on):
     assert "judge the cell again on the T4" in refused["harmful_hi_dev"]
     assert not (metrics_dir() / "auditkit").exists()
     write_cell("fp16")                                                # judged again on the T4
+    assert audit.record_safety(*CELL, dtype="fp16").name == "harmful_hi_dev-fp16.json"
+
+
+def test_no_fp16_record_from_a_judge_the_comparison_did_not_run(cell):
+    """R2-07: the T4 comparison measured the agreement of one judge (gate0-fp16.json judge.id: its model,
+    revision, labelling rules and Controversial mode). A cell judged by another, here the strict judge when
+    the comparison ran the loose mapping, gets no -fp16 record, through record_safety or a command's record
+    step."""
+    from lift.commands import run as run_cmd
+
+    write_cell("fp16")
+    write_licence(judge={"id": f"{GUARD_ID}#{RULES}#fp16#loose"})
+    with pytest.raises(ValueError, match=r"6 judgements were made by .*not by the judge gate0-fp16\.json"):
+        audit.record_safety(*CELL, dtype="fp16")
+    refused: dict[str, str] = {}
+    run_cmd._record(*CELL, dtype="fp16", refused=refused)
+    assert list(refused) == ["harmful_hi_dev"] and "re-run the full bf16 Gate 0" in refused["harmful_hi_dev"]
+    assert not (metrics_dir() / "auditkit").exists()
+    write_licence()                                                   # the comparison ran the strict judge
     assert audit.record_safety(*CELL, dtype="fp16").name == "harmful_hi_dev-fp16.json"
 
 
