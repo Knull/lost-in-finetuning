@@ -1,7 +1,7 @@
 import pytest
 
 from lift import config
-from lift.cachekey import generation_key
+from lift.cachekey import generation_key, intervention_config
 from lift.schemas import VariantSpec
 from lift.splits import assign_splits, check_disjoint
 
@@ -57,6 +57,18 @@ def test_cache_key_changes_with_every_component():
     renamed = VariantSpec(name="some-other-name", method="wiseft", adapter="x", seed=1,
                           params={"lambda": 0.5})
     assert _key(spec=renamed) == base               # the name is not behaviour
+    # R2-22: and each other component alone, so a key that drops one of them fails here.
+    assert _key(model_rev="def456") != base
+    assert _key(pid="prh-test-0002") != base
+    same = dict(name="wiseft-l0.50-x", method="wiseft", adapter="x", seed=1, params={"lambda": 0.5})
+    for change in ({"method": "resta"}, {"seed": 2}, {"adapter": "y"}, {"artifacts": {"cast": "c" * 64}}):
+        assert _key(spec=VariantSpec(**{**same, **change})) != base, change
+    # cast and cast_always at one strength, adapter and artifacts differ in method alone (CLAUDE.md rule 4).
+    steer = dict(adapter="x", seed=1, params={"strength": 1.0}, artifacts={"cast": "c" * 64})
+    assert (_key(spec=VariantSpec(name="cast-m1.0-x", method="cast", **steer))
+            != _key(spec=VariantSpec(name="castalways-m1.0-x", method="cast_always", **steer)))
+    # Every field of a variant but its name is behaviour, so a field added to VariantSpec reaches the key.
+    assert set(intervention_config(VariantSpec(**same))) == set(VariantSpec.model_fields) - {"name"}
 
 
 def test_cache_key_refuses_unresolved_revision_and_missing_adapter():
