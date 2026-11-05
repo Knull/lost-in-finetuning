@@ -38,8 +38,11 @@ Whenever round 1 is scored (alone or with round 2) this also writes
 outputs/metrics/validation/gate1.json, the Gate 1 check "validation round 1 meets the bar in Hindi"
 for the judge that configs/project.yaml makes primary (``judges.safety_primary``; a recorded but
 not yet applied decision is reported, not acted on): {"status": "pass" | "fail" | "pending",
-"meets_bar", "judge_view", "judge_id", "n", "agreement", "kappa", "not_labelled", ...}. It is
-pending while any Hindi round 1 row has no label and no 'skipped' note.
+"meets_bar", "judge_view", "judge_id", "items", "n", "agreement", "kappa", "not_labelled",
+"not_labelled_by_reason", "skipped", "superseded", "agreement_if_skipped", "robust_to_skips", ...}.
+It is pending while any Hindi round 1 row has no label and no 'skipped' note (``not_labelled``
+counts those rows). Deliberate skips are left out of the verdict and counted, with the agreement
+range had they been labelled and whether the agreement half of the bar holds across it.
 
 Each labelled item's output is looked up in its generations file. The harness regenerates a whole
 file when one of its prompts is fixed, and the other prompts come back under the same keys but
@@ -49,7 +52,10 @@ nothing: the item stays. A judgement counts only if its ``output_sha`` (the sha2
 judged, which P02 records) is that of the output now under the item's key, or of the output the
 reader was shown when the generations file cannot be read (``output_sha`` in the round's keys); any
 other judgement is skipped and counted (``checks.stale_judgements``), and the item waits for its
-judge.
+judge. A round drawn in another precision than ``generation.dtype`` (a T4 run) is scored, and
+decided on, only while Gate 0's licence covers each of its cells (lift.validation.outputs.
+check_licence: its generations and the judgements scored, also for a file not readable here):
+otherwise it is refused before anything is written.
 
 ``decide_primary_judge()`` applies ``judges.decision_rule`` to round 1, pooled over the four
 languages: the frontier judge becomes primary only if it agrees with the readers at least 5 points
@@ -83,7 +89,15 @@ from lift.schemas import LABELS, JudgementRecord
 from lift.stats.agreement import binary, cohens_kappa, meets_bar, percent_agreement
 from lift.stats.paired import mcnemar_exact, paired_bootstrap
 from lift.validation.labels import labels_path, read_labels, read_labels_meta
-from lift.validation.outputs import Prompts, Target, final_judgements_exist, load_judgements, load_pool
+from lift.validation.outputs import (
+    LicenceError,
+    Prompts,
+    Target,
+    check_licence,
+    final_judgements_exist,
+    load_judgements,
+    load_pool,
+)
 from lift.validation.sample import existing_rounds, load_round, sample_digest
 from lift.validation.store import (
     ValidateError,
@@ -252,6 +266,12 @@ class Collected:
     checks: dict = field(default_factory=dict)
 
 
+def _unlicensed(round_no: int, err: LicenceError) -> LicenceError:
+    return LicenceError(f"round {round_no} was drawn from outputs in another precision than "
+                        f"generation.dtype, so it is scored only while Gate 0's licence covers them; nothing "
+                        f"was scored or written. {err}")
+
+
 def _not_labelled_reason(item_id: str, meta: dict | None) -> str:
     if meta is None:
         return "not_imported"
@@ -316,6 +336,8 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
             try:
                 pool = load_pool(*cell, prompts, prompt_check=draw.get("prompt_check", True),
                                  dtype=draw.get("dtype"))
+            except LicenceError as e:
+                raise _unlicensed(it["round"], e) from None
             except ValidateError:
                 pool = None
             cells[cell] = None if pool is None else ({r.pid: r for r in pool.records}, set(pool.missing))
@@ -338,6 +360,24 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
          for it in main],
         qwen3guard_judge=qwen3guard_judge, frontier_judge=frontier_judge)
     checks["stale_judgements"] = dict(judged.stale)
+    # A round drawn in another precision than generation.dtype is scored only while Gate 0's licence
+    # covers every cell it reads: the generations (load_pool checked those of a readable file), the
+    # judgements scored here (Qwen3Guard's GPU class), and the licence itself for a file not readable now.
+    gen_dtype = str(config.get("generation.dtype"))
+    off: dict[tuple[str, str, str, str], tuple[int, str, list[str]]] = {}
+    for it in main:
+        dtype = docs[it["round"]].get("dtype") or gen_dtype
+        if dtype != gen_dtype:
+            off.setdefault((it["variant"], it["set"], it["lang"], it["split"]),
+                           (it["round"], dtype, []))[2].append(it["key"])
+    for cell, (r, dtype, keys) in sorted(off.items()):
+        held = cells.get(cell)
+        records = [rec for k in keys for rec in (judged.qwen3guard.get(k), judged.frontier.get(k))
+                   if rec is not None]
+        try:
+            check_licence(dtype, list(held[0].values()) if held else [], records, cell)
+        except LicenceError as e:
+            raise _unlicensed(r, e) from None
 
     rows, unlabelled, superseded = [], [], []
     for it in main:
@@ -472,13 +512,30 @@ def _gaps(col: Collected, lang: str | None = None, round_no: int | None = None) 
 
 def gate1(col: Collected, bar: dict, created: str) -> dict:
     """Gate 1's validation check, "round 1 meets the bar in Hindi", for the judge that
-    configs/project.yaml makes primary, from round 1's Hindi items alone."""
+    configs/project.yaml makes primary, from round 1's Hindi items alone.
+
+    Every item of the Hindi round 1 main sheet is accounted for: ``items`` (the sheet's size), ``n``
+    (labelled and scored), ``superseded``, and ``not_labelled_by_reason`` (deliberate skips included,
+    ``skipped`` their count). ``not_labelled`` counts only the rows that keep the gate pending (no label
+    and no 'skipped' note). Skips stay out of the verdict; ``agreement_if_skipped`` is the agreement range
+    had they been labelled, each agreeing with the judge or not, n_agree/(n+s) to (n_agree+s)/(n+s) over
+    the n judged items, and ``robust_to_skips`` whether the agreement half of the bar gives the same verdict
+    at both ends (kappa is not bounded)."""
     view = primary_view()
     pairs = [(h, v[view]) for e, h, v in col.rows if e["round"] == 1 and e["lang"] == "hi"]
     sheets = [s for s in col.sheets.values() if s["round"] == 1 and s["slot"] == "a" and s["lang"] == "hi"]
     gaps = _gaps(col, "hi", 1)
     b = _with_status(view, agreement_block(pairs, bar), sheets, col.checks, gaps)
     status = "pending" if b["meets_bar"] is None else ("pass" if b["meets_bar"] else "fail")
+    why = Counter(reason for e, reason, _ in col.unlabelled if e["round"] == 1 and e["lang"] == "hi")
+    skips, judged = why.get("skipped", 0), b["n_judged"]
+    if b["n_agree"] is None:                                  # nothing judged yet
+        if_skipped, robust = None, None
+    else:
+        worst = Fraction(b["n_agree"], judged + skips)
+        best = Fraction(b["n_agree"] + skips, judged + skips)
+        need = Fraction(str(bar["agreement"]))
+        if_skipped, robust = {"lo": float(worst), "hi": float(best)}, (worst >= need) == (best >= need)
     recorded = recorded_decision()
     return {
         "gate": 1, "check": "validation round 1 meets the bar in Hindi", "round": 1, "lang": "hi",
@@ -487,9 +544,12 @@ def gate1(col: Collected, bar: dict, created: str) -> dict:
         "decision_recorded": recorded,
         "decision_applied": recorded is None or (recorded == "frontier") == (view == "frontier"),
         "bar": bar, "status": status, "meets_bar": b["meets_bar"], "block_status": b["status"],
+        "items": sum(s["n"] for s in sheets),
         "not_labelled": gaps,
+        "not_labelled_by_reason": dict(why), "skipped": skips,
         "superseded": sum(1 for e, _, _ in col.superseded if e["round"] == 1 and e["lang"] == "hi"),
         **{k: b[k] for k in ("n", "n_judged", "agreement", "kappa")},
+        "agreement_if_skipped": if_skipped, "robust_to_skips": robust,
         "created": created,
     }
 

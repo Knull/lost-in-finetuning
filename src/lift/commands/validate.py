@@ -338,8 +338,8 @@ def _prompt_flag(s: argparse.ArgumentParser) -> None:
                    help="escape hatch: treat every output as current even if its prompt_sha does not "
                         "match the prompt text (printed as a warning; recorded in what it writes)")
     s.add_argument("--dtype", default=None, choices=["bf16", "fp16", "fp32"],
-                   help="the precision of the outputs to use (default: generation.dtype; fp16 only for a "
-                        "T4 run Gate 0 has cleared)")
+                   help="the precision of the outputs to use (default: generation.dtype; another is "
+                        "refused unless Gate 0's licence, gate0-<dtype>.json, covers the outputs)")
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -418,6 +418,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     s = steps.add_parser("utility-score", help="score the reader's preferences against the utility judge")
     s.add_argument("--verdicts", nargs="+", default=None, metavar="FILE",
-                   help="UtilityVerdict JSONL files (default: found under outputs/)")
+                   help="UtilityVerdict JSONL files (default: found under outputs/, except what lift "
+                        "sync never syncs: outputs/.aside, outputs/.sync-backup, caches)")
     s.add_argument("--judge-id", default=None, help="the utility judge to use if several are found")
     s.set_defaults(func=_utility_score)

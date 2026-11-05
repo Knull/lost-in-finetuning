@@ -4,7 +4,9 @@ harness's judge ids. Fake worlds only (tests/validation_fakes.py), all under tmp
 """
 
 import copy
+import json
 import re
+import shutil
 
 import pytest
 from validation_fakes import (
@@ -22,7 +24,9 @@ from validation_fakes import (
     write_verdicts,
 )
 
+from lift import paths
 from lift.io import read_jsonl, sha256_text, write_jsonl
+from lift.models.generate import HARNESS_VERSION
 from lift.schemas import JudgementRecord, PromptRecord
 from lift.validation import outputs
 from lift.validation import score as scoring
@@ -83,13 +87,15 @@ def test_round_keys_are_the_item_id_map_that_p02_reads(tmp_path, monkeypatch):
     assert keys == {it["key"] for it in load_round(1)["items"]}
 
 
-def spotcheck(path, rows):
+P01_HEADER = ["item_id", "set", "english", "translation", "verdict", "corrected", "note"]
+
+
+def spotcheck(path, rows, *, header=P01_HEADER, above=()):
     import csv
 
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, lineterminator="\n")
-        writer.writerow(["item_id", "set", "english", "translation", "verdict", "corrected", "note"])
-        writer.writerows(rows)
+        writer.writerows([*above, header, *rows])
 
 
 def test_prompts_on_spot_check_sheets_are_kept_off_their_readers_sheets(tmp_path, monkeypatch):
@@ -295,6 +301,36 @@ def test_p01s_own_spot_check_sheets_keep_their_prompts_off_the_sheets(tmp_path, 
     assert not seen & set(hi) and not doc["warnings"]
 
 
+@pytest.mark.parametrize("how", ["translation header renamed", "line typed above the header",
+                                 "workbook saved as csv"])
+def test_a_spot_check_sheet_handed_back_unreadable_never_lets_its_prompts_through(tmp_path, monkeypatch, how):
+    # R1-45: P01's spot-check sheet, not applied yet, as its reader may hand it back. A renamed translation
+    # header is still read (the ids say which prompts it shows); a sheet that cannot be read at all stops
+    # the draw, naming the file, since its prompts could not be kept off its reader's sheets.
+    world_for(tmp_path, monkeypatch)
+    prompts = Prompts()
+    hi = sorted(p for p, r in prompts.get("harmful", "hi").items() if r.split == "dev")[:5]
+    sheets_dir().mkdir(parents=True, exist_ok=True)
+    path = sheets_dir() / "spotcheck_hi.csv"
+    rows = [[f"hi-{p}", "harmful", "x", prompts.get("harmful", "hi")[p].text, "ok", "", ""] for p in hi]
+    if how == "translation header renamed":
+        spotcheck(path, rows, header=["hindi translation" if c == "translation" else c for c in P01_HEADER])
+        make_sheets(1)
+        doc = load_round(1)
+        assert not {it["pid"] for it in doc["items"] if it["lang"] in ("hi", "en")} & set(hi)
+        assert doc["excluded_seen_pids"]["hi"] == doc["excluded_seen_pids"]["en"] == len(hi)
+        return
+    if how == "line typed above the header":
+        spotcheck(path, rows, above=[["checked by the hindi reader"]])
+    else:
+        path.write_bytes(b"PK\x03\x04" + bytes(64))              # how every .xlsx (a zip file) starts
+    with pytest.raises(ValidateError, match=r"spotcheck_hi\.csv") as refused:
+        make_sheets(1)
+    assert "apply-spotchecks" in str(refused.value)               # the remedy: fix it, or apply and move it
+    assert not round_keys_path(1).exists() and not draw_path(1).exists()
+    assert any("spotcheck_hi.csv" in p for p in check_round(1)["problems"])
+
+
 def test_an_output_that_changed_under_its_key_is_superseded_even_with_judgements(tmp_path, monkeypatch):
     world = world_for(tmp_path, monkeypatch)
     make_sheets(1)
@@ -446,13 +482,124 @@ def test_the_decision_texts_use_the_configured_threshold(tmp_path, monkeypatch):
     assert "switches at 10 points" in entry and "exactly 10 points" in entry and "5 points" not in entry
 
 
+# --- R1-16: outputs in another precision than generation.dtype need Gate 0's licence ------------
+
+T4_REV, T4_DECODING, T4_DIGEST = "c" * 40, "d" * 16, "e" * 64   # Global's sha, decoding digest, the bf16 run
+T4_STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "7.5"}
+QWEN_FP16 = PRIMARY_ID + "#fp16#strict"         # the harness's id for Qwen3Guard run in fp16, strict mapping
+
+
+def t4_run(world, *, made_on="7.5", judged_on=None):
+    """Every output of ``world`` as a Kaggle job makes it: in fp16 on GPU class ``made_on``, with the
+    provenance lift.models.generate records, and judged by Qwen3Guard in fp16 on ``judged_on`` (the same
+    GPU unless given). The frontier judge is an API: its judgements carry no stack."""
+    meta = {"dtype": "fp16", "model_rev": T4_REV, "harness": HARNESS_VERSION, "decoding": T4_DECODING,
+            **T4_STACK, "gpu_capability": made_on}
+    for cell, gens in list(world.generations.items()):
+        write_generations(world, *cell, [g.model_copy(update={"meta": dict(meta)}) for g in gens])
+    stack = {**T4_STACK, "gpu_capability": judged_on or made_on}
+    for path in (world.outputs / "judgements" / "qwen3guard").rglob("*.jsonl"):
+        write_jsonl(path, [{**r, "judge": QWEN_FP16, "native": {**r["native"], "stack": stack}}
+                           for r in read_jsonl(path)])
+
+
+def write_gate0(*, passed=True):
+    """Gate 0's two reports, reduced to what its fp16 licence reads (as tests/test_pipeline.py writes
+    them): gate0-fp16.json, the T4 comparison on 200 prompts against the bf16 run T4_DIGEST under this
+    harness and these decoding settings (``passed`` its verdict), and gate0.json, that bf16 Gate 0."""
+    folder = paths.metrics_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    revisions = {"global": T4_REV, "judge": "a" * 40}
+    fp16 = {"pass": passed, "comparable": True, "n": 200, "reference_digest": T4_DIGEST,
+            "harness": HARNESS_VERSION, "decoding": T4_DECODING}
+    (folder / "gate0-fp16.json").write_text(json.dumps(
+        {"dtype": "fp16", "reference_dtype": "bf16", "pass": passed, "gpu_capability": "7.5",
+         "checks": {"precision": {"pass": True, "digest": "f" * 64}, "fp16": fp16},
+         "revisions": revisions}), encoding="utf-8")
+    (folder / "gate0.json").write_text(json.dumps(
+        {"dtype": "bf16", "pass": True, "checks": {"precision": {"pass": True, "digest": T4_DIGEST}},
+         "revisions": revisions}), encoding="utf-8")
+
+
 def test_a_t4_run_gate0_cleared_can_be_drawn_with_its_dtype(tmp_path, monkeypatch):
     world = world_for(tmp_path, monkeypatch)
-    for cell, gens in list(world.generations.items()):
-        write_generations(world, *cell, [g.model_copy(update={"meta": {"dtype": "fp16"}}) for g in gens])
+    t4_run(world)
+    write_gate0()
     assert check_round(1)["problems"]                            # bf16 asked for: nothing to draw
+    assert check_round(1, dtype="fp16")["problems"] == []
     make_sheets(1, dtype="fp16")
     assert load_round(1)["dtype"] == "fp16"
+
+
+@pytest.mark.parametrize("unlicensed", ["no comparison yet", "fp16 failed", "made on another GPU class"])
+def test_an_fp16_run_gate0_has_not_licensed_is_never_drawn(tmp_path, monkeypatch, unlicensed):
+    # R1-16: naming --dtype fp16 licenses nothing. A T4 run Gate 0 has not licensed (no comparison yet,
+    # a failed one, cells made on another GPU class than the comparison's) is refused for the readers'
+    # sheets, the utility sheet and the second judge's lists, naming the licence.
+    world = world_for(tmp_path, monkeypatch, utility=True)
+    t4_run(world, made_on="6.0" if unlicensed == "made on another GPU class" else "7.5")
+    if unlicensed != "no comparison yet":
+        write_gate0(passed=unlicensed != "fp16 failed")
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        make_sheets(1, dtype="fp16")
+    assert not round_keys_path(1).exists() and not draw_path(1).exists()
+    assert not list(world.validation.rglob("*.csv"))
+    assert any("gate0-fp16.json" in p for p in check_round(1, dtype="fp16")["problems"])
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        make_utility_sheet("adapter-aya-std-s1", n=10, dtype="fp16")
+    assert not (world.validation / "keys" / "utility.json").exists()
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        second_judge_sample(require_validated=False, dtype="fp16")
+
+
+def test_a_t4_round_is_scored_only_while_gate0s_licence_covers_it(tmp_path, monkeypatch):
+    # R1-16: score and decide-judge read the precision the round was drawn in, and must refuse (before
+    # writing anything) once Gate 0's licence no longer covers its cells, never score them as unknown.
+    world = world_for(tmp_path, monkeypatch)
+    t4_run(world)
+    write_gate0()
+    make_sheets(1, dtype="fp16")
+    import_truth(world)
+    assert scoring.score(1, write=False)["judges"]["qwen3guard_strict"]["judge_id"] == QWEN_FP16
+    assert scoring.decide_primary_judge(dry_run=True)["n"] == 180          # licensed: scored and decided
+    written = (scoring.gate1_path(), scoring.gate1_path().with_name("round1.json"), scoring.decision_path())
+    # Qwen3Guard judged the round on another GPU class than the comparison's: its labels are not covered.
+    t4_run(world, judged_on="6.0")
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json") as refused:
+        scoring.score(1)
+    assert "GPU class" in str(refused.value)
+    t4_run(world)
+    # A later comparison fails and replaces the report (decisions.md 27): T4 runs are never reported.
+    write_gate0(passed=False)
+    for step in (lambda: scoring.score(1), lambda: scoring.decide_primary_judge(dry_run=True),
+                 scoring.decide_primary_judge):
+        with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+            step()
+    # Also when the generations files cannot be read here: the licence is asked for all the same.
+    shutil.rmtree(world.outputs / "generations")
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        scoring.score(1)
+    assert not [p for p in written if p.exists()]
+
+
+def test_a_t4_utility_sheet_is_scored_only_while_gate0s_licence_covers_it(tmp_path, monkeypatch):
+    # R1-16: utility-score reads the precision the sheet was drawn in, as score does.
+    world = world_for(tmp_path, monkeypatch, utility=True)
+    t4_run(world)
+    write_gate0()
+    sheet = make_utility_sheet("adapter-aya-std-s1", n=10, dtype="fp16")
+    doc = read_json(world.validation / "keys" / "utility.json")
+    import_preferences(fill_sheet(sheet, world.root / "u.csv", {it["item_id"]: "tie" for it in doc["items"]},
+                                  column="preference"))
+    write_verdicts(world, "adapter-aya-std-s1", {it["pid"]: 0.5 for it in doc["items"]})
+    assert score_utility(write=False)["complete"]                          # licensed: scored
+    write_gate0(passed=False)
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        score_utility()
+    shutil.rmtree(world.outputs / "generations")                          # unreadable here: still asked
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        score_utility()
+    assert not (paths.metrics_dir() / "validation" / "utility.json").exists()
 
 
 def test_decide_judge_says_when_the_config_disagrees_with_a_decision_to_keep_qwen3guard(

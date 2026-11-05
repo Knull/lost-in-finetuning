@@ -11,7 +11,8 @@ answer and the candidate adapter's answer to the same instruction.
   columns, never which model wrote which. The reader puts A, B or tie in ``preference``.
 - Pairs whose stock or candidate output was remade after the sheet was made are left out of the
   score and counted, since verdicts are joined by pid and would be about answers the reader never
-  saw.
+  saw. A sheet drawn in another precision than ``generation.dtype`` (``--dtype``) is drawn and
+  scored only while Gate 0's licence covers both cells (lift.validation.outputs.check_licence).
 - Scoring turns the reader's preference into the candidate's score (win 1, tie 0.5, loss 0) and
   compares it with the utility judge's UtilityVerdict, whose score averages both presentation
   orders (above 0.5 is a win, 0.5 a tie, below 0.5 a loss). Reported: agreement and kappa on
@@ -21,9 +22,11 @@ answer and the candidate adapter's answer to the same instruction.
   bootstrap interval; and the confusion matrix.
 
 Verdicts are found by scanning outputs/ for UtilityVerdict records of the candidate (P03 decides
-where they live), or read from the files given. A UtilityVerdict carries no generation key, so the
-sha256 of every verdict file read is recorded with the score. HumanPreference is defined here
-because schemas.HumanLabel only takes the four safety classes.
+where they live), except generations and what lift sync never syncs (outputs/.aside,
+outputs/.sync-backup, caches: superseded or local-only copies), or read from the files given. A
+UtilityVerdict carries no generation key, so the sha256 of every verdict file read is recorded with
+the score. HumanPreference is defined here because schemas.HumanLabel only takes the four safety
+classes.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from datetime import UTC, date, datetime
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Literal
 
@@ -43,7 +47,15 @@ from lift.schemas import UtilityVerdict
 from lift.stats.agreement import cohens_kappa, percent_agreement
 from lift.stats.paired import paired_bootstrap, win_rate
 from lift.validation.labels import parse_filled
-from lift.validation.outputs import Prompts, fields_of, load_pool, read_records, variant_info
+from lift.validation.outputs import (
+    LicenceError,
+    Prompts,
+    check_licence,
+    fields_of,
+    load_pool,
+    read_records,
+    variant_info,
+)
 from lift.validation.sample import DEFAULT_SEED, archive, blind_id, rank
 from lift.validation.score import confusion
 from lift.validation.store import (
@@ -254,14 +266,23 @@ def _first_record_safe(path: Path) -> dict | None:
 
 
 def find_verdict_files() -> list[Path]:
-    """Every JSONL file under outputs/ (except generations) whose records are UtilityVerdicts."""
+    """Every JSONL file under outputs/ whose records are UtilityVerdicts, except under generations and
+    what lift sync never syncs: outputs/.aside (the files lift restart set aside), outputs/.sync-backup
+    (the local copies a forced pull replaced) and the rest of lift.sync.IGNORE_PATTERNS (caches, Gate 0's
+    staging). Those hold superseded or local-only copies, and a UtilityVerdict names no generation key
+    that could tell them apart. A file given to ``load_verdicts`` is read wherever it is."""
+    from lift.models.generate import ASIDE_DIR  # noqa: PLC0415 (outside the core of lift.validation)
+    from lift.sync import BACKUP_DIR, IGNORE_PATTERNS  # noqa: PLC0415
+
     root = paths.output_dir()
     if not root.is_dir():
         return []
     gens = paths.generations_dir()
     out = []
     for path in sorted(root.rglob("*.jsonl")):
-        if gens in path.parents:
+        rel = path.relative_to(root).as_posix()        # as lift.sync matches IGNORE_PATTERNS in outputs/
+        if gens in path.parents or rel.split("/", 1)[0] in (ASIDE_DIR, BACKUP_DIR) or any(
+                fnmatchcase(rel, pattern) for pattern in IGNORE_PATTERNS):
             continue
         first = _first_record_safe(path)
         if first is not None and _VERDICT_FIELDS <= set(first):
@@ -340,12 +361,19 @@ def score_utility(*, verdict_files: list[Path] | None = None, judge_id: str | No
     # A verdict is joined by pid alone, so a pair whose outputs were remade after the sheet was made
     # would be scored against answers the reader never saw: leave it out and count it.
     prompts, current = Prompts(), {}
+    dtype = doc.get("dtype") or str(config.get("generation.dtype"))
     for name in ("stock", doc["candidate"]):
+        cell = (name, "utility", "hi", doc["split"])
         try:
-            pool = load_pool(name, "utility", "hi", doc["split"], prompts,
-                             prompt_check=doc.get("prompt_check", True), dtype=doc.get("dtype"))
+            pool = load_pool(*cell, prompts, prompt_check=doc.get("prompt_check", True),
+                             dtype=doc.get("dtype"))
+        except LicenceError:
+            raise
         except ValidateError:
             pool = None
+        # A sheet drawn in another precision than generation.dtype is scored only while Gate 0's licence
+        # covers both cells: load_pool checks the records it keeps, and this also a file not readable here.
+        check_licence(dtype, [] if pool is None else pool.records, [], cell)
         current[name] = None if pool is None else ({r.pid: r for r in pool.records}, set(pool.missing))
 
     def remade(it: dict) -> bool:

@@ -9,7 +9,10 @@ Codes against lift.schemas and the CLAUDE.md file layout, not against the harnes
   is left out of the pool and counted. If no record of a file matches its prompts at all, the
   hashing convention is wrong, which is an error.
 - Records in a precision other than ``generation.dtype`` (meta "dtype", e.g. a T4 fp16 check) are
-  left out and counted, unless that precision is asked for (a T4 run Gate 0 has cleared). Two
+  left out and counted, unless that precision is asked for. Naming one licenses nothing: records
+  read in it must be covered by Gate 0's licence (decisions.md 27), checked by the harness's own
+  rule (``check_licence``: gate0-{dtype}.json and its bf16 gate0.json, and the harness, decoding
+  settings and GPU class the cell was made and judged with), or the read is a LicenceError. Two
   current records for one pid (two runs mixed in one file) are an error.
 - A pid of the split with no record at all means the run is unfinished. The harness batches by
   length, so a partial run holds only the shortest prompts, and sampling from it would bias the
@@ -29,7 +32,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -180,6 +183,51 @@ def dtype_of(meta: dict) -> str | None:
     return _DTYPES.get(v, v)
 
 
+class LicenceError(ValidateError):
+    """Outputs read in a precision other than ``generation.dtype`` that Gate 0's licence does not
+    cover (``check_licence``). Callers that take an unreadable generations file for "unknown" never
+    take this for one."""
+
+
+def qwen3guard_role() -> str:
+    """The judges role ("primary" or "second") whose block names Qwen3Guard now."""
+    for role in ("primary", "second"):
+        block = config.get(f"judges.safety_{role}", {})
+        if isinstance(block, dict) and "qwen3guard" in str(block.get("id", "")).lower():
+            return role
+    return "primary"
+
+
+def licence_problems(dtype: str, gens: Sequence[GenerationRecord], judgements: Sequence[JudgementRecord],
+                     cell: tuple[str, str, str, str]) -> list[str]:
+    """Why Gate 0's licence does not cover reading ``cell`` in ``dtype``: none for ``generation.dtype``,
+    which needs no licence. Otherwise the harness's own rule, as ``lift.judge.pipeline.load_records``
+    applies it to every reported number (``_licence_problems``): gate0-{dtype}.json passes on at least 200
+    prompts against the bf16 Gate 0 that gate0.json still records, both for the revision of Global that
+    made ``gens``; ``gens`` were made under the comparison's harness, decoding settings and GPU class; and
+    the ``judgements`` with a stack (Qwen3Guard's) were made on that GPU class. Empty ``gens`` (a file
+    that cannot be read here) still need the two reports to pass."""
+    if dtype == str(config.get("generation.dtype")):
+        return []
+    from lift.judge.pipeline import _licence_problems  # noqa: PLC0415 (the harness's rule, not a copy)
+
+    return _licence_problems(dtype, list(gens), list(judgements), cell, qwen3guard_role())
+
+
+def check_licence(dtype: str, gens: Sequence[GenerationRecord], judgements: Sequence[JudgementRecord],
+                  cell: tuple[str, str, str, str]) -> None:
+    """Raise LicenceError, naming gate0-{dtype}.json and the remedy, unless Gate 0's licence covers
+    reading ``cell`` in ``dtype`` (``licence_problems``)."""
+    problems = licence_problems(dtype, gens, judgements, cell)
+    if problems:
+        variant, set_name, lang, split = cell
+        raise LicenceError(
+            f"{variant}/{set_name}_{lang}_{split}: outputs in {dtype} are read only while Gate 0's licence "
+            f"(gate0-{dtype}.json, decisions.md 27) covers them, and it does not: " + "; ".join(problems)
+            + ". Get the licence first (the problems above say how; `lift sync pull` fetches Gate 0's "
+            f"reports), or use the {config.get('generation.dtype')} outputs (no --dtype)")
+
+
 @dataclass
 class Pool:
     """The current generations of one variant for one set, language and split."""
@@ -236,7 +284,8 @@ def load_pool(variant: str, set_name: str, lang: str, split: str, prompts: Promp
     ``prompt_check=False`` is the escape hatch for a harness that hashes something other than the
     prompt text: every record then counts as current, and stale outputs can no longer be told
     apart (callers record and announce it). ``dtype`` is the precision the outputs must have
-    (default ``generation.dtype``; fp16 only once Gate 0 has cleared a T4 run).
+    (default ``generation.dtype``). Another is read only while Gate 0's licence covers the records
+    kept in it: otherwise a LicenceError naming gate0-{dtype}.json (``check_licence``).
     """
     path = generations_path(variant, set_name, lang, split)
     if not path.is_file():
@@ -262,6 +311,8 @@ def load_pool(variant: str, set_name: str, lang: str, split: str, prompts: Promp
             other_dtype += 1
             continue
         by_key[rec.key] = rec
+    if by_key:
+        check_licence(want_dtype, list(by_key.values()), [], (variant, set_name, lang, split))
     current: dict[str, GenerationRecord] = {}
     stale_seen: set[str] = set()
     stale_records = 0
