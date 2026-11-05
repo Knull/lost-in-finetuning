@@ -1,3 +1,4 @@
+import contextlib
 import dataclasses
 import json
 import logging
@@ -51,6 +52,26 @@ def manual_greedy(model, ids, stop, cap):
     return out, False
 
 
+def step_scores(variant, rows):
+    """Per-step scores (rows x steps x vocab) of greedy_batch's left-padded decode of ``rows`` (token id
+    lists), from a fresh copy of the harness's greedy config that also returns them."""
+    tok = variant.tokenizer
+    stop = gen.gen_config(variant, max_new_tokens=CAP)["stop_ids"]
+    cfg = gen.greedy_config(max_new_tokens=CAP, stop_ids=stop, pad_id=tok.pad_token_id)
+    cfg.output_scores = cfg.return_dict_in_generate = True
+    seen = []
+
+    class Recorder:                         # the model, keeping the scores its generate returns
+        def generate(self, **kw):
+            out = variant.model.generate(**kw)
+            seen.append(torch.stack(out.scores, dim=1))
+            return out
+
+    gen.greedy_batch(Recorder(), rows, pad_id=tok.pad_token_id, stop_ids=stop, max_new_tokens=CAP,
+                     device="cpu", gen_config_obj=cfg)
+    return seen[0]
+
+
 def test_batched_equals_unbatched(stock, tmp_path):
     one = run(stock, tmp_path / "a.jsonl", batch_size=1)
     four = run(stock, tmp_path / "b.jsonl", batch_size=4)
@@ -61,6 +82,22 @@ def test_batched_equals_unbatched(stock, tmp_path):
         assert one[pid].output == four[pid].output
         assert one[pid].n_new_tokens == four[pid].n_new_tokens
         assert one[pid].key == four[pid].key
+    # R1-24: equal tokens miss a padding leak that moves the scores without flipping an argmax within CAP
+    # tokens (the full-attention layer attending to the left padding moved them by ~3e-3). So each row's
+    # per-step scores in the batches generate() decodes (longest first, 4 then 2, left padded) must match
+    # its scores alone, over the steps it runs.
+    ids = {p.pid: encode_chat(stock.tokenizer, p.text) for p in prompts()}
+    order = [p.pid for p in sorted(prompts(), key=lambda p: (-len(ids[p.pid]), p.lang, p.pid))]
+    for at in range(0, len(order), 4):
+        batch = order[at: at + 4]
+        together = step_scores(stock, [ids[pid] for pid in batch])
+        for i, pid in enumerate(batch):
+            alone = step_scores(stock, [ids[pid]])[0]
+            steps = alone.shape[0]                  # to its stop token, or CAP
+            assert steps == one[pid].meta["n_generated"] and together.shape[1] >= steps
+            gap = float((together[i, :steps] - alone).abs().max())
+            assert torch.allclose(together[i, :steps], alone, atol=1e-4), \
+                f"{pid}: its scores in a batch of {len(batch)} are off its scores alone by {gap:.1e}"
 
 
 def test_harness_is_pure_greedy_despite_the_checkpoint_sampling_defaults(stock):
@@ -126,6 +163,107 @@ def test_n_new_tokens_excludes_special_tokens(stock):
     rec = gen._record(stock, row, gen.GreedyOutput(ids=[special, a, b], stopped=True, n_generated=4), 0.5, 1,
                       "cpu", tok, {})
     assert rec.n_new_tokens == 2 and rec.output == "ab" and not rec.hit_cap
+
+
+LONG, MID, SHORT = TEXTS[3], TEXTS[4], TEXTS[0]         # 153, 130 and 103 tokens as chat text
+
+
+@contextlib.contextmanager
+def forward_hook(module, hook):
+    handle = module.register_forward_hook(hook)
+    try:
+        yield
+    finally:
+        handle.remove()
+
+
+class Overflow:
+    """A forward hook writing inf into one element of ``row``'s newest position from the module's
+    ``start``-th call on (call 1 is the prefill, then one per new token): an fp16 overflow (a value
+    above 65,504) as it shows up. The KV cache carries it to every later step."""
+
+    def __init__(self, *, row, start):
+        self.row, self.start, self.calls = row, start, 0
+
+    def __call__(self, _module, _args, output):
+        self.calls += 1
+        if self.calls < self.start:
+            return None
+        hidden = (output[0] if isinstance(output, tuple) else output).clone()
+        hidden[self.row, -1, 0] = float("inf")
+        return (hidden, *output[1:]) if isinstance(output, tuple) else hidden
+
+
+@pytest.mark.parametrize("dtype", ["fp16", "fp32"])
+def test_a_decode_that_goes_non_finite_is_refused_before_its_batch_is_written(stock, tmp_path, monkeypatch,
+                                                                              dtype):
+    # R1-25: greedy argmax over NaN scores picks id 0 (pad here), so a row that overflowed (fp16 on a T4)
+    # kept only the text before the overflow and was written as an ordinary cap hit that no field marked.
+    # Now its batch is refused before it is written, naming the row and the remedy, which depends on the
+    # precision (a label here: the tiny model runs fp32 either way).
+    real, sizes = gen.greedy_batch, []
+
+    def counted(model, rows, **kw):
+        sizes.append(len(rows))
+        return real(model, rows, **kw)
+
+    monkeypatch.setattr(gen, "greedy_batch", counted)
+    overflow = Overflow(row=1, start=4)                  # SHORT (p-001), from its 3rd new token on
+    path = tmp_path / "g.jsonl"
+    with forward_hook(stock.model.model.layers[1], overflow), \
+            pytest.raises(RuntimeError, match="non-finite") as exc:
+        run(dataclasses.replace(stock, dtype=dtype), path, ps=prompts([LONG, SHORT]), batch_size=2)
+    assert overflow.calls >= 4 and sizes == [2]         # it fired; one batch, not halved like an OOM
+    assert isinstance(exc.value, gen.NonFiniteOutputError) and not gen.is_oom(exc.value)
+    assert exc.value.pids == ["p-001"] and exc.value.dtype == dtype
+    message = str(exc.value)
+    assert "p-001" in message and "p-000" not in message and f"variant stock in {dtype}" in message
+    assert ("make this cell in bf16" in message) == (dtype == "fp16")
+    assert not path.exists()                             # nothing of the batch was written
+
+
+def test_rows_poisoned_through_their_padding_are_refused_but_a_finished_row_fed_pad_is_not(stock, tmp_path):
+    # R1-25: a non-finite pad state (NaN embeddings at pad positions) reaches every padded row from the
+    # prefill on, as masking does not stop it (a masked key's weight 0 times NaN is NaN). The unpadded row
+    # is untouched until it stops; then it is fed pad and its scores go NaN too, but they are never read,
+    # so it is not marked.
+    tok = stock.tokenizer
+    pad = tok.pad_token_id
+
+    def nan_at_pads(_module, args, output):
+        return output.masked_fill((args[0] == pad).unsqueeze(-1), float("nan"))
+
+    rows = [encode_chat(tok, t) for t in (LONG, MID, SHORT)]      # longest first, as generate() batches
+    stop = gen.gen_config(stock, max_new_tokens=CAP)["stop_ids"]
+    kw = dict(pad_id=pad, stop_ids=stop, max_new_tokens=CAP, device="cpu")
+    clean = gen.greedy_batch(stock.model, rows, **kw)
+    with forward_hook(stock.model.model.embed_tokens, nan_at_pads):
+        with pytest.raises(RuntimeError, match="non-finite") as exc:
+            run(stock, tmp_path / "g.jsonl", ps=prompts([LONG, SHORT, MID]), batch_size=3)
+        outs = gen.greedy_batch(stock.model, rows, **kw)
+        scores = step_scores(stock, rows)
+    assert sorted(exc.value.pids) == ["p-001", "p-002"]           # the padded rows, not LONG (p-000)
+    assert [o.nonfinite for o in outs] == [False, True, True]
+    assert not any(o.nonfinite for o in clean)
+    # LONG decoded as it does clean and stopped; fed pad after that, its scores went NaN.
+    done = clean[0].n_generated
+    assert clean[0].stopped and (outs[0].ids, outs[0].stopped) == (clean[0].ids, True)
+    assert scores.shape[1] > done + 1 and torch.isfinite(scores[0, :done]).all()
+    assert torch.isnan(scores[0, done + 1:]).any(dim=-1).all()
+
+
+def test_a_healthy_batch_is_never_marked_non_finite(stock, tmp_path):
+    # R1-25: the check passes the scores on unchanged (test_harness_is_pure_greedy_despite_the_checkpoint_
+    # sampling_defaults compares the tokens with plain argmax decoding) and marks no row of a healthy
+    # batch, the finished rows that are then fed pad included.
+    tok = stock.tokenizer
+    rows = sorted((encode_chat(tok, t) for t in TEXTS), key=len, reverse=True)
+    stop = gen.gen_config(stock, max_new_tokens=CAP)["stop_ids"]
+    outs = gen.greedy_batch(stock.model, rows, pad_id=tok.pad_token_id, stop_ids=stop, max_new_tokens=CAP,
+                            device="cpu")
+    assert any(o.stopped for o in outs) and not all(o.stopped for o in outs)
+    assert [o.nonfinite for o in outs] == [False] * len(TEXTS)
+    assert len(run(stock, tmp_path / "g.jsonl", batch_size=len(TEXTS))) == len(TEXTS)
 
 
 def test_resume_after_a_crash_writes_no_duplicates(stock, tmp_path, monkeypatch):
@@ -375,6 +513,28 @@ def test_a_wrapper_with_only_generate_uses_its_base_models_config_and_stop_set(s
     plain = run(stock, tmp_path / "s.jsonl", ps=prompts()[:2], batch_size=2)
     assert wrapper.calls == 1 and all(r.meta["gate_fired"] for r in got.values())
     assert {p: r.output for p, r in got.items()} == {p: r.output for p, r in plain.items()}
+
+
+def test_a_wrapper_must_pass_the_finiteness_check_on_and_decode_the_batch_as_one(stock):
+    # R1-25: the non-finite check is a logits processor greedy_batch hands model.generate. A wrapper (P05's
+    # CAST) that dropped it would leave decoding unchecked, and one that decoded the batch in parts would
+    # mark the wrong rows, so greedy_batch refuses both.
+    class DropsIt(_GenerateOnly):
+        def generate(self, logits_processor=None, **kw):
+            return super().generate(**kw)
+
+    class FirstRowOnly(_GenerateOnly):
+        def generate(self, input_ids, attention_mask, **kw):
+            return super().generate(input_ids=input_ids[:1], attention_mask=attention_mask[:1], **kw)
+
+    tok = stock.tokenizer
+    rows = [encode_chat(tok, t) for t in (LONG, SHORT)]
+    kw = dict(pad_id=tok.pad_token_id, stop_ids=gen.gen_config(stock, max_new_tokens=CAP)["stop_ids"],
+              max_new_tokens=CAP, device="cpu")
+    with pytest.raises(RuntimeError, match="must pass logits_processor on"):
+        gen.greedy_batch(DropsIt(stock.model), rows, **kw)
+    with pytest.raises(RuntimeError, match="must decode the batch as one"):
+        gen.greedy_batch(FirstRowOnly(stock.model), rows, **kw)
 
 
 def test_oom_retry_happens_outside_the_except_clause(stock, tmp_path, monkeypatch):
