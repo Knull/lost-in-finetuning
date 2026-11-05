@@ -63,7 +63,11 @@ Files under the data dir (training rows use the messages format TRL's SFTTrainer
                                                          rejected.jsonl, lexsi_provenance.json + summary
     sft/report.json                                      every stage count and the N decision
 variant is ``dedup`` (both candidates) or ``raw`` (the stress candidate,
-train.yaml ``stress.candidate``). The utility records go to
+train.yaml ``stress.candidate``). ``build_candidates`` leaves sft/ holding exactly the variants
+report.json lists: after its checks pass it removes every sft/{cand}/{variant} and
+interim/sft/{cand}/{variant} folder the plan does not make (such as the Nov 3 aya/raw once item 47
+moved the raw sample to indicalign), and a {cand} folder left empty. lift sync deletes nothing,
+so a removed variant must also be deleted from the runs repo by hand. The utility records go to
 prompts/utility_hi.jsonl through build.py. CuratorKIT's own files carry run timestamps (manifest.json:
 run_timestamp, wall_clock_seconds and its provenance's created_at; lexsi_provenance.json:
 created_at; rejected.jsonl: each row's provenance_chain timestamps), so interim/sft/ and the
@@ -566,6 +570,26 @@ def _curate(name: str, variant: str, rows: Sequence[SftRow],
     return out, summary
 
 
+def _remove_other_variants(plan: Iterable[tuple[str, str]]) -> None:
+    """Remove every {cand}/{variant} folder of sft_dir() and of interim/sft that ``plan`` does not
+    make (a variant train.yaml no longer asks for), then each {cand} folder left empty."""
+    keep, exports = set(plan), sft_dir()
+    for root in (exports, interim_dir() / "sft"):
+        if not root.is_dir():
+            continue
+        for cand in sorted(p for p in root.iterdir() if p.is_dir()):
+            for folder in sorted(p for p in cand.iterdir() if p.is_dir()):
+                if (cand.name, folder.name) in keep:
+                    continue
+                shutil.rmtree(folder)
+                if root == exports:
+                    log.warning("sft %s/%s: removed, the current plan does not make it; lift sync deletes "
+                                "nothing, so delete data/sft/%s/%s from the runs repo by hand",
+                                cand.name, folder.name, cand.name, folder.name)
+            if not any(cand.iterdir()):
+                cand.rmdir()
+
+
 def _write_variant(name: str, variant: str, curated: Sequence[dict], n: int, *, rows_target: int,
                    seed: int, train_pool: int, summary: dict | None) -> dict:
     """Sample ``n`` curated rows by sha256 rank, write the export, the CuratorKIT copies and
@@ -618,7 +642,9 @@ def build_candidates(train_pools: Mapping[str, Any], *,
                      cfg: Mapping[str, Any] | None = None, train_cfg: Mapping[str, Any] | None = None,
                      curate: Curate | None = None) -> dict:
     """Curate and sample every variant (each candidate deduplicated, plus the stress candidate raw),
-    write sft_dir()/report.json and return it.
+    write sft_dir()/report.json and return it. Once every variant is curated and its count checked
+    (a refused build changes nothing under sft_dir()), it removes every variant folder of
+    sft_dir() and interim/sft the plan does not make, so sft_dir() holds exactly the report's variants.
 
     Row counts (train.yaml): with ``equal_size`` true, every variant takes N = min(rows, each
     candidate's deduplicated count), the Nov 3 rule. With ``equal_size`` false (the default since
@@ -666,6 +692,7 @@ def build_candidates(train_pools: Mapping[str, Any], *,
         if short:
             log.warning("SFT variants below the target %d rows (no equal-size rule): %s", target,
                         ", ".join(f"{name}/{variant} {c}" for (name, variant), c in counts.items()))
+    _remove_other_variants(plan)
     variants = {}
     for name, variant in plan:
         rows, summary = curated[(name, variant)]

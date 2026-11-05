@@ -532,6 +532,36 @@ def test_build_candidates_without_equal_size_each_variant_keeps_its_own_count(da
     assert any("no equal-size rule" in r.getMessage() for r in caplog.records)
 
 
+def test_build_candidates_removes_the_variants_the_plan_no_longer_makes(data_dir, pools, caplog):
+    """R1-02: the Nov 4 rebuild (decisions item 47: the stress raw sample moved from aya to indicalign)
+    left the Nov 3 aya/raw export in data/sft, valid-looking and synced. After build_candidates,
+    data/sft holds exactly the variants report.json lists; a refused build removes nothing."""
+    heldout = sft.build_utility_heldout(pools, cfg=CFG)
+    train = sft.exclude_heldout(pools, heldout, cfg=CFG)
+    root, work = data_dir / "sft", data_dir / "interim" / "sft"
+
+    def exports():
+        return {p.parent.relative_to(root).as_posix() for p in root.rglob("sft_messages.jsonl")}
+
+    sft.build_candidates(train, cfg=CFG, train_cfg=training_cfg(5), curate=FakeCurate())      # the Nov 3 plan
+    assert exports() == set(VARIANTS)
+    nov4 = training_cfg(5, equal_size=False, stress="indicalign")
+    before = snapshot(root)
+    with pytest.raises(ValueError, match="no SFT rows left"):
+        sft.build_candidates({**train, "indicalign": ([], [])}, cfg=CFG, train_cfg=nov4, curate=FakeCurate())
+    assert snapshot(root) == before
+    with caplog.at_level(logging.WARNING, logger="lift.data.sft"):
+        report = sft.build_candidates(train, cfg=CFG, train_cfg=nov4, curate=FakeCurate())
+    assert exports() == set(report["variants"]) == {"aya/dedup", "indicalign/dedup", "indicalign/raw"}
+    assert not (root / "aya" / "raw").exists() and not (work / "aya" / "raw").exists()
+    assert any(r.getMessage().startswith("sft aya/raw: removed") for r in caplog.records)
+    only = {**nov4, "candidates": ["indicalign"]}                  # a candidate dropped altogether
+    report = sft.build_candidates(train, cfg=CFG, train_cfg=only, curate=FakeCurate())
+    assert exports() == set(report["variants"]) == {"indicalign/dedup", "indicalign/raw"}
+    assert sorted(p.name for p in root.iterdir()) == ["indicalign", "report.json"]
+    assert sorted(p.name for p in work.iterdir()) == ["indicalign"]
+
+
 def test_the_committed_training_config_drops_the_equal_size_rule():
     cfg = config.load("train")
     assert cfg["equal_size"] is False and cfg["stress"]["candidate"] == "indicalign"
