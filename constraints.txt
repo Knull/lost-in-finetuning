@@ -15,3 +15,8 @@ huggingface_hub==2.4.0
 hf_xet==1.8.0
 openai==3.43.0
 anthropic==2.4.0
+# The versions lift.train.lora (P03) was written and tested against. TRL's defaults moved between
+# releases (its loss type, how it prepares and truncates a dataset), so all seeds of a recipe must
+# train under these, not whatever pip resolves in a later session (safetune 0.1.12 allows trl <1.15).
+trl==1.14.2
+datasets==5.1.0
