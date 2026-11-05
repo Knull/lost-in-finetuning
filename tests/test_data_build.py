@@ -27,7 +27,7 @@ from fake_build import (
 from fake_sft import QUIRK_DRAW, aya_dataset_rows, near
 from fake_sources import belebele_rows_by_config, orbench_rows, redteam_rows
 
-from lift import config, manifest, splits
+from lift import config, manifest, prompts, splits
 from lift.data import build, polyrefuse, sources, translate
 from lift.data.build import SheetError
 from lift.data.text import clean_text
@@ -75,7 +75,8 @@ def split_file(dirs, name):
 
 
 def by_pid(set_name, lang):
-    items = build.load_prompts(set_name, lang)
+    """The file as it stands, a cell short of its frozen split too (the stages refuse that one)."""
+    items = build.load_prompts(set_name, lang, allow_short=True)
     return {x["pid"]: x for x in items} if set_name == "belebele" else {r.pid: r for r in items}
 
 
@@ -194,6 +195,7 @@ def test_fixture_build_without_translation(dirs, caplog):
         # the same-text check runs on PromptRecord files only, and only they carry its key
         has_key = ("cross_split_duplicates" in rep, "cross_split_duplicates" in summary["files"][name])
         assert has_key == ((True, True) if set_name != "belebele" else (False, False)), name
+        assert rep.get("awaiting_review", "none") == ({} if set_name != "belebele" else "none"), name
     assert {r.lid.label for r in en.values()} == {"eng_Latn"}
     dumps = [p.read_text(encoding="utf-8") for p in (dirs.data / "prompts" / "reports").glob("*.json")]
     leaked = [t for t in fixture_texts() if any(t in d for d in [*dumps, caplog.text])]
@@ -335,6 +337,9 @@ def test_texts_a_translation_makes_equal_are_caught_in_that_language(dirs, caplo
     assert summary["files"]["hard_benign_hi"]["cross_split_duplicates"] == 1
     assert summary["files"]["hard_benign_en"]["cross_split_duplicates"] == 0
     assert "1 texts repeat across splits of the frozen hard_benign split" in caplog.text
+    # the fit record the same-text rule left out does not leave its cell short (R1-01)
+    assert summary["short_cells"] == {} and report(dirs, "hard_benign_hi")["awaiting_review"] == {}
+    assert fit not in {r.pid for r in build.load_prompts("hard_benign", "hi", "fit")}
     # stats: the count per PromptRecord file, exclusions by reason type, a note per file
     st = build.stats(cfg=CFG)
     assert st["files"]["hard_benign_hi"]["cross_split_duplicates"] == 1
@@ -428,6 +433,17 @@ def test_build_state_reads_new_and_old_summaries():
     assert build.build_state({"complete": True, "rerun_needed": False, "skipped": []}) == "complete"
     assert build.build_state({"complete": False, "rerun_needed": False, "skipped": skipped}).startswith(
         "built; 1 files left out by --skip-translation")
+    short = {"easy_benign_zh": {"final": ["prb-test-0002", "prb-test-0003"]},
+             "hard_benign_hi": {"fit": ["orb-0001"]}}
+    awaiting = {"complete": False, "rerun_needed": False, "skipped": [], "short_cells": short}
+    assert build.build_state(awaiting) == (
+        "built; 3 fit/dev/final items await a reader's verdict (failures sheet: lift data spotcheck-sheets, "
+        "then lift data apply-spotchecks)")
+    assert build.build_state({"complete": False, "rerun_needed": False, "skipped": skipped,
+                              "short_cells": short}).startswith(
+        "built; 1 files left out by --skip-translation (run without it to translate them); 3 fit/dev/final")
+    assert build.build_state({"complete": False, "rerun_needed": True, "skipped": [],
+                              "short_cells": short}).startswith("INCOMPLETE")
     assert build.build_state({"complete": False, "rerun_needed": True, "skipped": skipped}).startswith(
         "INCOMPLETE")
     old = {"complete": False, "blocked": True, "skipped": [{**skipped[0], "reason": "translation blocked"}]}
@@ -501,6 +517,33 @@ def test_a_split_file_covering_other_pids_stops_the_build_and_is_kept(dirs):
     assert (dirs.splits / "harmful.json").read_bytes() == edited
 
 
+def test_a_split_file_with_other_counts_than_the_locked_sizes_stops_the_build_and_is_kept(dirs):
+    """R1-17: a committed split file whose per-split counts are not cfg sizes (a hand edit or a bad merge
+    that moved a pid between splits, or sizes changed after the freeze) stops the build before any file is
+    stamped from it; a count-preserving reassignment only warns (the test above)."""
+    build.build_all(ctx=fixture_ctx(), only=["hard_benign"], langs=["en"])
+    prompt_file = dirs.data / "prompts" / "hard_benign_en.jsonl"
+    stamped = prompt_file.read_bytes()
+    frozen = split_file(dirs, "hard_benign")["assignments"]
+    moved = min(p for p, s in frozen.items() if s == "final")             # same pids, same split names
+    edited = edit_split(dirs, "hard_benign", lambda a: a.update({moved: "dev"}))
+    message = (r"hard_benign.json holds \{'dev': 3, 'final': 1, 'fit': 2\} pids per split but "
+               r"sizes.hard_benign is \{'fit': 2, 'dev': 2, 'final': 2\}: split files are frozen and the "
+               r"sizes are locked; a change needs a docs/decisions.md entry and a new split file")
+    with pytest.raises(ValueError, match=message):
+        build.build_all(ctx=fixture_ctx(), only=["hard_benign"], langs=["en"])
+    assert (dirs.splits / "hard_benign.json").read_bytes() == edited           # never rewritten
+    assert prompt_file.read_bytes() == stamped                                 # nothing stamped from it
+
+    edit_split(dirs, "hard_benign", lambda a: a.update({moved: "final"}))    # the frozen file again
+    cfg = fixture_cfg()
+    cfg["sizes"]["hard_benign"] = {"fit": 2, "dev": 1, "final": 3}            # changed after the freeze
+    with pytest.raises(ValueError, match=r"holds \{'dev': 2, 'final': 2, 'fit': 2\} pids per split but "
+                                         r"sizes.hard_benign is \{'fit': 2, 'dev': 1, 'final': 3\}"):
+        build.freeze_split("hard_benign", frozen, cfg=cfg)
+    assert build.freeze_split("hard_benign", frozen, cfg=CFG) == frozen
+
+
 def test_a_split_file_with_other_assignments_is_kept_and_followed(dirs, caplog):
     build.build_all(ctx=fixture_ctx(), only=["hard_benign"], langs=["en"])
     frozen = split_file(dirs, "hard_benign")["assignments"]
@@ -523,7 +566,14 @@ def test_translation_failures_are_listed_and_left_out_of_the_file(dirs):
     harmless = FIX["HARMLESS_TEST"][1]                                     # prb-test-0001
     ctx = fixture_ctx(translator=FakeTranslator(empty_for=[harmless], english_for=[ORB[0].text]))
     summary = build.build_all(ctx=ctx)
-    assert summary["complete"]                     # listed failures are expected, not an incomplete build
+    # listed failures are expected and a rerun cannot add them, but each leaves a frozen pid out of its file:
+    # those cells are short of their frozen split until a reader's verdict, so the build is not complete
+    assert not summary["complete"] and summary["rerun_needed"] is False and summary["incomplete"] == []
+    easy, hard = (split_file(dirs, s)["assignments"] for s in ("easy_benign", "hard_benign"))
+    assert summary["short_cells"] == {
+        **{f"easy_benign_{lang}": {easy["prb-test-0001"]: ["prb-test-0001"]} for lang in ("hi", "zh")},
+        **{f"hard_benign_{lang}": {hard[ORB[0].pid]: [ORB[0].pid]} for lang in LANGS[1:]}}
+    assert build.build_state(summary).startswith("built; 7 fit/dev/final items await a reader's verdict")
     for lang in ("hi", "zh"):
         assert report(dirs, f"easy_benign_{lang}")["translation_failures"] == [
             {"pid": "prb-test-0001", "rule": "empty", "detail": "blank", "engine": "google",
@@ -536,6 +586,84 @@ def test_translation_failures_are_listed_and_left_out_of_the_file(dirs):
         assert failure["detail"].startswith("top=eng_Latn") and ORB[0].pid not in by_pid("hard_benign", lang)
     assert summary["files"]["hard_benign_hi"]["open_failures"] == 1
     assert summary["totals"]["translation_failures"] == 2 + 5
+
+
+def test_a_cell_short_of_its_frozen_split_is_flagged_and_refused_until_a_reader_decides(dirs):
+    """R1-01: GlotLID reads a cached zh translation of a frozen final pid as Japanese (as it read the short
+    all-Han outputs of prb-test-0240, 0484 and 0499 on the real build), so easy_benign_zh final is short of
+    its frozen split. A rerun cannot add the item (rerun_needed stays False), but the build is not complete
+    and says what awaits a reader's verdict, and prompts.load, which generate, run-dev, judge and the
+    reported reads go through, refuses the short cell until the failures sheet resolves it."""
+    build.build_all(ctx=fixture_ctx())                        # freezes the splits, caches every translation
+    final = sorted(p for p, s in split_file(dirs, "easy_benign")["assignments"].items() if s == "final")
+    pid = final[0]
+    zh_out = fake_translation(by_pid("easy_benign", "zh")[pid].text_en, "zh")     # its cached engine output
+    lid = FakeLID(overrides={text: ("jpn_Jpan", 0.99) for text in {zh_out, clean_text(zh_out)}})
+    summary = build.build_all(ctx=fixture_ctx(lid=lid))
+
+    assert pid not in by_pid("easy_benign", "zh") and pid in by_pid("easy_benign", "hi")
+    assert (summary["complete"], summary["rerun_needed"], summary["incomplete"]) == (False, False, [])
+    assert summary["short_cells"] == {"easy_benign_zh": {"final": [pid]}}
+    assert report(dirs, "easy_benign_zh")["awaiting_review"] == {"final": [pid]}
+    assert report(dirs, "easy_benign_hi")["awaiting_review"] == {}
+    state = ("built; 1 fit/dev/final items await a reader's verdict (failures sheet: lift data "
+             "spotcheck-sheets, then lift data apply-spotchecks)")
+    assert build.build_state(summary) == build.build_state(report(dirs, "build")) == state
+    lines = build.format_stats(build.stats(cfg=CFG)).splitlines()
+    assert f"last build {summary['run_id']}: {state}" in lines
+    assert "  short of their frozen split: easy_benign_zh (final 1)" in lines
+    assert (f"  easy_benign_zh: failures wrong_lang 1; 1 fit/dev/final items await a reader's verdict "
+            f"(failures sheet): final {pid}") in lines
+
+    assert {r.pid for r in prompts.load("easy_benign", "hi", "final")} == set(final)     # a full cell reads
+    assert {r.split for r in prompts.load("easy_benign", "zh", "dev")} == {"dev"}       # and so does zh dev
+    for split in ("final", None):
+        with pytest.raises(ValueError) as e:
+            prompts.load("easy_benign", "zh", split)
+        message = str(e.value)
+        assert (f"easy_benign_zh: easy_benign_zh.jsonl is short of its frozen split: final misses 1 of its "
+                f"{len(final)} frozen pids; 1 translation failures await a reader's verdict on the failures "
+                f"sheet, e.g. ['{pid}']: `lift data spotcheck-sheets --langs zh`, then `lift data "
+                "apply-spotchecks --file <the filled sheet>`, then `lift sync push`") == message
+
+    # the remedy works on the short cell: the failures sheet lists the item, and a reader's ok puts it back
+    _, failures = build.write_spotcheck_sheets(ctx=fixture_ctx(lid=lid), langs=["zh"])
+    assert f"zh-{pid}" in {row["item_id"] for row in read_sheet(failures)}
+    fill(failures, {f"zh-{pid}": {"verdict": "ok"}})
+    build.apply_spotchecks(failures, ctx=fixture_ctx(lid=lid))
+    assert {r.pid for r in prompts.load("easy_benign", "zh", "final")} == set(final)
+    assert report(dirs, "easy_benign_zh")["awaiting_review"] == {}
+    summary = build.build_all(ctx=fixture_ctx(lid=lid))
+    assert summary["complete"] and summary["short_cells"] == {} and build.build_state(summary) == "complete"
+
+
+def test_a_frozen_pid_missing_for_another_reason_is_refused_with_its_remedy(dirs, monkeypatch):
+    """R1-01: the reader names the remedy of each frozen pid a file lacks from the file's report: a rerun
+    for one that failed with an error (the build calls the file incomplete, not short), a rebuild for one
+    the report does not explain (a report from another build of the file explains nothing)."""
+    monkeypatch.setattr(translate, "translate_records",                 # no backoff sleeps in a test
+                        functools.partial(translate.translate_records, sleep=lambda _: None))
+    hard = {"only": ["hard_benign"], "langs": ["en", "hi"]}
+    summary = build.build_all(ctx=fixture_ctx(translator=FakeTranslator(always_raise=[ORB[2].text])), **hard)
+    frozen = split_file(dirs, "hard_benign")["assignments"]
+    split = frozen[ORB[2].pid]
+    assert summary["incomplete"] == ["hard_benign_hi"] and summary["rerun_needed"]
+    assert summary["short_cells"] == {}                                  # a rerun adds it: not a reader's
+    rerun = (rf"{split} misses 1 of its 2 frozen pids; 1 failed with an error a rerun translates, e.g. "
+             rf"\['{ORB[2].pid}'\]: `lift data build --only hard_benign --langs hi`, then `lift sync push`")
+    with pytest.raises(ValueError, match=rerun):
+        build.load_prompts("hard_benign", "hi", split)
+    assert len(build.load_prompts("hard_benign", "hi", split, allow_short=True)) == 1
+
+    path = dirs.data / "prompts" / "hard_benign_hi.jsonl"
+    rows = list(read_jsonl(path))
+    write_jsonl(path, [r for r in rows if r["pid"] != ORB[0].pid])       # the report no longer fits the file
+    gone = sorted([ORB[0].pid, ORB[2].pid])
+    rebuild = (rf"2 are not explained \(its report is from another build of the file\), e.g. "
+               rf"\['{gone[0]}', '{gone[1]}'\]: rebuild it \(`lift data build --only hard_benign`\), then "
+               r"`lift sync push`")
+    with pytest.raises(ValueError, match=rebuild):
+        build.load_prompts("hard_benign", "hi")
 
 
 def test_a_blocked_translator_stops_all_translation_and_the_rest_is_built(dirs):
@@ -717,7 +845,7 @@ def test_spotcheck_sheets_sample_dev_and_final_machine_translations(dirs, spot):
 
     [sample, _] = build.write_spotcheck_sheets(ctx=spot, langs=["hi"], n=100, out_dir=dirs.data / "all")
     every = read_sheet(sample)
-    expected = {f"hi-{r.pid}" for s in build.TRANSLATED_SETS for r in build.load_prompts(s, "hi")
+    expected = {f"hi-{r.pid}" for s in build.TRANSLATED_SETS for r in by_pid(s, "hi").values()
                 if r.split in ("dev", "final")}
     assert {r["item_id"] for r in every} == expected                   # never train, val or fit
     with pytest.raises(ValueError, match="no machine translations"):
@@ -764,6 +892,7 @@ def test_apply_spotchecks_round_trip(dirs, spot):
     build.apply_spotchecks(es_sheet, ctx=spot_ctx())
     bad_pid = bad_row["item_id"][3:]
     assert bad_pid not in by_pid("easy_benign", "es")
+    assert bad_pid not in {r.pid for r in build.load_prompts("easy_benign", "es")}   # left out on purpose
     [excluded] = [PromptRecord.model_validate(r) for r in read_jsonl(dirs.data / "prompts" / "excluded" /
                                                                        "easy_benign_es.jsonl")]
     assert excluded.pid == bad_pid and excluded.extra["excluded"] is True
@@ -915,7 +1044,7 @@ def test_an_item_is_on_one_sheet_only_and_the_sample_stays_blind_and_unbiased(di
     assert set(failures) == {f"es-{ORB[1].pid}"} and not set(sample) & set(failures)
     for set_name in build.TRANSLATED_SETS:
         tag = f"spotcheck:es:{set_name}"
-        candidates = [r.pid for r in build.load_prompts(set_name, "es")
+        candidates = [r.pid for r in by_pid(set_name, "es").values()
                       if r.translation and not r.translation.checked and r.split in ("dev", "final")]
         drawn = sorted(candidates, key=lambda pid, tag=tag: sha256_text(f"{SEED}:{tag}:{pid}"))[:3]
         assert sorted(k[3:] for k, r in sample.items() if r["set"] == set_name) == sorted(drawn), set_name
@@ -1109,7 +1238,7 @@ def test_the_apply_rebuild_keeps_failures_the_cache_cannot_hold(dirs, monkeypatc
     failures = {(x["pid"], x["rule"], x["detail"])
                 for x in report(dirs, "hard_benign_hi")["translation_failures"]}
     assert failures == {(ORB[1].pid, "empty", "blank"), (ORB[2].pid, "error", "ConnectionError x5")}
-    rec = build.load_prompts("hard_benign", "hi")[0]
+    rec = build.load_prompts("hard_benign", "hi", allow_short=True)[0]
     sheet = dirs.sheets / "spotcheck_hi.csv"
     sheet.parent.mkdir(parents=True)
     write_sheet(sheet, [{"item_id": f"hi-{rec.pid}", "set": "hard_benign", "english": rec.text_en,
@@ -1149,7 +1278,7 @@ def test_apply_refuses_to_run_without_the_translation_cache(dirs, spot, tmp_path
     shutil.copytree(google, tmp_path / "google")
     shutil.rmtree(google)
     before = snapshot(dirs.data)
-    hard = sorted({r.pid for r in build.load_prompts("hard_benign", "hi")} | {ORB[0].pid})   # + its failure
+    hard = sorted(set(by_pid("hard_benign", "hi")) | {ORB[0].pid})                     # + its failure
     for path, problem in ((sheet, "harmful_hi: 10 items (e.g. prh-test-0000, prh-test-0001, prh-test-0002, "
                                   "prh-test-0003, prh-test-0004)"),
                           (failures_sheet, f"hard_benign_hi: 5 items (e.g. {', '.join(hard)})")):
@@ -1439,9 +1568,13 @@ def test_stats_count_files_failures_and_exclusions(dirs, spot):
     assert st["files"]["easy_benign_es"]["lid_failures"] == ["prb-test-0002"]
     assert st["files"]["redteam_hi"]["by_split"] == {"final": 4}
     assert st["sft"]["decision"] == FULL and set(st["sft"]["variants"]) == set(VARIANTS)
-    assert st["build"]["complete"] is True
     b = st["build"]
-    assert (b["rerun_needed"], b["blocked"], b["blocked_kind"]) == (False, False, None)
+    assert (b["complete"], b["rerun_needed"], b["blocked"], b["blocked_kind"]) == (False, False, False, None)
+    assert sorted(p for pids in hard["awaiting_review"].values() for p in pids) == sorted([ORB[0].pid,
+                                                                                          ORB[1].pid])
+    assert b["short_cells"]["hard_benign_hi"] == hard["awaiting_review"]   # ORB[1] is empty everywhere
+    assert {name: sum(map(len, cells.values())) for name, cells in b["short_cells"].items()} == {
+        f"hard_benign_{lang}": 2 if lang == "hi" else 1 for lang in LANGS[1:]}
     assert st["files"]["harmful_hi"]["cross_split_duplicates"] == 0
     assert all("cross_split_duplicates" not in st["files"][f"belebele_{lang}"] for lang in LANGS)
     text = build.format_stats(st)
@@ -1450,7 +1583,9 @@ def test_stats_count_files_failures_and_exclusions(dirs, spot):
     assert "hard_benign_hi" in text and sft_line in text and "failures empty 1, wrong_lang 1" in text
     assert ("excluded = copies of a test prompt or a red-teaming repeat (duplicate_of, near_duplicate_of), "
             "train/val/fit texts a dev/final record has (same_text_as) and spot-check bad") in text
-    assert f"last build {st['build']['run_id']}: complete" in text.splitlines()
+    assert (f"last build {st['build']['run_id']}: built; 6 fit/dev/final items await a reader's verdict "
+            "(failures sheet: lift data spotcheck-sheets, then lift data apply-spotchecks)"
+            ) in text.splitlines()
     assert "  harmful_en: exclusions duplicate_of 1" in text.splitlines()
     assert not [t for t in fixture_texts() if t in text]
 

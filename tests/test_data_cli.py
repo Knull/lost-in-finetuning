@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from datafakes import FakeTranslator
 from fake_build import BlockingTranslator, fixture_ctx, isolate, read_sheet, repo_state, write_sheet
 
 from lift.cli import build_parser, main
@@ -155,6 +156,25 @@ def test_build_exits_3_when_cache_only_misses_items(dirs, monkeypatch, capsys):
     use_fixtures(monkeypatch)
     assert main(["data", "build", "--cache-only", "--only", "hard_benign", "--langs", "en", "hi"]) == 3
     assert "a rerun can translate are missing from: hard_benign_hi" in capsys.readouterr().out
+
+
+def test_build_exits_0_and_lists_a_cell_short_of_its_frozen_split(dirs, monkeypatch, capsys):
+    # R1-01: a frozen pid an open failure (an empty output) leaves out: listed with its cell, not complete;
+    # a rerun cannot add it, so the exit stays 0
+    use_fixtures(monkeypatch)
+    assert main(["data", "build", "--only", "hard_benign", "--langs", "en"]) == 0
+    first = build.load_prompts("hard_benign", "en")[0]
+    use_fixtures(monkeypatch, translator=FakeTranslator(empty_for=[first.text]))
+    capsys.readouterr()
+    assert main(["data", "build", "--only", "hard_benign", "--langs", "en", "hi"]) == 0
+    out = capsys.readouterr().out
+    assert (f"hard_benign_hi is short of its frozen split ({first.split} 1), awaiting a reader's verdict on "
+            f"the failures sheet: {first.pid}") in out.splitlines()
+    assert out.splitlines()[-1].startswith("built; 1 fit/dev/final items await a reader's verdict (failures "
+                                           "sheet: lift data spotcheck-sheets, then lift data "
+                                           "apply-spotchecks); summary in ")
+    assert main(["data", "stats"]) == 0
+    assert f"  short of their frozen split: hard_benign_hi ({first.split} 1)" in capsys.readouterr().out
 
 
 def test_stats_sheets_and_apply_on_a_built_fixture(dirs, monkeypatch, capsys, caplog):
