@@ -59,9 +59,14 @@ refused, its verdicts, metrics, AuditKIT record and answer check are set aside (
 synced) and left empty, so nothing reads them as current.
 
 The frontier judge (judges.utility) first sends its uncached requests as Message Batches when
-judges.utility.bulk is batch, waits for them and then judges from its call cache; --sync sends every
-request to the Messages API instead, and --no-wait submits the batches and exits 3 (rerun the same line to
-collect them). The fallback judge (Qwen3-8B in 4-bit, on --device) runs only when asked for.
+judges.utility.bulk is batch, waits for them and then judges from its call cache. --no-wait submits the
+batches and exits 3 (rerun the same line to collect them). --sync submits no batch and sends the uncached
+requests synchronously through the Messages API, except those an earlier batch holds (one left by
+--no-wait or by a stopped wait), which are never paid for twice: such a batch is collected first once it
+has ended, and while it still runs the line judges nothing and exits 3. Then rerun it once the batch has
+ended, cancel the batch in the Console and rerun, or set LIFT_ABANDON_BATCHES=<batch id> to give it up
+and pay for those requests again. The fallback judge (Qwen3-8B in 4-bit, on --device) runs only when
+asked for.
 
 examples:
   lift utility --variant adapter-aya-std-s1 --split dev                  (a GPU job: generate, then judge)
@@ -219,8 +224,12 @@ def register(sub: argparse._SubParsersAction) -> None:
                             "stack or pin needed with the frontier judge)")
     bulk = p.add_mutually_exclusive_group()
     bulk.add_argument("--sync", action="store_true",
-                      help="send every request to the Messages API, no Message Batches (small or urgent "
-                           "runs)")
+                      help="submit no Message Batch: judge every uncached request synchronously through the "
+                           "Messages API (small or urgent runs). An earlier batch that holds some of them is "
+                           "collected first once it has ended; while it still runs the line judges nothing "
+                           "and exits 3, rather than pay for those requests twice: rerun once it has ended, "
+                           "cancel it in the Console and rerun, or set LIFT_ABANDON_BATCHES=<batch id> to "
+                           "give it up and pay again")
     bulk.add_argument("--no-wait", action="store_true",
                       help="submit the Message Batches and exit 3 without waiting; rerun the same line to "
                            "collect them")

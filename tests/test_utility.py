@@ -728,6 +728,24 @@ def test_help_works_without_a_gpu_stack(monkeypatch, capsys):
     assert exc.value.code == 0 and "usage" in capsys.readouterr().out
 
 
+def test_the_help_says_sync_collects_an_earlier_batch_first_and_exits_3_while_it_runs(monkeypatch, capsys):
+    # V07 (decisions item 52): --sync never pays twice for requests an earlier Message Batch holds. It
+    # collects such a batch once it has ended, and while it still runs judges nothing and exits 3; the help
+    # used to say it sends every request to the Messages API.
+    monkeypatch.setenv("COLUMNS", "1000")                        # argparse wraps nothing: one line per option
+    with pytest.raises(SystemExit):
+        main(["utility", "--help"])
+    out = capsys.readouterr().out
+    option = next(line for line in out.splitlines() if line.strip().startswith("--sync"))
+    text = " ".join(out.split())
+    paragraph = text[text.index("--sync submits no batch"):text.index("The fallback judge")]
+    for help_text in (option, paragraph):
+        assert "collected first once it has ended" in help_text and "exits 3" in help_text
+        assert "LIFT_ABANDON_BATCHES=<batch id>" in help_text and "cancel" in help_text
+    assert "sends every request to the Messages API" not in text
+    assert "send every request to the Messages API" not in text
+
+
 def test_judge_only_judges_and_reports_checked_answers_with_no_gpu_stack_or_pin(cli, world, monkeypatch,
                                                                                  capsys, caplog):
     monkeypatch.setitem(sys.modules, "torch", None)              # `import torch` raises ImportError
