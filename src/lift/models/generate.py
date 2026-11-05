@@ -6,7 +6,8 @@ After the freeze it only takes bug fixes, and each fix means re-running anything
 Behaviour:
 - Greedy, ``max_new_tokens`` 256, default chat template with the preamble, left padding. The model's
   own generation_config.json (sampling defaults, repetition penalty, ...) is replaced by an explicit
-  greedy config, so nothing leaks in from the checkpoint.
+  greedy config, so nothing leaks in from the checkpoint. configs/project.yaml's generation.do_sample,
+  template and padding_side are locks, not settings: ``gen_config`` refuses any other value.
 - Stops on the model's end-of-turn tokens (``lift.models.load.stop_token_ids``). ``hit_cap`` means no
   end-of-turn token within ``max_new_tokens``. ``n_new_tokens`` counts the content tokens of the
   output (special tokens and the stop token excluded), the count the "fewer than 5 new tokens"
@@ -249,12 +250,23 @@ def _start_over(restart: str | None, out_path: Path) -> str:
 
 def gen_config(variant: LoadedVariant, *, max_new_tokens: int | None = None) -> dict[str, Any]:
     """Everything about decoding that can change an output. It goes into every cache key, so bf16
-    and fp16 outputs (or a different stop set or cap) never share a key."""
+    and fp16 outputs (or a different stop set or cap) never share a key. configs/project.yaml's
+    generation.do_sample, template and padding_side are locks, checked here: the harness implements only
+    their locked values (greedy; the tokenizer's default chat template, its preamble included; left
+    padding), so another value is refused rather than keyed (template) or ignored (padding_side, which no
+    key holds)."""
     from lift.models.load import stop_token_ids
 
     gen = config.get("generation")
     if gen["do_sample"] is not False:
         raise ValueError("generation.do_sample must be false: decoding is greedy (locked Oct 28)")
+    if gen.get("template") != "default":
+        raise ValueError(f"generation.template must be 'default', not {gen.get('template')!r}: chat_text "
+                         "renders only the tokenizer's default chat template, its preamble included (README "
+                         "Generation, locked Oct 28)")
+    if gen.get("padding_side") != "left":
+        raise ValueError(f"generation.padding_side must be 'left', not {gen.get('padding_side')!r}: "
+                         "greedy_batch left-pads every batch (locked Oct 28)")
     return {
         "harness": HARNESS_VERSION,
         "do_sample": False,

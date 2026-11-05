@@ -120,6 +120,26 @@ def test_unneutralised_model_is_refused(tiny_model_dir, stock, tmp_path):
                      max_new_tokens=CAP)
 
 
+@pytest.mark.parametrize("key, locked, edited", [("template", "default", "no_preamble"),
+                                                  ("padding_side", "left", "right")])
+def test_a_generation_setting_the_harness_does_not_implement_is_refused(stock, tmp_path, key, locked, edited):
+    # R2-16: generation.template entered every cache key without changing what is rendered (chat_text always
+    # renders the tokenizer's default template, its preamble included), and generation.padding_side was read
+    # by nothing (greedy_batch left-pads). An edit of either lock was mislabelled or ignored; it is refused
+    # now, as do_sample is. The committed values change no key: template stays in gen_config, padding_side
+    # stays out.
+    from lift import config
+
+    cfg = gen.gen_config(stock, max_new_tokens=CAP)
+    assert sorted(cfg) == ["do_sample", "dtype", "harness", "max_new_tokens", "stop_ids", "template"]
+    assert cfg["template"] == "default"
+    config.load("project")["generation"][key] = edited          # this test's view of configs/project.yaml
+    path = tmp_path / "g.jsonl"
+    with pytest.raises(ValueError, match=rf"generation\.{key} must be '{locked}', not '{edited}'"):
+        gen.generate(stock, prompts(), out_path=path, max_new_tokens=CAP)
+    assert not path.exists()
+
+
 def test_records_carry_hashes_counts_and_meta(stock, tmp_path, isolated_dirs):
     recs = run(stock, tmp_path / "g.jsonl", batch_size=2)
     p = prompts()[1]
