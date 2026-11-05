@@ -3,6 +3,7 @@ on the offline tiny tokenizer with greedy_batch replaced by canned outputs (one 
 tiny random cohere2 for real). Nothing is downloaded; every text is a benign placeholder."""
 
 import copy
+import json
 import logging
 import re
 import sys
@@ -365,7 +366,7 @@ def test_judge_checks_its_inputs_and_logs_no_text(tok, monkeypatch, caplog):
 
 
 @pytest.mark.torch
-def test_id_info_and_the_tied_lm_head_check(tok, tiny_guard, caplog):
+def test_id_info_and_the_tied_lm_head_check(tok, tiny_guard):
     torch = pytest.importorskip("torch")
     judge = make_judge(tok, tiny_guard)
     assert judge.judge_id == f"{MODEL_ID}@{REV}" and judge.dtype == "fp32"
@@ -376,9 +377,57 @@ def test_id_info_and_the_tied_lm_head_check(tok, tiny_guard, caplog):
     untied = build_tiny_cohere2(tok)
     untied.generation_config = copy.deepcopy(tiny_guard.generation_config)
     untied.lm_head.weight = torch.nn.Parameter(untied.lm_head.weight.detach().clone())
-    with caplog.at_level(logging.WARNING, logger=qg.__name__):
-        assert make_judge(tok, untied).info["tied_lm_head"] is False
-    assert "untied" in caplog.text
+    with pytest.raises(ValueError, match=r"lm_head\.weight.*embed_tokens"):    # its config ties them: refused
+        make_judge(tok, untied)
+    untied.config.tie_word_embeddings = False                     # a config that unties them: its own head
+    assert make_judge(tok, untied).info["tied_lm_head"] is False
+
+
+@pytest.fixture
+def tied_config_other_head(tmp_path, monkeypatch):
+    """A tiny Qwen3Guard-shaped checkpoint (Qwen3ForCausalLM) whose config.json ties the output head to the
+    input embeddings while model.safetensors stores an lm_head.weight that differs from
+    model.embed_tokens.weight, configured as judges.safety_primary (the id names a Qwen3Guard, as
+    make_judge requires)."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from safetensors.torch import load_file
+
+    from lift import config
+
+    tok = build_tiny_tokenizer()
+    cfg = transformers.Qwen3Config(
+        vocab_size=len(tok), hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=4,
+        num_key_value_heads=2, head_dim=8, max_position_embeddings=512, tie_word_embeddings=False,
+        pad_token_id=tok.pad_token_id, bos_token_id=tok.bos_token_id,
+        eos_token_id=tok.convert_tokens_to_ids("<|END_OF_TURN_TOKEN|>"))
+    torch.manual_seed(0)
+    model = transformers.Qwen3ForCausalLM(cfg).eval()
+    with torch.no_grad():                            # a head trained apart from the input embeddings
+        head = model.lm_head.weight
+        head.copy_(model.model.embed_tokens.weight + 0.5 * torch.randn_like(head))
+    path = tmp_path / "Qwen3Guard-Gen-tiny"
+    model.save_pretrained(path)
+    tok.save_pretrained(path)
+    conf = json.loads((path / "config.json").read_text(encoding="utf-8"))
+    conf["tie_word_embeddings"] = True               # the config ties the head; the file holds both tensors
+    (path / "config.json").write_text(json.dumps(conf), encoding="utf-8", newline="\n")
+    stored = load_file(path / "model.safetensors")
+    assert not torch.equal(stored["lm_head.weight"], stored["model.embed_tokens.weight"])
+    monkeypatch.setitem(config.load("project")["judges"]["safety_primary"], "id", str(path))
+    return path
+
+
+@pytest.mark.torch
+def test_a_checkpoint_whose_config_ties_the_head_but_stores_another_is_refused(tied_config_other_head):
+    # R1-11: transformers 5.x keeps the checkpoint's own lm_head.weight when the config ties it to
+    # embed_tokens but the stored values differ, so the judge would run another head than the stacks the
+    # release was evaluated with (transformers 4.5x, vLLM). Built through lift's own path (make_judge ->
+    # Qwen3GuardJudge -> load_model), the primary judge is refused, never built with only a warning.
+    from lift.judge import pipeline
+
+    with pytest.raises(ValueError, match=r"lm_head\.weight.*embed_tokens"):
+        pipeline.make_judge("primary", device="cpu", dtype="fp32")
 
 
 @pytest.mark.torch
