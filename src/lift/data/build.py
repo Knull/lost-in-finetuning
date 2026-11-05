@@ -1446,18 +1446,20 @@ def _verdicts_path() -> Path:
 
 
 def _read_verdicts() -> dict[tuple[str, str], dict[str, Any]]:
-    """The latest verdict row per (lang, pid). A line a killed run left half written is skipped with a
-    warning (apply that sheet again); a row that parses but is not a verdict raises."""
+    """The latest verdict row per (lang, pid). A line a killed run left half written (also one cut
+    inside a multi-byte character: each line is decoded on its own, as TranslationCache._load does) is
+    skipped with a warning (apply that sheet again: its verdict is stored anew); a row that parses but
+    is not a verdict raises."""
     path = _verdicts_path()
     if not path.exists():
         return {}
     out: dict[tuple[str, str], dict[str, Any]] = {}
-    for lineno, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
-        if not line.strip():
+    for lineno, raw in enumerate(path.read_bytes().split(b"\n"), 1):
+        if not raw.strip():
             continue
         try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
+            row = json.loads(raw.decode("utf-8"))
+        except ValueError:                           # JSONDecodeError and UnicodeDecodeError
             log.warning("%s:%d: skipping a half-written line", path.name, lineno)
             continue
         missing = [k for k in _VERDICT_FIELDS if not isinstance(row, dict) or k not in row]
@@ -1495,11 +1497,10 @@ def _owed(verdicts: Mapping[tuple[str, str], Mapping[str, Any]],
 
 
 def _append_verdicts(rows: Sequence[dict[str, Any]]) -> None:
-    path = _verdicts_path()
-    if path.exists() and path.stat().st_size and not path.read_bytes().endswith(b"\n"):
-        with open(path, "a", encoding="utf-8", newline="\n") as f:       # close off a half-written line
-            f.write("\n")
-    append_jsonl(path, rows)
+    """Append verdict rows. lift.io.append_jsonl closes off a last line a killed append cut short first:
+    completed when it parses, dropped when it does not decode or parse (its verdict was never stored:
+    applying that sheet again stores it), so no undecodable line stays in the synced file."""
+    append_jsonl(_verdicts_path(), rows)
 
 
 def sheets_dir() -> Path:
