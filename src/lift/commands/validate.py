@@ -338,8 +338,8 @@ def _prompt_flag(s: argparse.ArgumentParser) -> None:
                    help="escape hatch: treat every output as current even if its prompt_sha does not "
                         "match the prompt text (printed as a warning; recorded in what it writes)")
     s.add_argument("--dtype", default=None, choices=["bf16", "fp16", "fp32"],
-                   help="the precision of the outputs to use (default: generation.dtype; fp16 only for a "
-                        "T4 run Gate 0 has cleared)")
+                   help="the precision of the outputs to use (default: generation.dtype; another is "
+                        "refused unless Gate 0's licence, gate0-<dtype>.json, covers the outputs)")
 
 
 def register(sub: argparse._SubParsersAction) -> None:
