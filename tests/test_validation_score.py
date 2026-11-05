@@ -31,7 +31,7 @@ from validation_fakes import (
     write_judgements,
 )
 
-from lift import config, manifest
+from lift import config, manifest, splits
 from lift.io import read_jsonl, sha256_text, write_jsonl
 from lift.judge.labels import final_label, map_qwen3guard
 from lift.schemas import LABELS, HumanLabel, JudgementRecord, UnclearFlags
@@ -105,6 +105,7 @@ def private_copy(base, validation, tmp_path, monkeypatch):
     world = use_world(monkeypatch, World(root=tmp_path / "world", n=dict(base.n),
                                          generations=dict(base.generations)))
     monkeypatch.setenv("LIFT_DATA_DIR", str(base.data))
+    monkeypatch.setattr(splits, "SPLITS_DIR", base.splits_dir)        # the prompts' committed splits
     return world, load_round(1)
 
 

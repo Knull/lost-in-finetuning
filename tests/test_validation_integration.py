@@ -25,6 +25,7 @@ from validation_fakes import (
 )
 
 from lift import paths
+from lift.data import build
 from lift.io import read_jsonl, sha256_text, write_jsonl
 from lift.models.generate import HARNESS_VERSION
 from lift.schemas import JudgementRecord, PromptRecord
@@ -668,3 +669,44 @@ def test_load_judgements_pairs_a_judgement_only_with_the_output_it_judged(tmp_pa
     # A caller that cannot say which output it wants (no generation to compare with) gets no judgement.
     unknown = load_judgements([outputs.Target(gens[0].key, "stock", "harmful", "hi", "dev", gens[0].pid)])
     assert unknown.qwen3guard == {} and unknown.stale == {"qwen3guard": 1, "frontier": 1}
+
+
+# --- W2-06 (R1-19 follow-up): the prompt files are read through the build's own reader ----------
+
+
+def test_a_prompt_file_stamped_from_another_split_assignment_is_refused(tmp_path, monkeypatch):
+    # dev/final membership is the committed split's (data/splits), never the stamp a synced prompt file
+    # carries: a file whose stamps swap a dev and a final pid (every split keeps its size) is refused by
+    # every validation read, as lift.data.build.load_prompts refuses it for every other stage.
+    world = world_for(tmp_path, monkeypatch)
+    path = world.data / "prompts" / "harmful_hi.jsonl"
+    records = [PromptRecord.model_validate(r) for r in read_jsonl(path)]
+    dev = next(r.pid for r in records if r.split == "dev")
+    final = next(r.pid for r in records if r.split == "final")
+    swapped = {dev: "final", final: "dev"}
+    write_jsonl(path, [r.model_copy(update={"split": swapped.get(r.pid, r.split)}).model_dump()
+                       for r in records])
+    with pytest.raises(ValidateError, match=dev) as refused:
+        Prompts().get("harmful", "hi")
+    assert final in str(refused.value) and "lift data build --only harmful" in str(refused.value)
+    with pytest.raises(ValidateError, match="harmful_hi"):           # the draw stops on it, writing nothing
+        make_sheets(1)
+    assert not round_keys_path(1).exists() and not draw_path(1).exists()
+    # A missing committed split file: the stamps cannot be checked, so nothing is read either.
+    write_jsonl(path, [r.model_dump() for r in records])
+    (world.splits_dir / "harmful.json").unlink()
+    with pytest.raises(ValidateError, match=r"harmful\.json is missing"):
+        Prompts().get("harmful", "hi")
+
+
+def test_a_cell_short_of_its_frozen_split_is_still_read_for_the_sheets(tmp_path, monkeypatch):
+    # A translation failure leaves its pid out of the prompt file until a reader's verdict resolves it.
+    # Every run refuses the short cell, but the validation reads it (allow_short): a sheet may show the
+    # cell's prompts meanwhile, and its outputs are then made again in full before they are reported.
+    world = world_for(tmp_path, monkeypatch)
+    path = world.data / "prompts" / "harmful_hi.jsonl"
+    records = [PromptRecord.model_validate(r) for r in read_jsonl(path)]
+    write_jsonl(path, [r.model_dump() for r in records[1:]])
+    with pytest.raises(ValueError, match="short of its frozen split"):
+        build.load_prompts("harmful", "hi", "dev")
+    assert set(Prompts().get("harmful", "hi")) == {r.pid for r in records[1:]}

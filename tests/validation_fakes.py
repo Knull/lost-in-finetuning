@@ -3,15 +3,22 @@ verdicts written with the real schemas into a temporary directory. No model, no 
 
 Texts are neutral placeholders, so no test holds a real harmful prompt or completion, and they
 never contain a variant name, a set name or a judge label (the leak tests rely on that).
+
+The world commits its own split files (``World.splits_dir``, data/splits in the repo), which
+``use_world`` makes lift.splits.SPLITS_DIR: the prompt files are read through
+lift.data.build.load_prompts, which refuses a split stamp the committed split does not give.
 """
 
 from __future__ import annotations
 
 import csv
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from lift import splits as frozen_splits
+from lift.data.build import SPLIT_SETS
 from lift.io import sha256_obj, sha256_text, write_jsonl
 from lift.schemas import (
     LABELS,
@@ -94,12 +101,35 @@ class World:
     def validation(self) -> Path:
         return self.root / "validation"
 
+    @property
+    def splits_dir(self) -> Path:
+        """The world's committed split files: lift.splits.SPLITS_DIR while it is in use."""
+        return self.data / "splits"
+
     def by_key(self) -> dict[str, GenerationRecord]:
         return {g.key: g for recs in self.generations.values() for g in recs}
 
 
+def freeze_split(world: World, set_name: str, assignments: dict[str, str]) -> Path:
+    """Commit ``assignments`` (pid -> split) to the world's split file of ``set_name``, in the layout of
+    data/splits/{set}.json, with the pids already there (a pid has one split in every language)."""
+    path = world.splits_dir / f"{set_name}.json"
+    frozen = json.loads(path.read_text(encoding="utf-8"))["assignments"] if path.is_file() else {}
+    clash = sorted(pid for pid, split in assignments.items() if frozen.get(pid, split) != split)
+    if clash:
+        raise ValueError(f"{set_name}: {clash[:5]} are frozen in another split already")
+    frozen.update(assignments)
+    doc = {"name": set_name, "seed": 0, "sizes": dict(sorted(Counter(frozen.values()).items())),
+           "created": "2026-11-04", "n": len(frozen), "assignments": dict(sorted(frozen.items()))}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8", newline="\n")
+    return path
+
+
 def write_prompts(world: World, set_name: str, lang: str, splits: dict[str, int],
                   version: int = 0) -> list[PromptRecord]:
+    """The prompt file of ``set_name`` in ``lang``, pids in order over ``splits`` (split -> count), and
+    those splits frozen in the world's split file when the set has one (redteam is final, with none)."""
     records, i = [], 0
     for split, count in splits.items():
         for _ in range(count):
@@ -109,6 +139,8 @@ def write_prompts(world: World, set_name: str, lang: str, splits: dict[str, int]
                                         source="fake"))
             i += 1
     write_jsonl(world.data / "prompts" / f"{set_name}_{lang}.jsonl", [r.model_dump() for r in records])
+    if set_name in SPLIT_SETS:
+        freeze_split(world, set_name, {r.pid: r.split for r in records})
     return records
 
 
@@ -194,6 +226,7 @@ def use_world(monkeypatch, world: World) -> World:
     monkeypatch.setenv("LIFT_DATA_DIR", str(world.data))
     monkeypatch.setenv("LIFT_OUTPUT_DIR", str(world.outputs))
     monkeypatch.setenv("LIFT_VALIDATION_DIR", str(world.validation))
+    monkeypatch.setattr(frozen_splits, "SPLITS_DIR", world.splits_dir)
     return world
 
 
