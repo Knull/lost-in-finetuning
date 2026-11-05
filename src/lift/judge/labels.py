@@ -43,9 +43,14 @@ from lift.lang import LID_TOP_K
 from lift.schemas import UnclearFlags
 
 LABELS_VERSION = 1
-"""The version of the labelling rules. Bump it on any change to ``map_qwen3guard``, ``map_frontier``,
-``final_label``, ``unclear_flags``, the language-mass rule (``language_mass``), ``repetition_ratio`` or the
-Qwen3Guard output parser (lift.judge.qwen3guard): it moves ``rules_tag``, and with it every judge id."""
+"""The version of the labelling rules. Bump it on any change to code that decides a stored label or flag:
+``map_qwen3guard``, ``map_frontier``, ``final_label``, ``unclear_flags``, the language-mass rule
+(``language_mass``), ``repetition_ratio``, the Qwen3Guard output parser (lift.judge.qwen3guard), the
+frontier reply parser (``lift.judge.frontier.parse_safety_reply``) and the pipeline's label glue
+(lift.judge.pipeline: ``_flags``, ``EMPTY_OUTPUT_LID``, ``_judgement``, and the judge_label that
+``Qwen3GuardAdapter._outcome`` and ``FrontierAdapter.judge`` make of a reply). It moves ``rules_tag``, and
+with it every judge id. Nothing else does for a code change: a frontier judge id names its rubric file,
+not its parser, and a Qwen3Guard id names the model, not lift's code."""
 
 
 def rules_tag() -> str:

@@ -62,6 +62,10 @@ Jobs are launched from the laptop with `lift remote`, which drives Google's Cola
    [Environment]::SetEnvironmentVariable('LIFT_JUDGE_MAX_USD', '<cap>', 'User')
    ```
 
+   This form keeps each value in plain text in the registry (`HKCU\Environment`) until it is removed.
+   When you no longer need one, remove it in your own PowerShell window with
+   `[Environment]::SetEnvironmentVariable('NAME', $null, 'User')`.
+
    `hf auth login` must store a WRITE token for the runs repo too, not the read token that
    downloads the models: the job's pushes use it, and so does the push retry of
    `lift remote watch`.
@@ -222,12 +226,17 @@ exits 1. Any other failing line still ends the job. A cell is skipped when:
   (fp16 on a T4, say). Run with `--dtype <that dtype>` on the kind of GPU that made them, or leave
   the cell out with `--sets`/`--langs`. This is never a restart, which would discard them.
 - **Its judge differs**: its judgements file was made by another judge (another judge id, which
-  shows the judge's dtype and mode). Run with that judge, or the printed
-  `lift restart ... --judge ROLE` line.
+  names the labelling rules and, for Qwen3Guard, the dtype and mode:
+  `{model}@{sha}#rules-<tag>#{dtype}#{mode}`; a frontier judge's id ends in `#rules-<tag>`). Run with
+  that judge, or the printed `lift restart ... --judge ROLE` line. A file that differs only in its
+  rules tag (the labelling rules changed since it was judged) can only be judged again: its message
+  names only the restart line, and running with the old judge never finishes it.
 
 `lift restart` moves the cell's files to `outputs/.aside/<UTC stamp>/` on the VM, which is never
 synced, and leaves each one empty; it empties the cell's AuditKIT records too (an empty record is a
-retired one). The checkpoint push after it replaces the runs repo's copies with the empty files, and
+retired one). The checkpoint push after it replaces the runs repo's copies with the empty files (if
+another machine pushed the cell since this machine's last sync, it keeps the runs repo's copies and
+reports a conflict instead, emptied here by lift restart, which `lift sync push --force` settles), and
 the line after it refills them. With `--judge ROLE` it does this only for that judge's file and
 records. Its log names the `lift judge ... --judge ROLE` line (with P04's `--keys` for the second
 judge) that refills another judge's file it set aside: `lift run-dev` refills only the primary's. It

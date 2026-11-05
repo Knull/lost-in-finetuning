@@ -292,7 +292,9 @@ secrets getter, and the `lift_env` path in cell 2.
   `lift restart` moves the cell's generations, judgements and AuditKIT records (with `--judge`,
   only that judge's judgements and records) under `outputs/.aside/`, which is never synced, and
   leaves empty files in their place; an empty record is retired, and readers skip it. The
-  checkpoint push after it then replaces the runs repo's copies, and the job regenerates that cell
+  checkpoint push after it then replaces the runs repo's copies (if another machine pushed the cell
+  since this machine's last sync, it keeps them and reports a conflict instead, emptied here by lift
+  restart, which `lift sync push --force` settles), and the job regenerates that cell
   and reuses the others. A restart without `--judge` also empties the other judges' judgements,
   which `lift run-dev` does not refill: its log names the line that does, such as
   `lift judge ... --judge second` with P04's `--keys` list (`--sample 0.10` when P04 has drawn
@@ -354,9 +356,11 @@ secrets getter, and the `lift_env` path in cell 2.
     (Habits).
   - A cell made in another precision (bf16, by Colab): leave it out with `--sets` and `--langs`,
     and never restart it from here (Jobs on a T4 x2).
-  - A cell judged by another judge: run the line with the judge the message names (its id shows
-    the dtype and mode), or start that judge's judgements over with the `lift restart ... --judge`
-    line it prints, as for a stale cell.
+  - A cell judged by another judge: run the line with the judge the message names (its id names the
+    labelling rules, `#rules-<tag>`, and for Qwen3Guard the dtype and mode), or start that judge's
+    judgements over with the `lift restart ... --judge` line it prints, as for a stale cell. A file
+    that differs only in its rules tag (the labelling rules changed since it was judged) can only be
+    judged again: its message names only the restart line, and the old judge never finishes it.
   - A refused AuditKIT record: its error, above the list, says why; on a T4 it is most often the
     fp16 licence, which does not cover the cell (step 3 of the first jobs above). The judgements
     are written, so once that is fixed, the next run of the line writes the record.
