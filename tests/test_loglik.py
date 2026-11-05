@@ -3,10 +3,11 @@
 Covered: the frozen Belebele format and its letter scoring (BOS once, the letter boundary, the next-token
 and sequence paths, a forced answer through a stub model), the held-out NLL over exactly the tokens
 training supervises, batched against one-at-a-time scoring, the resumable cache-keyed score files (resume,
-a crash, out of memory, stale cells and the --restart remedy, precision and stack refusals: a cell made in
-another precision is never started over), wrappers (score_logits and its gate), the metrics files (per
-language and per precision; vs_stock never paired across precisions), and both commands end to end on the
-tiny model.
+a crash, out of memory, stale cells and the --restart remedy, a stack refusal; each precision's own files,
+named -{dtype} outside generation.dtype, and the guard for a file holding another precision's scores,
+which is never started over), wrappers (score_logits and its gate), the metrics files (per language and per
+precision; each precision's vs_stock pairs with stock's file of that precision), and both commands end to
+end on the tiny model.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from lift.cli import main
 from lift.io import read_jsonl, sha256_file, write_jsonl
 from lift.models import loglik
 from lift.models.generate import StaleOutputError
-from lift.paths import manifests_dir, metrics_dir, output_dir, prompts_dir
+from lift.paths import manifests_dir, metrics_dir, output_dir, prompts_dir, scores_dir
 from lift.schemas import PromptRecord, VariantSpec
 
 WORDS = ("river", "hill", "garden", "market", "school", "bridge")
@@ -405,7 +406,7 @@ def test_a_wrapper_without_score_logits_is_refused(stock):
                  lambda: loglik.belebele_cell(wrapper, bel_rows(1), lang="en", split="dev")):
         with pytest.raises(NotImplementedError, match="P05"):
             call()
-    assert not loglik.belebele_scores_path("stock", "en", "dev").exists()
+    assert not scores_dir().exists()                                     # no score file, in any precision
 
 
 @pytest.mark.torch
@@ -457,7 +458,7 @@ def test_a_cell_resumes_and_skips_done_keys(stock):
 
     rows = bel_rows(5)
     path = loglik.belebele_cell(stock, rows[:3], lang="en", split="dev", batch_size=2)
-    assert path == loglik.belebele_scores_path("stock", "en", "dev")
+    assert path == loglik.belebele_scores_path("stock", "en", "dev", dtype="fp32")     # the variant's dtype
     first = path.read_bytes()
     assert len(first.splitlines()) == 3
     loglik.belebele_cell(stock, rows, lang="en", split="dev", batch_size=2)
@@ -495,7 +496,7 @@ def test_a_crash_mid_cell_resumes_without_duplicates(stock, monkeypatch):
     monkeypatch.setattr(loglik, "_forward", dies_on_the_second_batch)
     with pytest.raises(RuntimeError, match="session killed"):
         loglik.belebele_cell(stock, rows, lang="en", split="dev", batch_size=2)
-    path = loglik.belebele_scores_path("stock", "en", "dev")
+    path = loglik.belebele_scores_path("stock", "en", "dev", dtype="fp32")
     assert len(path.read_bytes().splitlines()) == 2
     with path.open("ab") as f:                                       # and a kill mid-line on top of that
         f.write(b'{"key": "trunc')
@@ -535,32 +536,84 @@ def test_a_changed_text_or_answer_is_stale_and_its_restart_line_starts_the_cell_
     assert len(path.read_bytes().splitlines()) == 3
 
 
+def test_a_score_file_in_another_precision_than_generation_dtype_is_named_for_it():
+    """V05: as metrics_path, a precision other than generation.dtype (bf16) adds "-{dtype}" to a score
+    file's name, so a T4's fp16 cell and Colab's bf16 cell of one variant are two files."""
+    bf16 = scores_dir() / "belebele" / "stock" / "belebele_hi_dev.jsonl"
+    assert loglik.belebele_scores_path("stock", "hi", "dev") == bf16
+    assert loglik.belebele_scores_path("stock", "hi", "dev", dtype="bf16") == bf16
+    assert loglik.belebele_scores_path("stock", "hi", "dev", dtype="fp16") == bf16.with_name(
+        "belebele_hi_dev-fp16.jsonl")
+    held = scores_dir() / "heldout_loss" / "adapter-x" / "utility_hi_final.jsonl"
+    assert loglik.heldout_scores_path("adapter-x", "final") == held
+    assert loglik.heldout_scores_path("adapter-x", "final", dtype="bf16") == held
+    assert loglik.heldout_scores_path("adapter-x", "final", dtype="fp32") == held.with_name(
+        "utility_hi_final-fp32.jsonl")
+    assert loglik.metrics_path("belebele", "stock", "dev", dtype="fp16").name == "stock_dev-fp16.json"
+    assert loglik.metrics_path("heldout_nll", "stock", "dev", dtype="bf16").name == "stock_dev.json"
+
+
 @pytest.mark.torch
-def test_another_precision_or_configuration_is_refused(stock):
+def test_each_precision_scores_a_cell_into_its_own_file(stock):
+    """V05: the bf16 run (generation.dtype) of a cell an fp32 run scored first (a T4's fp16 line, on the
+    CPU) scores into its own file: neither is refused, appended to or replaced, and each resumes its own."""
+    rows, prompts = bel_rows(2), [utility(1), utility(2, "ind")]
+    bf16 = dataclasses.replace(stock, dtype="bf16")
+    cells = {"belebele": (lambda v: loglik.belebele_cell(v, rows, lang="en", split="dev"),
+                          lambda dtype: loglik.belebele_scores_path("stock", "en", "dev", dtype=dtype)),
+             "heldout": (lambda v: loglik.heldout_cell(v, prompts, split="dev"),
+                         lambda dtype: loglik.heldout_scores_path("stock", "dev", dtype=dtype))}
+    for score, path in cells.values():
+        first = score(stock)
+        assert first == path("fp32") and first.name.endswith("_dev-fp32.jsonl")
+        before = first.read_bytes()
+        second = score(bf16)
+        assert second == path("bf16") == path(None) and second.name.endswith("_dev.jsonl")
+        assert first.read_bytes() == before                                  # the fp32 file as it was
+        after = second.read_bytes()
+        for made, dtype in ((first, "fp32"), (second, "bf16")):
+            records = list(read_jsonl(made))
+            assert len(records) == 2 and {r["meta"]["dtype"] for r in records} == {dtype}
+        assert (score(stock), score(bf16)) == (first, second)                # each resumes its own: done
+        assert (first.read_bytes(), second.read_bytes()) == (before, after)
+
+
+@pytest.mark.torch
+def test_a_file_holding_another_precisions_scores_is_refused_and_never_started_over(stock):
+    """The guard (C08, kept by V05). lift writes each precision's scores to its own file, so a file at the
+    bf16 path holding fp32 scores was put there by hand. One file is one precision: nothing is appended. It
+    is not stale and names no command line, as a generations file's OtherPrecisionError, so --restart skips
+    it: starting it over would discard scores bf16 cannot make again. The remedy says where they belong."""
     from lift.models.generate import OtherPrecisionError
 
-    rows = bel_rows(2)
-    path = loglik.belebele_cell(stock, rows, lang="en", split="dev")
-    before = path.read_bytes()
+    rows, prompts = bel_rows(2), [utility(1)]
+    bf16 = dataclasses.replace(stock, dtype="bf16")
+    placed = []
+    for made in (loglik.belebele_cell(stock, rows, lang="en", split="dev"),
+                 loglik.heldout_cell(stock, prompts, split="dev")):
+        placed.append(made.with_name(made.name.replace("-fp32", "")))          # at bf16's path, by hand
+        shutil.copyfile(made, placed[-1])
+    before = [p.read_bytes() for p in placed]
     with pytest.raises(loglik.ScorePrecisionError) as exc:
-        loglik.belebele_cell(dataclasses.replace(stock, dtype="bf16"), rows, lang="en", split="dev")
-    # Not stale, and never started over, as a generations file made in another precision: no command line,
-    # so --restart skips it too (C08), and the remedies are the file's own --dtype or leaving it out.
+        loglik.belebele_cell(bf16, rows, lang="en", split="dev")
     assert isinstance(exc.value, OtherPrecisionError) and exc.value.dtype == "fp32"
     assert exc.value.command is None and "lift belebele" not in str(exc.value)
-    assert exc.value.remedy == ("made in fp32: score it with --dtype fp32 where fp32 runs, or leave it out "
-                                "with --langs")
-    prompts = [utility(1)]
-    loglik.heldout_cell(stock, prompts, split="dev")
+    assert exc.value.remedy == ("holds fp32 scores, which belong in outputs/scores/belebele/stock/"
+                                "belebele_en_dev-fp32.jsonl: move them there by hand, leaving this cell's "
+                                "file empty (sync never deletes), or leave it out with --langs")
     with pytest.raises(loglik.ScorePrecisionError) as exc:
-        loglik.heldout_cell(dataclasses.replace(stock, dtype="bf16"), prompts, split="dev")
+        loglik.heldout_cell(bf16, prompts, split="dev")
     assert exc.value.command is None and "lift heldout-loss" not in str(exc.value)
-    assert exc.value.remedy == ("made in fp32: score it with --dtype fp32 where fp32 runs, or leave this "
-                                "line out of the job")
+    assert exc.value.remedy == ("holds fp32 scores, which belong in outputs/scores/heldout_loss/stock/"
+                                "utility_hi_dev-fp32.jsonl: move them there by hand, leaving this cell's "
+                                "file empty (sync never deletes), or leave this line out of the job")
+    assert [p.read_bytes() for p in placed] == before                        # nothing appended
+    fp32 = loglik.belebele_scores_path("stock", "en", "dev", dtype="fp32")
+    kept = fp32.read_bytes()
     with pytest.raises(StaleOutputError, match="another configuration") as exc:
         loglik.belebele_cell(dataclasses.replace(stock, template_hash="f" * 64), rows, lang="en", split="dev")
     assert not isinstance(exc.value, loglik.ScorePrecisionError)
-    assert path.read_bytes() == before
+    assert fp32.read_bytes() == kept
 
 
 @pytest.mark.torch
@@ -602,7 +655,7 @@ def test_belebele_metrics_cover_every_complete_language_and_list_the_rest(stock)
     assert en["n"] == 4 and en["n_correct"] == sum(r["pred"] == r["gold"] for r in records)
     assert en["accuracy"] == en["n_correct"] / 4 and en["gate_fired_rate"] is None
     assert sum(en["pred_counts"].values()) == 4 and en["n_ties"] == 0
-    assert en["scores_path"] == "outputs/scores/belebele/stock/belebele_en_dev.jsonl"
+    assert en["scores_path"] == "outputs/scores/belebele/stock/belebele_en_dev-fp32.jsonl"
     assert en["scores_sha256"] == sha256_file(path) and doc["created"]
     assert list(doc["langs"]) == ["en"] and doc["left_out"] == {"hi": "incomplete: 2 of 4 items scored"}
     md = written.md_path.read_text(encoding="utf-8")
@@ -639,8 +692,8 @@ def test_heldout_metrics_pool_by_source_and_pair_with_stock(stock, fake_prompt_f
     written = loglik.write_heldout_metrics("adapter-x", "dev", dtype="fp32")
     doc = json.loads(written.json_path.read_text(encoding="utf-8"))
     assert written.json_path == metrics_dir() / "heldout_loss" / "adapter-x_dev-fp32.json"
-    mine = {r["pid"]: r for r in read_jsonl(loglik.heldout_scores_path("adapter-x", "dev"))}
-    base = {r["pid"]: r for r in read_jsonl(loglik.heldout_scores_path("stock", "dev"))}
+    mine = {r["pid"]: r for r in read_jsonl(loglik.heldout_scores_path("adapter-x", "dev", dtype="fp32"))}
+    base = {r["pid"]: r for r in read_jsonl(loglik.heldout_scores_path("stock", "dev", dtype="fp32"))}
     assert (doc["kind"], doc["version"], doc["lang"], doc["n_rows"]) == ("heldout_loss", 1, "hi", 5)
     assert doc["n_outside_split"] == 0 and doc["split"] == "dev"
     assert doc["n_tokens"] == sum(r["n_tokens"] for r in mine.values())
@@ -648,7 +701,7 @@ def test_heldout_metrics_pool_by_source_and_pair_with_stock(stock, fake_prompt_f
     assert doc["row_mean_nll"] == pytest.approx(sum(r["mean_nll"] for r in mine.values()) / 5)
     assert doc["perplexity"] == pytest.approx(math.exp(doc["mean_nll"]))
     assert doc["adapter_hash"] == "a" * 64 and doc["scores_sha256"] == sha256_file(
-        loglik.heldout_scores_path("adapter-x", "dev"))
+        loglik.heldout_scores_path("adapter-x", "dev", dtype="fp32"))
     assert {s: v["n_rows"] for s, v in doc["by_source"].items()} == {"aya": 3, "ind": 2}
     pids = sorted(mine)
     res = paired_bootstrap([mine[p]["mean_nll"] for p in pids], [base[p]["mean_nll"] for p in pids],
@@ -658,28 +711,81 @@ def test_heldout_metrics_pool_by_source_and_pair_with_stock(stock, fake_prompt_f
         res.diff, res.lo, res.hi, res.p_value, 5)
     assert vs["diff_row_mean_nll"] != 0                                   # guard: the two models differ
     assert set(vs["by_source"]) == {"aya", "ind"} and vs["by_source"]["ind"]["n"] == 2
-    assert vs["stock_scores_sha256"] == sha256_file(loglik.heldout_scores_path("stock", "dev"))
+    assert vs["stock_scores_path"] == "outputs/scores/heldout_loss/stock/utility_hi_dev-fp32.jsonl"
+    assert vs["stock_scores_sha256"] == sha256_file(loglik.heldout_scores_path("stock", "dev", dtype="fp32"))
     assert "vs stock: this variant minus stock" in written.md_path.read_text(encoding="utf-8")
     stock_doc = loglik.write_heldout_metrics("stock", "dev", dtype="fp32").doc
     assert stock_doc["vs_stock"] is None and stock_doc["vs_stock_note"] == "this is stock"
 
 
 @pytest.mark.torch
-def test_vs_stock_never_sends_a_run_to_score_stock_made_in_another_precision(stock, fake_prompt_files):
-    """C08: stock's file in another precision is never paired and never started over from this run's, so
-    the note names the precision that pairs with it, not a stock line that would only refuse the file."""
+def test_each_precision_pairs_with_stocks_scores_of_its_own_precision(stock, fake_prompt_files):
+    """V05: an adapter's held-out loss pairs with stock's file of its own precision, and neither precision's
+    files or metrics change when the other's cells are scored. bf16 stands for Colab's runs and fp32 for a
+    T4's fp16 ones; bf16's stock is another tiny model, so that the two stock files really differ."""
+    from fakes import build_tiny_cohere2
+
+    from lift.stats import paired_bootstrap
+
+    prompts = [utility(i, "aya" if i % 2 else "ind") for i in range(4)]
+    fake_prompt_files[("utility", "hi")] = prompts
+    adapter = dataclasses.replace(stock, model=build_tiny_cohere2(stock.tokenizer, seed=7),
+                                  adapter_hash="a" * 64,
+                                  spec=VariantSpec(name="adapter-x", method="adapter", adapter="adapter-x"))
+    loglik.heldout_cell(dataclasses.replace(stock, model=build_tiny_cohere2(stock.tokenizer, seed=11),
+                                            dtype="bf16"), prompts, split="dev")
+    loglik.heldout_cell(dataclasses.replace(adapter, dtype="bf16"), prompts, split="dev")
+    bf16 = loglik.write_heldout_metrics("adapter-x", "dev")
+    assert bf16.json_path.name == "adapter-x_dev.json" and bf16.doc["dtype"] == "bf16"
+    kept = [bf16.json_path, bf16.md_path, loglik.heldout_scores_path("stock", "dev"),
+            loglik.heldout_scores_path("adapter-x", "dev")]
+    kept = {p: p.read_bytes() for p in kept}
+    loglik.heldout_cell(adapter, prompts, split="dev")                   # fp32, and stock has no fp32 file
+    doc = loglik.write_heldout_metrics("adapter-x", "dev", dtype="fp32").doc
+    assert doc["vs_stock"] is None                                        # never paired with bf16's stock
+    assert doc["vs_stock_note"] == ("stock's held-out scores of dev cannot be paired (no score file); run "
+                                    "`lift heldout-loss --variant stock --split dev --dtype fp32`, then this "
+                                    "variant's line again")
+    loglik.heldout_cell(stock, prompts, split="dev")                     # that line: stock's own fp32 file
+    fp32 = loglik.write_heldout_metrics("adapter-x", "dev", dtype="fp32")
+    assert fp32.json_path.name == "adapter-x_dev-fp32.json"
+    assert {p: p.read_bytes() for p in kept} == kept                      # bf16's files never touched
+    for written, dtype in ((bf16, "bf16"), (fp32, "fp32")):
+        vs = written.doc["vs_stock"]
+        mine, base = (loglik.heldout_scores_path(name, "dev", dtype=dtype) for name in ("adapter-x", "stock"))
+        assert vs["stock_scores_path"] == "outputs/scores/heldout_loss/stock/" + base.name
+        assert vs["stock_scores_sha256"] == sha256_file(base)
+        x, y = ({r["pid"]: r["mean_nll"] for r in read_jsonl(p)} for p in (mine, base))
+        pids = sorted(x)
+        res = paired_bootstrap([x[p] for p in pids], [y[p] for p in pids], clusters=pids)
+        assert (vs["diff_row_mean_nll"], vs["lo"], vs["hi"], vs["n"]) == (res.diff, res.lo, res.hi, 4)
+    assert bf16.doc["vs_stock"]["diff_row_mean_nll"] != fp32.doc["vs_stock"]["diff_row_mean_nll"]
+    again = loglik.heldout_metrics("adapter-x", "dev")                    # bf16's numbers, recomputed
+    assert {k: v for k, v in again.items() if k != "created"} == {
+        k: v for k, v in bf16.doc.items() if k != "created"}
+
+
+@pytest.mark.torch
+def test_vs_stock_never_pairs_a_file_holding_another_precisions_scores(stock, fake_prompt_files):
+    """The guard in vs_stock (C08): stock's fp32 file holding bf16 scores (put there by hand) is never
+    paired, and the note says where they belong rather than only naming stock's fp32 line, which would
+    refuse the file."""
     prompts = [utility(i, "aya" if i % 2 else "ind") for i in range(3)]
     fake_prompt_files[("utility", "hi")] = prompts
-    loglik.heldout_cell(dataclasses.replace(stock, dtype="bf16"), prompts, split="dev")   # generation.dtype
+    made = loglik.heldout_cell(dataclasses.replace(stock, dtype="bf16"), prompts, split="dev")
+    shutil.copyfile(made, loglik.heldout_scores_path("stock", "dev", dtype="fp32"))      # by hand
     adapter = dataclasses.replace(stock, adapter_hash="a" * 64,
                                   spec=VariantSpec(name="adapter-x", method="adapter", adapter="adapter-x"))
     loglik.heldout_cell(adapter, prompts, split="dev")                                    # fp32: a T4's fp16
     doc = loglik.heldout_metrics("adapter-x", "dev", dtype="fp32")
     assert doc["n_rows"] == 3 and doc["vs_stock"] is None
     note = doc["vs_stock_note"]
-    assert note.startswith("stock's held-out scores of dev were made in bf16, not fp32: ")
-    assert note.endswith("Score this variant in bf16, where bf16 runs, to pair it with them")
-    assert "lift heldout-loss" not in note and "--restart" not in note
+    assert note.startswith("stock's fp32 held-out file of dev holds scores made in bf16, which belong in "
+                           "outputs/scores/heldout_loss/stock/utility_hi_dev.jsonl: ")
+    assert note.endswith("then run `lift heldout-loss --variant stock --split dev --dtype fp32` and this "
+                         "variant's line again")
+    assert "Move them there by hand, leaving that file empty (sync never deletes)" in note
+    assert "--restart" not in note
 
 
 # --- the commands -----------------------------------------------------------------------------------------
@@ -763,44 +869,82 @@ def test_lift_belebele_skips_a_stale_cell_and_restart_starts_it_over(tiny_model_
 
 
 @pytest.mark.torch
-def test_lift_belebele_never_starts_over_a_cell_made_in_another_precision(tiny_model_dir, monkeypatch,
-                                                                          caplog):
-    """C08: a run in another precision than a cell's file never discards it, --restart included, as lift
-    restart without --force: generation.dtype's file (the reported bf16 numbers, which a T4's fp16 line
-    would otherwise throw away) and the other way round. Skipped, listed without a --restart line, exit 3."""
+def test_lift_belebele_keeps_each_precisions_cells_apart(tiny_model_dir, monkeypatch):
+    """V05: Colab's bf16 line over the cells a T4's fp16 line scored first (fp32 here, on the CPU), and the
+    other way round, scores its own files: nothing is refused or set aside, --restart included, and neither
+    precision's files or metrics change when the other runs."""
     pin()
     tiny_build(monkeypatch, tiny_model_dir)
     for lang in ("en", "hi"):
         write_belebele(lang, bel_rows(2, lang=lang))
-    argv = ["belebele", "--variant", "stock", "--split", "dev", "--device", "cpu"]
-    assert main([*argv, "--langs", "hi"]) == 0                            # bf16, generation.dtype
-    assert main([*argv, "--langs", "en", "--dtype", "fp32"]) == 0
-    hi, en = (loglik.belebele_scores_path("stock", lang, "dev") for lang in ("hi", "en"))
-    bf16, fp32 = (metrics_dir() / "belebele" / name for name in ("stock_dev.json", "stock_dev-fp32.json"))
-    numbers = {p: loglik.read_metrics(p)["langs"] for p in (bf16, fp32)}
-    assert [list(langs) for langs in numbers.values()] == [["hi"], ["en"]]
-    runs = {"hi": ([*argv, "--langs", "hi", "--dtype", "fp32"], bf16),       # a T4's fp16 line, on a CPU
-            "en": ([*argv, "--langs", "en"], fp32)}
-    for lang, (line, theirs) in runs.items():
-        made = "bf16" if theirs == bf16 else "fp32"
+    argv = ["belebele", "--variant", "stock", "--split", "dev", "--langs", "hi", "en", "--device", "cpu"]
+    files = {dtype: [loglik.belebele_scores_path("stock", lang, "dev", dtype=dtype) for lang in ("en", "hi")]
+             for dtype in ("bf16", "fp32")}
+    metrics = {dtype: loglik.metrics_path("belebele", "stock", "dev", dtype=dtype) for dtype in files}
+    assert main([*argv, "--dtype", "fp32"]) == 0                          # the T4's line first
+    for first, flag in (("fp32", []), ("bf16", ["--dtype", "fp32"])):
+        kept = {p: p.read_bytes() for p in (*files[first], metrics[first], metrics[first].with_suffix(".md"))}
         for restart in ([], ["--restart"]):
-            caplog.clear()
-            kept = {p: p.read_bytes() for p in (hi, en, theirs, theirs.with_suffix(".md"))}
-            assert main([*line, *restart]) == 3
-            assert (f"belebele_{lang}_dev: made in {made}: score it with --dtype {made} where {made} runs, "
-                    "or leave it out with --langs\n") in caplog.text
-            assert f"--langs {lang} --restart" not in caplog.text and "set aside in" not in caplog.text
-            # Nothing discarded, and the file's precision's metrics untouched (a run writes only its own).
+            assert main([*argv, *flag, *restart]) == 0                    # the other precision's line
             assert {p: p.read_bytes() for p in kept} == kept
     assert not (output_dir() / ".aside").exists()
-    assert {p: loglik.read_metrics(p)["langs"] for p in numbers} == numbers
+    for dtype, paths in files.items():
+        assert all({r["meta"]["dtype"] for r in read_jsonl(p)} == {dtype} for p in paths)
+        doc = loglik.read_metrics(metrics[dtype])
+        assert doc["dtype"] == dtype and list(doc["langs"]) == ["en", "hi"] and not doc["left_out"]
+        assert [c["scores_path"] for c in doc["langs"].values()] == [
+            "outputs/scores/belebele/stock/" + p.name for p in paths]
+
+
+GUARD_LISTED = {
+    "belebele": ("belebele_hi_dev: holds fp32 scores, which belong in outputs/scores/belebele/stock/"
+                 "belebele_hi_dev-fp32.jsonl: move them there by hand, leaving this cell's file empty (sync "
+                 "never deletes), or leave it out with --langs\n"),
+    "heldout_nll": ("utility_hi_dev: holds fp32 scores, which belong in outputs/scores/heldout_loss/stock/"
+                    "utility_hi_dev-fp32.jsonl: move them there by hand, leaving this cell's file empty "
+                    "(sync never deletes), or leave this line out of the job\n"),
+}
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("task", ["belebele", "heldout_nll"])
+def test_lift_never_starts_over_a_file_holding_another_precisions_scores(task, tiny_model_dir, monkeypatch,
+                                                                          caplog, request):
+    """The guard (C08, kept by V05), end to end: a score file at the bf16 path holding fp32 scores (put
+    there by hand) is skipped and listed with where its scores belong, --restart included, never with a
+    --restart line; nothing is set aside, and the fp32 file and metrics are left as they are."""
+    pin()
+    tiny_build(monkeypatch, tiny_model_dir)
+    stock_line = ["--variant", "stock", "--device", "cpu"]
+    if task == "belebele":
+        write_belebele("hi", bel_rows(2, lang="hi"))
+        line = ["belebele", *stock_line, "--split", "dev", "--langs", "hi"]
+        made, placed = (loglik.belebele_scores_path("stock", "hi", "dev", dtype=d) for d in ("fp32", "bf16"))
+    else:                                   # fake_prompt_files replaces the reader the Belebele line needs
+        store = request.getfixturevalue("fake_prompt_files")
+        store[("utility", "hi")] = [utility(i, "aya" if i % 2 else "ind") for i in range(2)]
+        line = ["heldout-loss", *stock_line]
+        made, placed = (loglik.heldout_scores_path("stock", "dev", dtype=d) for d in ("fp32", "bf16"))
+    assert main([*line, "--dtype", "fp32"]) == 0
+    shutil.copyfile(made, placed)                                         # by hand, at bf16's path
+    fp32 = loglik.metrics_path(task, "stock", "dev", dtype="fp32")
+    kept = {p: p.read_bytes() for p in (made, placed, fp32, fp32.with_suffix(".md"))}
+    for restart in ([], ["--restart"]):
+        caplog.clear()
+        assert main([*line, *restart]) == 3
+        assert GUARD_LISTED[task] in caplog.text
+        assert " --restart\n" not in caplog.text and "set aside in" not in caplog.text
+        assert {p: p.read_bytes() for p in kept} == kept
+    assert not (output_dir() / ".aside").exists()
+    assert not loglik.metrics_path(task, "stock", "dev").exists()         # nothing qualifies in bf16
 
 
 @pytest.mark.torch
 def test_belebele_metrics_are_per_language_and_per_precision(tiny_model_dir, monkeypatch):
-    """C09: a refused or started-over cell never empties another language's numbers. Another precision's
-    metrics are left as they are, and the run's own are recomputed from the files that still qualify,
-    the cell listed under left_out meanwhile."""
+    """C09: a refused or started-over cell never empties another language's numbers, and a run never
+    changes another precision's: each precision has its own score files (V05), so the bf16 line scores
+    beside fp32's, and an fp32 restart sets aside only fp32's file. The run's own metrics are recomputed
+    from the files that still qualify, the cell listed under left_out meanwhile."""
     pin()
     tiny_build(monkeypatch, tiny_model_dir)
     for lang in ("en", "hi"):
@@ -811,10 +955,12 @@ def test_belebele_metrics_are_per_language_and_per_precision(tiny_model_dir, mon
     before = fp32.read_bytes()
     doc = loglik.read_metrics(fp32)
     assert list(doc["langs"]) == ["en", "hi"] and not doc["left_out"]
-    code = main([*argv, "--langs", "hi", "--restart"])                    # bf16: hi's fp32 file is refused
-    assert fp32.read_bytes() == before                                      # en's fp32 numbers are kept
-    assert code == 3 and not (output_dir() / ".aside").exists()
-    assert not (metrics_dir() / "belebele" / "stock_dev.json").exists()     # nothing qualifies in bf16
+    assert main([*argv, "--langs", "hi", "en", "--restart"]) == 0    # bf16: its own files, beside fp32's
+    assert fp32.read_bytes() == before and not (output_dir() / ".aside").exists()
+    bf16 = metrics_dir() / "belebele" / "stock_dev.json"
+    assert list(loglik.read_metrics(bf16)["langs"]) == ["en", "hi"]
+    bf16_kept = {p: p.read_bytes() for p in (bf16, bf16.with_suffix(".md"), *(
+        loglik.belebele_scores_path("stock", lang, "dev") for lang in ("en", "hi")))}
     # In the run's own precision a restart moves only that language to left_out while it is scored again.
     rows = bel_rows(3, lang="en")
     rows[0] = {**rows[0], "question": rows[0]["question"] + " (fixed)"}
@@ -822,7 +968,7 @@ def test_belebele_metrics_are_per_language_and_per_precision(tiny_model_dir, mon
     seen, real = [], loglik.belebele_cell
 
     def watched(variant, cell_rows, *, lang, **kw):
-        if lang == "en" and not loglik.belebele_scores_path("stock", "en", "dev").read_bytes():
+        if lang == "en" and not loglik.belebele_scores_path("stock", "en", "dev", dtype="fp32").read_bytes():
             seen.append(loglik.read_metrics(fp32))                          # emptied, before it is scored
         return real(variant, cell_rows, lang=lang, **kw)
 
@@ -834,6 +980,9 @@ def test_belebele_metrics_are_per_language_and_per_precision(tiny_model_dir, mon
     final = loglik.read_metrics(fp32)
     assert list(final["langs"]) == ["en", "hi"] and not final["left_out"]
     assert final["langs"]["hi"] == doc["langs"]["hi"] and final["langs"]["en"]["n"] == 3
+    # bf16's en file is stale too, but only a bf16 line starts it over: its files and numbers stay.
+    assert {p: p.read_bytes() for p in bf16_kept} == bf16_kept
+    assert [p.name for p in (output_dir() / ".aside").rglob("*.jsonl")] == ["belebele_en_dev-fp32.jsonl"]
 
 
 @pytest.mark.torch
@@ -864,26 +1013,40 @@ def test_lift_heldout_loss_for_stock_then_an_adapter_pairs_them(tiny_model_dir, 
 
 
 @pytest.mark.torch
-def test_lift_heldout_loss_never_starts_over_a_file_made_in_another_precision(tiny_model_dir,
-                                                                              fake_prompt_files,
-                                                                              monkeypatch, caplog):
-    """C08 for the held-out loss: stock's bf16 file (generation.dtype), which every adapter pairs with, is
-    never discarded by a run in another precision, --restart included; its metrics stay."""
+def test_lift_heldout_loss_pairs_each_precision_with_its_own_stock(tiny_model_dir, tiny_lora_adapter,
+                                                                    fake_prompt_files, monkeypatch):
+    """V05 for the held-out loss, end to end: a T4's fp16 lines (fp32 here) after Colab's bf16 ones make
+    stock's and the adapter's own files of that precision, --restart included, and the adapter pairs with
+    stock's scores of its own precision. Stock's bf16 file, which every bf16 adapter pairs with, and the
+    bf16 metrics are never touched."""
+    pytest.importorskip("peft")
+    from lift.models import variants
+
     pin()
     tiny_build(monkeypatch, tiny_model_dir)
-    fake_prompt_files[("utility", "hi")] = [utility(i, "aya" if i % 2 else "ind") for i in range(3)]
-    argv = ["heldout-loss", "--variant", "stock", "--device", "cpu"]
-    assert main(argv) == 0
-    path = loglik.heldout_scores_path("stock", "dev")
-    bf16 = metrics_dir() / "heldout_loss" / "stock_dev.json"
-    before = {p: p.read_bytes() for p in (path, bf16, bf16.with_suffix(".md"))}
-    assert main([*argv, "--dtype", "fp32", "--restart"]) == 3
-    assert ("utility_hi_dev: made in bf16: score it with --dtype bf16 where bf16 runs, or leave this line "
-            "out of the job\n") in caplog.text
-    assert "--split dev --restart" not in caplog.text and "set aside in" not in caplog.text
-    assert {p: p.read_bytes() for p in before} == before
-    assert not (output_dir() / ".aside").exists()
-    assert loglik.read_metrics(bf16)["n_rows"] == 3
+    name = "adapter-aya-std-s1"
+    shutil.copytree(tiny_lora_adapter, variants.adapter_path(name))
+    real_spec = variants.get_spec
+    monkeypatch.setattr(variants, "get_spec", lambda n: VariantSpec(name=name, method="adapter", adapter=name,
+                                                                    seed=1) if n == name else real_spec(n))
+    fake_prompt_files[("utility", "hi")] = [utility(i, "aya" if i % 2 else "ind") for i in range(4)]
+    for variant in ("stock", name):
+        assert main(["heldout-loss", "--variant", variant, "--device", "cpu"]) == 0
+    bf16 = [loglik.metrics_path("heldout_nll", v, "dev") for v in ("stock", name)]
+    bf16 += [m.with_suffix(".md") for m in bf16]
+    bf16 += [loglik.heldout_scores_path(v, "dev") for v in ("stock", name)]
+    kept = {p: p.read_bytes() for p in bf16}
+    for variant in ("stock", name):
+        assert main(["heldout-loss", "--variant", variant, "--device", "cpu", "--dtype", "fp32",
+                     "--restart"]) == 0
+    assert {p: p.read_bytes() for p in kept} == kept and not (output_dir() / ".aside").exists()
+    for dtype in ("bf16", "fp32"):
+        doc = loglik.read_metrics(loglik.metrics_path("heldout_nll", name, "dev", dtype=dtype))
+        stock_file = loglik.heldout_scores_path("stock", "dev", dtype=dtype)
+        assert doc["dtype"] == dtype and doc["n_rows"] == 4 and doc["vs_stock"]["n"] == 4
+        assert doc["vs_stock"]["stock_scores_path"] == "outputs/scores/heldout_loss/stock/" + stock_file.name
+        assert doc["vs_stock"]["stock_scores_sha256"] == sha256_file(stock_file)
+        assert {r["meta"]["dtype"] for r in read_jsonl(stock_file)} == {dtype}
 
 
 @pytest.mark.torch
@@ -895,4 +1058,4 @@ def test_a_wrapper_without_score_logits_exits_2(stock, fake_prompt_files, monkey
         stock, model=object(), base=stock.model))
     fake_prompt_files[("utility", "hi")] = [utility(1)]
     assert main(["heldout-loss", "--variant", "stock", "--device", "cpu"]) == 2
-    assert not loglik.heldout_scores_path("stock", "dev").exists()
+    assert not scores_dir().exists()                                     # no score file, in any precision

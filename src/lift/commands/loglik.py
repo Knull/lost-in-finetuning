@@ -6,20 +6,25 @@ importing torch, and a precision other than ``generation.dtype`` on a GPU with n
 check every prompt file before loading the model, so a missing or malformed file costs no GPU time. Then
 they score each cell into its resumable file and write the metrics.
 
-A cell the run refuses is logged and skipped, and the other cells go on. That is a stale cell (made under
-another configuration or from other texts, or begun under another stack) or one made in another
-precision. At the end each such cell is listed with its remedy, and the command exits 3, which the job
-runners treat as "done, cells listed". ``--restart`` starts a stale cell over instead: its file goes to
-outputs/.aside/ (never synced) and an empty one takes its place, so the next push replaces the runs repo's
-copy. The run's metrics are rewritten before it is scored again, one language at a time: that cell moves
-to left_out, and every other language keeps its numbers.
+Each precision scores into its own files: a --dtype other than ``generation.dtype`` adds "-{dtype}" to the
+score and metrics names (lift.models.loglik), so a T4's fp16 line and Colab's bf16 line over the same
+cells never meet. Each scores, starts over and reports only its own precision's cells, and each
+precision's held-out loss pairs with stock's scores of that precision.
 
-A cell made in another precision is never started over, --restart or not, as lift restart refuses one
-without --force: it would discard scores this run's precision cannot make again (a T4's fp16 line would
-throw away Colab's bf16 scores, and the runs repo's copy at the next push). It is skipped and listed with
-its remedies, its own --dtype where that precision runs or leaving it out, and that precision's metrics
-are left as they are. A current cell is left as it is too, so a job line that keeps --restart costs
-nothing when it runs again.
+A cell the run refuses is logged and skipped, and the other cells go on. That is a stale cell (made under
+another configuration or from other texts, or begun under another stack) or a file holding another
+precision's scores. At the end each such cell is listed with its remedy, and the command exits 3, which
+the job runners treat as "done, cells listed". ``--restart`` starts a stale cell over instead: its file
+goes to outputs/.aside/ (never synced) and an empty one takes its place, so the next push replaces the
+runs repo's copy. The run's metrics are rewritten before it is scored again, one language at a time: that
+cell moves to left_out, and every other language keeps its numbers.
+
+A file at this precision's path holding another precision's scores (no lift run writes one: it was put
+there by hand) is never started over, --restart or not, as lift restart refuses a cell made in another
+precision without --force: it would discard scores this run's precision cannot make again. It is skipped
+and listed with its remedies, moving it by hand to its own precision's path or leaving it out, and that
+precision's metrics are left as they are. A current cell is left as it is too, so a job line that keeps
+--restart costs nothing when it runs again.
 
 Exit codes: 0 done; 3 done, but cells were skipped; 2 a variant these commands cannot score (a wrapper
 without score_logits, P05); 1 an error.
@@ -44,19 +49,21 @@ SKIPPED = {
     "stale": ("were skipped as stale (see the errors above). To start one over, run its line below once: "
               "it sets the cell's score file aside in outputs/.aside/ (never synced) and leaves it empty, so "
               "the next lift sync push replaces the runs repo's copy, then scores the cell again"),
-    "precision": ("were made in another precision and left as they are (see the errors above): one is never "
-                  "started over, --restart or not, as that would discard scores this precision cannot make "
-                  "again. Score each with its own --dtype where that precision runs, or leave it out"),
+    "precision": ("hold another precision's scores at this precision's path (put there by hand: each "
+                  "precision scores into its own file) and were left as they are (see the errors above): one "
+                  "is never started over, --restart or not, as that would discard scores this precision "
+                  "cannot make again. Move each by hand to the file its scores belong in, or leave it out"),
 }
-_SKIPPED_AS = {"stale": "stale", "precision": "made in another precision"}
+_SKIPPED_AS = {"stale": "stale", "precision": "holds another precision's scores"}
 
 BELEBELE_HELP = """\
 Belebele accuracy by letter log-likelihood, in the frozen format of lift.models.loglik (P/Q/A-D/Answer:,
 no chat template, the same for every variant). Each --langs cell of the split is scored into
 outputs/scores/belebele/{variant}/belebele_{lang}_{split}.jsonl (resumable, cache-keyed). Then
 outputs/metrics/belebele/{variant}_{split}.json and .md hold the accuracy of every complete language under
-this configuration. Exits 3 when a cell was skipped (listed with its remedy: --restart starts a stale one
-over; one made in another precision is never started over).
+this configuration. A --dtype other than generation.dtype adds -{dtype} to both names, so each precision
+keeps its own files. Exits 3 when a cell was skipped (listed with its remedy: --restart starts a stale one
+over; a file holding another precision's scores is never started over).
 
 example job (lift remote --job, or the Kaggle runner's JOB):
   lift sync pull
@@ -69,8 +76,10 @@ instructions, chat template and preamble on, over exactly the tokens training su
 the tokens that close the turn). Nothing is truncated. Scores go to
 outputs/scores/heldout_loss/{variant}/utility_hi_{split}.jsonl (resumable, cache-keyed). Metrics go to
 outputs/metrics/heldout_loss/{variant}_{split}.json and .md: pooled, by source (aya, ind) and, when
-stock's scores of the split exist, against stock, paired by pid. Run stock first. --split defaults to dev:
-the final split is only for frozen variants (CLAUDE.md rule 1).
+stock's scores of the split exist in the same precision, against stock, paired by pid. Run stock first, in
+the same --dtype. A --dtype other than generation.dtype adds -{dtype} to both names, so each precision
+keeps its own files and pairs with its own stock's. --split defaults to dev: the final split is only for
+frozen variants (CLAUDE.md rule 1).
 """
 
 
@@ -137,8 +146,9 @@ def _load_variant(args: argparse.Namespace, spec: Any, dtype: str) -> Any:
 
 
 def _skip(skipped: dict[str, dict[str, str]], cell: str, exc: Exception) -> None:
-    """Log a refused cell and keep its remedy under its kind (``SKIPPED``). A cell made in another
-    precision gets its own --dtype or leaving it out, never a --restart line (lift.models.loglik)."""
+    """Log a refused cell and keep its remedy under its kind (``SKIPPED``). A file holding another
+    precision's scores gets where they belong or leaving it out, never a --restart line
+    (lift.models.loglik)."""
     from lift.models.loglik import ScorePrecisionError
 
     precision = isinstance(exc, ScorePrecisionError)
@@ -158,7 +168,8 @@ def _cell(score: Callable[[], Any], *, cell: str, path: Path, restart: bool, ref
           skipped: dict[str, dict[str, str]]) -> None:
     """Score one cell. A refused cell is skipped (its remedy kept in ``skipped``) or, with ``restart`` and
     a refusal that names its --restart line (a stale cell in the run's precision), set aside and scored
-    again. A cell made in another precision names none, so it is skipped with --restart too: nothing set
+    again. ``path`` is the cell's file in the run's precision, the only one --restart sets aside. A file
+    holding another precision's scores names none, so it is skipped with --restart too: nothing set
     aside, and that precision's metrics left as they are. Before the cell is scored again, the run's
     metrics are rewritten (``refresh``) from the files left: that language moves to left_out, and every
     other language keeps its numbers."""
@@ -214,8 +225,8 @@ def _belebele(args: argparse.Namespace) -> int:
         score = functools.partial(loglik.belebele_cell, variant, rows[lang], lang=lang, split=args.split,
                                   batch_size=args.batch_size)
         _cell(score, cell=f"belebele_{lang}_{args.split}",
-              path=loglik.belebele_scores_path(spec.name, lang, args.split), restart=args.restart,
-              refresh=refresh, skipped=skipped)
+              path=loglik.belebele_scores_path(spec.name, lang, args.split, dtype=dtype),
+              restart=args.restart, refresh=refresh, skipped=skipped)
     _report_belebele(refresh(), spec.name, args.split)
     return _exit(skipped)
 
@@ -255,8 +266,9 @@ def _heldout(args: argparse.Namespace) -> int:
     score = functools.partial(loglik.heldout_cell, variant, prompts, split=args.split,
                               batch_size=args.batch_size)
     skipped: dict[str, dict[str, str]] = {}
-    _cell(score, cell=f"utility_hi_{args.split}", path=loglik.heldout_scores_path(spec.name, args.split),
-          restart=args.restart, refresh=refresh, skipped=skipped)
+    _cell(score, cell=f"utility_hi_{args.split}",
+          path=loglik.heldout_scores_path(spec.name, args.split, dtype=dtype), restart=args.restart,
+          refresh=refresh, skipped=skipped)
     _report_heldout(refresh(), spec.name, args.split)
     return _exit(skipped)
 
@@ -292,10 +304,10 @@ def _common(p: argparse.ArgumentParser) -> None:
                    help="items per forward pass (default: chosen from free memory)")
     p.add_argument("--restart", action="store_true",
                    help="start over a cell this run refuses as stale (made under another configuration or "
-                        "from other texts, or begun under another stack): its file goes to outputs/.aside/ "
-                        "and an empty one takes its place. A current cell is left as it is, and so is one "
-                        "made in another precision: that is never started over, as it would discard scores "
-                        "this precision cannot make again")
+                        "from other texts, or begun under another stack): its file in this precision goes to "
+                        "outputs/.aside/ and an empty one takes its place. A current cell is left as it is, "
+                        "and so is a file holding another precision's scores: that is never started over, as "
+                        "it would discard scores this precision cannot make again")
 
 
 def register(sub: argparse._SubParsersAction) -> None:
