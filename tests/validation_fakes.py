@@ -3,16 +3,29 @@ verdicts written with the real schemas into a temporary directory. No model, no 
 
 Texts are neutral placeholders, so no test holds a real harmful prompt or completion, and they
 never contain a variant name, a set name or a judge label (the leak tests rely on that).
+
+The world commits its own split files (``World.splits_dir``, data/splits in the repo), which
+``use_world`` makes lift.splits.SPLITS_DIR: the prompt files are read through
+lift.data.build.load_prompts, which refuses a split stamp the committed split does not give.
+
+The judge ids are the ones the configured judges write (``qwen_judge_id``, ``frontier_judge_id``),
+since the validation reads only those (lift.validation.outputs.judge_rules).
 """
 
 from __future__ import annotations
 
 import csv
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from lift import config
+from lift import splits as frozen_splits
+from lift.data.build import SPLIT_SETS
 from lift.io import sha256_obj, sha256_text, write_jsonl
+from lift.judge import frontier
+from lift.judge.labels import rules_tag
 from lift.schemas import (
     LABELS,
     GenerationRecord,
@@ -22,8 +35,40 @@ from lift.schemas import (
     UtilityVerdict,
 )
 
-PRIMARY_ID = "Qwen/Qwen3Guard-Gen-4B@0123456789abcdef"
-FRONTIER_ID = "fakeprovider/frontier-model@2026-11-01"
+QWEN_REV = "0123456789abcdef0123456789abcdef01234567"   # any sha: tests see the configured one as "main"
+FRONTIER_API = "2026-11-01"                             # any API version fits the configured rule
+
+
+def _judges_entry(kind: str) -> tuple[str, dict]:
+    """(name, block) of the judges block of configs/project.yaml that makes the ``kind`` judge."""
+    for name in ("safety_primary", "safety_second"):
+        block = config.get(f"judges.{name}")
+        if ("provider" in block) == (kind == "frontier"):
+            return name, block
+    raise LookupError(f"no judges block makes a {kind} judge")
+
+
+def qwen_judge_id(*, dtype: str = "bf16", mode: str | None = None, revision: str = QWEN_REV,
+                  rules: str | None = None) -> str:
+    """A Qwen3Guard judge id as the harness writes it, {model}@{revision}#{rules tag}#{dtype}#{mode}; by
+    default one the configured rule accepts (the configured model and mode, the labelling rules now)."""
+    _, entry = _judges_entry("qwen3guard")
+    return f"{entry['id']}@{revision}#{rules or rules_tag()}#{dtype}#{mode or entry['controversial']}"
+
+
+def frontier_judge_id(*, api: str = FRONTIER_API, rubric: str | None = None, rules: str | None = None) -> str:
+    """A frontier judge id as the harness writes it, {FrontierJudge.judge_id}#{rules tag}; by default the
+    configured judge's (its provider, model, rubric version and settings tag, which
+    lift.judge.pipeline._expected_judge builds its rule from), spoken to over API version ``api``."""
+    name, entry = _judges_entry("frontier")
+    s = frontier._settings(entry["provider"], name, {})
+    tag = frontier._settings_tag(s["temperature"], s["effort"], s["thinking"], s["max_tokens"])
+    version = rubric or frontier.load_rubric(entry["rubric"]).version
+    return f"{entry['provider']}/{entry['model']}@{version}+{tag}+api{api}#{rules or rules_tag()}"
+
+
+PRIMARY_ID = qwen_judge_id()
+FRONTIER_ID = frontier_judge_id()
 UTILITY_ID = "fakeprovider/utility-model@2026-11-01"
 LANGS = ("hi", "zh", "es", "en")
 SAFETY_SETS = ("harmful", "easy_benign", "hard_benign")
@@ -94,12 +139,35 @@ class World:
     def validation(self) -> Path:
         return self.root / "validation"
 
+    @property
+    def splits_dir(self) -> Path:
+        """The world's committed split files: lift.splits.SPLITS_DIR while it is in use."""
+        return self.data / "splits"
+
     def by_key(self) -> dict[str, GenerationRecord]:
         return {g.key: g for recs in self.generations.values() for g in recs}
 
 
+def freeze_split(world: World, set_name: str, assignments: dict[str, str]) -> Path:
+    """Commit ``assignments`` (pid -> split) to the world's split file of ``set_name``, in the layout of
+    data/splits/{set}.json, with the pids already there (a pid has one split in every language)."""
+    path = world.splits_dir / f"{set_name}.json"
+    frozen = json.loads(path.read_text(encoding="utf-8"))["assignments"] if path.is_file() else {}
+    clash = sorted(pid for pid, split in assignments.items() if frozen.get(pid, split) != split)
+    if clash:
+        raise ValueError(f"{set_name}: {clash[:5]} are frozen in another split already")
+    frozen.update(assignments)
+    doc = {"name": set_name, "seed": 0, "sizes": dict(sorted(Counter(frozen.values()).items())),
+           "created": "2026-11-04", "n": len(frozen), "assignments": dict(sorted(frozen.items()))}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8", newline="\n")
+    return path
+
+
 def write_prompts(world: World, set_name: str, lang: str, splits: dict[str, int],
                   version: int = 0) -> list[PromptRecord]:
+    """The prompt file of ``set_name`` in ``lang``, pids in order over ``splits`` (split -> count), and
+    those splits frozen in the world's split file when the set has one (redteam is final, with none)."""
     records, i = [], 0
     for split, count in splits.items():
         for _ in range(count):
@@ -109,6 +177,8 @@ def write_prompts(world: World, set_name: str, lang: str, splits: dict[str, int]
                                         source="fake"))
             i += 1
     write_jsonl(world.data / "prompts" / f"{set_name}_{lang}.jsonl", [r.model_dump() for r in records])
+    if set_name in SPLIT_SETS:
+        freeze_split(world, set_name, {r.pid: r.split for r in records})
     return records
 
 
@@ -131,12 +201,15 @@ def write_generations(world: World, variant: str, set_name: str, lang: str, spli
 
 
 def judgement(gen: GenerationRecord, judge: str, label: str) -> JudgementRecord:
+    """``judge``'s judgement of ``gen`` with final label ``label``: Qwen3Guard's native fields for a
+    Qwen3Guard id (any revision, precision or mode), a frontier judge's otherwise."""
+    qwen = "Qwen3Guard" in judge
     native, flags = qwen_native(label, gen.key)
-    if judge != PRIMARY_ID:
+    if not qwen:
         native = {"label": label.upper(), "reason": "fake"}
     return JudgementRecord(key=gen.key, variant=gen.variant, pid=gen.pid, lang=gen.lang, set=gen.set,
                            split=gen.split, judge=judge,
-                           judge_label=label if label != "unclear" or judge != PRIMARY_ID else "benign",
+                           judge_label=label if label != "unclear" or not qwen else "benign",
                            label=label, flags=flags, native=native, output_sha=sha256_text(gen.output))
 
 
@@ -194,6 +267,7 @@ def use_world(monkeypatch, world: World) -> World:
     monkeypatch.setenv("LIFT_DATA_DIR", str(world.data))
     monkeypatch.setenv("LIFT_OUTPUT_DIR", str(world.outputs))
     monkeypatch.setenv("LIFT_VALIDATION_DIR", str(world.validation))
+    monkeypatch.setattr(frozen_splits, "SPLITS_DIR", world.splits_dir)
     return world
 
 
