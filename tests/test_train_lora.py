@@ -2,9 +2,10 @@
 on CPU.
 
 The runs repo is never reached: lift.sync.push and lift.sync.preflight are replaced by a recorder
-(``hub``). The default registry is a copy of configs/variants.yaml in tmp (``registry``): no test writes
-the real one. Merge parity decodes 8 new tokens instead of 256 (``short_parity``), which changes nothing
-it compares.
+(``hub``). The default registry is a small synthetic file in tmp in the layout of configs/variants.yaml
+(``registry``, ``REGISTRY_TEXT``): no test reads or writes the real one, so the entries committed there
+(the pilot's adapter, P05's repairs) change no outcome. Merge parity decodes 8 new tokens instead of 256
+(``short_parity``), which changes nothing it compares.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from lift.cli import main  # noqa: E402
 from lift.io import sha256_file, write_jsonl  # noqa: E402
 from lift.models import variants  # noqa: E402
 from lift.models.load import encode_chat  # noqa: E402
-from lift.paths import CONFIG_DIR, adapters_dir, manifests_dir, output_dir, sft_dir  # noqa: E402
+from lift.paths import adapters_dir, manifests_dir, output_dir, sft_dir  # noqa: E402
 from lift.train import lora, merge  # noqa: E402
 
 NAME = "adapter-aya-std-s1"
@@ -41,14 +42,22 @@ COMMIT = "b" * 40
 # The user turn alone (byte-level tokens) fills max_seq_len 1024 after the tiny preamble.
 LONG = {"id": "aya-09999", "messages": [{"role": "user", "content": "x " * 600},
                                         {"role": "assistant", "content": "ok"}]}
+# The tests' registry: configs/variants.yaml's layout (comments, a blank line, a two-space list), stock only.
+REGISTRY_TEXT = ("# A test registry in the layout of configs/variants.yaml; its comments must survive.\n"
+                 "# Names: stock, adapter-{candidate}-{std|stress}-s{seed}\n"
+                 "\n"
+                 "variants:\n"
+                 "  - name: stock\n"
+                 "    method: stock\n")
 
 
 @pytest.fixture(autouse=True)
 def registry(tmp_path, monkeypatch):
-    """A copy of configs/variants.yaml as the default registry, so no test writes the real one."""
+    """``REGISTRY_TEXT`` in tmp as the default registry: no test reads or writes configs/variants.yaml,
+    whose entries (the pilot's adapter once registered, P05's repairs) must change no test's outcome."""
     path = tmp_path / "configs" / "variants.yaml"
     path.parent.mkdir()
-    shutil.copyfile(CONFIG_DIR / "variants.yaml", path)
+    path.write_text(REGISTRY_TEXT, encoding="utf-8", newline="\n")
     monkeypatch.setattr(lora, "default_registry", lambda: path)
     return path
 
@@ -446,7 +455,7 @@ def test_a_five_step_run_trains_pushes_checks_parity_registers_and_resumes(
     assert reg["entry"]["location"] == f"runs repo ($LIFT_RUNS_REPO): outputs/adapters/{NAME}@{COMMIT}"
     assert "fp32 2/2 prompts token-identical" in reg["entry"]["note"]
     text = registry.read_text(encoding="utf-8")
-    assert text.startswith((CONFIG_DIR / "variants.yaml").read_text(encoding="utf-8"))   # comments kept
+    assert text.startswith(REGISTRY_TEXT)                                               # comments kept
     entry = next(e for e in yaml.safe_load(text)["variants"] if e["name"] == NAME)
     assert entry == reg["entry"] and entry["artifacts"] == {"adapter": digest} and entry["seed"] == 1
     spec = lora._registry_specs(yaml.safe_load(text), registry)[NAME]
@@ -574,6 +583,14 @@ def test_a_folder_without_weights_is_refused(tiny_model_dir, utility):
 
 
 # --- the registry ------------------------------------------------------------------------------------
+
+
+def test_the_tests_registry_holds_stock_alone_whatever_the_real_one_holds(registry):
+    # A copy of configs/variants.yaml would carry its entries in: once the pilot's adapter is registered
+    # there (another hash than any test's), register_adapter would refuse every test's entry for it.
+    text = registry.read_text(encoding="utf-8")
+    assert text == REGISTRY_TEXT and list(lora._registry_specs(yaml.safe_load(text), registry)) == ["stock"]
+    assert lora.default_registry() == registry != config.CONFIG_DIR / "variants.yaml"
 
 
 def test_register_adapter_edits_the_text_once_and_refuses_another_hash(registry, monkeypatch):
