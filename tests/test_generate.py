@@ -222,6 +222,45 @@ def test_a_decode_that_goes_non_finite_is_refused_before_its_batch_is_written(st
     assert not path.exists()                             # nothing of the batch was written
 
 
+def goes_non_finite_on(monkeypatch, call):
+    """greedy_batch marking every row of its ``call``-th batch non-finite (an fp16 overflow as its watch marks
+    it); the others decode as they do."""
+    real, calls = gen.greedy_batch, []
+
+    def greedy_batch(model, rows, **kw):
+        calls.append(len(rows))
+        outs = real(model, rows, **kw)
+        return [dataclasses.replace(o, nonfinite=True) for o in outs] if len(calls) == call else outs
+
+    monkeypatch.setattr(gen, "greedy_batch", greedy_batch)
+
+
+@pytest.mark.parametrize("dtype, held", [("fp16", True), ("fp16", False), ("fp32", True)])
+def test_a_non_finite_cell_is_skipped_like_a_stale_one_and_names_its_restart_line(stock, monkeypatch, dtype,
+                                                                                  held):
+    # W2-02: a non-finite batch stopped the whole lift generate or run-dev line (and the job) instead of
+    # being skipped and listed like a stale cell. A non-finite fp16 cell is made in bf16; when its file
+    # already holds fp16 records (an earlier batch), a bf16 run never extends them, so the error names the
+    # cell's restart line with --dtype fp16, which sets them aside. In bf16 or fp32 it is a fault to report:
+    # no line.
+    goes_non_finite_on(monkeypatch, 2 if held else 1)
+    path = cell_path()
+    with pytest.raises(gen.NonFiniteOutputError) as exc:
+        run(dataclasses.replace(stock, dtype=dtype), path, ps=prompts([LONG, SHORT]), batch_size=1)
+    assert isinstance(exc.value, gen.StaleOutputError) and not isinstance(exc.value, gen.OtherPrecisionError)
+    assert exc.value.pids == (["p-001"] if held else ["p-000"]) and exc.value.dtype == dtype
+    written = gen.read_generations(path) if path.exists() else []
+    assert [r.pid for r in written] == (["p-000"] if held else [])
+    message = str(exc.value)
+    line = "lift restart --variant stock --split dev --sets harmful --langs en --dtype fp16"
+    if dtype == "fp16" and held:
+        assert exc.value.command == line and f"`{line}`" in message and "make this cell in bf16" in message
+    else:
+        assert exc.value.command is None and "lift restart" not in message
+        assert ("make this cell in bf16" in message) == (dtype == "fp16")
+        assert ("CLAUDE.md rule 9" in message) == (dtype != "fp16")
+
+
 def test_rows_poisoned_through_their_padding_are_refused_but_a_finished_row_fed_pad_is_not(stock, tmp_path):
     # R1-25: a non-finite pad state (NaN embeddings at pad positions) reaches every padded row from the
     # prefill on, as masking does not stop it (a masked key's weight 0 times NaN is NaN). The unpadded row
@@ -515,10 +554,10 @@ def test_a_wrapper_with_only_generate_uses_its_base_models_config_and_stop_set(s
     assert {p: r.output for p, r in got.items()} == {p: r.output for p, r in plain.items()}
 
 
-def test_a_wrapper_must_pass_the_finiteness_check_on_and_decode_the_batch_as_one(stock):
+def test_a_wrapper_must_pass_the_finiteness_check_on(stock):
     # R1-25: the non-finite check is a logits processor greedy_batch hands model.generate. A wrapper (P05's
-    # CAST) that dropped it would leave decoding unchecked, and one that decoded the batch in parts would
-    # mark the wrong rows, so greedy_batch refuses both.
+    # CAST) that dropped it would leave decoding unchecked, so greedy_batch refuses it; and one that returns
+    # fewer sequences than the batch has rows.
     class DropsIt(_GenerateOnly):
         def generate(self, logits_processor=None, **kw):
             return super().generate(**kw)
@@ -533,8 +572,86 @@ def test_a_wrapper_must_pass_the_finiteness_check_on_and_decode_the_batch_as_one
               max_new_tokens=CAP, device="cpu")
     with pytest.raises(RuntimeError, match="must pass logits_processor on"):
         gen.greedy_batch(DropsIt(stock.model), rows, **kw)
-    with pytest.raises(RuntimeError, match="must decode the batch as one"):
+    with pytest.raises(RuntimeError, match="returned 1 sequences for the 2 rows"):
         gen.greedy_batch(FirstRowOnly(stock.model), rows, **kw)
+
+
+class _InPieces(_GenerateOnly):
+    """A CAST-like wrapper whose per-prompt gate decodes the batch one row at a time, each through the model's
+    own generate with the logits processor passed on, and returns the batch's sequences as one, padded at the
+    end as a batch decode pads a finished row. ``poison``: the row whose decode overflows (an Overflow hook on
+    layer 1 from its 4th call on, during that row's piece only)."""
+
+    def __init__(self, inner, pad_id, poison=None):
+        super().__init__(inner)
+        self.pad_id, self.poison = pad_id, poison
+
+    def generate(self, input_ids, attention_mask, **kw):
+        outs = []
+        for i in range(input_ids.shape[0]):
+            hook = (forward_hook(self.inner.model.layers[1], Overflow(row=0, start=4)) if i == self.poison
+                    else contextlib.nullcontext())
+            with hook:
+                outs.append(super().generate(input_ids=input_ids[i:i + 1],
+                                             attention_mask=attention_mask[i:i + 1], **kw))
+        width = max(o.shape[1] for o in outs)
+        pad = torch.nn.functional.pad
+        return torch.cat([pad(o, (0, width - o.shape[1]), value=self.pad_id) for o in outs])
+
+
+def test_a_wrapper_that_decodes_the_batch_in_pieces_is_checked_as_a_whole(stock, tmp_path):
+    # W2-02 (R1-25 follow-up): P05's CAST gates each prompt, so its wrapper may decode a batch in pieces, each
+    # through the model's generate with the logits processor passed on. That was refused ("must decode the
+    # batch as one"). It is decoded now; the check cannot tell which rows a piece holds, so a NaN or +inf
+    # score in any piece marks every row, and generate refuses the batch whole, as it refuses a batch anyway.
+    tok = stock.tokenizer
+    rows = [encode_chat(tok, t) for t in (LONG, SHORT)]
+    kw = dict(pad_id=tok.pad_token_id, stop_ids=gen.gen_config(stock, max_new_tokens=CAP)["stop_ids"],
+              max_new_tokens=CAP, device="cpu")
+    whole = gen.greedy_batch(stock.model, rows, **kw)
+    pieces = _InPieces(stock.model, tok.pad_token_id)
+    split = gen.greedy_batch(pieces, rows, **kw)
+    assert pieces.calls == 2
+    assert [(o.ids, o.stopped, o.n_generated, o.nonfinite) for o in split] == [
+        (o.ids, o.stopped, o.n_generated, False) for o in whole]
+    poisoned = gen.greedy_batch(_InPieces(stock.model, tok.pad_token_id, poison=1), rows, **kw)
+    assert [o.nonfinite for o in poisoned] == [True, True]       # row 0 decoded clean, but is not told apart
+    wrapped = dataclasses.replace(stock, model=_InPieces(stock.model, tok.pad_token_id, poison=1),
+                                  base=stock.model)
+    path = tmp_path / "g.jsonl"
+    with pytest.raises(gen.NonFiniteOutputError) as exc:
+        run(wrapped, path, ps=prompts([LONG, SHORT]), batch_size=2)
+    assert sorted(exc.value.pids) == ["p-000", "p-001"] and not path.exists()
+
+
+def test_minus_inf_scores_are_never_marked_non_finite(stock):
+    # W2-02 (R1-25): processors set -inf on purpose (a banned token), so only a NaN or +inf score marks a row
+    watch = gen._NonFiniteWatch(1, stop_ids=[99], n_rows=3)
+    ids = torch.tensor([[5, 6], [5, 7], [5, 8]])
+    scores = torch.zeros(3, 4)
+    scores[0, 1] = float("-inf")
+    scores[1, 2] = float("nan")
+    scores[2, 3] = float("inf")
+    assert watch(ids, scores) is scores and watch.rows() == [False, True, True]
+    # and through greedy_batch: a -inf logit on a token the decode never picks changes nothing, marks nothing
+    tok = stock.tokenizer
+    rows = sorted((encode_chat(tok, t) for t in TEXTS), key=len, reverse=True)
+    kw = dict(pad_id=tok.pad_token_id, stop_ids=gen.gen_config(stock, max_new_tokens=CAP)["stop_ids"],
+              max_new_tokens=CAP, device="cpu")
+    clean = gen.greedy_batch(stock.model, rows, **kw)
+    used = {i for o in clean for i in o.ids} | set(kw["stop_ids"])
+    banned = next(t for t in range(len(tok)) if t not in used)
+    calls = []
+
+    def ban(_module, _args, output):
+        calls.append(1)
+        output[..., banned] = float("-inf")
+        return output
+
+    with forward_hook(stock.model.lm_head, ban):
+        banned_out = gen.greedy_batch(stock.model, rows, **kw)
+    assert calls and [(o.ids, o.stopped) for o in banned_out] == [(o.ids, o.stopped) for o in clean]
+    assert not any(o.nonfinite for o in banned_out)
 
 
 def test_oom_retry_happens_outside_the_except_clause(stock, tmp_path, monkeypatch):

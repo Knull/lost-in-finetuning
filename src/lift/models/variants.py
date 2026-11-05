@@ -21,7 +21,12 @@ files live in outputs/adapters/{adapter}/ (synced through the runs repo); when t
 behaviour fields of adapter_config.json, not the bare file sha256) and the loaded adapter must match.
 
 A wrapper variant (CAST) sets ``LoadedVariant.base`` to the HF model it wraps; the harness reads
-config, generation_config and the stop set from ``hf_model`` and calls ``model.generate``.
+config, generation_config and the stop set from ``hf_model`` and calls ``model.generate``. That must pass
+the ``logits_processor`` it is handed on to the model's own generate, the check that decoding stays finite
+(lift.models.generate._NonFiniteWatch): a wrapper that never calls it is refused, as is one that returns
+another number of sequences than the batch has rows. It may decode the batch in pieces (CAST's per-prompt
+gate): the check then cannot tell the rows apart, so a NaN or +inf score in any piece marks every row, and
+generate refuses that batch whole.
 """
 
 from __future__ import annotations

@@ -18,8 +18,9 @@ Behaviour:
 - Decoding must stay finite. A row whose scores hold a NaN or +inf before its end-of-turn token (an
   fp16 overflow, typically) decodes garbage from then on (argmax over NaN picks id 0), which would be
   written as its output, often a cap hit cut short. So its batch raises NonFiniteOutputError before
-  anything of it is written. A non-finite fp16 run is not reported (decisions item 27): the cell is
-  made in bf16.
+  anything of it is written: a StaleOutputError, so lift generate and run-dev skip the cell and list
+  it. A non-finite fp16 run is not reported (decisions item 27): the cell is made in bf16 (after its
+  restart line, when its file already holds fp16 records). In bf16 or fp32 it is a fault to report.
 - One GenerationRecord per prompt, appended to
   outputs/generations/{variant}/{set}_{lang}_{split}.jsonl as each batch finishes. On restart, keys
   already present are skipped (resumable across sessions); a record for the same pid under a
@@ -95,16 +96,20 @@ class OtherPrecisionError(StaleOutputError):
         self.dtype = dtype
 
 
-class NonFiniteOutputError(RuntimeError):
+class NonFiniteOutputError(StaleOutputError):
     """A row's decoding went non-finite: a NaN or +inf score before its end-of-turn token
     (``GreedyOutput.nonfinite``), as an fp16 overflow does. Greedy argmax decodes garbage from then on,
     which would be written as the row's output (often a cap hit cut short), so its batch is not written.
     ``pids`` are the batch's non-finite rows, ``dtype`` the run's precision. A non-finite fp16 run is not
-    reported (decisions item 27): the cell is made in bf16. Never retried like an out-of-memory error, and
-    not a StaleOutputError: no command skips the cell and goes on."""
+    reported (decisions item 27): the cell is made in bf16, and ``command`` is the cell's ``lift restart
+    ... --dtype fp16`` line when its file already holds fp16 records (a bf16 run never extends them: the
+    line sets them aside), else None. In bf16 or fp32 it is a fault to report (CLAUDE.md rule 9), never a
+    restart: ``command`` is None. The message names the remedy. Never retried like an out-of-memory error;
+    a StaleOutputError, so lift generate and run-dev skip the cell, list it apart ("nonfinite") and go on
+    with the others."""
 
-    def __init__(self, message: str, *, pids: Sequence[str], dtype: str) -> None:
-        super().__init__(message)
+    def __init__(self, message: str, *, pids: Sequence[str], dtype: str, command: str | None = None) -> None:
+        super().__init__(message, command=command)
         self.pids = list(pids)
         self.dtype = dtype
 
@@ -399,7 +404,12 @@ class _NonFiniteWatch:
     scores) that marks a row whose scores hold a NaN or +inf at a step where it is still decoding: no
     stop id among its new tokens (past ``width``) yet. A finished row is fed pad and its scores are
     never read, so they are never checked; -inf is left alone, as processors set it on purpose. It keeps
-    one bool per row, never the scores."""
+    one bool per row, never the scores.
+
+    A call with another batch size than the ``n_rows`` greedy_batch decodes is a wrapper decoding the batch
+    in pieces (P05's CAST, whose per-prompt gate may): which rows a piece holds is unknown, so a NaN or +inf
+    anywhere in its scores, a finished row's included, marks every row, and generate refuses the batch
+    whole, as it refuses a batch anyway."""
 
     def __init__(self, width: int, stop_ids: Sequence[int], n_rows: int) -> None:
         self.width, self.stop_ids, self.n_rows = width, list(stop_ids), n_rows
@@ -409,15 +419,14 @@ class _NonFiniteWatch:
     def __call__(self, input_ids: Any, scores: Any) -> Any:
         import torch
 
-        if scores.shape[0] != self.n_rows:
-            raise RuntimeError(f"the logits processor saw a batch of {scores.shape[0]}, not the "
-                               f"{self.n_rows} rows greedy_batch decodes: a wrapper must decode the batch "
-                               "as one")
-        if self._stops is None:
-            self._stops = torch.tensor(self.stop_ids, dtype=input_ids.dtype, device=input_ids.device)
-        running = ~torch.isin(input_ids[:, self.width:], self._stops).any(dim=-1)
-        bad = (torch.isnan(scores).any(dim=-1) | torch.isposinf(scores).any(dim=-1)) & running
-        self.marked = bad if self.marked is None else self.marked | bad
+        if scores.shape[0] != self.n_rows:          # a piece of the batch: its rows cannot be told apart
+            bad = (torch.isnan(scores) | torch.isposinf(scores)).any().reshape(1).expand(self.n_rows)
+        else:
+            if self._stops is None:
+                self._stops = torch.tensor(self.stop_ids, dtype=input_ids.dtype, device=input_ids.device)
+            running = ~torch.isin(input_ids[:, self.width:], self._stops).any(dim=-1)
+            bad = (torch.isnan(scores).any(dim=-1) | torch.isposinf(scores).any(dim=-1)) & running
+        self.marked = bad.clone() if self.marked is None else self.marked | bad.to(self.marked.device)
         return scores
 
     def rows(self) -> list[bool]:
@@ -464,7 +473,9 @@ def greedy_batch(model: Any, rows: Sequence[Sequence[int]], *, pad_id: int, stop
                  max_new_tokens: int, device: str, gen_config_obj: Any | None = None) -> list[GreedyOutput]:
     """Greedy-decode a batch of token id lists with left padding and an attention mask. Each output says
     whether its row's decoding went non-finite before it stopped (``_NonFiniteWatch``); the caller decides
-    what that means (``generate`` refuses the batch)."""
+    what that means (``generate`` refuses the batch). ``model.generate`` (a wrapper's too) must call the
+    logits processor it is handed, at least once, and return one sequence per row; it may decode the batch
+    in pieces (the check then marks every row of a non-finite batch)."""
     import torch
     from transformers import LogitsProcessorList
 
@@ -482,6 +493,9 @@ def greedy_batch(model: Any, rows: Sequence[Sequence[int]], *, pad_id: int, stop
         out = model.generate(input_ids=input_ids.to(device), attention_mask=mask.to(device),
                              generation_config=cfg, logits_processor=LogitsProcessorList([watch]))
     sequences = out if isinstance(out, torch.Tensor) else out.sequences
+    if sequences.shape[0] != len(rows):
+        raise RuntimeError(f"model.generate returned {sequences.shape[0]} sequences for the {len(rows)} rows "
+                           "of the batch: a wrapper must return one per row, in their order")
     stop = set(stop_ids)
     results = []
     for new, nonfinite in zip(sequences[:, width:].tolist(), watch.rows(), strict=True):
@@ -542,14 +556,21 @@ def _check_precision(existing: Sequence[GenerationRecord], dtype: str, out_path:
             dtype=was)
 
 
-def _nonfinite_error(out_path: Path, variant: LoadedVariant, pids: Sequence[str],
-                     n_batch: int) -> NonFiniteOutputError:
+def _nonfinite_error(out_path: Path, variant: LoadedVariant, pids: Sequence[str], n_batch: int, *,
+                     restart: str | None) -> NonFiniteOutputError:
     """The refusal of a batch whose rows ``pids`` (of ``n_batch``) went non-finite, with the remedy for
-    the run's precision."""
+    the run's precision. ``restart``: the cell's lift restart line when its file already holds records (in
+    the run's precision, which is checked before any batch), else None; it is the error's ``command`` only
+    in fp16, whose cell is made in bf16 instead."""
     dtype = variant.dtype
+    command = restart if dtype == "fp16" else None
     if dtype == "fp16":
         remedy = ("A non-finite fp16 run is not reported (decisions item 27): make this cell in bf16, on an "
                   "A100 or L4.")
+        if command:
+            remedy += (f" Its file holds fp16 records, which a bf16 run never extends: first run `{command}` "
+                       "as a job line right after `lift sync pull` (it sets them aside), then the line that "
+                       "failed without --dtype.")
     else:
         remedy = (f"In {dtype} this is no fp16 overflow: the variant (its weights or intervention) or the "
                   "harness makes NaN or inf. Stop and report it (CLAUDE.md rule 9); never tune around it.")
@@ -558,7 +579,7 @@ def _nonfinite_error(out_path: Path, variant: LoadedVariant, pids: Sequence[str]
         f"score before the end-of-turn token) for {len(pids)} of the {n_batch} prompts of a batch, e.g. "
         f"{list(pids[:5])}; nothing of that batch is written: from then on such a row decodes garbage "
         f"(argmax over NaN picks id 0), which would be written as its output. {remedy}",
-        pids=pids, dtype=dtype)
+        pids=pids, dtype=dtype, command=command)
 
 
 def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_path: Path,
@@ -679,7 +700,9 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
             return
         nonfinite = [r.prompt.pid for r, o in zip(batch, outs, strict=True) if o.nonfinite]
         if nonfinite:                       # after the try, so never retried as an out-of-memory error
-            raise _nonfinite_error(out_path, variant, nonfinite, len(batch))
+            held = bool(existing) or stats["n_written"] > 0         # records of this cell in the file
+            raise _nonfinite_error(out_path, variant, nonfinite, len(batch),
+                                   restart=restart if held else None)
         extra = variant.batch_meta() if variant.batch_meta is not None else [{}] * len(batch)
         records = []
         for r, o, more in zip(batch, outs, extra, strict=True):

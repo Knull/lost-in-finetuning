@@ -166,21 +166,30 @@ SKIPPED = {
               "and nothing was generated for them. Do what each line says on the laptop, which ends with "
               "`lift sync push`; a later job's `lift sync pull` brings the completed prompt files, and the "
               "line that skipped the cell makes it"),
+    "nonfinite": ("went non-finite in decoding (see the errors above), and nothing of that batch was "
+                  "written. A non-finite fp16 run is not reported (decisions item 27), so such a cell is "
+                  "made in bf16 on an A100 or L4: its line first, as a job line right after `lift sync "
+                  "pull`, when its file holds fp16 records to set aside, then the line that failed without "
+                  "--dtype. In bf16 or fp32 it is a fault to report (CLAUDE.md rule 9), never one to tune "
+                  "around"),
 }
 _SKIPPED_AS = {"stale": "stale", "precision": "made in another precision",
-               "judges": "judged by another judge", "short": "short of its frozen split"}
+               "judges": "judged by another judge", "short": "short of its frozen split",
+               "nonfinite": "decoding went non-finite"}
 REDRAW = "after P04 draws the key list again (lift validate second-judge-sample, then lift sync push)"
 
 
 def _kind(exc: Exception) -> str:
     from lift.data.build import ShortCellError
     from lift.judge.pipeline import MixedJudgesError
-    from lift.models.generate import OtherPrecisionError
+    from lift.models.generate import NonFiniteOutputError, OtherPrecisionError
 
     if isinstance(exc, OtherPrecisionError):
         return "precision"
     if isinstance(exc, ShortCellError):
         return "short"
+    if isinstance(exc, NonFiniteOutputError):
+        return "nonfinite"
     return "judges" if isinstance(exc, MixedJudgesError) else "stale"
 
 
@@ -193,7 +202,11 @@ def _skip(skipped: dict[str, dict[str, str]], variant: str, set_name: str, lang:
     laptop, which discards nothing. Any other cell made in another precision than the run's ``dtype`` is
     listed as such whatever refusal came first (an API judge has no precision for judge_file to check): a
     restart line run here would discard it. A stale cell's whole-cell restart gets the lines its job needs
-    under it (``_after_restart``)."""
+    under it (``_after_restart``); so does a non-finite fp16 cell's (NonFiniteOutputError: its line sets
+    its fp16 records aside, and the cell and the refills are made in generation.dtype); one with nothing
+    to set aside is made there directly, and a non-finite cell of any other precision is a fault to
+    report."""
+    from lift import config
     from lift.models.generate import made_in
 
     found = _kind(exc)
@@ -214,9 +227,19 @@ def _skip(skipped: dict[str, dict[str, str]], variant: str, set_name: str, lang:
                   "is %s. It was also found %s, which a run in %s settles: a restart from here would discard "
                   "its %s outputs", variant, cell, made, dtype, _SKIPPED_AS[found], made, made)
     command = getattr(exc, "command", None)
+    default = str(config.get("generation.dtype"))
     if kind == "precision":
         remedy = (f"made in {made}: run it with --dtype {made} where {made} runs, or leave it out with "
                   "--sets/--langs")
+    elif kind == "nonfinite" and exc.dtype != "fp16":
+        remedy = (f"a fault in {exc.dtype}, no fp16 overflow: report it (CLAUDE.md rule 9), never tune "
+                  "around it")
+    elif kind == "nonfinite" and command is None:
+        remedy = (f"nothing to set aside: run the line that failed in {default} on an A100 or L4 (without "
+                  "--dtype)")
+    elif kind == "nonfinite":                  # decisions item 27: the fp16 cell is made in bf16 instead
+        remedy = command + _after_restart(variant, set_name, lang, split, judged=judged, dtype=default,
+                                          generates=generates, keys=keys, redraw=True)
     elif command is None:
         remedy = "no lift restart line covers it (see its error above)"
     elif " --judge " in command:
@@ -538,11 +561,11 @@ def run_cells(holder: dict[str, Any], make_judge: Callable[[], Any], cells: Sequ
     after it is generated (both models loaded); without, every file is generated first, the
     generator is dropped and its memory released, then the judge is loaded and judges them all.
     A cell whose generations or judgements file is refused (StaleOutputError: stale, made in another
-    precision, judged by another judge), or whose prompts are short of the frozen split (ShortCellError,
-    when they are loaded: nothing is generated), is logged and skipped, and the other cells go on: a
-    cut-short session must not block the rest. Its remedy goes into ``skipped[kind]`` (``SKIPPED``) under
-    "{set}_{lang}_{split}"; without ``skipped``, one StaleOutputError listing them is raised once every
-    other cell is done.
+    precision, judged by another judge, decoding went non-finite), or whose prompts are short of the
+    frozen split (ShortCellError, when they are loaded: nothing is generated), is logged and skipped, and
+    the other cells go on: a cut-short session must not block the rest. Its remedy goes into
+    ``skipped[kind]`` (``SKIPPED``) under "{set}_{lang}_{split}"; without ``skipped``, one
+    StaleOutputError listing them is raised once every other cell is done.
     """
     from lift.data.build import ShortCellError
     from lift.judge.pipeline import judge_file
