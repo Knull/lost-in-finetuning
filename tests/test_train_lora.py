@@ -28,12 +28,14 @@ pytest.importorskip("datasets")
 import yaml  # noqa: E402
 from fakes import make_prompt  # noqa: E402
 
-from lift import config, sync  # noqa: E402
+from lift import config, gate0, sync  # noqa: E402
 from lift.cli import main  # noqa: E402
-from lift.io import sha256_file, write_jsonl  # noqa: E402
+from lift.io import sha256_file, sha256_text, write_jsonl  # noqa: E402
 from lift.models import variants  # noqa: E402
 from lift.models.load import encode_chat  # noqa: E402
 from lift.paths import adapters_dir, manifests_dir, output_dir, sft_dir  # noqa: E402
+from lift.prompts import SAFETY_SETS  # noqa: E402
+from lift.schemas import LANGS  # noqa: E402
 from lift.train import lora, merge  # noqa: E402
 
 NAME = "adapter-aya-std-s1"
@@ -608,6 +610,58 @@ def test_a_failed_fp32_parity_is_never_registered(tiny_model_dir, utility, regis
         train(tiny_model_dir)
     with pytest.raises(ValueError, match="FAILED"):
         lora.register_pulled(NAME)
+
+
+@pytest.fixture
+def safety_prompts(fake_prompt_files):
+    """Six dev prompts in every safety set and language: the pool Gate 0's parity sample is drawn from."""
+    for set_name in SAFETY_SETS:
+        for lang in LANGS:
+            fake_prompt_files[(set_name, lang)] = [
+                make_prompt(f"{set_name[:3]}-{i:04d}", lang, set_name, "dev", text=f"{set_name} {lang} {i}")
+                for i in range(6)]
+    return fake_prompt_files
+
+
+def test_the_adapter_parity_runs_on_gate0s_parity_prompts(tiny_model_dir, safety_prompts, utility,
+                                                          monkeypatch):
+    # The prompts Gate 0's own random-LoRA parity used, as run_gate0 hands them to check_parity.
+    from lift.prompts import mixed_sample
+
+    handed = []
+
+    def check_parity(model_id, revision, prompts, *, device, max_new_tokens=None):
+        handed.append(list(prompts))
+        return {"pass": True, "all_match": True}
+
+    monkeypatch.setattr(gate0, "check_parity", check_parity)
+    gate0.run_gate0(device="cpu", model_id=str(tiny_model_dir), revision="local", resolve_pins=False,
+                    skip=["preamble", "precision", "throughput", "dry_run"])
+    [drawn] = handed
+    texts, info = lora._parity_texts(None)
+    assert len(drawn) == gate0.N_PARITY == 20 and texts == [p.text for p in drawn]
+    assert info["n"] == 20 and info["pids"] == [f"{p.set}_{p.lang}:{p.pid}" for p in drawn]
+    assert info["source"] == ("Gate 0's merge-parity sample: lift.prompts.mixed_sample(20, split='dev', "
+                              f"seed={gate0.SEED + 3})")
+    assert texts != [p.text for p in mixed_sample(20, split="dev", seed=0)]    # parity_check's own default
+    assert lora._parity_texts(PARITY) == (PARITY, {"source": "given", "n": 2,
+                                                   "sha256": [sha256_text(t) for t in PARITY]})
+
+    # A run without parity_prompts checks the adapter on those very prompts and records which they were.
+    write_sft(rows(4))
+    checked = []
+
+    def parity_check(adapter_dir, *, prompts, dtype, **kw):
+        checked.append(list(prompts))
+        return {"adapter_hash": merge.adapter_hash(adapter_dir), "dtype": dtype, "n": len(prompts),
+                "n_match": len(prompts), "match_share": 1.0, "all_match": True,
+                "first_divergence": [None] * len(prompts)}
+
+    monkeypatch.setattr(merge, "parity_check", parity_check)
+    path = train(tiny_model_dir, parity_prompts=None, max_steps=1)
+    assert checked == [texts]
+    recorded = read(path / "registration.json")["parity"]["fp32"]["prompts"]
+    assert recorded == {"source": info["source"], "n": 20, "pids": info["pids"]}
 
 
 def test_a_failed_push_never_fails_training(tiny_model_dir, utility, hub):
