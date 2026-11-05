@@ -130,8 +130,9 @@ def require_pinned(*keys: str) -> None:
 
 
 def _complete(variant: str, set_name: str, lang: str, split: str) -> bool:
-    """True if every prompt of the split has a generation (the AuditKIT record needs all of them). Its
-    read of the split raises ShortCellError for a cell short of its frozen split (``_record`` lists it)."""
+    """True if every prompt of the split has a generation (the AuditKIT record needs all of them, and
+    ``_record`` refuses it otherwise). Its read of the split raises ShortCellError for a cell short of its
+    frozen split (``_record`` lists it)."""
     from lift.models.generate import generations_path, read_generations
     from lift.prompts import load
 
@@ -156,10 +157,12 @@ def _record(variant: str, set_name: str, lang: str, split: str, *, dtype: str,
     """Write the AuditKIT record of a judged cell. A record the checked loader refuses (another
     precision, a stale judgement) is logged and kept in ``refused`` with its error rather than stopping
     the run: the judgements are already written, and the command exits 3 at the end. So is the record
-    of a cell short of its frozen split (ShortCellError, from ``_complete``'s read of the split: lift
-    judge reads prompt texts by pid, so it judges a short cell's generations made before that check),
-    kept with the error's remedy and the lines that then make the record, whose lift generate line is in
-    the precision the cell's generations were made in (``_own_dtype``)."""
+    of a cell whose generations do not cover its split (``_complete``: its lift generate line stopped
+    early, or ran with --limit), kept with the lift generate line that makes the rest, and the record of
+    a cell short of its frozen split (ShortCellError, from ``_complete``'s read of the split: lift judge
+    reads prompt texts by pid, so it judges a short cell's generations made before that check), kept with
+    the error's remedy and the lines that then make the record. Their lift generate lines are in the
+    precision the cell's generations were made in (``_own_dtype``). run-dev --limit asks for no record."""
     from lift.audit import record_safety
     from lift.data.build import ShortCellError
     from lift.models.generate import StaleOutputError
@@ -167,7 +170,13 @@ def _record(variant: str, set_name: str, lang: str, split: str, *, dtype: str,
     cell = f"{set_name}_{lang}_{split}"
     try:
         if not _complete(variant, set_name, lang, split):
-            log.info("%s %s: generations do not cover every prompt yet; no AuditKIT record", variant, cell)
+            own = _own_dtype(variant, set_name, lang, split, dtype=dtype)
+            generate = _generate_line(variant, set_name, lang, split, dtype=own)
+            log.error("%s %s: no AuditKIT record: its generations do not cover every prompt of its split",
+                      variant, cell)
+            refused[cell] = ("its generations do not cover every prompt of its split (a lift generate line "
+                             f"stopped early, or run with --limit): `{generate}` makes the rest, then the "
+                             "line that failed judges them and writes the record")
             return
         log.info("AuditKIT record: %s", record_safety(variant, set_name, lang, split, dtype=dtype))
     except ShortCellError as exc:              # its prompt file is completed on the laptop first

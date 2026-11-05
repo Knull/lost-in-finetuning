@@ -873,6 +873,59 @@ def test_judge_refuses_a_short_cells_record_with_its_remedy_and_exits_3(made, tm
     assert "stock easy_benign_zh_final: no AuditKIT record: easy_benign_zh: " in caplog.text
 
 
+def test_judge_over_generations_short_of_their_split_refuses_the_record_and_exits_3(fake_prompt_files,
+                                                                                    monkeypatch, caplog,
+                                                                                    tmp_path):
+    # R2-13: a primary judge line over a generations file that stops short of its split (its lift generate
+    # line was stopped at --max-hours or killed as hung, or ran with --limit) logged one INFO line, wrote no
+    # AuditKIT record and exited 0, so job.py, the Kaggle runner and lift remote reported it done although
+    # every reported read refuses the cell. Its record is refused now, listed with the lift generate line
+    # that makes the rest, and the line exits 3; a whole cell the same line judged gets its record. The real
+    # Qwen3Guard adapter over StubGuard, the real record_safety and AuditKIT; placeholder texts.
+    pytest.importorskip("auditkit")
+    from fakes import make_prompt
+
+    from lift import audit
+    from lift.cachekey import intervention_digest
+    from lift.judge import pipeline
+    from lift.models.generate import HARNESS_VERSION, generations_path
+    from lift.models.variants import get_spec
+
+    for name in ("XDG_CACHE_HOME", "XDG_DATA_HOME"):           # AuditKIT writes nothing outside outputs/
+        monkeypatch.setenv(name, str(tmp_path / name))
+    pin(judge=True)
+    pids = ("prh-test-0001", "prh-test-0002")
+    meta = {"dtype": "bf16", "run_config": "rc0", "model_rev": "b" * 40, "harness": HARNESS_VERSION,
+            "template": "9" * 16, "decoding": "d" * 16, "torch": "2.15.0", "transformers": "5.22.1",
+            "gpu": "NVIDIA A100-SXM4-40GB", "gpu_capability": "8.0",
+            "intervention": intervention_digest(get_spec("stock"))}
+    for lang, made in (("en", pids), ("hi", pids[:1])):       # hi: its generate line stopped after one prompt
+        fake_prompt_files[("harmful", lang)] = [make_prompt(p, lang, "harmful", "final", text=f"q {p}")
+                                                for p in pids]
+        write_jsonl(generations_path("stock", "harmful", lang, "final"), [{
+            "key": sha256_text(f"stock:{lang}:{pid}"), "variant": "stock", "pid": pid, "lang": lang,
+            "set": "harmful", "split": "final", "prompt_sha": sha256_text(f"q {pid}"), "output": "o",
+            "n_prompt_tokens": 1, "n_new_tokens": 9, "hit_cap": False, "seconds": 0.1, "meta": meta}
+            for pid in made])
+    monkeypatch.setattr(pipeline, "make_judge", lambda *a, **kw: guard())
+    monkeypatch.setattr("lift.lang.LangID", FakeLID)
+    argv = ["judge", "--variant", "stock", "--split", "final", "--sets", "harmful", "--langs", "en", "hi",
+            "--device", "cpu"]
+    assert main(argv) == 3
+    assert [judged("stock", "harmful", lang, "final") for lang in ("en", "hi")] == [2, 1]
+    records = {lang: audit.auditkit_path("qwen3guard", "stock", "harmful", lang, "final")
+               for lang in ("en", "hi")}
+    assert records["en"].is_file() and not records["hi"].exists()
+    generate = "lift generate --variant stock --split final --sets harmful --langs hi"
+    assert ("  harmful_hi_final: its generations do not cover every prompt of its split (a lift generate "
+            f"line stopped early, or run with --limit): `{generate}` makes the rest, then the line that "
+            "failed judges them and writes the record\n") in caplog.text
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors[0] == ("stock harmful_hi_final: no AuditKIT record: its generations do not cover every "
+                         "prompt of its split")
+    assert not any("harmful_en_final" in m for m in errors)
+
+
 def test_the_module_docstring_lists_every_kind_of_skipped_cell_with_its_remedy():
     # W3-02: the module docstring still listed three kinds after W2-01 and W2-02 added short and nonfinite,
     # and its judges remedy left out the cell only the role's restart line remedies
