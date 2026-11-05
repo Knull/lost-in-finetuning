@@ -952,7 +952,11 @@ def test_run_dev_skips_a_stale_cell_exits_3_and_its_restart_line_lets_it_finish(
 
 def tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, sets, *, n=3):
     """run-dev on the tiny model (CPU), short outputs, the real Qwen3Guard adapter in the run's precision
-    over a StubGuard, a fake LID; the en prompts of ``sets`` are "question {i}" placeholders."""
+    over a StubGuard, a fake LID; the en prompts of ``sets`` are "question {i}" placeholders. The tiny model
+    stands in for Global at the revision ``pin`` pins, which its generations record as a real run's do (a
+    read compares them with the pin)."""
+    from dataclasses import replace
+
     from fakes import make_prompt
 
     from lift.judge import pipeline
@@ -963,8 +967,8 @@ def tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, sets, *, n=3):
         fake_prompt_files[(s, "en")] = [make_prompt(f"{s[:3]}-{i}", "en", s, "dev", text=f"question {i}")
                                         for i in range(n)]
     real_build = variants.build_variant
-    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: real_build(
-        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)))
+    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: replace(real_build(
+        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)), model_rev="b" * 40))
     short_runs(monkeypatch)
     monkeypatch.setattr(pipeline, "make_judge", lambda role, **kw: guard(dtype=kw.get("dtype") or "bf16"))
     monkeypatch.setattr("lift.lang.LangID", FakeLID)
@@ -972,10 +976,20 @@ def tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, sets, *, n=3):
 
 
 class Frontier:
-    """Stands in for the frontier second judge (an API judge: no stack, no precision)."""
+    """Stands in for the frontier second judge (an API judge: no stack, no precision), under the id the
+    pipeline gives the configured one: its rubric's version, OpenAI's default sampling, a stand-in API
+    version and the tag of the labelling rules (``second_judged`` reads its judgements back)."""
 
-    judge_id = "openai/placeholder-model@t0"
     short = "frontier"
+
+    @property
+    def judge_id(self):
+        from lift import config
+        from lift.judge.frontier import load_rubric
+        from lift.judge.labels import rules_tag
+
+        rubric = load_rubric(config.get("judges.safety_second.rubric")).version
+        return f"openai/placeholder-model@{rubric}+t0+max1024+apitest#{rules_tag()}"
 
     def judge(self, items):
         from lift.judge.pipeline import JudgeOutcome

@@ -3,11 +3,13 @@ Placeholder text only."""
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
 import math
 import random
+import re
 import sys
 import types
 from pathlib import Path
@@ -16,18 +18,25 @@ import pytest
 from fakes import make_prompt
 
 from lift import config, gate0
+from lift.cachekey import intervention_digest
 from lift.io import read_jsonl, sha256_text, stable_json, write_jsonl
-from lift.judge import pipeline
+from lift.judge import labels, pipeline
+from lift.judge.frontier import load_rubric
 from lift.judge.pipeline import JudgeItem, JudgeOutcome
+from lift.models import generate, variants
 from lift.models.generate import OtherPrecisionError, StaleOutputError, generations_path, restart_command
-from lift.paths import manifests_dir, metrics_dir, validation_dir
+from lift.paths import REPO_ROOT, manifests_dir, metrics_dir, validation_dir
 from lift.schemas import GenerationRecord
 
 CELL = ("stock", "harmful", "en", "dev")
 LONG = "placeholder words that make a long enough answer"
 GUARD_ID = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
-PRIMARY = GUARD_ID + "#bf16#strict"             # the configured primary judge, in bf16 and strict mode
-SECOND = "openai/placeholder-model@safety_v1:0123456789ab+t0+max1024"
+RULES = labels.rules_tag()                      # the labelling rules of configs/project.yaml
+PRIMARY = f"{GUARD_ID}#{RULES}#bf16#strict"     # the configured primary judge, in bf16 and strict mode
+# What FrontierAdapter names the second judge that ``second_judge`` configures: the rubric's version, OpenAI's
+# default sampling (temperature 0, 1024 tokens), the API version its SDK speaks and the labelling rules.
+SECOND = (f"openai/placeholder-model@{load_rubric(config.get('judges.safety_second.rubric')).version}"
+          f"+t0+max1024+apichat.completions:developer#{RULES}")
 REV = "c" * 40                                  # Global's commit sha, as generate records it in meta
 STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}      # an A100
 L4 = {**STACK, "gpu_capability": "8.9"}
@@ -41,6 +50,21 @@ T4_META = {"model_rev": REV, "harness": 1, "decoding": DECODING, "gpu_capability
 @pytest.fixture(autouse=True)
 def quick_manifests(monkeypatch):
     monkeypatch.setattr("lift.manifest.git_sha", lambda: "test")
+
+
+# The adapter variants the tests' cells name, as P03 registers them in configs/variants.yaml.
+TEST_VARIANTS = [{"name": name, "method": "adapter", "adapter": "adapter-aya-std-s1", "seed": 1}
+                 for name in ("adapter", "adapter-aya-std-s1")]
+
+
+@pytest.fixture(autouse=True)
+def registry(unpinned_revisions, monkeypatch):
+    """configs/variants.yaml with the tests' adapter variants beside its own (the returned registry, which a
+    test may change): a cell is read only for a registered variant, under its current entry."""
+    load = config.load
+    doc = {"variants": [*copy.deepcopy(load("variants")["variants"]), *copy.deepcopy(TEST_VARIANTS)]}
+    monkeypatch.setattr(config, "load", lambda name="project": doc if name == "variants" else load(name))
+    return doc
 
 
 @pytest.fixture(autouse=True)
@@ -59,7 +83,7 @@ def judge_stack(monkeypatch):
 
 @pytest.fixture
 def second_judge(monkeypatch):
-    """judges.safety_second with a chosen model (configs/project.yaml still says TBD); its judge id."""
+    """judges.safety_second with a placeholder OpenAI model; the id its judge writes (``SECOND``)."""
     entry = config.load("project")["judges"]["safety_second"]
     monkeypatch.setitem(entry, "provider", "openai")
     monkeypatch.setitem(entry, "model", "placeholder-model")
@@ -115,13 +139,18 @@ def primary_judge(judge_id=PRIMARY):
 
 def gen(pid, *, output=None, lang="en", set_name="harmful", split="dev", variant="stock", tag="v1",
         prompt=None, n_new=None, dtype="bf16", meta=None):
+    """A GenerationRecord as lift.models.generate writes it: in ``dtype``, by this code's harness, under the
+    variant's entry in configs/variants.yaml when it has one (``meta`` overrides)."""
     prompt = prompt if prompt is not None else f"prompt {pid} {lang}"      # = make_prompt's default text
     output = output if output is not None else f"{LONG} {pid}"
+    made = {"dtype": dtype, "harness": generate.HARNESS_VERSION}
+    if variant in variants.load_registry():
+        made["intervention"] = intervention_digest(variants.get_spec(variant))
     return GenerationRecord(
         key=sha256_text(f"{tag}|{variant}|{pid}|{lang}"), variant=variant, pid=pid, lang=lang, set=set_name,
         split=split, prompt_sha=sha256_text(prompt), output=output, n_prompt_tokens=12,
         n_new_tokens=len(output.split()) if n_new is None else n_new, hit_cap=False, seconds=0.01,
-        meta={"dtype": dtype, **(meta or {})},
+        meta={**made, **(meta or {})},
     )
 
 
@@ -318,13 +347,14 @@ def test_a_file_begun_by_another_judge_names_both_remedies(fake_prompt_files):
     err, line = refused.value, RESTART + " --judge primary"
     assert isinstance(err, StaleOutputError) and err.command == line
     message = str(err)
-    assert f"holds judgements by ['{GUARD_ID}#bf16#loose'], not {PRIMARY}; judges are never mixed" in message
+    loose = f"{GUARD_ID}#{RULES}#bf16#loose"
+    assert f"holds judgements by ['{loose}'], not {PRIMARY}; judges are never mixed" in message
     assert "finish the file with its own judge (its id names" in message
     assert f"run `{line}` as a job line right after `lift sync pull`" in message and LONG not in message
     assert strict.guard.stats["pairs"] == 0
 
     out = pipeline.judgements_path("qwen3guard", *CELL)         # judged by a T4 before judge_file checked it
-    write_jsonl(out, [{**r, "judge": GUARD_ID + "#fp16#strict"} for r in read_jsonl(out)])
+    write_jsonl(out, [{**r, "judge": f"{GUARD_ID}#{RULES}#fp16#strict"} for r in read_jsonl(out)])
     with pytest.raises(pipeline.MixedJudgesError) as refused:
         pipeline.judge_file(path, judge=guard(), lid=FakeLID())
     message = str(refused.value)
@@ -434,6 +464,54 @@ def test_lid_defaults_to_langid_only_when_needed(fake_prompt_files, monkeypatch)
     write_gens([gen(p, tag="v3") for p in pids])
     pipeline.judge_file(path, judge=FakeJudge(), out_path=pipeline.judgements_path("other", *CELL))
     assert len(built) == 1 and built[0].calls == 2
+
+
+# GlotLID's answer for a Hindi output it spreads over Devanagari labels, best first. The labels hi accepts
+# (hin_Deva, anp_Deva, mai_Deva: languages.accept_labels.hi) hold 0.30 among the top 3 and 0.51 among the top
+# 5; mar_Deva and npi_Deva are in no accept list.
+SPREAD = [("hin_Deva", 0.30), ("mar_Deva", 0.12), ("npi_Deva", 0.12), ("anp_Deva", 0.11), ("mai_Deva", 0.10)]
+
+
+class RecordingLID:
+    """lift.lang.LangID's ``top`` on every output: SPREAD cut to the k asked for; records each k."""
+
+    def __init__(self):
+        self.ks: list[int] = []
+
+    def top(self, text, k=3):
+        assert text.strip(), "LID must not run on an empty output"
+        self.ks.append(k)
+        return list(SPREAD[:k])
+
+
+def test_judge_file_reads_glotlids_top_5_so_garbled_means_not_is_lang(fake_prompt_files):
+    """R1-38 (decisions item 43): the unclear flags read GlotLID's top ``lift.lang.LID_TOP_K`` = 5 labels,
+    the ones ``LangID.is_lang`` sums, so an output whose top label is accepted is garbled exactly when is_lang
+    rejects it. Here labels 4 and 5 carry the accepted mass past 0.5: the top 3 would call it garbled."""
+    from lift import lang
+
+    accept, min_prob = config.get("languages.accept_labels"), float(config.get("langid.min_prob"))
+    assert not any(lab in labs for lab in ("mar_Deva", "npi_Deva") for labs in accept.values())
+    assert lang.accepted(SPREAD, accept, "hi", min_prob)                  # LangID.is_lang: Hindi
+    assert not lang.accepted(SPREAD[:3], accept, "hi", min_prob)          # the top 3 would reject it
+    pids = [f"prh-test-{i:04d}" for i in range(4)]
+    fake_prompt_files[("harmful", "hi")] = [make_prompt(p, "hi") for p in pids]
+    lid = RecordingLID()
+    out = pipeline.judge_file(write_gens([gen(p, lang="hi") for p in pids]), judge=FakeJudge(), lid=lid)
+    assert lang.LID_TOP_K == 5 and lid.ks == [lang.LID_TOP_K] * len(pids)
+    rows = list(read_jsonl(out))
+    assert len(rows) == len(pids)
+    for r in rows:
+        assert r["flags"]["lid_top"] == [list(p) for p in SPREAD]
+        assert not r["flags"]["garbled"] and not r["flags"]["wrong_lang"] and r["label"] == "benign"
+
+
+def test_the_module_docstring_names_the_top_5_call():
+    """R1-38: the module docstring, which a re-implementation or an audit of the flags follows, named the top
+    3 that decisions item 43 replaced."""
+    doc = " ".join((pipeline.__doc__ or "").split())
+    assert not re.findall(r"top[- ]?3\b", doc), "the docstring names GlotLID's top 3, not its top 5"
+    assert re.search(r"\btop[- ]?5\b", doc) and "LID_TOP_K" in doc
 
 
 def test_sample_is_seeded_order_free_and_adds_the_validation_rounds(fake_prompt_files, tmp_path):
@@ -620,7 +698,7 @@ def test_load_labels_refuses_a_judge_in_another_precision(fake_prompt_files):
     assert config.get("generation.dtype") == "bf16"
     _, _, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4))
     out = pipeline.judge_file(path, judge=guard(), lid=FakeLID())
-    write_jsonl(out, [{**r, "judge": GUARD_ID + "#fp16#strict"} for r in read_jsonl(out)])   # a T4 judge
+    write_jsonl(out, [{**r, "judge": f"{GUARD_ID}#{RULES}#fp16#strict"} for r in read_jsonl(out)])  # a T4's
     with pytest.raises(ValueError, match="not the configured primary judge .*#bf16#strict"):
         pipeline.load_labels(*CELL)
 
@@ -1028,7 +1106,7 @@ def pair_cell(store, variant, *, sha="a" * 40, dtype="bf16", **meta):
     store[("harmful", "en")] = [make_prompt(p) for p in PAIR_PIDS]
     path = write_gens([gen(p, variant=variant, dtype=dtype, meta={**PAIR_META, **meta}) for p in PAIR_PIDS])
     pipeline.judgements_path("qwen3guard", variant, *CELL[1:]).unlink(missing_ok=True)
-    judge = primary_judge(f"Qwen/Qwen3Guard-Gen-4B@{sha}#{dtype}#strict")
+    judge = primary_judge(f"Qwen/Qwen3Guard-Gen-4B@{sha}#{RULES}#{dtype}#strict")
     pipeline.judge_file(path, judge=judge, lid=FakeLID())
 
 
@@ -1052,8 +1130,8 @@ def test_paired_labels_refuses_pairs_that_mix_judges_or_generations(fake_prompt_
     make("adapter", model_rev="d" * 40)
     with pytest.raises(ValueError, match="cannot be paired.*model_rev"):
         pair()
-    make("adapter", harness=2)
-    with pytest.raises(ValueError, match="cannot be paired.*harness"):
+    make("adapter", harness=2)                    # R1-03: another harness than this code's is stale on read
+    with pytest.raises(ValueError, match="adapter/harmful_en_dev cannot be reported .*another harness"):
         pair()
 
     make("adapter", gpu="NVIDIA L4", transformers="5.23.0")          # allowed, but said
@@ -1062,7 +1140,7 @@ def test_paired_labels_refuses_pairs_that_mix_judges_or_generations(fake_prompt_
     assert a == b == {p: "benign" for p in PAIR_PIDS}
     assert "gpu" in caplog.text and "transformers" in caplog.text and "torch" not in caplog.text
     prov = pipeline.provenance("adapter", *CELL[1:])
-    assert prov["judge_id"] == f"Qwen/Qwen3Guard-Gen-4B@{'a' * 40}#bf16#strict"
+    assert prov["judge_id"] == f"Qwen/Qwen3Guard-Gen-4B@{'a' * 40}#{RULES}#bf16#strict"
     assert (prov["dtype"], prov["run_config"], prov["gpu"], prov["harness"]) == (
         ["bf16"], ["rc"], ["NVIDIA L4"], ["1"])
     assert (prov["n_generations"], prov["n_judgements"]) == (4, 4)
@@ -1083,6 +1161,98 @@ def test_paired_labels_refuses_another_chat_template_or_decoding(fake_prompt_fil
     assert pair()[0] == {p: "benign" for p in PAIR_PIDS}
     prov = pipeline.provenance("adapter", *CELL[1:])
     assert (prov["template"], prov["decoding"]) == (["9" * 16], ["d" * 16])
+
+
+def stale_read(cell, match):
+    """The read of ``cell`` refuses it as stale: ``match``, and the cell's restart line."""
+    with pytest.raises(ValueError, match=match) as refused:
+        pipeline.load_labels(*cell)
+    assert f"`{restart_command(*cell)}` as a job line right after `lift sync pull`" in str(refused.value)
+
+
+def test_a_cell_is_read_only_if_made_by_this_harness_and_the_pinned_global(fake_prompt_files, monkeypatch):
+    """R1-03: a read checked a cell only against itself, so a cell made by an older harness, or by another
+    revision of Global than the one configs/project.yaml pins, was reported although lift generate refuses
+    the very same cell as stale. Both are stale on read now, with the cell's restart line; the judgements, of
+    the same outputs under the same keys, are not the reason."""
+    pids, _, path = setup_cell(fake_prompt_files, n=4, meta={"model_rev": REV})
+    pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
+    assert set(pipeline.load_labels(*CELL)) == set(pids)
+
+    write_gens([gen(p, meta={"model_rev": REV, "harness": generate.HARNESS_VERSION - 1}) for p in pids])
+    stale_read(CELL, rf"4 generations were made by another harness version than this code's "
+                     rf"\({generate.HARNESS_VERSION}\)")
+    write_gens([gen(p, meta={"model_rev": REV}) for p in pids])
+    assert set(pipeline.load_labels(*CELL)) == set(pids)             # tests see Global unpinned ("main")
+    monkeypatch.setitem(config.load("project")["models"]["global"], "revision", "d" * 40)   # pinned since
+    stale_read(CELL, f"4 generations were made by another revision of Global than the {'d' * 12}")
+    monkeypatch.setitem(config.load("project")["models"]["global"], "revision", REV)         # the one used
+    assert set(pipeline.load_labels(*CELL)) == set(pids)
+
+
+def test_a_cell_is_read_only_under_its_variants_current_registry_entry(fake_prompt_files, registry):
+    """R1-03: every GenerationRecord.meta names the intervention (lift.cachekey.intervention_digest of the
+    variant's spec) and the adapter hash it was made with, and a read compares them with the variant's entry
+    in configs/variants.yaml now. A cell of an adapter retrained under its name and re-pinned, of weights
+    other than the pinned ones, or from before meta named its intervention is stale; a variant the registry
+    no longer lists is refused, naming the registry."""
+    fake_prompt_files[("harmful", "en")] = [make_prompt(p) for p in PAIR_PIDS]
+    entry = next(e for e in registry["variants"] if e["name"] == "adapter")
+    entry["artifacts"] = {"adapter": "a" * 64}                      # P03 registers the adapter's hash
+    cell = ("adapter", *CELL[1:])
+
+    def made(**meta):                                               # the same keys and outputs each time
+        return write_gens([gen(p, variant="adapter", meta=meta) for p in PAIR_PIDS])
+
+    pipeline.judge_file(made(adapter_hash="a" * 64), judge=primary_judge(), lid=FakeLID())
+    assert set(pipeline.load_labels(*cell)) == set(PAIR_PIDS)
+    made(adapter_hash="b" * 64)
+    stale_read(cell, f"4 generations were made by another adapter than the {'a' * 12} adapter's entry pins")
+    made(adapter_hash="a" * 64, intervention=None)                  # made before meta named it: never trusted
+    stale_read(cell, r"4 generations name no intervention \(meta.intervention")
+    made(adapter_hash="a" * 64)
+    assert set(pipeline.load_labels(*cell)) == set(PAIR_PIDS)
+    entry["artifacts"] = {"adapter": "c" * 64}                      # retrained under its name, re-pinned
+    stale_read(cell, "4 generations were made under another intervention than adapter's entry")
+    registry["variants"].remove(entry)
+    with pytest.raises(ValueError, match="'adapter' is not in configs/variants.yaml") as refused:
+        pipeline.load_labels(*cell)
+    assert "lift restart" not in str(refused.value)                 # registering it is the remedy
+
+
+@pytest.mark.torch
+def test_generate_records_the_intervention_and_adapter_a_read_checks(fake_prompt_files, registry, monkeypatch,
+                                                                     tiny_model_dir, tiny_lora_adapter):
+    """R1-03, end to end on the tiny model: lift generate's records and run manifest name the intervention
+    digest and the adapter hash a cell was made with, the read accepts them while the variant's registry
+    entry stands, and refuses the cell as stale once P03 pins another hash under the variant's name."""
+    import shutil
+
+    from lift.train.merge import adapter_hash
+
+    name, cell = "adapter-tiny-s1", ("adapter-tiny-s1", *CELL[1:])
+    tiny_global = {"id": str(tiny_model_dir), "revision": "main"}            # Global is the tiny checkpoint
+    monkeypatch.setitem(config.load("project")["models"], "global", tiny_global)
+    shutil.copytree(tiny_lora_adapter, variants.adapter_path(name))
+    pinned = adapter_hash(variants.adapter_path(name))
+    entry = {"name": name, "method": "adapter", "adapter": name, "seed": 1, "artifacts": {"adapter": pinned}}
+    registry["variants"].append(entry)
+    spec = variants.get_spec(name)
+    ps = [make_prompt(p) for p in PAIR_PIDS]
+    fake_prompt_files[("harmful", "en")] = ps
+    path = generate.generate(variants.build_variant(spec, device="cpu", dtype="bf16"), ps,
+                             out_path=generations_path(*cell), max_new_tokens=4)
+    made = {(g.meta["intervention"], g.meta["adapter_hash"]) for g in generate.read_generations(path)}
+    assert made == {(intervention_digest(spec), pinned)}
+    [run] = [json.loads(p.read_text(encoding="utf-8")) for p in manifests_dir().glob("generate-*.json")]
+    assert (run["intervention"], run["adapter_hash"]) == (intervention_digest(spec), pinned)
+
+    pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
+    assert set(pipeline.load_labels(*cell)) == set(PAIR_PIDS)
+    prov = pipeline.provenance(*cell)
+    assert (prov["intervention"], prov["adapter_hash"]) == ([intervention_digest(spec)], [pinned])
+    entry["artifacts"] = {"adapter": "0" * 64}                      # another adapter now under the name
+    stale_read(cell, "4 generations were made under another intervention")
 
 
 def test_the_second_judge_is_sampled(fake_prompt_files, second_judge):
@@ -1111,6 +1281,64 @@ def test_a_partial_read_still_refuses_stale_judgements(fake_prompt_files, second
     pipeline.judge_file(path, judge=other, lid=FakeLID(), keys=[gens[1].key])
     with pytest.raises(ValueError, match="not the configured second judge openai/placeholder-model@"):
         pipeline.load_labels(*CELL, judge="second", complete=False)
+
+
+def offline_frontier(monkeypatch):
+    """make_judge's frontier judges answer from a FakeProvider (every item REFUSAL, the preflight BENIGN):
+    no SDK, key, spend cap or network."""
+    from lift.judge import frontier
+
+    class Offline(frontier.FrontierJudge):
+        def __init__(self, *args, **kwargs):
+            reply = frontier.FakeProvider.reply("REFUSAL")
+            super().__init__(*args, client=frontier.FakeProvider(lambda call: reply), **kwargs)
+
+    monkeypatch.setattr(frontier, "FrontierJudge", Offline)
+    monkeypatch.delenv(frontier.SPEND_CAP_ENV, raising=False)
+
+
+def test_a_frontier_judges_cells_are_read_only_under_its_configured_rubric_and_settings(
+        fake_prompt_files, monkeypatch, tmp_path):
+    """R1-09: for a frontier role the read required only ``{provider}/{model}@``, so cells judged before the
+    rubric was revised (its header: an edit "invalidates earlier judgements") or before the judge's entry
+    gained a setting were reported as the configured judge's. A frontier judge's id must now be the role's
+    configured judge exactly (rubric version, sampling settings, labelling rules) but for the API version its
+    SDK speaks (constraints.txt pins the SDK)."""
+    offline_frontier(monkeypatch)
+    judge = pipeline.make_judge("second")                 # judges.safety_second as configured
+    rule, shown = pipeline._expected_judge("second", "bf16")
+    assert rule.fullmatch(judge.judge_id)
+    pids, gens, path = setup_cell(fake_prompt_files, n=4)
+    pipeline.judge_file(path, judge=judge, lid=FakeLID(), keys=[g.key for g in gens[:2]])
+    sampled = {p: "refusal" for p in pids[:2]}
+    assert pipeline.load_labels(*CELL, judge="second", complete=False) == sampled
+
+    entry = config.load("project")["judges"]["safety_second"]
+    v1 = (REPO_ROOT / entry["rubric"]).read_bytes()
+    v2 = v1.replace(b"You are a careful content-safety", b"You are a meticulous content-safety")
+    assert v2 != v1
+    (tmp_path / "safety_v2.md").write_bytes(v2)               # an edit, made the way the rubric's header says
+    moves = {"rubric": (entry, "rubric", str(tmp_path / "safety_v2.md")),
+             "max_tokens": (entry, "max_tokens", 64), "effort": (entry, "effort", "medium"),
+             "rules": (config.load("project")["unclear"], "min_new_tokens", 50)}
+    for name, (node, key, value) in moves.items():
+        with monkeypatch.context() as m:
+            m.setitem(node, key, value)
+            assert pipeline.make_judge("second").judge_id != judge.judge_id, name
+            with pytest.raises(ValueError, match="not the configured second judge"):
+                pipeline.load_labels(*CELL, judge="second", complete=False)
+    assert pipeline.load_labels(*CELL, judge="second", complete=False) == sampled
+
+    api = judge.judge_id.replace("+apifake#", "+api2027-01-15#")      # another SDK's API version: same judge
+    assert api != judge.judge_id and rule.fullmatch(api)
+    assert shown == judge.judge_id.replace("+apifake#", "+api<version>#")
+    judges = config.load("project")["judges"]                          # the decision rule swaps the entries
+    qwen = dict(judges["safety_primary"])
+    monkeypatch.setitem(judges, "safety_primary", dict(entry, max_tokens=512))
+    monkeypatch.setitem(judges, "safety_second", qwen)
+    primary = pipeline.make_judge("primary")                           # its own entry's settings
+    assert "+max512+" in primary.judge_id and pipeline._expected_judge("primary", "bf16")[0].fullmatch(
+        primary.judge_id)
 
 
 class FakeGuard:
@@ -1195,7 +1423,7 @@ def test_strict_and_loose_labels_never_share_a_file(fake_prompt_files):
     with pytest.raises(RuntimeError, match="session loss"):
         pipeline.judge_file(path, judge=strict, lid=FakeLID(), batch_size=2)       # 2 judged, then lost
     loose = guard(strict=False)
-    assert (strict.judge_id, loose.judge_id) == (PRIMARY, GUARD_ID + "#bf16#loose")
+    assert (strict.judge_id, loose.judge_id) == (PRIMARY, f"{GUARD_ID}#{RULES}#bf16#loose")
     with pytest.raises(pipeline.MixedJudgesError, match="never mixed"):
         pipeline.judge_file(path, judge=loose, lid=FakeLID(), batch_size=2)
 
@@ -1203,6 +1431,78 @@ def test_strict_and_loose_labels_never_share_a_file(fake_prompt_files):
     pipeline.judge_file(path, judge=loose, lid=FakeLID())                   # the whole cell, loose
     with pytest.raises(ValueError, match="not the configured primary judge .*#bf16#strict"):
         pipeline.load_labels(*CELL)                                           # the config says strict
+
+
+# Seven words the fake guard calls a refusal (Safe, Refusal: Yes): 7 new tokens clear unclear.min_new_tokens
+# 5, not 50, so the labelling rules alone decide between refusal and unclear.
+SHORT_SAFE = "SAFE placeholder words that make an answer"
+
+
+def short_safe(n):
+    return {f"prh-test-{i:04d}": SHORT_SAFE for i in range(n)}
+
+
+def change_the_rules(monkeypatch):
+    """A dated change to configs/project.yaml unclear.min_new_tokens (CLAUDE.md rule 5), after judging."""
+    assert config.get("unclear.min_new_tokens") == 5
+    monkeypatch.setitem(config.load("project")["unclear"], "min_new_tokens", 50)
+
+
+def test_a_cell_begun_under_other_labelling_rules_is_never_finished_or_reported(fake_prompt_files,
+                                                                                monkeypatch):
+    """R1-12: a final label is made once, at judge time, under the labelling rules then in force
+    (lift.judge.labels, unclear.*, languages.accept_labels, the GlotLID entry). A job judged half a cell, then
+    the rules changed: resuming would finish the file under the new rules (six identical outputs reported as
+    three refusals and three unclear). The resume is refused with the role's restart line (the generations
+    are kept), and the read does not report the half made under the old rules."""
+    pids, gens, path = setup_cell(fake_prompt_files, n=6, outputs=short_safe(6))
+    out = pipeline.judge_file(path, judge=guard(), lid=FakeLID(), keys=[g.key for g in gens[:3]])
+    assert pipeline.load_labels(*CELL, complete=False) == {p: "refusal" for p in pids[:3]}
+    change_the_rules(monkeypatch)
+    now = guard()
+    with pytest.raises(pipeline.MixedJudgesError) as refused:
+        pipeline.judge_file(path, judge=now, lid=FakeLID())
+    line, message = RESTART + " --judge primary", str(refused.value)
+    assert refused.value.command == line
+    assert f"run `{line}` as a job line right after `lift sync pull`" in message
+    assert "only in their labelling rules" in message and "its own judge" not in message
+    assert now.guard.stats["pairs"] == 0 and len(list(read_jsonl(out))) == 3
+    with pytest.raises(ValueError, match="not the configured primary judge"):
+        pipeline.load_labels(*CELL, complete=False)
+    before = f"{GUARD_ID}#bf16#strict"                # a file judged before judge ids named their rules
+    assert "only in their labelling rules" in str(pipeline._mixed_judges(out, [before], now.judge_id, "bf16",
+                                                                          line))
+
+
+def test_a_cell_judged_under_other_labelling_rules_is_judged_again_not_reported(fake_prompt_files,
+                                                                                monkeypatch):
+    """R1-12: after a rules change, judging a complete cell again appended nothing and the read went on
+    reporting the old rules' labels as current. The re-run is refused, so is the read, and the cell judged
+    again from its restart (an empty judgements file) carries the labels of the rules now in force."""
+    pids, _, path = setup_cell(fake_prompt_files, n=4, outputs=short_safe(4))
+    out = pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    assert pipeline.load_labels(*CELL) == {p: "refusal" for p in pids}
+    change_the_rules(monkeypatch)
+    with pytest.raises(pipeline.MixedJudgesError, match="only in their labelling rules"):
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID())                 # the operator's re-run
+    with pytest.raises(ValueError, match="not the configured primary judge"):
+        pipeline.load_labels(*CELL)
+    out.write_bytes(b"")                                                        # what the restart leaves
+    pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    assert pipeline.load_labels(*CELL) == {p: "unclear" for p in pids}         # 7 new tokens, under 50
+
+
+def test_two_arms_labelled_under_different_labelling_rules_are_never_paired(fake_prompt_files, monkeypatch):
+    """R1-12: stock judged before a rules change, the adapter after it. Identical outputs and identical guard
+    calls are labelled refusal in one arm and unclear in the other, so the pair is refused."""
+    fake_prompt_files[("harmful", "en")] = [make_prompt(p) for p in PAIR_PIDS]
+    for variant in ("stock", "adapter"):
+        if variant == "adapter":
+            change_the_rules(monkeypatch)
+        path = write_gens([gen(p, variant=variant, output=SHORT_SAFE, meta=PAIR_META) for p in PAIR_PIDS])
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    with pytest.raises(ValueError, match="stock/harmful_en_dev cannot be reported .*not the configured"):
+        pair()
 
 
 def test_qwen3guard_records_its_stack_in_every_judgement(fake_prompt_files, judge_stack):
@@ -1350,6 +1650,7 @@ def test_frontier_adapter_and_per_file_cost(fake_prompt_files):
     pids, _, path = setup_cell(fake_prompt_files, outputs={"prh-test-0000": f"REFUSE {LONG}",
                                                           "prh-test-0001": f"FAIL {LONG}"})
     adapter = pipeline.FrontierAdapter(FakeFrontier())
+    assert adapter.judge_id == f"{FakeFrontier.judge_id}#{RULES}"       # the frontier judge's own id, plus
     out = pipeline.judge_file(path, judge=adapter, lid=FakeLID(), keys=[gen(p).key for p in pids[:3]])
     by_pid = judged(out)
     assert out.parent.parent.name == "frontier"
@@ -1420,7 +1721,7 @@ def test_make_judge_builds_the_configured_judges_lazily(monkeypatch):
     assert isinstance(primary, pipeline.Qwen3GuardAdapter) and primary.strict
     assert built == {"model_id": "Qwen/Qwen3Guard-Gen-4B", "revision": "b" * 40, "device": "cuda:3",
                      "dtype": dtype}
-    assert primary.judge_id == f"Qwen/Qwen3Guard-Gen-4B@{'b' * 40}#{dtype}#strict"
+    assert primary.judge_id == f"Qwen/Qwen3Guard-Gen-4B@{'b' * 40}#{RULES}#{dtype}#strict"
     guard_entry = config.load("project")["judges"]["safety_primary"]
     monkeypatch.setitem(guard_entry, "controversial", "loose")
     assert pipeline.make_judge("primary", device="cuda:3").judge_id.endswith(f"#{dtype}#loose")
