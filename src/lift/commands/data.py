@@ -4,7 +4,9 @@ Handlers import lift.data lazily, so ``lift --help`` needs no data packages. Eac
 stderr and writes stdout/stderr with errors="backslashreplace", so a cp1252 console never crashes.
 
 Exit status. ``lift data build``: 0 when nothing a rerun could add is missing (listed failures are
-expected and reported; files left out by --skip-translation are listed and need a run without it);
+expected and reported; a cell they leave short of its frozen split is listed too, as awaiting a
+reader's verdict on the failures sheet, and every later stage refuses it until then; files left out
+by --skip-translation are listed and need a run without it);
 3 (EXIT_INCOMPLETE) when the summary's rerun_needed is set: translation was blocked (HTTP 429:
 Google refused this IP, wait 30 minutes or more; a streak: ten items in a row failed with network
 or service errors, check the network), a file was skipped because of the block, or items a rerun can
@@ -82,6 +84,11 @@ def _build(args: argparse.Namespace) -> int:
         print(f"skipped {x['set']}_{x['lang']}: {x['reason']}")
     if summary["incomplete"]:
         print("items a rerun can translate are missing from: " + ", ".join(summary["incomplete"]))
+    for name, cells in summary["short_cells"].items():
+        counts = ", ".join(f"{split} {len(pids)}" for split, pids in cells.items())
+        pids = [pid for split_pids in cells.values() for pid in split_pids]
+        print(f"{name} is short of its frozen split ({counts}), awaiting a reader's verdict on the failures "
+              f"sheet: {' '.join(pids[:10])}" + (" ..." if len(pids) > 10 else ""))
     if summary["sft"]:
         d = summary["sft"]["decision"]
         if d.get("rows") is not None:
@@ -167,7 +174,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     b = data.add_parser("build", help="build data/prompts, data/splits and data/sft",
                         description="Build every prompt set (resumable: translations are cached), freeze "
                                     "the splits and make the SFT candidates. Exit 0 when built (files "
-                                    "--skip-translation left out are listed), 3 when translation was "
+                                    "--skip-translation left out, and cells short of their frozen split "
+                                    "until a reader's verdict, are listed), 3 when translation was "
                                     "blocked or items a rerun can translate are missing (rerun to resume "
                                     "from the cache), 1 when a package is missing or the build stops on "
                                     "an error.")
