@@ -1293,6 +1293,73 @@ def test_a_repair_cell_is_read_only_while_its_pin_is_its_adapters_current_one(fa
     assert pipeline.paired_labels(*arms, *CELL[1:]) == ({p: "benign" for p in PAIR_PIDS},) * 2
 
 
+def test_a_cell_is_refused_while_no_entry_of_method_adapter_names_its_adapter(fake_prompt_files, registry):
+    """W3-03 follow-up (wave 3, run-read VERIFY-3): a repair was held to the pin of every entry of method
+    adapter naming its adapter, but read under its own pin once no such entry was left, as after P03
+    un-registers an adapter whose fp32 merge parity failed (nothing may evaluate it, CLAUDE.md rule 9). Two
+    repairs of that adapter pinning different weights then both read, and paired (PAIR_MUST_MATCH has no
+    adapter field). A cell of a variant that names an adapter is refused unless an entry of method adapter
+    names that adapter with the same pin, naming the registry and no restart line."""
+    adapter = "adapter-aya-std-s1"
+    repairs = [{"name": f"wiseft-l{lam}-{adapter}", "method": "wiseft", "adapter": adapter,
+                "params": {"lam": float(lam)}, "artifacts": {"adapter": pin}}
+               for lam, pin in (("0.50", ADAPTER_HASH), ("0.25", "c" * 64))]
+    names = [r["name"] for r in repairs]
+    registry["variants"] += repairs
+    for name in names:
+        pair_cell(fake_prompt_files, name)
+    assert set(pipeline.load_labels(names[0], *CELL[1:])) == set(PAIR_PIDS)     # its adapter's pin
+    with pytest.raises(ValueError, match=f"{names[1]}'s entry .* pins adapter hash {'c' * 12}, but"):
+        pipeline.load_labels(names[1], *CELL[1:])                               # not its adapter's
+    own = [e for e in registry["variants"] if e["method"] == "adapter" and e["adapter"] == adapter]
+    assert [e["name"] for e in own] == ["adapter", adapter]                      # TEST_VARIANTS
+    for entry in own:                                # un-registered (P03: its fp32 merge parity failed)
+        registry["variants"].remove(entry)
+    for name in names:
+        unnamed = f"{name}'s entry in configs/variants.yaml names adapter {adapter}, but no entry of method"
+        with pytest.raises(ValueError, match=f"{unnamed} adapter names it") as refused:
+            pipeline.load_labels(name, *CELL[1:])
+        assert "lift restart" not in str(refused.value)                       # registering it is the remedy
+    with pytest.raises(ValueError, match="no entry of method adapter names it"):
+        pipeline.paired_labels(*names, *CELL[1:])
+    registry["variants"].append(own[1])              # registered again, with the same weights
+    assert set(pipeline.load_labels(names[0], *CELL[1:])) == set(PAIR_PIDS)
+
+
+def test_every_entry_of_method_adapter_naming_one_adapter_holds_the_others_to_its_pin(fake_prompt_files,
+                                                                                     registry):
+    """W3-03 (wave 3, run-read VERIFY-4): two behaviours no test pinned. The comparison is symmetric: an
+    adapter's own entry and an alias of method adapter naming the same adapter (TEST_VARIANTS' "adapter")
+    each read only while the other pins the same hash, so after the adapter is registered again with new
+    weights, the alias's cells, made from the old ones, are refused, and so are the new ones' until the
+    alias pins them too. And an own entry that pins no hash is never the same pin as a repair's."""
+    adapter = "adapter-aya-std-s1"
+    alias, own = (next(e for e in registry["variants"] if e["name"] == name) for name in ("adapter", adapter))
+    for name in ("adapter", adapter):
+        pair_cell(fake_prompt_files, name)
+    assert pipeline.paired_labels("adapter", adapter, *CELL[1:]) == ({p: "benign" for p in PAIR_PIDS},) * 2
+    own["artifacts"] = {"adapter": "c" * 64}         # trained again, registered again (--replace)
+    pair_cell(fake_prompt_files, adapter)            # and its cells made again from the new weights
+    for name, other, theirs in (("adapter", adapter, "c"), (adapter, "adapter", "a")):
+        held = (f"{name}'s entry in configs/variants.yaml pins adapter hash .*, but {other}'s entry "
+                f"\\(method adapter, adapter {adapter}\\) pins {theirs * 12}")
+        with pytest.raises(ValueError, match=held):
+            pipeline.load_labels(name, *CELL[1:])
+    alias["artifacts"] = {"adapter": "c" * 64}       # the alias pins the new weights too
+    stale_read(("adapter", *CELL[1:]), "generations were made under another intervention")
+    assert set(pipeline.load_labels(adapter, *CELL[1:])) == set(PAIR_PIDS)
+
+    repair = {"name": f"wiseft-l0.50-{adapter}", "method": "wiseft", "adapter": adapter,
+              "params": {"lam": 0.5}, "artifacts": {"adapter": "c" * 64}}
+    registry["variants"] = [e for e in registry["variants"] if e is not alias] + [repair]
+    pair_cell(fake_prompt_files, repair["name"])
+    assert set(pipeline.load_labels(repair["name"], *CELL[1:])) == set(PAIR_PIDS)
+    del own["artifacts"]                             # the adapter's own entry pins no hash
+    unpinned = f"{repair['name']}'s entry .* but {adapter}'s entry \\(method adapter, adapter {adapter}\\)"
+    with pytest.raises(ValueError, match=f"{unpinned} pins none"):
+        pipeline.load_labels(repair["name"], *CELL[1:])
+
+
 @pytest.mark.torch
 def test_generate_records_the_intervention_and_adapter_a_read_checks(fake_prompt_files, registry, monkeypatch,
                                                                      tiny_model_dir, tiny_lora_adapter):
