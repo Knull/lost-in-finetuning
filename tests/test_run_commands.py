@@ -292,6 +292,148 @@ def test_a_refused_auditkit_record_is_reported_not_fatal(monkeypatch, caplog):
     assert run_cmd._refused_exit({}, {"precision": {"harmful_hi_dev": "made in fp16"}}) == 3
 
 
+# --- lift judge's bulk prefill --------------------------------------------------------------------------
+
+
+class BulkJudge:
+    """An API judge with a bulk prefill, shaped like the frontier judge's adapter: it records the order of
+    its calls (the generation keys each got) and counts its spend; ``fail`` is raised by prefill, ``reply``
+    replaces prefill's summary."""
+
+    judge_id = "anthropic/placeholder-model@x"
+    short = "frontier"
+
+    def __init__(self, *, fail=None, reply=None):
+        self.events: list[tuple[str, list[str]]] = []
+        self.stats = {"calls": 0, "usd": 0.0}
+        self.fail, self.reply = fail, reply
+
+    def prefill(self, items, *, wait=True):
+        assert wait is True                         # lift judge waits for its batches
+        self.events.append(("prefill", [i.key for i in items]))
+        if self.fail is not None:
+            raise self.fail
+        self.stats["usd"] += 0.25
+        return self.reply if self.reply is not None else {
+            "mode": "batch", "n_requests": len(items), "n_cached": 0, "n_submitted": len(items),
+            "n_collected": len(items), "n_errored": 0, "n_expired": 0, "n_canceled": 0,
+            "batch_ids": ["msgbatch_placeholder"], "usd": 0.25, "unlisted": "not a summary field"}
+
+    def judge(self, items):
+        from lift.judge.pipeline import JudgeOutcome
+
+        self.events.append(("judge", [i.key for i in items]))
+        self.stats["calls"] += len(items)
+        return [JudgeOutcome("refusal", {"label": "REFUSAL", "reason": "placeholder"}, "") for _ in items]
+
+
+def bulk_judge(monkeypatch, judge, *, texts=None):
+    """lift judge with ``judge`` as the second judge, the cells' prompt texts ``texts`` ({lang: text}; "t",
+    write_generation's, by default) and a fake LID; returns the command line without --langs."""
+    monkeypatch.setattr("lift.judge.pipeline.make_judge", lambda *a, **kw: judge)
+    monkeypatch.setattr("lift.prompts.texts_by_pid",
+                        lambda s, lang: {f"{s[:3]}-0001": (texts or {}).get(lang, "t")})
+    monkeypatch.setattr("lift.lang.LangID", FakeLID)
+    return ["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--judge", "second"]
+
+
+def prefill_manifests():
+    from lift.paths import manifests_dir
+
+    runs = [json.loads(p.read_text(encoding="utf-8")) for p in manifests_dir().glob("judge_prefill-*.json")]
+    return sorted(runs, key=lambda m: m["started"])
+
+
+def test_judge_prefills_every_cells_pending_items_at_once_then_judges_cell_by_cell(monkeypatch, caplog):
+    # P03 W: a judge with a bulk API (the frontier judge's Message Batches) gets every item the run's cells
+    # will send in one prefill, which only fills its call cache; then the cell loop runs as before. Already
+    # judged items are not sent again, and the prefill's spend is recorded in its own manifest.
+    caplog.set_level(logging.INFO, logger="lift.run")
+    keys = {lang: write_generation("harmful", lang, "dev") for lang in ("en", "hi", "zh")}
+    judge = BulkJudge()
+    argv = bulk_judge(monkeypatch, judge)
+    assert main([*argv, "--langs", "zh"]) == 0
+    assert judge.events == [("prefill", [keys["zh"]]), ("judge", [keys["zh"]])]
+
+    judge.events.clear()
+    assert main([*argv, "--langs", "en", "hi", "zh"]) == 0
+    assert judge.events == [("prefill", [keys["en"], keys["hi"]]), ("judge", [keys["en"]]),
+                            ("judge", [keys["hi"]])]                    # zh: judged already, nothing sent
+    first, second = prefill_manifests()
+    assert first["n_items"] == 1 and first["status"] == "ok"
+    assert second["cells"] == {"harmful_en_dev": 1, "harmful_hi_dev": 1, "harmful_zh_dev": 0}
+    assert second["n_items"] == 2 and second["devices"] == 0 and second["cells_left_out"] == []
+    assert second["judge"] == BulkJudge.judge_id and second["judge_dir"] == "frontier"
+    assert second["prefill"] == {"mode": "batch", "n_requests": 2, "n_cached": 0, "n_submitted": 2,
+                                 "n_collected": 2, "n_errored": 0, "n_expired": 0, "n_canceled": 0,
+                                 "batch_ids": ["msgbatch_placeholder"], "usd": 0.25}
+    assert second["judge_stats"] == {"calls": 0, "usd": 0.25}
+    assert "'n_submitted': 2" in caplog.text and "unlisted" not in caplog.text
+
+    judge.events.clear()
+    caplog.clear()
+    assert main([*argv, "--langs", "en", "hi", "zh"]) == 0             # nothing pending: no prefill at all
+    assert judge.events == [] and len(prefill_manifests()) == 2
+    assert "nothing left to judge in the 3 cells planned, so no bulk prefill" in caplog.text
+
+
+def test_the_prefill_sends_only_the_items_the_runs_key_list_selects(monkeypatch):
+    keys = {lang: write_generation("harmful", lang, "dev") for lang in ("en", "hi")}
+    listed = generations_dir().parent / "stock_dev.txt"
+    listed.write_text(keys["hi"] + "\n", encoding="utf-8")
+    judge = BulkJudge()
+    argv = bulk_judge(monkeypatch, judge)
+    assert main([*argv, "--keys", str(listed)]) == 0
+    assert judge.events == [("prefill", [keys["hi"]]), ("judge", [keys["hi"]])]
+    [run] = prefill_manifests()
+    assert run["cells"] == {"harmful_hi_dev": 1}
+
+
+def test_a_cell_its_planning_refuses_is_left_out_of_the_prefill_and_listed_as_before(monkeypatch, caplog):
+    # A stale cell (its prompt changed after generation) raises in planning as judge_file raises it: the
+    # prefill goes on without it, and the cell loop skips and lists it with its restart line, as without
+    # the prefill.
+    caplog.set_level(logging.INFO, logger="lift.run")
+    keys = {lang: write_generation("harmful", lang, "dev") for lang in ("en", "hi")}
+    judge = BulkJudge()
+    argv = bulk_judge(monkeypatch, judge, texts={"en": "a corrected translation"})
+    assert main([*argv, "--langs", "en", "hi"]) == 3
+    assert judge.events == [("prefill", [keys["hi"]]), ("judge", [keys["hi"]])]
+    assert "harmful_en_dev: left out of the bulk prefill (StaleJudgementsError)" in caplog.text
+    restart = "lift restart --variant stock --split dev --sets harmful --langs en"
+    assert f"  harmful_en_dev: {restart}\n" in listing(caplog, "were skipped as stale")
+    [run] = prefill_manifests()
+    assert run["cells"] == {"harmful_hi_dev": 1} and run["cells_left_out"] == ["harmful_en_dev"]
+    assert "corrected" not in caplog.text
+
+
+@pytest.mark.parametrize("failure, error, spent", [
+    ({"fail": RuntimeError("the batch API is down")}, RuntimeError, 0.0),
+    ({"reply": ["not", "a", "summary"]}, TypeError, 0.25),             # spent, then no summary
+])
+def test_a_failed_prefill_is_recorded_and_ends_the_line_before_any_cell(failure, error, spent, monkeypatch):
+    write_generation("harmful", "en", "dev")
+    judge = BulkJudge(**failure)
+    argv = bulk_judge(monkeypatch, judge)
+    with pytest.raises(error):
+        main([*argv, "--langs", "en"])
+    assert [kind for kind, _keys in judge.events] == ["prefill"]
+    [run] = prefill_manifests()
+    assert run["status"] == "failed" and run["error"] == error.__name__ and "prefill" not in run
+    assert run["judge_stats"] == {"calls": 0, "usd": spent}
+
+
+def test_a_judge_without_a_bulk_api_is_never_planned(monkeypatch):
+    from lift.judge import pipeline
+
+    write_generation("harmful", "en", "dev")
+    bulk_judge(monkeypatch, Frontier())                        # judge() only, as the Qwen3Guard adapter
+    monkeypatch.setattr(pipeline, "pending_items", lambda *a, **kw: pytest.fail("planned without prefill"))
+    assert main(["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en",
+                 "--judge", "second"]) == 0
+    assert prefill_manifests() == []
+
+
 # --- lift restart ---------------------------------------------------------------------------------------
 
 

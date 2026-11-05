@@ -45,6 +45,14 @@ outputs/judgements/{judge_dir}/{variant}/{set}_{lang}_{split}.jsonl after each c
   judgements file is never extended on another stack (a complete one is re-entered without error).
   Frontier judgements carry no stack.
 
+Planning: ``pending_items`` returns the items ``judge_file`` would send a judge for a cell, in its order,
+after the same checks, selection and resume state, through the same code (``_plan``), and writes
+nothing: a judgements file whose last line a kill cut short is read as judge_file's repair will leave
+it. A judge with a bulk API exposes ``prefill(items, *, wait=True) -> dict`` (``FrontierAdapter``: the
+frontier judge's Message Batches, which only fill its call cache); ``lift judge`` hands it every cell's
+pending items at once, then judges cell by cell, finding the replies cached, so bulk and one-at-a-time
+judging give the same judgements.
+
 Reading:
 - ``load_records`` (whole JudgementRecords) and ``load_labels`` ({pid: label}) are the door to every
   reported number, the loose label, flags and judge failures included. Each returned judgement must
@@ -72,6 +80,7 @@ Reading:
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import math
@@ -153,7 +162,9 @@ class Judge(Protocol):
     """What ``judge_file`` needs. ``judge_id`` (revision included) goes into every record, so two
     judges never share a file; ``short`` names the judgements directory. A judge on local hardware
     also exposes ``stack`` (read with getattr; None or absent for an API judge) and writes it into
-    every judgement's ``native["stack"]``."""
+    every judgement's ``native["stack"]``. A judge with a bulk API may also expose ``prefill(items, *,
+    wait=True) -> dict`` (read with getattr; ``FrontierAdapter.prefill``), which ``lift judge`` calls once
+    with every cell's ``pending_items`` before judging them."""
 
     judge_id: str
     short: str
@@ -301,7 +312,8 @@ class FrontierAdapter:
     """The frontier LLM judge (``lift.judge.frontier.FrontierJudge``) as a Judge. ``native`` keeps the
     judge's label and reason, and ``model_echo`` (the model id that answered) when the result has
     one. ``stats`` passes through its call, token and cost counters for the run manifest. An API
-    judge runs on no hardware of ours, so it has no ``stack``."""
+    judge runs on no hardware of ours, so it has no ``stack``. ``prefill`` hands a whole run's items to
+    the judge's Message Batches path ahead of ``judge``."""
 
     short = "frontier"
     device = None
@@ -315,6 +327,17 @@ class FrontierAdapter:
     @property
     def stats(self) -> dict[str, Any]:
         return dict(self.frontier.stats)
+
+    def prefill(self, items: Sequence[JudgeItem], *, wait: bool = True) -> dict[str, Any]:
+        """Fill the judge's call cache with the first-turn replies to ``items`` in bulk, through
+        ``FrontierJudge.prefill_safety`` (Message Batches at batch prices, when the judge's config entry
+        has ``bulk: batch`` and enough of them are uncached; otherwise a no-op that says so), so that
+        ``judge`` then finds them cached and decides every item exactly as the one-at-a-time path does:
+        bulk never changes a judgement or the judge id. Returns its summary (mode, request counts, batch
+        ids, usd: counts and ids only). With ``wait`` False a batch still running raises its
+        FrontierBatchPending, and a rerun collects it."""
+        return self.frontier.prefill_safety([i.prompt for i in items], [i.response for i in items],
+                                            [i.prompt_lang for i in items], wait=wait)
 
     def judge(self, items: Sequence[JudgeItem]) -> list[JudgeOutcome]:
         results = self.frontier.safety([i.prompt for i in items], [i.response for i in items],
@@ -534,9 +557,40 @@ def _select(gens: Sequence[GenerationRecord], *, sample: float | None, keys: Col
 # ----------------------------------------------------------------------------- reading records
 
 
-def _read_judgements(path: Path) -> list[JudgementRecord]:
-    """All records of one judgements file. Two records for one key or one pid raise."""
-    records = [JudgementRecord.model_validate(row) for row in read_jsonl(path)]
+def _valid_json(data: bytes) -> bool:
+    try:
+        json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return True
+
+
+def _rows_as_repaired(path: Path) -> Iterator[dict[str, Any]]:
+    """The rows of a JSONL file as ``read_jsonl`` reads them once ``lift.models.generate.repair_tail`` has
+    run, without writing to it: the repair completes a last line a kill cut short (no newline) that is
+    valid JSON, and drops one that is not. The lines are read as ``read_jsonl`` reads a file (UTF-8,
+    universal newlines, blank lines skipped, a bad line raising with its line number)."""
+    data = path.read_bytes()
+    cut = data.rfind(b"\n") + 1
+    if cut < len(data) and not _valid_json(data[cut:]):
+        data = data[:cut]
+    with io.TextIOWrapper(io.BytesIO(data), encoding="utf-8") as lines:
+        for lineno, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{path}:{lineno}: bad JSON line") from e
+
+
+def _read_judgements(path: Path, *, as_repaired: bool = False) -> list[JudgementRecord]:
+    """All records of one judgements file; with ``as_repaired``, as they read once ``repair_tail`` has run,
+    the file left untouched (``_rows_as_repaired``: planning writes nothing). Two records for one key or
+    one pid raise."""
+    rows = _rows_as_repaired(path) if as_repaired else read_jsonl(path)
+    records = [JudgementRecord.model_validate(row) for row in rows]
     seen_keys: set[str] = set()
     seen_pids: set[str] = set()
     dupes = []
@@ -576,20 +630,23 @@ def _check_prompt_texts(gens: Sequence[GenerationRecord], texts: Mapping[str, st
 
 def _resume_state(out_path: Path, judge_id: str, gens: Sequence[GenerationRecord],
                   cell: tuple[str, str, str, str], *, resume: bool,
-                  restart: str | None, judge_only: bool = False) -> dict[str, JudgementRecord]:
+                  restart: str | None, judge_only: bool = False,
+                  repair: bool = True) -> dict[str, JudgementRecord]:
     """{key: record} already in ``out_path``, after checking it holds this judge's judgements of
     these generations' current outputs only (a record without ``output_sha`` is not trusted). Another
     judge's records raise ``MixedJudgesError``. Judgements of generations that changed since are stale:
     ``restart`` judges the cell again (``judge_only``: the role's ``--judge`` line, which keeps the current
-    generations; else the whole cell's)."""
+    generations; else the whole cell's). A truncated last line is repaired first; ``repair`` False reads
+    the file as the repair would leave it and writes nothing (planning)."""
     from lift.models.generate import repair_tail
 
     if not out_path.exists():
         return {}
     if not resume:
         raise FileExistsError(f"{out_path} exists; pass resume=True or move it aside")
-    repair_tail(out_path)
-    records = _read_judgements(out_path)
+    if repair:
+        repair_tail(out_path)
+    records = _read_judgements(out_path, as_repaired=not repair)
     others = sorted({r.judge for r in records} - {judge_id})
     if others:
         raise _mixed_judges(out_path, others, judge_id, _file_dtype(gens), restart if judge_only else None)
@@ -738,8 +795,10 @@ def _failed(r: JudgementRecord) -> bool:
     return bool(r.native.get("judge_failure"))
 
 
-def _stats_delta(before: Mapping[str, Any] | None, after: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """What this run added to a judge's cumulative counters (one judge object may judge many files)."""
+def stats_delta(before: Mapping[str, Any] | None, after: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """What this run added to a judge's cumulative counters (one judge object may judge many files, after a
+    bulk prefill): each numeric counter's increase, any other value as it is now; None for a judge without
+    counters."""
     if after is None:
         return None
     out: dict[str, Any] = {}
@@ -750,32 +809,35 @@ def _stats_delta(before: Mapping[str, Any] | None, after: Mapping[str, Any] | No
     return out
 
 
-def judge_file(generations_path: str | Path, *, judge: str | Judge = "primary", resume: bool = True,
-               lid: Any = None, sample: float | None = None, keys: Collection[str] | None = None,
-               out_path: str | Path | None = None, device: str | None = None, dtype: str | None = None,
-               prompts_by_pid: Mapping[str, str] | None = None, seed: int | None = None,
-               batch_size: int = 64) -> Path:
-    """Judge one generations file (one variant/set/lang/split) and return the judgements path.
+@dataclass(frozen=True)
+class _Plan:
+    """What ``judge_file`` judges in one cell, as ``_plan`` found it."""
 
-    ``judge`` is a role ("primary" | "second", built with ``make_judge(role, device=, dtype=)``) or a
-    Judge object. ``lid`` has ``top(text, k)`` (default ``lift.lang.LangID()``, built only if a
-    non-empty output needs it). Prompt texts come from ``prompts_by_pid`` or the prompt files, and
-    every generation's ``prompt_sha`` must match them. ``out_path`` defaults to
-    outputs/judgements/{judge.short}/{variant}/{set}_{lang}_{split}.jsonl. The manifest records the
-    counts (``selection.n_keys_not_in_file`` for ``keys=``, ``selection.n_pids_drawn`` for
-    ``sample=``) and the judge's cost counters, also when the run fails. The judgements file is
-    written only once something has been judged (an empty one is judged from the start), and is
-    extended only by the same judge on the same stack. Before anything is judged, a judge on local hardware
-    in another precision than the generations raises ``OtherPrecisionError``, checked before anything else
-    of the cell, so a cell of another precision is never offered a restart line, also when it is stale
-    too. A file another judge began raises ``MixedJudgesError``, and a stale cell ``StaleJudgementsError``.
-    """
-    from lift.manifest import finish_run, start_run
+    judge: Any                              # the Judge object (judge_file builds one from a role)
+    gens: list[GenerationRecord]
+    cell: tuple[str, str, str, str]
+    texts: dict[str, str]                   # pid -> native prompt text
+    selected: list[GenerationRecord]
+    selection: dict[str, Any]               # how they were selected, for the manifest
+    out_path: Path
+    existing: dict[str, JudgementRecord]    # key -> judgement already in out_path
+    todo: list[GenerationRecord]            # selected and not judged yet, by pid
+
+
+def _item(g: GenerationRecord, texts: Mapping[str, str]) -> JudgeItem:
+    """What the judge is sent for one generation: its key, native prompt text, output and language."""
+    return JudgeItem(g.key, texts[g.pid], g.output, g.lang)
+
+
+def _plan(generations_path: Path, judge: str | Judge, *, resume: bool, repair: bool, sample: float | None,
+          keys: Collection[str] | None, seed: int | None, out_path: str | Path | None, device: str | None,
+          dtype: str | None, prompts_by_pid: Mapping[str, str] | None) -> _Plan:
+    """judge_file's checks of one cell, in its order, and what it would judge: the one code path of
+    ``judge_file`` and ``pending_items``, so the two never differ. Raises what judge_file raises before it
+    judges anything (the rules are in its docstring). ``repair`` False (planning) leaves a judgements file
+    whose last line a kill cut short as it is and reads it as the repair would leave it."""
     from lift.models.generate import read_generations
 
-    generations_path = Path(generations_path)
-    if batch_size < 1:
-        raise ValueError("batch_size must be at least 1")
     gens = read_generations(generations_path)
     if not gens:
         raise ValueError(f"{generations_path} holds no generations: generate the cell before judging it "
@@ -799,12 +861,68 @@ def judge_file(generations_path: str | Path, *, judge: str | Judge = "primary", 
     role = _role_of(out_path, cell)
     rejudge = restart_command(*cell, judge=role, dtype=made) if role else None
     existing = _resume_state(out_path, judge.judge_id, gens, cell, resume=resume, judge_only=role is not None,
-                             restart=rejudge or _cell_restart(cell, generations_path, out_path, dtype=made))
+                             restart=rejudge or _cell_restart(cell, generations_path, out_path, dtype=made),
+                             repair=repair)
     todo = sorted((g for g in selected if g.key not in existing), key=lambda g: g.pid)
-    n_resumed = len(selected) - len(todo)
     if existing:
         _check_judge_stack(out_path, list(existing.values()), getattr(judge, "stack", None), len(todo),
                            restart=rejudge)
+    return _Plan(judge=judge, gens=gens, cell=cell, texts=texts, selected=selected, selection=selection,
+                 out_path=out_path, existing=existing, todo=todo)
+
+
+def pending_items(generations_path: str | Path, judge: Judge, *, sample: float | None = None,
+                  keys: Collection[str] | None = None, seed: int | None = None,
+                  prompts_by_pid: Mapping[str, str] | None = None) -> list[JudgeItem]:
+    """The items ``judge_file(generations_path, judge=judge, ...)`` with the same selection would send
+    ``judge`` now, in the order it sends them (by pid), into the judge's own judgements file (the default
+    ``out_path``, where lift judge writes). It runs judge_file's checks, selection and resume state through
+    the same code (``_plan``), so it raises what judge_file would raise before judging anything
+    (OtherPrecisionError, MixedJudgesError, StaleJudgementsError, ValueError, FileNotFoundError), and it
+    writes nothing: no judgement, no manifest, and a judgements file whose last line a kill cut short is
+    read as judge_file's repair will leave it, not repaired. ``judge`` is the Judge object: planning never
+    builds, and so never loads, a judge. lift judge hands a judge with a bulk API (``prefill``) every
+    cell's items at once, before judging cell by cell."""
+    if isinstance(judge, str):
+        raise TypeError(f"pending_items takes the Judge object (make_judge({judge!r})), not a role: planning "
+                        "never builds a judge")
+    plan = _plan(Path(generations_path), judge, resume=True, repair=False, sample=sample, keys=keys,
+                 seed=seed, out_path=None, device=None, dtype=None, prompts_by_pid=prompts_by_pid)
+    return [_item(g, plan.texts) for g in plan.todo]
+
+
+def judge_file(generations_path: str | Path, *, judge: str | Judge = "primary", resume: bool = True,
+               lid: Any = None, sample: float | None = None, keys: Collection[str] | None = None,
+               out_path: str | Path | None = None, device: str | None = None, dtype: str | None = None,
+               prompts_by_pid: Mapping[str, str] | None = None, seed: int | None = None,
+               batch_size: int = 64) -> Path:
+    """Judge one generations file (one variant/set/lang/split) and return the judgements path.
+
+    ``judge`` is a role ("primary" | "second", built with ``make_judge(role, device=, dtype=)``) or a
+    Judge object. ``lid`` has ``top(text, k)`` (default ``lift.lang.LangID()``, built only if a
+    non-empty output needs it). Prompt texts come from ``prompts_by_pid`` or the prompt files, and
+    every generation's ``prompt_sha`` must match them. ``out_path`` defaults to
+    outputs/judgements/{judge.short}/{variant}/{set}_{lang}_{split}.jsonl. The manifest records the
+    counts (``selection.n_keys_not_in_file`` for ``keys=``, ``selection.n_pids_drawn`` for
+    ``sample=``) and the judge's cost counters, also when the run fails. The judgements file is
+    written only once something has been judged (an empty one is judged from the start), and is
+    extended only by the same judge on the same stack. Before anything is judged, a judge on local hardware
+    in another precision than the generations raises ``OtherPrecisionError``, checked before anything else
+    of the cell, so a cell of another precision is never offered a restart line, also when it is stale
+    too. A file another judge began raises ``MixedJudgesError``, and a stale cell ``StaleJudgementsError``.
+    ``pending_items`` gives the items this sends, without judging them.
+    """
+    from lift.manifest import finish_run, start_run
+
+    generations_path = Path(generations_path)
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    plan = _plan(generations_path, judge, resume=resume, repair=True, sample=sample, keys=keys, seed=seed,
+                 out_path=out_path, device=device, dtype=dtype, prompts_by_pid=prompts_by_pid)
+    judge, gens, texts, selected, selection = plan.judge, plan.gens, plan.texts, plan.selected, plan.selection
+    out_path, existing, todo = plan.out_path, plan.existing, plan.todo
+    variant, set_name, lang, split = plan.cell
+    n_resumed = len(selected) - len(todo)
 
     judge_device, judge_dtype = getattr(judge, "device", None), getattr(judge, "dtype", None)
     stats_before = getattr(judge, "stats", None)
@@ -833,7 +951,7 @@ def judge_file(generations_path: str | Path, *, judge: str | Judge = "primary", 
                 "label_counts": dict(sorted(Counter(r.label for r in final).items())),
                 **({"label_loose_counts": dict(sorted(loose.items()))} if loose else {}),
                 "seconds": round(timing["seconds"], 3), "lid_seconds": round(timing["lid_seconds"], 3),
-                "judge_stats": _stats_delta(stats_before, getattr(judge, "stats", None)), **extra}
+                "judge_stats": stats_delta(stats_before, getattr(judge, "stats", None)), **extra}
 
     accept = config.get("languages.accept_labels")
     unclear = config.get("unclear")
@@ -847,7 +965,7 @@ def judge_file(generations_path: str | Path, *, judge: str | Judge = "primary", 
             t0 = time.perf_counter()
             flags = [_flags(g, lid, accept, unclear) for g in chunk]
             t1 = time.perf_counter()
-            outcomes = judge.judge([JudgeItem(g.key, texts[g.pid], g.output, g.lang) for g in chunk])
+            outcomes = judge.judge([_item(g, texts) for g in chunk])
             t2 = time.perf_counter()
             _check_count(outcomes, chunk, f"judge {judge.judge_id}")
             records = [_judgement(g, f, o, judge.judge_id)
