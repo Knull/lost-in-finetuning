@@ -42,8 +42,12 @@ sweep, apply the selection rule (overall and per repair family), and hand over t
      weights.
    - A CAST wrapper's `generate` must pass `logits_processor` (with every other keyword) on to
      the model's `generate`. The harness's non-finite watch (R1-25) refuses a wrapper that drops
-     it. A wrapper that decodes the batch in pieces is accepted, but then a NaN in any piece
-     refuses the whole batch.
+     it. A wrapper that decodes the batch in pieces is accepted when it passes `logits_processor`
+     on to every piece and the pieces hold each row once (their batch sizes must add up to the
+     batch's), but then a NaN in any piece refuses the whole batch. A steered re-run of the rows
+     the gate fired on, after a decode of the whole batch, is refused when it passes the processor
+     on and goes unchecked when it does not (the watch never sees it): decode the gated rows and
+     the others as separate pieces instead.
    - ReSta depends on Base's weights, so Base's revision must reach the key (R1-04). The resta
      builder refuses a `models.base.revision` that is not a 40-hex sha (the `require_pinned` rule),
      and records that sha in the spec it builds (for example `artifacts.base`) and in the registry

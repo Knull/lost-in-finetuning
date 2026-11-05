@@ -27,8 +27,9 @@ config, generation_config and the stop set from ``hf_model`` and calls ``model.g
 the ``logits_processor`` it is handed on to the model's own generate, the check that decoding stays finite
 (lift.models.generate._NonFiniteWatch): a wrapper that never calls it is refused, as is one that returns
 another number of sequences than the batch has rows. It may decode the batch in pieces (CAST's per-prompt
-gate): the check then cannot tell the rows apart, so a NaN or +inf score in any piece marks every row, and
-generate refuses that batch whole.
+gate), passing the processor on to every piece, the pieces holding each row once: pieces whose batch sizes
+do not add up to the batch's rows are refused. The check then cannot tell the rows apart, so a NaN or +inf
+score in any piece marks every row, and generate refuses that batch whole.
 """
 
 from __future__ import annotations
