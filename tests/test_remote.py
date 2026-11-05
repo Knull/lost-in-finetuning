@@ -821,6 +821,46 @@ def test_the_runners_agree_on_which_commands_exit_3_and_go_on(job):
     assert named in row.lower()
 
 
+# The lines a T4 runs with --dtype fp16, as kaggle/README.md's "fp16 everywhere" bullet names them.
+T4_FP16 = ("generate", "judge", "run-dev", "train", "utility --generate-only", "belebele", "heldout-loss")
+# A command in backticks, with or without "lift" ("`lift utility --generate-only`", "`run-dev`"); not a flag.
+LIFT_COMMAND = re.compile(r"`(?:lift )?([a-z][a-z-]*(?: --[a-z-]+)*)`")
+
+
+def sentences(text: str) -> list[str]:
+    return re.split(r"(?<=[.!?])\s+", " ".join(text.split()))
+
+
+def kaggle_about() -> str:
+    """The first (markdown) cell of kaggle/runner.ipynb, which a Kaggle user reads while filling JOB."""
+    cells = json.loads((REPO_ROOT / "kaggle" / "runner.ipynb").read_text(encoding="utf-8"))["cells"]
+    (source,) = ["".join(c["source"]) for c in cells if c.get("id") == "about"]
+    return source
+
+
+# Review C14: after P03, CLAUDE.md (the brief every session reads) still named only generate, judge and
+# run-dev as the commands whose exit 3 the runners go past, and the Kaggle runner's T4 rule gave
+# --dtype fp16 to their lines alone, while kaggle/README.md gives it to train, utility --generate-only,
+# belebele and heldout-loss lines too: a T4 user following the notebook lost the job to a refused line.
+def test_the_docs_name_every_command_that_exits_3_and_every_t4_model_line(job):
+    brief = sentences((REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
+    (threes,) = [s for s in brief if re.search(r"\bexit 3\b", s) and "runners go on" in s]
+    for cmd in job.PARTIAL_COMMANDS:
+        assert re.search(rf"`(lift )?{cmd}`", threes), cmd
+    assert "`lift train` and `lift gate` never exit 3" in threes
+    (t4,) = [s for s in brief if "T4" in s and "`--dtype fp16`" in s]
+    for cmd in T4_FP16:
+        assert re.search(rf"`(lift )?{cmd}`", t4), cmd
+    readme = (REPO_ROOT / "kaggle" / "README.md").read_text(encoding="utf-8")
+    bullet = " ".join(readme.split("**fp16 everywhere.**", 1)[1].split("\n- **", 1)[0].split())
+    rule = " ".join(kaggle_about().split("**The T4 rule.**", 1)[1].split("\n\n", 1)[0].split())
+    assert set(T4_FP16) <= set(LIFT_COMMAND.findall(bullet)) <= set(LIFT_COMMAND.findall(rule))
+    assert "`--dtype fp16`" in rule
+    (train,) = re.findall(r"`lift train` \(([^)]*)\)", bullet)
+    for flags in re.findall(r"`(--[^`]+)`", train):  # the T4's own training flags
+        assert flags in rule, flags
+
+
 @pytest.mark.parametrize("line", P03_PARTIAL)
 def test_a_p03_line_that_exits_3_is_reported_and_the_next_lines_run(job, tmp_path, line):
     root = tmp_path / "content"
