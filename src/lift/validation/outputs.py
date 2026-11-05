@@ -113,28 +113,33 @@ def read_records(path: Path) -> Iterator[tuple[int, dict]]:
     """(line number, row) for each record of a JSONL file.
 
     Lines end at a newline only, as lift.io reads them (stable_json leaves U+2028 and friends
-    unescaped inside strings, so str.splitlines would cut records apart). A last line without its
-    newline that does not parse was cut short by a killed append and is skipped, as
-    lift.io.existing_keys and the harness's repair do (its pid then counts as missing). Any other
-    unreadable line is a ValidateError naming the file and line, never a traceback.
+    unescaped inside strings, so str.splitlines would cut records apart). The file is split as bytes
+    and each line decoded on its own (a newline byte never occurs inside a UTF-8 character). A last
+    line without its newline that does not decode or parse was cut short by a killed append, also one
+    cut inside a multi-byte character, and is skipped, as lift.io.existing_keys and the harness's
+    repair do (its pid then counts as missing). Any other unreadable line is a ValidateError naming the
+    file and line, never a traceback.
     """
-    try:
-        text = Path(path).read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        raise ValidateError(f"{path}: not a UTF-8 JSONL file") from None
-    complete = text.endswith(_NL)
-    lines = text.split(_NL)
+    data = Path(path).read_bytes()
+    complete = data.endswith(_NL.encode())
+    lines = data.split(_NL.encode())
     if complete:
         lines.pop()                                      # the empty piece after the final newline
-    for lineno, line in enumerate(lines, 1):
-        line = line.removesuffix(_CR)
+    for lineno, raw in enumerate(lines, 1):
+        cut = lineno == len(lines) and not complete      # a last line a killed append may have cut short
+        try:
+            line = raw.decode("utf-8").removesuffix(_CR)
+        except UnicodeDecodeError:
+            if cut:
+                return
+            raise ValidateError(f"{path}:{lineno}: not UTF-8") from None
         if not line.strip():
             continue
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
-            if lineno == len(lines) and not complete:
-                return                                   # cut short by a killed append
+            if cut:
+                return
             raise ValidateError(f"{path}:{lineno}: not a JSON record") from None
         if not isinstance(row, dict):
             raise ValidateError(f"{path}:{lineno}: not a JSON object")

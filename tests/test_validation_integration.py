@@ -405,6 +405,48 @@ def test_records_are_split_at_newlines_only_and_a_cut_last_line_is_told_by_its_m
         list(outputs.read_records(path))                         # a damaged line that is not cut short
 
 
+HINDI_WORD = "उत्तर"          # a neutral Devanagari word ("answer"): 3 bytes a character in UTF-8
+
+
+def test_a_line_cut_inside_a_character_is_skipped_only_as_the_last_line_without_its_newline(tmp_path):
+    # R2-28: the lines are split as bytes and each is decoded on its own, so a last line cut inside a
+    # multi-byte character is a cut line like any other, not a whole file that is not UTF-8.
+    path = tmp_path / "x.jsonl"
+    write_jsonl(path, [{"key": "a", "output": HINDI_WORD}, {"key": "b", "output": HINDI_WORD}])
+    data = path.read_bytes()
+    cut = data.rindex(HINDI_WORD.encode("utf-8")) + 1             # one byte into the last line's word
+    path.write_bytes(data[:cut])
+    assert [r["key"] for _, r in outputs.read_records(path)] == ["a"]
+    path.write_bytes(data[:cut] + b"\n")                          # the same line with its newline: damaged
+    with pytest.raises(ValidateError, match=r"x\.jsonl:2: not UTF-8"):
+        list(outputs.read_records(path))
+    first = data.index(HINDI_WORD.encode("utf-8")) + 1
+    path.write_bytes(data[:first] + data[first + 1:])             # a broken character on the first line
+    with pytest.raises(ValidateError, match=r"x\.jsonl:1: not UTF-8"):
+        list(outputs.read_records(path))
+
+
+def test_a_generations_file_cut_inside_a_hindi_character_counts_its_pid_as_missing(tmp_path, monkeypatch):
+    # R2-28: a killed append most likely cuts a Hindi, Chinese or Thai record inside its output, so inside
+    # a character. The file is read as any file whose last line was cut: the pid counts as missing (an
+    # unfinished run), and second-judge-sample lists the file as incomplete instead of stopping on it.
+    world = world_for(tmp_path, monkeypatch, judgements=False)
+    cell = ("stock", "harmful", "hi", "dev")
+    recs = world.generations[cell]
+    last = recs[-1].model_copy(update={"output": f"{HINDI_WORD} {recs[-1].output}"})
+    path = write_generations(world, *cell, [*recs[:-1], last])
+    data = path.read_bytes()
+    start = data.rindex(b"\n", 0, len(data) - 1) + 1              # where the last record begins
+    path.write_bytes(data[: data.index(HINDI_WORD.encode("utf-8"), start) + 1])
+    with pytest.raises(UnicodeDecodeError):
+        path.read_bytes().decode("utf-8")
+    pool = load_pool(*cell, Prompts())
+    assert [g.pid for g in pool.records] == sorted(g.pid for g in recs[:-1])
+    assert pool.missing == [last.pid] and "unfinished" in pool.problem()
+    doc = second_judge_sample(require_validated=False)
+    assert doc["incomplete_files"] == [f"stock/{path.name}"]
+
+
 def test_the_fallback_judge_never_switches_and_its_decision_is_robust(tmp_path, monkeypatch):
     world = world_for(tmp_path, monkeypatch, judgements=False)
     make_sheets(1)
