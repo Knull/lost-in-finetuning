@@ -18,7 +18,9 @@
   back as "?" (Excel's plain CSV) is a warning of its own. A label column that comes back in
   alphabetical order, either way round, while the ids are still in the order the sheet was made
   was sorted on its own: its labels no longer sit next to their items, which the text check
-  cannot see, so the import stops too. A whole sheet sorted by label, rows kept together, is fine.
+  cannot see, so the import stops too. With the ids in item_id order instead (either way round:
+  the sheet sorted by item_id, then the label column alone) it is a warning. A whole sheet sorted
+  by label, rows kept together, leaves the ids in neither order and is fine.
 - Which sheet a file belongs to (the main one or the Hindi overlap) follows from its ids.
 - Re-importing a sheet replaces its labels. The import records which draw of the round it
   belongs to, so a later re-draw cannot be scored against old labels.
@@ -99,6 +101,12 @@ def _in_order_made(ids: list[str], items: dict[str, dict], sheet: str) -> bool:
     made = {i: n for n, i in enumerate(i for i, it in items.items() if it["sheet"] == sheet)}
     rows = [made[i] for i in ids]
     return rows == sorted(rows)
+
+
+def _in_id_order(ids: list[str]) -> bool:
+    """Whether a file's ``ids`` (in row order) are in item_id order, either way round: the sheet was sorted
+    by its id column, rows kept together (a sheet is made in a seeded random order, never this one)."""
+    return ids in (sorted(ids), sorted(ids, reverse=True))
 
 
 def parse_filled(file: Path, items: dict[str, dict], *, value_column: str,
@@ -182,7 +190,8 @@ def parse_filled(file: Path, items: dict[str, dict], *, value_column: str,
     if not sheets_in_file:
         raise ValidateError(f"{file}: no item id of {what} in the file; is it the right sheet?")
     sheet = next(iter(sheets_in_file))
-    if _sorted_on_its_own(in_order) and _in_order_made(list(seen), items, sheet):
+    values_sorted = _sorted_on_its_own(in_order)
+    if values_sorted and _in_order_made(list(seen), items, sheet):
         raise ValidateError(f"{file}: the {value_column} column is in alphabetical order while the item ids "
                             "are still in the order the sheet was made, so it was sorted on its own and its "
                             "values no longer sit next to their items. Nothing imported: undo the sort (or "
@@ -201,6 +210,10 @@ def parse_filled(file: Path, items: dict[str, dict], *, value_column: str,
     if changed:
         warnings.append(f"{len(changed)} row(s) show a prompt or response that differs from the sheet "
                         f"as made (an edited cell?): {', '.join(sorted(changed)[:MAX_LISTED])}")
+    if values_sorted and _in_id_order(list(seen)):
+        warnings.append(f"the {value_column} column is in alphabetical order and the item ids in item_id "
+                        f"order: if the sheet was sorted by item_id and then the {value_column} column on "
+                        "its own, the values no longer sit next to their items. Check before scoring")
     if unlabelled:
         warnings.append(f"{len(unlabelled)} row(s) have no {value_column} and no 'skipped' note "
                         f"(unfinished?): {', '.join(sorted(unlabelled)[:MAX_LISTED])}")
