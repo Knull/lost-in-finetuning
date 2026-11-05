@@ -557,6 +557,112 @@ def test_restart_retires_the_cells_auditkit_records(judge, caplog):
     assert len(list((output_dir() / ".aside").iterdir())) == 1
 
 
+AYA, IND = "adapter-aya-std-s1", "adapter-indicalign-std-s1"
+
+
+def utility_files(variant, split="dev", *, dtype=None):
+    """lift utility's files of ``variant``'s pair with stock on ``split`` (placeholders): a verdict file P04's
+    scan reads as one, the metrics, AuditKIT utility records of both judge dirs and both text policies, and
+    the answer check. Stock holds only its answer check. Returns {path: bytes}."""
+    from lift import audit, utility
+
+    verdict = {"pid": "utl-aya-00001", "variant": variant, "judge": "placeholder-judge", "order_ab": "A",
+               "order_ba": "B", "score": 1.0}
+    files = {utility.checked_path(variant, split, dtype=dtype): '{"kind": "utility_checked"}\n'}
+    if variant != "stock":
+        files[utility.verdicts_path("frontier", variant, split, dtype=dtype)] = json.dumps(verdict) + "\n"
+        for path in utility.metrics_paths(variant, split, dtype=dtype):
+            files[path] = '{"kind": "utility"}\n'
+        files[audit.utility_record_path("frontier", variant, split, dtype=dtype)] = '{"metadata": {}}\n'
+        files[audit.utility_record_path("fallback", variant, split, text="full", dtype=dtype)] = "{}\n"
+    for path, text in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return {path: path.read_bytes() for path in files}
+
+
+def retired_aside(files):
+    """Each of ``files`` ({path: bytes}) is empty and its bytes are under the one outputs/.aside/ stamp, a
+    verdict file's copy named *.jsonl.aside."""
+    stamp, = (output_dir() / ".aside").iterdir()
+    for path, data in files.items():
+        copy = stamp / path.relative_to(output_dir())
+        if path.suffix == ".jsonl":
+            copy = copy.with_name(copy.name + ".aside")
+        assert path.read_bytes() == b"" and copy.read_bytes() == data, path
+    return stamp
+
+
+@pytest.mark.parametrize("dtype", ["bf16", "fp16"])
+def test_restarting_stocks_utility_cell_retires_every_candidates_utility_files(dtype, caplog):
+    # C07: every candidate's verdicts, metrics, AuditKIT utility records and answer check were made from
+    # pairs with stock's answers, which the restart sets aside: they are retired with them (copied aside and
+    # left empty, never removed), in every precision, and the log names each candidate's lift utility line.
+    from lift import utility
+    from lift.validation.utility import find_verdict_files
+
+    caplog.set_level(logging.INFO, logger="lift.run")
+    write_generation("utility", "hi", "dev", dtype=dtype)                    # stock's answers
+    held = {**utility_files("stock"), **utility_files(AYA), **utility_files(IND, dtype="fp16")}
+    kept = {**utility_files(AYA, "final"), **utility_files("stock", "final")}
+    flag = "" if dtype == "bf16" else " --dtype fp16"
+    assert main([*RESTART, "--sets", "utility", "--langs", "hi", *flag.split()]) == 0
+    stamp = retired_aside(held)
+    assert generations_dir().joinpath("stock", "utility_hi_dev.jsonl").read_bytes() == b""
+    assert all(path.read_bytes() == data for path, data in kept.items())
+    assert find_verdict_files() == [utility.verdicts_path("frontier", AYA, "final")]     # no copy in .aside
+    assert caplog.text.count("lift utility's file retired") == len(held)
+    for candidate in (AYA, IND):
+        assert f"`lift utility --variant {candidate} --split dev{flag}`" in caplog.text
+    closing = f"1 file(s) emptied, 0 AuditKIT record(s) and {len(held)} of lift utility's files retired"
+    assert closing in caplog.text and str(stamp) in caplog.text
+    caplog.clear()
+    assert main([*RESTART, "--sets", "utility", "--langs", "hi", *flag.split()]) == 0      # nothing left
+    assert "lift utility's file retired" not in caplog.text
+    assert len(list((output_dir() / ".aside").iterdir())) == 1
+
+
+def test_restarting_a_candidates_utility_cell_retires_its_own_utility_files_only(monkeypatch, caplog):
+    from lift import utility
+    from lift.models import variants
+    from lift.schemas import VariantSpec
+
+    assert run_cmd.UTILITY_CELL == (utility.SET, utility.LANG)
+    monkeypatch.setattr(variants, "load_registry", lambda: {
+        "stock": VariantSpec(name="stock", method="stock"),
+        **{n: VariantSpec(name=n, method="adapter", adapter=n) for n in (AYA, IND)}})
+    caplog.set_level(logging.INFO, logger="lift.run")
+    write_generation("utility", "hi", "dev", variant=AYA)
+    mine = utility_files(AYA)
+    others = {**utility_files(IND), **utility_files("stock")}
+    argv = ["restart", "--variant", AYA, "--split", "dev", "--sets", "utility", "--langs", "hi"]
+    assert main([*argv, "--judge", "primary"]) == 0      # one judge's restart keeps the answers: files stay
+    assert all(path.read_bytes() == data for path, data in {**mine, **others}.items())
+    assert main(argv) == 0
+    retired_aside(mine)
+    assert all(path.read_bytes() == data for path, data in others.items())
+    assert f"`lift utility --variant {AYA} --split dev`" in caplog.text and IND not in caplog.text
+
+
+def test_restarting_stocks_utility_cell_with_no_candidate_names_any_candidates_line(caplog):
+    caplog.set_level(logging.INFO, logger="lift.run")
+    write_generation("utility", "hi", "dev")
+    assert main([*RESTART, "--sets", "utility", "--langs", "hi"]) == 0
+    assert ("filled again by `lift utility --variant <candidate> --split dev` (any candidate's line makes "
+            "stock's answers again)") in caplog.text
+    assert "lift run-dev" not in caplog.text                 # a utility cell's line is lift utility's
+
+
+def test_a_utility_restart_whose_answers_are_not_here_retires_nothing(caplog):
+    # Nothing was started over (lift restart runs right after lift sync pull: answers only the runs repo
+    # holds are left as they are there), so what was derived from them stays too.
+    caplog.set_level(logging.INFO, logger="lift.run")
+    held = {**utility_files("stock"), **utility_files(AYA)}
+    assert main([*RESTART, "--sets", "utility", "--langs", "hi"]) == 0
+    assert all(path.read_bytes() == data for path, data in held.items())
+    assert "utility_hi_dev.jsonl: not here, skipped" in caplog.text and not (output_dir() / ".aside").exists()
+
+
 def test_restart_refuses_a_cell_made_in_another_precision_unless_forced(caplog):
     # W3: a restart would discard a cell of another precision (the T4 backup's fp16 line over Colab's bf16
     # cell), and the next push would replace the runs repo's copy. Refused, with nothing moved for any listed
