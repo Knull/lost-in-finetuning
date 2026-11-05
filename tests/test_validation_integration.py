@@ -178,6 +178,27 @@ def test_gate1_is_written_whenever_round_1_is_scored_and_waits_for_unfinished_ro
     assert read_json(scoring.gate1_path())["status"] == "pass"
 
 
+def test_gate1_tells_when_a_hindi_output_it_scored_was_generated_again(tmp_path, monkeypatch):
+    # R2-12: an output regenerated with other text under its key leaves its item superseded and its
+    # judgements about another text. gate1.json was scored before that: gate1_stale says it no longer
+    # holds, and the next score counts the item as superseded.
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    import_truth(world)
+    scoring.score(1)
+    gate = read_json(scoring.gate1_path())
+    assert (gate["status"], gate["superseded"], scoring.gate1_stale(gate)) == ("pass", 0, [])
+    item = next(it for it in load_round(1)["items"] if it["lang"] == "hi")
+    cell = (item["variant"], item["set"], "hi", item["split"])
+    write_generations(world, *cell, [g.model_copy(update={"output": g.output + " (regenerated)"})
+                                     if g.key == item["key"] else g for g in world.generations[cell]])
+    stale = scoring.gate1_stale(gate)
+    assert len(stale) == 1 and "generated again" in stale[0]
+    scoring.score(1)
+    gate = read_json(scoring.gate1_path())
+    assert (gate["superseded"], scoring.gate1_stale(gate)) == (1, [])
+
+
 def test_redteam_keys_get_their_own_judge_command(tmp_path, monkeypatch):
     world = world_for(tmp_path, monkeypatch)
     red = write_prompts(world, "redteam", "hi", {"final": 30})
@@ -403,6 +424,48 @@ def test_records_are_split_at_newlines_only_and_a_cut_last_line_is_told_by_its_m
     path.write_text(raw.split("\n")[0] + "\n" + '{"key": "b"' + "\n", encoding="utf-8", newline="\n")
     with pytest.raises(ValidateError, match=r":2: not a JSON record"):
         list(outputs.read_records(path))                         # a damaged line that is not cut short
+
+
+HINDI_WORD = "उत्तर"          # a neutral Devanagari word ("answer"): 3 bytes a character in UTF-8
+
+
+def test_a_line_cut_inside_a_character_is_skipped_only_as_the_last_line_without_its_newline(tmp_path):
+    # R2-28: the lines are split as bytes and each is decoded on its own, so a last line cut inside a
+    # multi-byte character is a cut line like any other, not a whole file that is not UTF-8.
+    path = tmp_path / "x.jsonl"
+    write_jsonl(path, [{"key": "a", "output": HINDI_WORD}, {"key": "b", "output": HINDI_WORD}])
+    data = path.read_bytes()
+    cut = data.rindex(HINDI_WORD.encode("utf-8")) + 1             # one byte into the last line's word
+    path.write_bytes(data[:cut])
+    assert [r["key"] for _, r in outputs.read_records(path)] == ["a"]
+    path.write_bytes(data[:cut] + b"\n")                          # the same line with its newline: damaged
+    with pytest.raises(ValidateError, match=r"x\.jsonl:2: not UTF-8"):
+        list(outputs.read_records(path))
+    first = data.index(HINDI_WORD.encode("utf-8")) + 1
+    path.write_bytes(data[:first] + data[first + 1:])             # a broken character on the first line
+    with pytest.raises(ValidateError, match=r"x\.jsonl:1: not UTF-8"):
+        list(outputs.read_records(path))
+
+
+def test_a_generations_file_cut_inside_a_hindi_character_counts_its_pid_as_missing(tmp_path, monkeypatch):
+    # R2-28: a killed append most likely cuts a Hindi, Chinese or Thai record inside its output, so inside
+    # a character. The file is read as any file whose last line was cut: the pid counts as missing (an
+    # unfinished run), and second-judge-sample lists the file as incomplete instead of stopping on it.
+    world = world_for(tmp_path, monkeypatch, judgements=False)
+    cell = ("stock", "harmful", "hi", "dev")
+    recs = world.generations[cell]
+    last = recs[-1].model_copy(update={"output": f"{HINDI_WORD} {recs[-1].output}"})
+    path = write_generations(world, *cell, [*recs[:-1], last])
+    data = path.read_bytes()
+    start = data.rindex(b"\n", 0, len(data) - 1) + 1              # where the last record begins
+    path.write_bytes(data[: data.index(HINDI_WORD.encode("utf-8"), start) + 1])
+    with pytest.raises(UnicodeDecodeError):
+        path.read_bytes().decode("utf-8")
+    pool = load_pool(*cell, Prompts())
+    assert [g.pid for g in pool.records] == sorted(g.pid for g in recs[:-1])
+    assert pool.missing == [last.pid] and "unfinished" in pool.problem()
+    doc = second_judge_sample(require_validated=False)
+    assert doc["incomplete_files"] == [f"stock/{path.name}"]
 
 
 def test_the_fallback_judge_never_switches_and_its_decision_is_robust(tmp_path, monkeypatch):
@@ -786,6 +849,50 @@ def test_the_scores_stop_on_a_refused_prompt_file_and_count_only_a_missing_one(t
     assert out["judges"]["qwen3guard_strict"]["langs"]["hi"]["status"] == "ok"
     (prompts / "utility_hi.jsonl").unlink()
     assert score_utility()["n_judged"] == 10
+
+
+def test_the_scores_stop_on_a_refused_prompt_file_whose_generations_files_are_all_missing(tmp_path,
+                                                                                        monkeypatch):
+    # W3-05 follow-up: with no generations file of the set and language here, load_pool never reads the
+    # prompt file (a missing generations file proves nothing), so the scores' own read of it for each
+    # labelled item is the one that sees it is here and refused: that stops them too, never counted as a
+    # prompt file missing here.
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    import_truth(world)
+    assert scoring.score(1)["checks"]["prompt_file_missing"] == 0
+    swap_stamps(world.data / "prompts" / "harmful_hi.jsonl")
+    gone = sorted((world.outputs / "generations").rglob("harmful_hi_*.jsonl"))
+    assert len(gone) == 3                                # stock and the adapter on dev, stock on final
+    for path in gone:
+        path.unlink()
+    stamped = r"harmful_hi: 2 records of harmful_hi\.jsonl carry another split than the committed split"
+    with pytest.raises(outputs.PromptFileError, match=stamped):
+        scoring.score(1, write=False)
+    with pytest.raises(outputs.PromptFileError, match=stamped):
+        scoring.decide_primary_judge(dry_run=True)
+
+
+def test_the_utility_score_stops_on_a_refused_prompt_file_whose_generations_files_are_missing(tmp_path,
+                                                                                            monkeypatch):
+    # W3-05 follow-up: the utility score reads its prompt file itself too, so a refused one stops it even
+    # when neither utility generations file is here (load_pool then reads no prompt file), as it stops
+    # lift validate score.
+    world = world_for(tmp_path, monkeypatch, utility=True)
+    sheet = make_utility_sheet("adapter-aya-std-s1", n=10)
+    doc = read_json(world.validation / "keys" / "utility.json")
+    prefs = {it["item_id"]: it["candidate_is"] for it in doc["items"]}
+    import_preferences(fill_sheet(sheet, world.root / "u.csv", prefs, column="preference"))
+    write_verdicts(world, "adapter-aya-std-s1", {it["pid"]: 1.0 for it in doc["items"]})
+    gone = sorted((world.outputs / "generations").rglob("utility_hi_*.jsonl"))
+    assert len(gone) == 2                                # stock and the candidate
+    for path in gone:
+        path.unlink()
+    assert score_utility(write=False)["n_judged"] == 10            # missing generations prove nothing
+    swap_stamps(world.data / "prompts" / "utility_hi.jsonl")
+    stamped = r"utility_hi: 2 records of utility_hi\.jsonl carry another split"
+    with pytest.raises(outputs.PromptFileError, match=stamped):
+        score_utility(write=False)
 
 
 def test_a_cell_short_of_its_frozen_split_is_still_read_for_the_sheets(tmp_path, monkeypatch):

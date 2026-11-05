@@ -13,8 +13,9 @@ answer and the candidate adapter's answer to the same instruction.
   score and counted, since verdicts are joined by pid and would be about answers the reader never
   saw. A generations or prompt file that is missing here proves nothing, but a prompt file that is
   here and refused (lift.validation.outputs.PromptFileError: a stale or foreign copy) stops the
-  score. A sheet drawn in another precision than ``generation.dtype`` (``--dtype``) is drawn and
-  scored only while Gate 0's licence covers both cells (lift.validation.outputs.check_licence).
+  score, whether or not the generations files are here. A sheet drawn in another precision than
+  ``generation.dtype`` (``--dtype``) is drawn and scored only while Gate 0's licence covers both
+  cells (lift.validation.outputs.check_licence).
 - The import records its warnings with the preferences (labels/utility_hi.meta.json), and the
   score reports them (``import_warnings``), so a sheet imported with one is never scored as if
   clean (lift.validation.score.import_warnings).
@@ -367,6 +368,8 @@ def score_utility(*, verdict_files: list[Path] | None = None, judge_id: str | No
     # A verdict is joined by pid alone, so a pair whose outputs were remade after the sheet was made
     # would be scored against answers the reader never saw: leave it out and count it.
     prompts, current = Prompts(), {}
+    if prompts.exists("utility", "hi"):
+        prompts.get("utility", "hi")       # here but refused: a PromptFileError, generations here or not
     dtype = doc.get("dtype") or str(config.get("generation.dtype"))
     for name in ("stock", doc["candidate"]):
         cell = (name, "utility", "hi", doc["split"])

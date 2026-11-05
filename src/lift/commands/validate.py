@@ -10,7 +10,8 @@
     lift validate utility-score
 
 Outputs: validation/{sheets,keys,labels}/ (private), outputs/metrics/validation/ and
-outputs/metrics/judge_decision.json. P03's Gate 1 reads outputs/metrics/validation/gate1.json.
+outputs/metrics/judge_decision.json. P03's Gate 1 reads outputs/metrics/validation/gate1.json, and
+lift.validation.score.gate1_stale says whether it still holds for the files here.
 Nothing here prints prompt or response text: only paths, ids and counts.
 """
 
