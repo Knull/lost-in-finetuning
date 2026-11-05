@@ -6,15 +6,17 @@ After the freeze it only takes bug fixes, and each fix means re-running anything
 Behaviour:
 - Greedy, ``max_new_tokens`` 256, default chat template with the preamble, left padding. The model's
   own generation_config.json (sampling defaults, repetition penalty, ...) is replaced by an explicit
-  greedy config, so nothing leaks in from the checkpoint.
+  greedy config, so nothing leaks in from the checkpoint. configs/project.yaml's generation.do_sample,
+  template and padding_side are locks, not settings: ``gen_config`` refuses any other value.
 - Stops on the model's end-of-turn tokens (``lift.models.load.stop_token_ids``). ``hit_cap`` means no
   end-of-turn token within ``max_new_tokens``. ``n_new_tokens`` counts the content tokens of the
   output (special tokens and the stop token excluded), the count the "fewer than 5 new tokens"
   unclear rule reads; ``meta.n_generated`` counts every generated token for throughput.
 - A prompt that would not fit in the context with ``max_new_tokens`` more tokens raises; nothing is
   ever truncated.
-- Batches sorted by prompt length (longest first); batch size chosen from free memory unless given.
-  An out-of-memory error halves the batch and retries it (never skips a prompt).
+- Batches sorted by prompt length (longest first); batch size chosen from free memory unless given (a
+  given one must be at least 1). An out-of-memory error halves the batch and retries it (never skips a
+  prompt).
 - Decoding must stay finite. A row whose scores hold a NaN or +inf before its end-of-turn token (an
   fp16 overflow, typically) decodes garbage from then on (argmax over NaN picks id 0), which would be
   written as its output, often a cap hit cut short. So its batch raises NonFiniteOutputError before
@@ -182,12 +184,13 @@ def restart_cell(variant: str, set_name: str, lang: str, split: str, *, aside: P
 
     Emptied, never removed: sync never deletes, so a removed file comes back from the runs repo at the
     next pull, while an emptied one is a local edit the next push sends (an update), replacing the runs
-    repo's copy when that copy has not changed since this machine's last sync; otherwise the push reports
-    an emptied-file conflict (a merge would fill it again), which ``lift sync push --force`` settles by
-    completing the restart (R1-08). generate and judge_file then fill it again (an empty file has no
-    stack). An empty record is retired (readers skip it): a record must not outlive the outputs it
-    describes, and the record of another precision's cell is never rewritten. The copy is written before
-    the file is emptied, so a kill in between loses nothing."""
+    repo's copies unless the cell's files there changed since this machine's last sync, when lift sync
+    names what settles it (R1-08, decisions item 63; sync never merges into an emptied file, which a merge
+    would fill again): ``lift sync push --force`` when only the files the restart emptied changed there,
+    else ``lift sync pull``, then ``lift sync push``. generate and judge_file then fill it again (an empty
+    file has no stack). An empty record is retired (readers skip it): a record must not outlive the
+    outputs it describes, and the record of another precision's cell is never rewritten. The copy is
+    written before the file is emptied, so a kill in between loses nothing."""
     if judge_dir is not None:
         files = [judgements_dir() / judge_dir / variant / f"{set_name}_{lang}_{split}.jsonl"]
     else:
@@ -242,18 +245,30 @@ def _start_over(restart: str | None, out_path: Path) -> str:
         return f"move {out_path} aside (no lift restart line covers that file)"
     return (f"run `{restart}` as a job line right after `lift sync pull`, followed by the line that failed "
             "(once: it sets the cell's files aside and leaves them empty, so the next push replaces the runs "
-            "repo's copies, unless one changed since this machine's last sync: then that push reports an "
-            "emptied-file conflict, which `lift sync push --force` settles)")
+            "repo's copies unless the cell's files there changed since this machine's last sync, when lift "
+            "sync names what settles it: `lift sync push --force` when only the files the restart emptied "
+            "changed there, else `lift sync pull`, then `lift sync push`)")
 
 
 def gen_config(variant: LoadedVariant, *, max_new_tokens: int | None = None) -> dict[str, Any]:
     """Everything about decoding that can change an output. It goes into every cache key, so bf16
-    and fp16 outputs (or a different stop set or cap) never share a key."""
+    and fp16 outputs (or a different stop set or cap) never share a key. configs/project.yaml's
+    generation.do_sample, template and padding_side are locks, checked here: the harness implements only
+    their locked values (greedy; the tokenizer's default chat template, its preamble included; left
+    padding), so another value is refused rather than keyed (template) or ignored (padding_side, which no
+    key holds)."""
     from lift.models.load import stop_token_ids
 
     gen = config.get("generation")
     if gen["do_sample"] is not False:
         raise ValueError("generation.do_sample must be false: decoding is greedy (locked Oct 28)")
+    if gen.get("template") != "default":
+        raise ValueError(f"generation.template must be 'default', not {gen.get('template')!r}: chat_text "
+                         "renders only the tokenizer's default chat template, its preamble included (README "
+                         "Generation, locked Oct 28)")
+    if gen.get("padding_side") != "left":
+        raise ValueError(f"generation.padding_side must be 'left', not {gen.get('padding_side')!r}: "
+                         "greedy_batch left-pads every batch (locked Oct 28)")
     return {
         "harness": HARNESS_VERSION,
         "do_sample": False,
@@ -450,17 +465,20 @@ class _NonFiniteWatch:
 
     def rows(self) -> list[bool]:
         """Whether each row was marked. Raises when generate never called the processor (then nothing
-        was checked), or decoded the batch in pieces whose batch sizes do not add up to its rows (then a
-        piece may have been decoded without it)."""
+        was checked), or decoded the batch in pieces whose batch sizes do not add up to its rows: fewer, and
+        a row went unchecked; more, and a row was decoded more than once."""
         if self.marked is None:
             raise RuntimeError("model.generate never called the logits processor that checks decoding stays "
                                "finite: a wrapper must pass logits_processor on to the model's generate")
-        if any(n != self.n_rows for n in self.decodes) and sum(self.decodes) != self.n_rows:
+        total = sum(self.decodes)
+        if any(n != self.n_rows for n in self.decodes) and total != self.n_rows:
+            fewer = total < self.n_rows
             raise RuntimeError(
-                f"model.generate decoded the batch of {self.n_rows} rows in pieces, and the batch sizes of "
-                "the inner decodes that called the logits processor checking decoding stays finite, "
-                f"{self.decodes}, add up to {sum(self.decodes)}, not {self.n_rows}: a wrapper must pass "
-                "logits_processor on to every inner decode, its pieces holding each row once")
+                f"model.generate decoded the batch of {self.n_rows} rows in pieces: the inner decodes that "
+                f"called the logits processor checking decoding stays finite held {self.decodes} rows, "
+                f"{total} in all, {'fewer' if fewer else 'more'} than the batch's {self.n_rows}, so "
+                f"{'a row went unchecked' if fewer else 'a row was decoded more than once'}. A wrapper must "
+                "decode each row exactly once, in one inner decode that passes logits_processor on")
         return [bool(x) for x in self.marked.tolist()]
 
 
@@ -616,6 +634,8 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
     from lift.manifest import finish_run, start_run
     from lift.models.load import check_neutral_generation_config, encode_chat
 
+    if batch_size is not None and batch_size < 1:   # a negative one would decode empty batches for ever
+        raise ValueError(f"batch_size must be at least 1, got {batch_size}")
     out_path = Path(out_path)
     check_neutral_generation_config(variant.hf_model)
     gen_cfg = gen_config(variant, max_new_tokens=max_new_tokens)
