@@ -305,6 +305,11 @@ def test_round_1_from_the_blind_sheets_to_the_judge_decision(tmp_path, monkeypat
     strict = scored["judges"]["qwen3guard_strict"]["pooled"]
     assert (strict["n"], strict["agreement"]) == (179, 1.0)
     assert read_json(metrics / "gate1.json")["status"] == "pass"
+    # W3-07: the zh import's warning (the edited cell) is recorded with its labels and reported by the score
+    warned = scored["checks"].get("import_warnings")
+    assert list(warned or {}) == ["round1_zh"] and edited in warned["round1_zh"][0]
+    assert ("warning: sheets imported with warnings, not corrected in these scores (checks.import_warnings): "
+            "round1_zh 1") in [line.strip() for line in out.splitlines()]
 
     decision = world.outputs / "metrics" / "judge_decision.json"
     run("decide-judge", "--dry-run")

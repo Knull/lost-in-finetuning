@@ -48,6 +48,7 @@ from lift.validation.utility import (
     score_utility,
     utility_keys_path,
     utility_labels_path,
+    utility_meta_path,
     utility_sheet_path,
 )
 
@@ -670,6 +671,25 @@ def test_score_utility_counts_pairs_without_a_verdict(tmp_path, monkeypatch):
     write_verdicts(world, CANDIDATE, {it["pid"]: 1.0 for it in items})
     out = score_utility()
     assert (out["n_judged"], out["n_missing"], out["complete"]) == (19, 0, True)
+
+
+def test_score_utility_reports_the_warnings_its_import_gave(tmp_path, monkeypatch, capsys):
+    # W3-07: the utility import records its warnings with the preferences (labels/utility_hi.meta.json),
+    # and the score reports them (utility.json import_warnings, a line in utility.md, the command's output)
+    world = utility_world(tmp_path, monkeypatch)
+    items = draw(20)
+    warned = answer(world, {it["item_id"]: "A" for it in items[1:]})["warnings"]     # one row left empty
+    assert [w for w in warned if items[0]["item_id"] in w]
+    assert json.loads(utility_meta_path().read_text(encoding="utf-8")).get("warnings") == warned
+    write_verdicts(world, CANDIDATE, {it["pid"]: 1.0 for it in items})
+    assert main(["validate", "utility-score"]) == 0
+    printed = capsys.readouterr().out
+    out = json.loads((world.outputs / "metrics" / "validation" / "utility.json").read_text(encoding="utf-8"))
+    assert out.get("import_warnings") == warned
+    md = (world.outputs / "metrics" / "validation" / "utility.md").read_text(encoding="utf-8")
+    assert [ln for ln in md.splitlines() if ln.startswith("Imported with warnings") and warned[0] in ln]
+    warning = "the sheet was imported with warnings, not corrected in this score (import_warnings): 1"
+    assert f"warning: {warning}" in [line.strip() for line in printed.splitlines()]
 
 
 def test_cli_utility_round_trip_prints_no_sheet_text(tmp_path, monkeypatch, capsys):

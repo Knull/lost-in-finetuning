@@ -804,6 +804,40 @@ def test_labels_that_do_not_belong_to_this_draw_are_refused(round1, tamper):
         score(1)
 
 
+def test_a_sheet_imported_with_warnings_is_never_scored_as_if_clean(round1):
+    # W3-07: an import's warnings are recorded with its labels (labels/{sheet}.meta.json) and every score
+    # reports them by sheet (checks.import_warnings, and a line in round{N}.md). Here the reader sorted the
+    # zh sheet by item_id, then its label column alone: imported with a warning, never scored as if clean.
+    world, doc = round1
+    write_judgements(world)
+    import_sheets(world, doc, truth_of, sheets={"round1_hi", "round1_es", "round1_en"})
+    rows = read_csv(world.validation / "sheets" / doc["sheets"]["round1_zh"]["file"])
+    col_id, col_label = rows[1].index("item_id"), rows[1].index("label")
+    key = {it["item_id"]: it["key"] for it in doc["items"]}
+    by_id = sorted(rows[2:], key=lambda row: row[col_id])
+    labels = sorted(truth(key[row[col_id]]) for row in by_id)
+    filled = world.root / "filled_round1_zh.csv"
+    with open(filled, "w", encoding="utf-8-sig", newline="") as f:
+        csv.writer(f, lineterminator="\n").writerows(
+            rows[:2] + [row[:col_label] + [label] + row[col_label + 1:]
+                        for row, label in zip(by_id, labels, strict=True)])
+    warned = import_labels(1, "zh", filled)["warnings"]
+    assert [w for w in warned if "alphabetical order" in w]
+    out = score(1)
+    assert out["checks"].get("import_warnings") == {"round1_zh": warned}
+    md = (world.outputs / "metrics" / "validation" / "round1.md").read_text(encoding="utf-8")
+    shown = [line for line in md.splitlines() if line.startswith("Imported with warnings")]
+    assert len(shown) == 1 and all(f"round1_zh: {w}" in shown[0] or w in shown[0] for w in warned)
+    assert "round1_hi" not in shown[0]
+    # An import that recorded no warnings (made before they were recorded) is not taken for a clean one.
+    meta = read_json(world.validation / "labels" / "round1_hi.meta.json")
+    del meta["warnings"]
+    write_json(world.validation / "labels" / "round1_hi.meta.json", meta)
+    out = score(1, write=False)
+    assert sorted(out["checks"]["import_warnings"]) == ["round1_hi", "round1_zh"]
+    assert "import the filled sheet again" in out["checks"]["import_warnings"]["round1_hi"][0]
+
+
 def test_scoring_before_any_draw_is_an_error(tmp_path, monkeypatch):
     use_world(monkeypatch, World(root=tmp_path))
     with pytest.raises(ValidateError, match="no validation round"):
