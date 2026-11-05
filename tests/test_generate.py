@@ -51,6 +51,26 @@ def manual_greedy(model, ids, stop, cap):
     return out, False
 
 
+def step_scores(variant, rows):
+    """Per-step scores (rows x steps x vocab) of greedy_batch's left-padded decode of ``rows`` (token id
+    lists), from a fresh copy of the harness's greedy config that also returns them."""
+    tok = variant.tokenizer
+    stop = gen.gen_config(variant, max_new_tokens=CAP)["stop_ids"]
+    cfg = gen.greedy_config(max_new_tokens=CAP, stop_ids=stop, pad_id=tok.pad_token_id)
+    cfg.output_scores = cfg.return_dict_in_generate = True
+    seen = []
+
+    class Recorder:                         # the model, keeping the scores its generate returns
+        def generate(self, **kw):
+            out = variant.model.generate(**kw)
+            seen.append(torch.stack(out.scores, dim=1))
+            return out
+
+    gen.greedy_batch(Recorder(), rows, pad_id=tok.pad_token_id, stop_ids=stop, max_new_tokens=CAP,
+                     device="cpu", gen_config_obj=cfg)
+    return seen[0]
+
+
 def test_batched_equals_unbatched(stock, tmp_path):
     one = run(stock, tmp_path / "a.jsonl", batch_size=1)
     four = run(stock, tmp_path / "b.jsonl", batch_size=4)
@@ -61,6 +81,22 @@ def test_batched_equals_unbatched(stock, tmp_path):
         assert one[pid].output == four[pid].output
         assert one[pid].n_new_tokens == four[pid].n_new_tokens
         assert one[pid].key == four[pid].key
+    # R1-24: equal tokens miss a padding leak that moves the scores without flipping an argmax within CAP
+    # tokens (the full-attention layer attending to the left padding moved them by ~3e-3). So each row's
+    # per-step scores in the batches generate() decodes (longest first, 4 then 2, left padded) must match
+    # its scores alone, over the steps it runs.
+    ids = {p.pid: encode_chat(stock.tokenizer, p.text) for p in prompts()}
+    order = [p.pid for p in sorted(prompts(), key=lambda p: (-len(ids[p.pid]), p.lang, p.pid))]
+    for at in range(0, len(order), 4):
+        batch = order[at: at + 4]
+        together = step_scores(stock, [ids[pid] for pid in batch])
+        for i, pid in enumerate(batch):
+            alone = step_scores(stock, [ids[pid]])[0]
+            steps = alone.shape[0]                  # to its stop token, or CAP
+            assert steps == one[pid].meta["n_generated"] and together.shape[1] >= steps
+            gap = float((together[i, :steps] - alone).abs().max())
+            assert torch.allclose(together[i, :steps], alone, atol=1e-4), \
+                f"{pid}: its scores in a batch of {len(batch)} are off its scores alone by {gap:.1e}"
 
 
 def test_harness_is_pure_greedy_despite_the_checkpoint_sampling_defaults(stock):
