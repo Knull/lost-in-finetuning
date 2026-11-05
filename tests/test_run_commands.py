@@ -972,10 +972,20 @@ def tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, sets, *, n=3):
 
 
 class Frontier:
-    """Stands in for the frontier second judge (an API judge: no stack, no precision)."""
+    """Stands in for the frontier second judge (an API judge: no stack, no precision), under the id the
+    pipeline gives the configured one: its rubric's version, OpenAI's default sampling, a stand-in API
+    version and the tag of the labelling rules (``second_judged`` reads its judgements back)."""
 
-    judge_id = "openai/placeholder-model@t0"
     short = "frontier"
+
+    @property
+    def judge_id(self):
+        from lift import config
+        from lift.judge.frontier import load_rubric
+        from lift.judge.labels import rules_tag
+
+        rubric = load_rubric(config.get("judges.safety_second.rubric")).version
+        return f"openai/placeholder-model@{rubric}+t0+max1024+apitest#{rules_tag()}"
 
     def judge(self, items):
         from lift.judge.pipeline import JudgeOutcome

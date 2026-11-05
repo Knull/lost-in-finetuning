@@ -12,7 +12,7 @@ from fakes import make_prompt  # noqa: E402
 
 from lift import audit  # noqa: E402
 from lift.io import read_jsonl, sha256_text, stable_json, write_jsonl  # noqa: E402
-from lift.judge import pipeline  # noqa: E402
+from lift.judge import labels, pipeline  # noqa: E402
 from lift.models.generate import generations_path  # noqa: E402
 from lift.paths import metrics_dir  # noqa: E402
 from lift.schemas import GenerationRecord, JudgementRecord, UnclearFlags  # noqa: E402
@@ -29,6 +29,7 @@ OUTPUTS = [f"placeholder output number {i}" for i in range(6)]
 WRONG_LANG = [False, False, False, False, True, False]
 HIT_CAP = [True, False, False, True, False, False]
 GUARD_ID = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
+RULES = labels.rules_tag()                        # the labelling rules of configs/project.yaml
 META = {"run_config": "rc0", "model_rev": "c" * 40, "harness": 1, "template": "9" * 16, "decoding": "d" * 16,
         "torch": "2.15.0", "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB"}
 GPU_CLASS = {"bf16": "8.0", "fp16": "7.5"}       # meta.gpu_capability: bf16 on the A100, fp16 on the T4
@@ -66,7 +67,7 @@ def write_cell(dtype: str = "bf16", judged_on: str | None = None) -> None:
                   **({"judge_failure": "unparseable"} if FAILED[i] else {})}
         judgements.append(JudgementRecord(
             key=key, variant=variant, pid=pid, lang=lang, set=set_name, split=split,
-            judge=f"{GUARD_ID}#{dtype}#strict", judge_label=LABELS[i], label=LABELS[i], flags=flags,
+            judge=f"{GUARD_ID}#{RULES}#{dtype}#strict", judge_label=LABELS[i], label=LABELS[i], flags=flags,
             native=native, output_sha=sha256_text(OUTPUTS[i])))
     write_jsonl(generations_path(*CELL), [g.model_dump() for g in reversed(gens)])
     write_jsonl(pipeline.judgements_path(pipeline.judge_dir("primary"), *CELL),
@@ -96,7 +97,7 @@ def test_headline_equals_lift_rates(cell):
     lift = result.metadata["lift"]
     assert (lift["n"], lift["n_harmful"], lift["n_unclear"]) == (6, 2, 2)
     assert (lift["variant"], lift["judge"], lift["judge_id"], lift["text"]) == (
-        "adapter", "primary", f"{GUARD_ID}#bf16#strict", "redacted")
+        "adapter", "primary", f"{GUARD_ID}#{RULES}#bf16#strict", "redacted")
     assert result.config.extra["lift"]["labels_sha256"] == lift["labels_sha256"]
 
 
@@ -160,7 +161,7 @@ def test_a_cell_in_another_precision_needs_gate0s_licence_and_gets_its_own_file(
     assert sorted(p.name for p in path.parent.iterdir()) == ["harmful_hi_dev-fp16.full.json",
                                                              "harmful_hi_dev-fp16.json"]
     lift = auditkit.RunResult.load(str(path)).metadata["lift"]
-    assert lift["provenance"]["dtype"] == ["fp16"] and lift["judge_id"] == f"{GUARD_ID}#fp16#strict"
+    assert lift["provenance"]["dtype"] == ["fp16"] and lift["judge_id"] == f"{GUARD_ID}#{RULES}#fp16#strict"
     write_cell()
     assert audit.record_safety(*CELL, dtype="bf16") == path.with_name("harmful_hi_dev.json")
 

@@ -18,7 +18,7 @@ from fakes import make_prompt
 
 from lift import config, gate0
 from lift.io import read_jsonl, sha256_text, stable_json, write_jsonl
-from lift.judge import pipeline
+from lift.judge import labels, pipeline
 from lift.judge.pipeline import JudgeItem, JudgeOutcome
 from lift.models.generate import OtherPrecisionError, StaleOutputError, generations_path, restart_command
 from lift.paths import manifests_dir, metrics_dir, validation_dir
@@ -27,8 +27,9 @@ from lift.schemas import GenerationRecord
 CELL = ("stock", "harmful", "en", "dev")
 LONG = "placeholder words that make a long enough answer"
 GUARD_ID = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
-PRIMARY = GUARD_ID + "#bf16#strict"             # the configured primary judge, in bf16 and strict mode
-SECOND = "openai/placeholder-model@safety_v1:0123456789ab+t0+max1024"
+RULES = labels.rules_tag()                      # the labelling rules of configs/project.yaml
+PRIMARY = f"{GUARD_ID}#{RULES}#bf16#strict"     # the configured primary judge, in bf16 and strict mode
+SECOND = f"openai/placeholder-model@safety_v1:0123456789ab+t0+max1024#{RULES}"
 REV = "c" * 40                                  # Global's commit sha, as generate records it in meta
 STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}      # an A100
 L4 = {**STACK, "gpu_capability": "8.9"}
@@ -319,13 +320,14 @@ def test_a_file_begun_by_another_judge_names_both_remedies(fake_prompt_files):
     err, line = refused.value, RESTART + " --judge primary"
     assert isinstance(err, StaleOutputError) and err.command == line
     message = str(err)
-    assert f"holds judgements by ['{GUARD_ID}#bf16#loose'], not {PRIMARY}; judges are never mixed" in message
+    loose = f"{GUARD_ID}#{RULES}#bf16#loose"
+    assert f"holds judgements by ['{loose}'], not {PRIMARY}; judges are never mixed" in message
     assert "finish the file with its own judge (its id names" in message
     assert f"run `{line}` as a job line right after `lift sync pull`" in message and LONG not in message
     assert strict.guard.stats["pairs"] == 0
 
     out = pipeline.judgements_path("qwen3guard", *CELL)         # judged by a T4 before judge_file checked it
-    write_jsonl(out, [{**r, "judge": GUARD_ID + "#fp16#strict"} for r in read_jsonl(out)])
+    write_jsonl(out, [{**r, "judge": f"{GUARD_ID}#{RULES}#fp16#strict"} for r in read_jsonl(out)])
     with pytest.raises(pipeline.MixedJudgesError) as refused:
         pipeline.judge_file(path, judge=guard(), lid=FakeLID())
     message = str(refused.value)
@@ -669,7 +671,7 @@ def test_load_labels_refuses_a_judge_in_another_precision(fake_prompt_files):
     assert config.get("generation.dtype") == "bf16"
     _, _, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4))
     out = pipeline.judge_file(path, judge=guard(), lid=FakeLID())
-    write_jsonl(out, [{**r, "judge": GUARD_ID + "#fp16#strict"} for r in read_jsonl(out)])   # a T4 judge
+    write_jsonl(out, [{**r, "judge": f"{GUARD_ID}#{RULES}#fp16#strict"} for r in read_jsonl(out)])  # a T4's
     with pytest.raises(ValueError, match="not the configured primary judge .*#bf16#strict"):
         pipeline.load_labels(*CELL)
 
@@ -1077,7 +1079,7 @@ def pair_cell(store, variant, *, sha="a" * 40, dtype="bf16", **meta):
     store[("harmful", "en")] = [make_prompt(p) for p in PAIR_PIDS]
     path = write_gens([gen(p, variant=variant, dtype=dtype, meta={**PAIR_META, **meta}) for p in PAIR_PIDS])
     pipeline.judgements_path("qwen3guard", variant, *CELL[1:]).unlink(missing_ok=True)
-    judge = primary_judge(f"Qwen/Qwen3Guard-Gen-4B@{sha}#{dtype}#strict")
+    judge = primary_judge(f"Qwen/Qwen3Guard-Gen-4B@{sha}#{RULES}#{dtype}#strict")
     pipeline.judge_file(path, judge=judge, lid=FakeLID())
 
 
@@ -1111,7 +1113,7 @@ def test_paired_labels_refuses_pairs_that_mix_judges_or_generations(fake_prompt_
     assert a == b == {p: "benign" for p in PAIR_PIDS}
     assert "gpu" in caplog.text and "transformers" in caplog.text and "torch" not in caplog.text
     prov = pipeline.provenance("adapter", *CELL[1:])
-    assert prov["judge_id"] == f"Qwen/Qwen3Guard-Gen-4B@{'a' * 40}#bf16#strict"
+    assert prov["judge_id"] == f"Qwen/Qwen3Guard-Gen-4B@{'a' * 40}#{RULES}#bf16#strict"
     assert (prov["dtype"], prov["run_config"], prov["gpu"], prov["harness"]) == (
         ["bf16"], ["rc"], ["NVIDIA L4"], ["1"])
     assert (prov["n_generations"], prov["n_judgements"]) == (4, 4)
@@ -1244,7 +1246,7 @@ def test_strict_and_loose_labels_never_share_a_file(fake_prompt_files):
     with pytest.raises(RuntimeError, match="session loss"):
         pipeline.judge_file(path, judge=strict, lid=FakeLID(), batch_size=2)       # 2 judged, then lost
     loose = guard(strict=False)
-    assert (strict.judge_id, loose.judge_id) == (PRIMARY, GUARD_ID + "#bf16#loose")
+    assert (strict.judge_id, loose.judge_id) == (PRIMARY, f"{GUARD_ID}#{RULES}#bf16#loose")
     with pytest.raises(pipeline.MixedJudgesError, match="never mixed"):
         pipeline.judge_file(path, judge=loose, lid=FakeLID(), batch_size=2)
 
@@ -1252,6 +1254,75 @@ def test_strict_and_loose_labels_never_share_a_file(fake_prompt_files):
     pipeline.judge_file(path, judge=loose, lid=FakeLID())                   # the whole cell, loose
     with pytest.raises(ValueError, match="not the configured primary judge .*#bf16#strict"):
         pipeline.load_labels(*CELL)                                           # the config says strict
+
+
+# Seven words the fake guard calls a refusal (Safe, Refusal: Yes): 7 new tokens clear unclear.min_new_tokens
+# 5, not 50, so the labelling rules alone decide between refusal and unclear.
+SHORT_SAFE = "SAFE placeholder words that make an answer"
+
+
+def short_safe(n):
+    return {f"prh-test-{i:04d}": SHORT_SAFE for i in range(n)}
+
+
+def change_the_rules(monkeypatch):
+    """A dated change to configs/project.yaml unclear.min_new_tokens (CLAUDE.md rule 5), after judging."""
+    assert config.get("unclear.min_new_tokens") == 5
+    monkeypatch.setitem(config.load("project")["unclear"], "min_new_tokens", 50)
+
+
+def test_a_cell_begun_under_other_labelling_rules_is_never_finished_or_reported(fake_prompt_files,
+                                                                                monkeypatch):
+    """R1-12: a final label is made once, at judge time, under the labelling rules then in force
+    (lift.judge.labels, unclear.*, languages.accept_labels, the GlotLID entry). A job judged half a cell, then
+    the rules changed: resuming would finish the file under the new rules (six identical outputs reported as
+    three refusals and three unclear). The resume is refused with the role's restart line (the generations
+    are kept), and the read does not report the half made under the old rules."""
+    pids, gens, path = setup_cell(fake_prompt_files, n=6, outputs=short_safe(6))
+    out = pipeline.judge_file(path, judge=guard(), lid=FakeLID(), keys=[g.key for g in gens[:3]])
+    assert pipeline.load_labels(*CELL, complete=False) == {p: "refusal" for p in pids[:3]}
+    change_the_rules(monkeypatch)
+    now = guard()
+    with pytest.raises(pipeline.MixedJudgesError) as refused:
+        pipeline.judge_file(path, judge=now, lid=FakeLID())
+    line, message = RESTART + " --judge primary", str(refused.value)
+    assert refused.value.command == line
+    assert f"run `{line}` as a job line right after `lift sync pull`" in message
+    assert "only in their labelling rules" in message and "its own judge" not in message
+    assert now.guard.stats["pairs"] == 0 and len(list(read_jsonl(out))) == 3
+    with pytest.raises(ValueError, match="not the configured primary judge"):
+        pipeline.load_labels(*CELL, complete=False)
+
+
+def test_a_cell_judged_under_other_labelling_rules_is_judged_again_not_reported(fake_prompt_files,
+                                                                                monkeypatch):
+    """R1-12: after a rules change, judging a complete cell again appended nothing and the read went on
+    reporting the old rules' labels as current. The re-run is refused, so is the read, and the cell judged
+    again from its restart (an empty judgements file) carries the labels of the rules now in force."""
+    pids, _, path = setup_cell(fake_prompt_files, n=4, outputs=short_safe(4))
+    out = pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    assert pipeline.load_labels(*CELL) == {p: "refusal" for p in pids}
+    change_the_rules(monkeypatch)
+    with pytest.raises(pipeline.MixedJudgesError, match="only in their labelling rules"):
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID())                 # the operator's re-run
+    with pytest.raises(ValueError, match="not the configured primary judge"):
+        pipeline.load_labels(*CELL)
+    out.write_bytes(b"")                                                        # what the restart leaves
+    pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    assert pipeline.load_labels(*CELL) == {p: "unclear" for p in pids}         # 7 new tokens, under 50
+
+
+def test_two_arms_labelled_under_different_labelling_rules_are_never_paired(fake_prompt_files, monkeypatch):
+    """R1-12: stock judged before a rules change, the adapter after it. Identical outputs and identical guard
+    calls are labelled refusal in one arm and unclear in the other, so the pair is refused."""
+    fake_prompt_files[("harmful", "en")] = [make_prompt(p) for p in PAIR_PIDS]
+    for variant in ("stock", "adapter"):
+        if variant == "adapter":
+            change_the_rules(monkeypatch)
+        path = write_gens([gen(p, variant=variant, output=SHORT_SAFE, meta=PAIR_META) for p in PAIR_PIDS])
+        pipeline.judge_file(path, judge=guard(), lid=FakeLID())
+    with pytest.raises(ValueError, match="stock/harmful_en_dev cannot be reported .*not the configured"):
+        pair()
 
 
 def test_qwen3guard_records_its_stack_in_every_judgement(fake_prompt_files, judge_stack):
@@ -1399,6 +1470,7 @@ def test_frontier_adapter_and_per_file_cost(fake_prompt_files):
     pids, _, path = setup_cell(fake_prompt_files, outputs={"prh-test-0000": f"REFUSE {LONG}",
                                                           "prh-test-0001": f"FAIL {LONG}"})
     adapter = pipeline.FrontierAdapter(FakeFrontier())
+    assert adapter.judge_id == f"{FakeFrontier.judge_id}#{RULES}"       # the frontier judge's own id, plus
     out = pipeline.judge_file(path, judge=adapter, lid=FakeLID(), keys=[gen(p).key for p in pids[:3]])
     by_pid = judged(out)
     assert out.parent.parent.name == "frontier"
@@ -1469,7 +1541,7 @@ def test_make_judge_builds_the_configured_judges_lazily(monkeypatch):
     assert isinstance(primary, pipeline.Qwen3GuardAdapter) and primary.strict
     assert built == {"model_id": "Qwen/Qwen3Guard-Gen-4B", "revision": "b" * 40, "device": "cuda:3",
                      "dtype": dtype}
-    assert primary.judge_id == f"Qwen/Qwen3Guard-Gen-4B@{'b' * 40}#{dtype}#strict"
+    assert primary.judge_id == f"Qwen/Qwen3Guard-Gen-4B@{'b' * 40}#{RULES}#{dtype}#strict"
     guard_entry = config.load("project")["judges"]["safety_primary"]
     monkeypatch.setitem(guard_entry, "controversial", "loose")
     assert pipeline.make_judge("primary", device="cuda:3").judge_id.endswith(f"#{dtype}#loose")

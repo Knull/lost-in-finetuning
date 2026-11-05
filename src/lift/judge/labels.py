@@ -28,13 +28,35 @@ Rules (locked Oct 28, refined Nov 3 and 4 before any run, see docs/decisions.md)
   all read und_Deva 1.0: wrong_lang on a Hindi prompt, not garbled).
 - A confident output in the wrong language keeps the judge's label and is flagged ``wrong_lang``,
   reported as its own rate. Romanised Hindi counts as Hindi; Hindi-English code-mixing is flagged.
+- A final label is made once, at judge time, under the rules then in force, so every judge id carries
+  ``rules_tag()`` (lift.judge.pipeline): labels made under other rules are never resumed into, read or
+  paired as current, and a change to any rule means judging the affected cells again.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from lift import config
+from lift.io import sha256_obj
+from lift.lang import LID_TOP_K
 from lift.schemas import UnclearFlags
+
+LABELS_VERSION = 1
+"""The version of the labelling rules. Bump it on any change to ``map_qwen3guard``, ``map_frontier``,
+``final_label``, ``unclear_flags``, the language-mass rule (``language_mass``), ``repetition_ratio`` or the
+Qwen3Guard output parser (lift.judge.qwen3guard): it moves ``rules_tag``, and with it every judge id."""
+
+
+def rules_tag() -> str:
+    """``rules-`` and 8 hex naming the labelling rules now in force: ``LABELS_VERSION``, configs/project.yaml
+    ``unclear`` and ``languages.accept_labels``, the GlotLID entry ``langid`` and ``lift.lang.LID_TOP_K``.
+    Every judge id carries it (lift.judge.pipeline), so one judgements file, read or pair is one set of
+    rules."""
+    rules = {"version": LABELS_VERSION, "unclear": config.get("unclear"),
+             "accept_labels": config.get("languages.accept_labels"), "langid": config.get("langid"),
+             "lid_top_k": LID_TOP_K}
+    return "rules-" + sha256_obj(rules)[:8]
 
 
 def repetition_ratio(text: str, n: int = 10) -> float:
