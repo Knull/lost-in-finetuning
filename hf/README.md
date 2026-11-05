@@ -8,7 +8,7 @@ deadline. Gating follows docs/decisions.md item 14.
 | Repaired model | public | The frozen repair applied to the chosen adapter. The model card carries the CC-BY-NC-4.0 and Cohere acceptable-use notices, the verdict, and the per-language before/after table. |
 | Repair parameters | public | CAST vectors, condition and threshold; the WiSE-FT lambda; the ReSta alpha. |
 | Adapters (unrepaired) | gated, automatic approval | Research artifacts that drifted on safety, with a terms note. |
-| Logs dataset | public | Prompt ids, labels, flags, generation keys, output hashes (the redacted AuditKIT records), metadata and aggregate tables. No output text. |
+| Logs dataset | public | Prompt ids, labels, flags, generation keys, output hashes (the redacted AuditKIT records), metadata and aggregate tables. No output text, and no judge text: `JudgementRecord.raw` and `native.reason` (the judges' replies, a frontier judge's reason included) stay out with it, as CLAUDE.md rule 6 gates judge logs. |
 | Raw completions | gated, manual approval | Every judged output in full, refusals and benign answers included, the harmful ones too. No other artifact holds more of an output than the Space's 10-word cut. |
 | Translated prompt sets | public | Hindi PolyRefuse, Chinese harmless, OR-Bench-Hard in 5 languages, with native-check notes and the CC-BY-4.0 attribution for OR-Bench. |
 | Collections | public | One for model artifacts, one for data artifacts, both linked from the article. |
