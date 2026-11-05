@@ -599,8 +599,8 @@ def test_results_keep_input_order_with_many_workers():
     assert [(o["label"], o["reason"]) for o in out] == [(LABELS[i % 4], f"item {i}") for i in range(40)]
 
 
-def test_pairwise_is_left_to_p03():
-    with pytest.raises(NotImplementedError, match="P03"):
+def test_a_safety_judge_refuses_pairwise():
+    with pytest.raises(ValueError, match="pairwise rubric"):
         make_judge()[0].pairwise(["i"], ["a"], ["b"])
 
 
