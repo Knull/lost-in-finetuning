@@ -24,10 +24,14 @@ side changed since:
   outputs/judgements and outputs/judge_cache is merged by "key" (``merge_jsonl_by_key``: local
   lines in order, then the remote lines whose key is new). Anything else is a CONFLICT, and so is a
   merge that would have to pick between two different records of one key or would break a rule
-  the file's readers enforce: the local file is kept and reported; push also uploads the local
-  copy under ``conflicts/<utc-timestamp>/<path>`` so it is not lost. ``force`` lets the remote copy
-  win on pull (the replaced local copy is kept under ``outputs/.sync-backup/<utc-timestamp>/<path>``,
-  never pushed) and the local copy win on push (the Hub keeps the old one in its history);
+  the file's readers enforce, and a merge of generations or judgements where exactly one side holds
+  no records: that is the file ``lift restart`` leaves, which the merge would fill again with the
+  other side's records, here or on the Hub, undoing the restart (``SyncReport.emptied``). The local
+  file is kept and reported; push also uploads the local copy under
+  ``conflicts/<utc-timestamp>/<path>`` so it is not lost. ``force`` lets the remote copy win on pull
+  (the replaced local copy is kept under ``outputs/.sync-backup/<utc-timestamp>/<path>``, never
+  pushed) and the local copy win on push (the Hub keeps the old one in its history). For a restart's
+  file, push --force completes a restart made here and pull --force one another machine pushed;
 - judgements and AuditKIT records pair with their cell, checked by content: a cell whose files do not
   belong together is one every reader rejects and no sync repairs, and P08 publishes the records.
   A judgement pairs with a generations file when its key is there, with the same pid, and its
@@ -241,6 +245,7 @@ class Merged:
     rows: list[dict]
     added: int      # remote records whose key was new
     dropped: int    # judge_cache lines left out (not a JSON object with a string "key"), both sides
+    remote: int     # records the remote copy holds (the local ones are the rows not added)
 
 
 def merge_jsonl_by_key(local: Path, remote: Path, *, kind: str) -> Merged:
@@ -271,7 +276,7 @@ def merge_jsonl_by_key(local: Path, remote: Path, *, kind: str) -> Merged:
     rows = local_rows + added
     if not lenient:
         check_merged(kind, rows, local.name)
-    return Merged(rows, len(added), dropped_here + dropped_there)
+    return Merged(rows, len(added), dropped_here + dropped_there, len(remote_rows))
 
 
 def check_merged(kind: str, rows: Sequence[dict], name: str) -> None:
@@ -1056,6 +1061,24 @@ def _merge_refused(item: _Item, merged: Sequence[dict]) -> str | None:
     return "hub" if _pairs(_rows(item.local.read_bytes()), gens) else "local"
 
 
+_EMPTIED_ON = {"here": "here", "hub": "on the Hub"}
+
+
+def _emptied(item: _Item, merged: Merged) -> str | None:
+    """The side of a generations or judgements file changed on both sides that holds no records while the
+    other one does: "here" or "hub"; None otherwise, and for any other file. That is the file lift restart
+    leaves (restart_cell), and the merge would fill it again with the other side's records, here or on the
+    Hub, undoing the restart while every sync reports ok (_merge_refused, asked first, checks only that
+    judgements pair, and those of a --judge restart still do). It is not written: the file is a plain
+    conflict, which --force settles either way."""
+    if merge_kind(item.path) not in ("generations", "judgements"):
+        return None
+    here, hub = len(merged.rows) - merged.added, merged.remote      # the local records come first
+    if bool(here) == bool(hub):
+        return None
+    return "hub" if here else "here"
+
+
 def _hold_unpaired(items: list[_Item], report: SyncReport, *, records: bool) -> None:
     """Push: a judgements file (``records`` False) or an AuditKIT record that would go up must pair with its
     cell as the Hub will then hold it, which _hold_back made this machine's copy. Otherwise it is held
@@ -1299,6 +1322,10 @@ class SyncReport:
     # pull: judgements files and AuditKIT records here not checked: they, or a file they were made from, were
     # left out of this pull (--only) and differ here and on the Hub -> that file (no merge is written).
     unchecked: dict[str, str] = field(default_factory=dict)
+    # Generations and judgements files changed on both sides and not merged because one side holds no
+    # records, as lift restart leaves a file (the merge would undo the restart) -> that side, "here" or "hub".
+    # Each is a conflict, unless --force settled it.
+    emptied: dict[str, str] = field(default_factory=dict)
     busy: list[str] = field(default_factory=list)        # changed here while sync ran: left as they are
 
     def paths(self, action: str) -> list[str]:
@@ -1343,12 +1370,24 @@ class SyncReport:
             lines.append(f"  {len(self.backups)} local copy(ies) replaced by the Hub's are kept under "
                          f"{self.backup_dir}")
         if plain := [p for p in self.conflicts if p not in self.held and p not in self.busy
-                     and p not in self.unchecked]:
+                     and p not in self.unchecked and p not in self.emptied]:
             fix = (f"lift sync pull --force takes the Hub's copy (the local one is kept under "
                    f"outputs/{BACKUP_DIR})" if self.direction == "pull"
                    else "lift sync push --force uploads the local copy over the Hub's")
             lines.append(f"  {len(plain)} conflict(s): changed here and on the Hub since the last "
                          f"sync; the local copy {would or 'was '}kept. Resolve by hand, or {fix}")
+        emptied = [self.emptied[p] for p in self.conflicts if p in self.emptied and p not in self.busy]
+        undo = f"a merge would fill them again, undoing the restart, so the local copy {would or 'was '}kept"
+        if n := emptied.count("here"):
+            lines.append(f"  {n} file(s) emptied here by lift restart and changed on the Hub since the last "
+                         f"sync: {undo}. lift sync push --force completes the restart over the Hub's copy; "
+                         "lift sync pull --force takes the Hub's copy instead (the emptied one is kept under "
+                         f"outputs/{BACKUP_DIR})")
+        if n := emptied.count("hub"):
+            lines.append(f"  {n} file(s) emptied on the Hub by lift restart and changed here since the last "
+                         f"sync: {undo}. lift sync pull --force completes the restart here (the local copy "
+                         f"is kept under outputs/{BACKUP_DIR}); lift sync push --force sends the local copy "
+                         "over it instead")
         lines += self._pairing(would)
         if self.busy:
             lines.append(f"  {len(self.busy)} file(s) changed on this machine while sync ran and were "
@@ -1367,6 +1406,8 @@ class SyncReport:
                              else f"not taken while {source} conflicts")
         if source := self.unchecked.get(path):
             notes.append(f"not merged: {source} was not pulled")
+        if side := self.emptied.get(path):
+            notes.append(f"not merged: emptied {_EMPTIED_ON[side]} by lift restart")
         if path in self.busy:
             notes.append("changed here while sync ran")
         if copy := self.conflict_copies.get(path):
@@ -1435,13 +1476,14 @@ def pull(subdirs: Sequence[str] = (), *, force: bool = False, api: Any = None) -
     """Download new and changed files of the runs repo, pinned to its current commit, without ever
     overwriting a local edit (rules in the module docstring). Generations come first: the judgements
     and AuditKIT records of a cell whose generations conflict are not taken, and a merge of judgements
-    that would not pair with the generations here is not written. Conflicts, and files of a changed cell
-    that no longer pair (``report.unpaired``), leave ``report.ok`` False; ``force`` lets the remote copy
-    win conflicts instead, keeping each replaced local copy under outputs/.sync-backup/<utc-timestamp>/<path>
-    (``report.backups``). A cell the pull changes stays in the sync state until a pull has reported it, so a
-    retry after an error still checks it. A judgements file or record the pull left out (--only), or whose
-    generations (or judgements) it left out, while that file differs here and on the Hub is neither checked
-    nor merged (``report.unchecked``, which leaves ``report.ok`` False too)."""
+    that would not pair with the generations here is not written, nor one that would undo a lift restart
+    (``report.emptied``). Conflicts, and files of a changed cell that no longer pair (``report.unpaired``),
+    leave ``report.ok`` False; ``force`` lets the remote copy win conflicts instead, keeping each replaced
+    local copy under outputs/.sync-backup/<utc-timestamp>/<path> (``report.backups``). A cell the pull
+    changes stays in the sync state until a pull has reported it, so a retry after an error still checks
+    it. A judgements file or record the pull left out (--only), or whose generations (or judgements) it
+    left out, while that file differs here and on the Hub is neither checked nor merged
+    (``report.unchecked``, which leaves ``report.ok`` False too)."""
     selected = select(subdirs)
     remote = _connect(api)
     tree = _remote_tree(remote)
@@ -1526,10 +1568,11 @@ def _backup(item: _Item, root: Path) -> None:
 def _pulled(item: _Item, result: tuple[Path, Digest], state: _State, report: SyncReport, *, force: bool,
             backups: Path, unpulled: Callable[[str], str | None]) -> None:
     """Record a verified download (already in place), or merge it into the local JSONL first. A merge that
-    cannot be made, of judgements that would not pair with the generations here, or of judgements whose
-    generations the pull left out while they differ from the Hub's (``unpulled``: it cannot be checked), is
-    not written: the Hub's copy replaces the local one with ``force``, else the local one stays (a
-    conflict, which records nothing)."""
+    cannot be made, of judgements that would not pair with the generations here, of judgements whose
+    generations the pull left out while they differ from the Hub's (``unpulled``: it cannot be checked), or
+    that would undo a lift restart (_emptied: one side holds no records; ``report.emptied``) is not written:
+    the Hub's copy replaces the local one with ``force``, else the local one stays (a conflict, which
+    records nothing)."""
     staged, digest = result
     if item.action == MERGE:
         refused: str | None
@@ -1546,6 +1589,11 @@ def _pulled(item: _Item, result: tuple[Path, Digest], state: _State, report: Syn
             elif refused := _merge_refused(item, merged.rows):
                 log.warning("sync pull: merged, %s would hold judgements that do not pair with the cell's "
                             "generations here; not merged", item.path)
+            elif side := _emptied(item, merged):
+                log.warning("sync pull: %s holds no records %s, as lift restart leaves it, and records on "
+                            "the other side; not merged, which would undo the restart", item.path,
+                            _EMPTIED_ON[side])
+                report.emptied[item.path], refused = side, "emptied"
         if refused is None:
             _apply_merge(item, merged, "pull")
         elif force:
@@ -1642,7 +1690,8 @@ def _merge_for_push(remote: _Remote, item: _Item, staging: Path, report: SyncRep
     """Fold the remote records of a JSONL changed on both sides into the local file before upload. A merge
     of judgements that would not pair with the cell's generations is not written: held back when this
     machine's own judgements do not pair (_unpair), a conflict when only the Hub's would not (``force``
-    then sends the local copy as it is)."""
+    then sends the local copy as it is). Nor is a merge that would undo a lift restart (_emptied: one side
+    holds no records), a conflict too (``report.emptied``), which ``force`` settles the same way."""
     if item.action != MERGE:
         return
     staged, _ = _download(remote, item, staging)
@@ -1663,6 +1712,12 @@ def _merge_for_push(remote: _Remote, item: _Item, staging: Path, report: SyncRep
             _unpair(item, report, _generations_of(_cell(item.path)))
         else:
             item.action = FORCE if force else CONFLICT
+        return
+    if side := _emptied(item, merged):
+        log.warning("sync push: %s holds no records %s, as lift restart leaves it, and records on the other "
+                    "side; not merged, which would undo the restart", item.path, _EMPTIED_ON[side])
+        report.emptied[item.path] = side
+        item.action = FORCE if force else CONFLICT
         return
     if _apply_merge(item, merged, "push"):
         item.digest = file_digest(item.local)
