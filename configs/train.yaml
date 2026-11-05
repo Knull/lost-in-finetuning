@@ -28,5 +28,5 @@ stress:                        # bundled stress test, used only if the standard 
   lr: 4.0e-4
   epochs: 3
   dedup: false
-  candidate: indicalign        # Nov 4 (item 47): Aya's raw pool (788 rows) is too small to stress anything
+  candidate: indicalign        # Nov 4 (item 47): Aya's raw pool (785 rows since item 57) is too small to stress anything
   seeds: [1]
