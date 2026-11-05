@@ -2,9 +2,10 @@
 on CPU.
 
 The runs repo is never reached: lift.sync.push and lift.sync.preflight are replaced by a recorder
-(``hub``). The default registry is a copy of configs/variants.yaml in tmp (``registry``): no test writes
-the real one. Merge parity decodes 8 new tokens instead of 256 (``short_parity``), which changes nothing
-it compares.
+(``hub``). The default registry is a small synthetic file in tmp in the layout of configs/variants.yaml
+(``registry``, ``REGISTRY_TEXT``): no test reads or writes the real one, so the entries committed there
+(the pilot's adapter, P05's repairs) change no outcome. Merge parity decodes 8 new tokens instead of 256
+(``short_parity``), which changes nothing it compares.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import json
 import logging
 import shutil
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -27,28 +29,39 @@ pytest.importorskip("datasets")
 import yaml  # noqa: E402
 from fakes import make_prompt  # noqa: E402
 
-from lift import config, sync  # noqa: E402
+from lift import config, gate0, sync  # noqa: E402
 from lift.cli import main  # noqa: E402
-from lift.io import sha256_file, write_jsonl  # noqa: E402
+from lift.io import sha256_file, sha256_text, write_jsonl  # noqa: E402
 from lift.models import variants  # noqa: E402
 from lift.models.load import encode_chat  # noqa: E402
-from lift.paths import CONFIG_DIR, adapters_dir, manifests_dir, output_dir, sft_dir  # noqa: E402
+from lift.paths import adapters_dir, manifests_dir, output_dir, sft_dir  # noqa: E402
+from lift.prompts import SAFETY_SETS  # noqa: E402
+from lift.schemas import LANGS  # noqa: E402
 from lift.train import lora, merge  # noqa: E402
 
 NAME = "adapter-aya-std-s1"
 PARITY = ["hi", "नमस्ते, आप कैसे हैं?"]
 COMMIT = "b" * 40
+SHA = "c" * 40
 # The user turn alone (byte-level tokens) fills max_seq_len 1024 after the tiny preamble.
 LONG = {"id": "aya-09999", "messages": [{"role": "user", "content": "x " * 600},
                                         {"role": "assistant", "content": "ok"}]}
+# The tests' registry: configs/variants.yaml's layout (comments, a blank line, a two-space list), stock only.
+REGISTRY_TEXT = ("# A test registry in the layout of configs/variants.yaml; its comments must survive.\n"
+                 "# Names: stock, adapter-{candidate}-{std|stress}-s{seed}\n"
+                 "\n"
+                 "variants:\n"
+                 "  - name: stock\n"
+                 "    method: stock\n")
 
 
 @pytest.fixture(autouse=True)
 def registry(tmp_path, monkeypatch):
-    """A copy of configs/variants.yaml as the default registry, so no test writes the real one."""
+    """``REGISTRY_TEXT`` in tmp as the default registry: no test reads or writes configs/variants.yaml,
+    whose entries (the pilot's adapter once registered, P05's repairs) must change no test's outcome."""
     path = tmp_path / "configs" / "variants.yaml"
     path.parent.mkdir()
-    shutil.copyfile(CONFIG_DIR / "variants.yaml", path)
+    path.write_text(REGISTRY_TEXT, encoding="utf-8", newline="\n")
     monkeypatch.setattr(lora, "default_registry", lambda: path)
     return path
 
@@ -348,12 +361,13 @@ def test_the_counter_books_micro_batches_to_their_optimizer_step():
 
     counter = lora.SupervisedTokenCounter(DataCollatorForLanguageModeling(pad_token_id=0))
     for n in (2, 1, 3):                     # collated ahead of use, as accelerate's lookahead does
-        counter([{"input_ids": [5] + [6] * n, "labels": [-100] + [6] * n}])
+        counter([{"input_ids": [5] + [6] * n, "labels": [-100] + [6] * n}] * (4 - n))
     counter.consumed()
     assert counter.in_step == 1
     counter.step_end()                      # step 1: two micro-batches
     counter.step_end()                      # step 2: one
-    assert counter.per_batch == [2, 1, 3] and counter.per_step == [3, 3] and counter.in_step == 0
+    assert counter.per_batch == [4, 3, 3] and counter.per_step == [7, 3] and counter.in_step == 0
+    assert counter.rows_per_batch == [2, 3, 1] and counter.rows_per_step == [5, 1]
     with pytest.raises(RuntimeError, match="never built"):
         counter.consumed()
 
@@ -396,16 +410,101 @@ def test_seeds_change_the_data_order(tiny_model_dir, tiny_tokenizer, tmp_path):
     assert one[1] != two[0]         # data_seed = 1000 x seed: seed 1's 2nd epoch is not seed 2's 1st
 
 
-def test_lora_wraps_every_projection_of_every_layer_in_fp32(tiny_model_dir):
-    p = plan(tiny_model_dir)
+@pytest.mark.parametrize("dtype, base", [("fp32", torch.float32), ("bf16", torch.bfloat16),
+                                         ("fp16", torch.float16)])
+def test_lora_wraps_every_projection_of_every_layer_in_fp32(tiny_model_dir, dtype, base):
+    # On a bf16 (A100) or fp16 (T4) base the LoRA weights must still be fp32: the frozen base's own dtype
+    # is checked too, so no case can fall back to an fp32 base, where fp32 LoRA weights prove nothing.
+    p = plan(tiny_model_dir, dtype=dtype)
     model, info = lora.lora_model(p)
     assert info["layers"] == 4 and info["wrapped_modules"] == 4 * 7
     assert info["trainable_dtypes"] == ["float32"] and 0 < info["trainable_params"] < info["total_params"]
+    assert {q.dtype for q in model.parameters() if not q.requires_grad} == {base}
     assert model.get_base_model().config.use_cache is False
-    doubled = {**p.cfg["lora"], "target_modules": ["q_proj", "q_proj"]}
-    twice = dataclasses.replace(p, cfg={**p.cfg, "lora": doubled})
-    with pytest.raises(RuntimeError, match="exactly once"):
-        lora.lora_model(twice)
+    if dtype == "fp32":                         # the target_modules refusal does not depend on the dtype
+        doubled = {**p.cfg["lora"], "target_modules": ["q_proj", "q_proj"]}
+        twice = dataclasses.replace(p, cfg={**p.cfg, "lora": doubled})
+        with pytest.raises(RuntimeError, match="exactly once"):
+            lora.lora_model(twice)
+
+
+def test_lora_weights_left_in_the_base_precision_stop_the_run(tiny_model_dir, monkeypatch):
+    import peft
+
+    real = peft.get_peft_model
+    monkeypatch.setattr(peft, "get_peft_model",          # PEFT without its fp32 cast (TRL's ZeRO-3 path)
+                        lambda model, cfg, **kw: real(model, cfg, **{**kw, "autocast_adapter_dtype": False}))
+    with pytest.raises(RuntimeError, match=r"LoRA weights are \['bfloat16'\], not float32, on a bf16 base"):
+        lora.lora_model(plan(tiny_model_dir, dtype="bf16"))
+
+
+# --- one device, the recipe's batch ------------------------------------------------------------------
+
+
+@pytest.mark.filterwarnings("ignore:'pin_memory' argument is set as true:UserWarning")
+def test_two_visible_gpus_train_on_one_at_the_recipe_batch(tiny_model_dir, tiny_tokenizer, tmp_path,
+                                                           monkeypatch):
+    # A plain process that sees two GPUs (a Kaggle T4 x2): TrainingArguments counts both (n_gpu 2), and the
+    # Trainer would wrap the model in nn.DataParallel and take 2 x 16 = 32 rows an optimizer step. Faked
+    # without a GPU: torch.cuda.device_count() says 2 while a cuda:0 plan's config and Trainer are built;
+    # torch.cuda.is_available() stays False, so the model (loaded by a CPU plan) and every batch stay on the
+    # CPU, where nn.DataParallel would pass the whole batch through.
+    from transformers.training_args import ParallelMode
+
+    cpu = plan(tiny_model_dir)
+    cuda = dataclasses.replace(cpu, device="cuda:0")
+    real_model, real_trainer, built = lora.lora_model, lora.make_trainer, {}
+
+    def kept(*a, **kw):
+        built["trainer"], counter = real_trainer(*a, **kw)
+        return built["trainer"], counter
+
+    monkeypatch.setattr(lora, "lora_model", lambda p: real_model(cpu))
+    monkeypatch.setattr(lora, "make_trainer", kept)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    for stat in ("reset_peak_memory_stats", "max_memory_allocated", "max_memory_reserved"):
+        monkeypatch.setattr(torch.cuda, stat, lambda *a, **k: 0)
+    examples = [lora.build_example(tiny_tokenizer, row, 1024) for row in rows(20)]
+    fit = lora._fit(cuda, tiny_tokenizer, examples, tmp_path, {})
+    trainer = built["trainer"]
+    assert trainer.args.n_gpu == 1 and trainer.args.parallel_mode == ParallelMode.NOT_PARALLEL
+    assert trainer._train_batch_size == 1 and trainer.get_total_train_batch_size(trainer.args) == 16
+    assert not isinstance(trainer.model_wrapped, torch.nn.DataParallel)
+    assert fit["batch"] == {"per_device": 1, "grad_accum": 16, "effective": 16, "n_gpu": 1, "visible_gpus": 2,
+                            "processes": 1, "micro_batch": 1, "per_step": 16}
+    # 2 epochs of 20 rows, 16 a step: each epoch a full step and one of the 4 rows left (n_gpu 2: one of 20)
+    assert fit["global_step"] == 4 and fit["rows_per_step"] == [16, 4, 16, 4]
+    assert len(fit["supervised_tokens_per_batch"]) == 40
+
+
+def test_a_trainer_off_the_recipe_batch_is_refused_before_its_first_step(tiny_model_dir, tiny_tokenizer,
+                                                                        tmp_path, monkeypatch):
+    from trl.trainer.sft_trainer import DataCollatorForLanguageModeling
+
+    p = plan(tiny_model_dir)
+    real_config = lora.sft_config
+
+    def two_gpus(plan, output_dir):        # what a launcher or another transformers could leave: n_gpu 2
+        args = real_config(plan, output_dir)
+        args._n_gpu = 2
+        return args
+
+    monkeypatch.setattr(lora, "sft_config", two_gpus)
+    model, _info = lora.lora_model(p)
+    examples = [lora.build_example(tiny_tokenizer, row, 1024) for row in rows(4)]
+    with pytest.raises(lora.TrainRefused, match=r"take 32 rows per optimizer step \(2 per micro-batch, 1 "
+                                                r"process\(es\), n_gpu 2\), not the recipe's 16 .*torchrun.*"
+                                                r"CUDA_VISIBLE_DEVICES=0"):
+        lora.make_trainer(model, tiny_tokenizer, examples, p, output_dir=tmp_path / "refused")
+    # Past that check, the collator still stops the first micro-batch of more rows than the recipe's.
+    monkeypatch.setattr(lora, "check_batch", lambda plan, batch: None)
+    trainer, counter = lora.make_trainer(model, tiny_tokenizer, examples, p, output_dir=tmp_path / "t")
+    with pytest.raises(RuntimeError, match="put 2 rows in one micro-batch, but the recipe takes 1"):
+        trainer.train()
+    assert trainer.state.global_step == 0 and counter.per_batch == []
+    counter = lora.SupervisedTokenCounter(DataCollatorForLanguageModeling(pad_token_id=0), max_rows=2)
+    assert counter([{"input_ids": [5, 6], "labels": [-100, 6]}] * 2)["input_ids"].shape[0] == 2
 
 
 # --- a whole run -------------------------------------------------------------------------------------
@@ -426,12 +525,18 @@ def test_a_five_step_run_trains_pushes_checks_parity_registers_and_resumes(
     assert trained["data"]["sha256"] == sha256_file(sft_dir() / "aya" / "dedup" / "sft_messages.jsonl")
     assert (trained["data"]["rows_trained"], trained["data_seed"], trained["dtype"]) == (4, 1000, "fp32")
     assert trained["lora"]["wrapped_modules"] == 28 and trained["train"]["global_step"] == 5
-    assert trained["batch"] == {"per_device": 1, "grad_accum": 16, "effective": 16}
+    # The plan's batch beside the Trainer's (on the CPU n_gpu is 0), and the rows each step took: one
+    # epoch of the 4 rows a step (max_steps 5 runs 5 epochs).
+    assert trained["batch"] == {"per_device": 1, "grad_accum": 16, "effective": 16, "n_gpu": 0,
+                                "visible_gpus": torch.cuda.device_count(), "processes": 1, "micro_batch": 1,
+                                "per_step": 16}
+    assert trained["rows_per_step"] == [4] * 5
     log = read(path / "trainer_log.json")
     assert log["training_args"]["loss_type"] == "nll" and log["training_args"]["data_seed"] == 1000
 
     [run] = manifests(name=NAME)
     assert run["status"] == "ok" and run["devices"] == 1 and run["adapter_hash"] == digest
+    assert run["batch"] == trained["batch"] and run["rows_per_step"] == [4] * 5
     assert [e["step"] for e in run["loss_curve"]] == [1, 2, 3, 4, 5]
     assert all("loss" in e for e in run["loss_curve"])
     # 4 rows, 1 per micro-batch: each step (one epoch with max_steps 5) sums every row's supervised tokens
@@ -446,7 +551,7 @@ def test_a_five_step_run_trains_pushes_checks_parity_registers_and_resumes(
     assert reg["entry"]["location"] == f"runs repo ($LIFT_RUNS_REPO): outputs/adapters/{NAME}@{COMMIT}"
     assert "fp32 2/2 prompts token-identical" in reg["entry"]["note"]
     text = registry.read_text(encoding="utf-8")
-    assert text.startswith((CONFIG_DIR / "variants.yaml").read_text(encoding="utf-8"))   # comments kept
+    assert text.startswith(REGISTRY_TEXT)                                               # comments kept
     entry = next(e for e in yaml.safe_load(text)["variants"] if e["name"] == NAME)
     assert entry == reg["entry"] and entry["artifacts"] == {"adapter": digest} and entry["seed"] == 1
     spec = lora._registry_specs(yaml.safe_load(text), registry)[NAME]
@@ -507,6 +612,90 @@ def test_a_failed_fp32_parity_is_never_registered(tiny_model_dir, utility, regis
         train(tiny_model_dir)
     with pytest.raises(ValueError, match="FAILED"):
         lora.register_pulled(NAME)
+
+
+def test_an_fp16_parity_registers_with_a_warning_whatever_its_share(tiny_model_dir, utility, registry,
+                                                                    monkeypatch, caplog):
+    # The T4 exception as the code applies it: the fp16 share is recorded, not required.
+    write_sft(rows(4))
+
+    def fp16_parity(adapter_dir, *, prompts, dtype, **kw):
+        assert dtype == "fp16"
+        return {"adapter_hash": merge.adapter_hash(adapter_dir), "dtype": dtype, "n": len(prompts),
+                "n_match": 0, "match_share": 0.0, "all_match": False, "first_divergence": [1] * len(prompts)}
+
+    monkeypatch.setattr(merge, "parity_check", fp16_parity)
+    with caplog.at_level(logging.WARNING, logger="lift.train"):
+        path = train(tiny_model_dir, parity_dtype="fp16")
+    reg = read(path / "registration.json")
+    assert set(reg["parity"]) == {"fp16"} and reg["parity"]["fp16"]["n_match"] == 0
+    assert reg["registered"]["outcome"] == "added"
+    assert "merge parity fp16 0/2 prompts token-identical (T4; fp32 not checked)" in reg["entry"]["note"]
+    assert any("registered on an fp16 parity" in r.getMessage() for r in caplog.records)
+    assert lora.register_pulled(NAME) == "unchanged"                     # the laptop applies the same rule
+
+
+def test_the_t4_parity_exception_is_stated_as_the_code_applies_it(capsys):
+    # lift.train.lora's docstring and lift train --help state the exception exactly: fp16 parity only on a
+    # GPU without native bf16, its share recorded, the adapter registered with a warning whatever it is.
+    with pytest.raises(SystemExit):
+        main(["train", "--help"])
+    for text in (" ".join(capsys.readouterr().out.split()), " ".join(lora.__doc__.split())):
+        assert "The one exception is a GPU without native bf16 (a T4" in text
+        assert "--parity-dtype fp16" in text and "records the share of prompts that match" in text
+        assert "registers the adapter with a warning, whatever that share" in text
+
+
+@pytest.fixture
+def safety_prompts(fake_prompt_files):
+    """Six dev prompts in every safety set and language: the pool Gate 0's parity sample is drawn from."""
+    for set_name in SAFETY_SETS:
+        for lang in LANGS:
+            fake_prompt_files[(set_name, lang)] = [
+                make_prompt(f"{set_name[:3]}-{i:04d}", lang, set_name, "dev", text=f"{set_name} {lang} {i}")
+                for i in range(6)]
+    return fake_prompt_files
+
+
+def test_the_adapter_parity_runs_on_gate0s_parity_prompts(tiny_model_dir, safety_prompts, utility,
+                                                          monkeypatch):
+    # The prompts Gate 0's own random-LoRA parity used, as run_gate0 hands them to check_parity.
+    from lift.prompts import mixed_sample
+
+    handed = []
+
+    def check_parity(model_id, revision, prompts, *, device, max_new_tokens=None):
+        handed.append(list(prompts))
+        return {"pass": True, "all_match": True}
+
+    monkeypatch.setattr(gate0, "check_parity", check_parity)
+    gate0.run_gate0(device="cpu", model_id=str(tiny_model_dir), revision="local", resolve_pins=False,
+                    skip=["preamble", "precision", "throughput", "dry_run"])
+    [drawn] = handed
+    texts, info = lora._parity_texts(None)
+    assert len(drawn) == gate0.N_PARITY == 20 and texts == [p.text for p in drawn]
+    assert info["n"] == 20 and info["pids"] == [f"{p.set}_{p.lang}:{p.pid}" for p in drawn]
+    assert info["source"] == ("Gate 0's merge-parity sample: lift.prompts.mixed_sample(20, split='dev', "
+                              f"seed={gate0.SEED + 3})")
+    assert texts != [p.text for p in mixed_sample(20, split="dev", seed=0)]    # parity_check's own default
+    assert lora._parity_texts(PARITY) == (PARITY, {"source": "given", "n": 2,
+                                                   "sha256": [sha256_text(t) for t in PARITY]})
+
+    # A run without parity_prompts checks the adapter on those very prompts and records which they were.
+    write_sft(rows(4))
+    checked = []
+
+    def parity_check(adapter_dir, *, prompts, dtype, **kw):
+        checked.append(list(prompts))
+        return {"adapter_hash": merge.adapter_hash(adapter_dir), "dtype": dtype, "n": len(prompts),
+                "n_match": len(prompts), "match_share": 1.0, "all_match": True,
+                "first_divergence": [None] * len(prompts)}
+
+    monkeypatch.setattr(merge, "parity_check", parity_check)
+    path = train(tiny_model_dir, parity_prompts=None, max_steps=1)
+    assert checked == [texts]
+    recorded = read(path / "registration.json")["parity"]["fp32"]["prompts"]
+    assert recorded == {"source": info["source"], "n": 20, "pids": info["pids"]}
 
 
 def test_a_failed_push_never_fails_training(tiny_model_dir, utility, hub):
@@ -574,6 +763,14 @@ def test_a_folder_without_weights_is_refused(tiny_model_dir, utility):
 
 
 # --- the registry ------------------------------------------------------------------------------------
+
+
+def test_the_tests_registry_holds_stock_alone_whatever_the_real_one_holds(registry):
+    # A copy of configs/variants.yaml would carry its entries in: once the pilot's adapter is registered
+    # there (another hash than any test's), register_adapter would refuse every test's entry for it.
+    text = registry.read_text(encoding="utf-8")
+    assert text == REGISTRY_TEXT and list(lora._registry_specs(yaml.safe_load(text), registry)) == ["stock"]
+    assert lora.default_registry() == registry != config.CONFIG_DIR / "variants.yaml"
 
 
 def test_register_adapter_edits_the_text_once_and_refuses_another_hash(registry, monkeypatch):
@@ -666,3 +863,79 @@ def test_lift_train_exits_2_on_a_refused_request_and_stops_on_unpinned_revisions
                  "--per-device-batch", "3"]) == 2
     with pytest.raises(SystemExit, match="unpinned revisions"):
         main(["train", "--candidate", "aya", "--recipe", "standard", "--seed", "1", "--device", "cpu"])
+
+
+# --- lift train --check ------------------------------------------------------------------------------
+
+
+def snapshot(root: Path) -> dict[str, str]:
+    """Every file under ``root`` with its sha256: what a step that writes nothing leaves as it was."""
+    return {p.relative_to(root).as_posix(): sha256_file(p) for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_check_builds_every_example_as_training_does_and_writes_nothing(tiny_model_dir, tiny_tokenizer,
+                                                                        utility, hub, registry,
+                                                                        isolated_dirs, monkeypatch):
+    write_sft(rows(3) + [LONG])
+    before = snapshot(isolated_dirs), registry.read_text(encoding="utf-8")
+    with monkeypatch.context() as m:
+        m.setattr("lift.models.load.load_model", lambda *a, **k: pytest.fail("a model was loaded"))
+        m.setattr(lora, "register_adapter", lambda *a, **k: pytest.fail("the registry was written"))
+        m.setattr(torch.cuda, "is_available", lambda: False)          # no GPU here, and none is asked for
+        report = lora.check_training("aya", "standard", 1, model_id=str(tiny_model_dir))     # device cuda:0
+        dropped = lora.check_training("aya", "standard", 1, model_id=str(tiny_model_dir), drop_unfit=True)
+        with pytest.raises(lora.TrainRefused, match="no CUDA GPU here"):     # the same request, training
+            lora.train_lora("aya", "standard", 1, model_id=str(tiny_model_dir), push=False)
+    assert (snapshot(isolated_dirs), registry.read_text(encoding="utf-8")) == before
+    assert not hub.pushes and hub.preflights == 0 and not manifests()
+
+    examples = [lora.build_example(tiny_tokenizer, row, 1024) for row in rows(3) + [LONG]]
+    assert report["counts"] == lora.data_stats(examples)
+    assert (report["counts"]["rows"], report["counts"]["truncated_rows"]) == (4, 1)
+    assert report["unfit"] == [{"id": "aya-09999", "prompt_tokens": examples[3]["n_prompt"], "limit": 1024}]
+    assert report["stops"] and report["kept"] == lora.data_stats(examples[:3])
+    assert report["data"]["sha256"] == sha256_file(sft_dir() / "aya" / "dedup" / "sft_messages.jsonl")
+    assert report["data"]["heldout_prompts_checked"] == 2 and report["model"]["revision"].startswith("local-")
+    out = "\n".join(lora.check_lines(report))
+    assert "rows: 4; truncated at 1024 tokens: 1" in out
+    assert f"    aya-09999, {examples[3]['n_prompt']}, 1024" in out
+    assert "lift train stops on these rows" in out and "--drop-unfit" in out
+    assert f"supervised tokens: {report['counts']['supervised_tokens']} (per row: min 0," in out
+    assert "Question 0" not in out and "x x x" not in out                 # ids and counts, never text
+
+    # --drop-unfit: what the check says training takes is what training records it took.
+    assert not dropped["stops"] and dropped["kept"] == report["kept"]
+    assert "lift train --drop-unfit drops exactly these and trains on 3 rows" in "\n".join(
+        lora.check_lines(dropped))
+    path = train(tiny_model_dir, drop_unfit=True, max_steps=1, parity=False)
+    assert read(path / "lift_train.json")["counts"] == report["kept"]
+
+
+def test_lift_train_check_reads_the_pinned_tokenizer_and_exits_0(tiny_tokenizer, utility, hub, monkeypatch,
+                                                                 capsys):
+    write_sft(rows(3) + [LONG])
+    line = ["train", "--candidate", "aya", "--recipe", "standard", "--seed", "1", "--check"]
+    loaded = []
+
+    def load_tokenizer(model_id, revision):
+        loaded.append((model_id, revision))
+        return tiny_tokenizer
+
+    monkeypatch.setattr("lift.models.load.load_tokenizer", load_tokenizer)
+    monkeypatch.setattr("lift.models.load.load_model", lambda *a, **k: pytest.fail("a model was loaded"))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(SystemExit, match="unpinned revisions"):    # the tests see models.global at "main"
+        main(line)
+    assert not loaded
+    config.load("project")["models"]["global"]["revision"] = SHA   # pinned, as configs/project.yaml is now
+    assert main(line) == 0
+    out = capsys.readouterr().out
+    assert loaded == [(config.get("models.global.id"), SHA)]
+    assert f"tokenizer: {config.get('models.global.id')}@{SHA[:12]}; max_seq_len 1024" in out
+    assert "aya-09999, " in out and "lift train stops on these rows" in out
+    assert main([*line, "--drop-unfit"]) == 0
+    assert "lift train --drop-unfit drops exactly these and trains on 3 rows" in capsys.readouterr().out
+    assert main([*line, "--per-device-batch", "3"]) == 2
+    assert "lift train --check: refused" in capsys.readouterr().err
+    assert not hub.pushes and hub.preflights == 0 and not manifests()
+    assert main(line[:-1]) == 2 and "no CUDA GPU here" in capsys.readouterr().err   # training: refused

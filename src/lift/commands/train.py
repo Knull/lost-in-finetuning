@@ -11,8 +11,14 @@ but not registered, and nothing may evaluate it until the cause is understood: C
 registry already holds another entry under the name; 2 a refused request, before any GPU time (a
 candidate or seed the recipe does not allow, a per-device batch that does not divide the effective
 batch, a precision the GPU must not use, a stale or malformed training file, rows the template leaves no
-answer token in, a push that cannot work). Unpinned revisions stop it like lift generate (exit 1). It
-never exits 3: a job runner treats any other exit as the line failing.
+answer token in, a push that cannot work) or before the first training step (a Trainer that would not
+take the recipe's batch: a torchrun launch, say). Unpinned revisions stop it like lift generate (exit 1).
+It never exits 3: a job runner treats any other exit as the line failing.
+
+``lift train ... --check`` runs anywhere, the laptop included: it loads Global's tokenizer only, builds
+every example as training would (lift.train.lora.check_training), prints the counts and the rows left
+without a supervised token, writes nothing and exits 0 (2 when the request or the training file is
+refused, 1 on unpinned revisions).
 
 ``lift register-adapter NAME [NAME ...]`` is the laptop's half: a GPU runtime's configs/ edit dies with
 the session (configs/ travels by git, not by lift sync). After ``lift sync pull`` it recomputes each
@@ -31,15 +37,22 @@ import sys
 
 TRAIN_HELP = """\
 Train one Hindi LoRA adapter of Tiny Aya Global (configs/train.yaml; rules in lift.train.lora): chat
-template on, loss on the answer tokens only, the effective batch 16 on every GPU. The adapter goes to
+template on, loss on the answer tokens only, the effective batch 16 on every GPU, one process on one GPU
+(cuda:0: a second visible GPU, as on a Kaggle T4 x2, stays idle). The adapter goes to
 outputs/adapters/adapter-{candidate}-{std|stress}-s{seed}/ and to the runs repo at once; then merged and
-unmerged greedy outputs are compared in fp32 (merge parity) and the adapter is registered in this
-machine's configs/variants.yaml. A GPU runtime loses that edit with the session: on the laptop run
-`lift sync pull`, then `lift register-adapter NAME`, and commit configs/variants.yaml.
+unmerged greedy outputs are compared in fp32 (merge parity: every token must match, or the adapter is
+not registered) and the adapter is registered in this machine's configs/variants.yaml. The one exception
+is a GPU without native bf16 (a T4): there --parity-dtype fp16 records the share of prompts that match
+and registers the adapter with a warning, whatever that share. A GPU runtime loses the registry edit
+with the session: on the laptop run `lift sync pull`, then `lift register-adapter NAME`, and commit
+configs/variants.yaml.
 
 Every training row is tokenized before the model loads; rows whose prompt alone (the ~366-token
 preamble and a long user turn) fills max_seq_len stop the run with their ids, unless --drop-unfit drops
-exactly those rows (recorded; it needs a dated docs/decisions.md entry).
+exactly those rows (recorded; it needs a dated docs/decisions.md entry). --check shows them first, on
+any machine with transformers (the laptop too): it loads the tokenizer only (no model, no GPU, no push,
+no registry), tokenizes every row as training does, prints the counts and those rows (id, prompt tokens,
+limit), writes nothing, exits 0.
 
 Rerunning the same line never trains again: it pushes, checks parity (unless already recorded for that
 adapter in that precision) and registers. --retrain sets the folder aside (outputs/.aside/, never synced)
@@ -49,6 +62,8 @@ examples (job lines; on a T4 add --dtype fp16 --per-device-batch 1, and --parity
 parity does not fit):
   lift train --candidate aya --recipe standard --seed 1 --per-device-batch 4
   lift train --candidate indicalign --recipe stress --seed 1 --per-device-batch 4
+before a GPU run (the laptop):
+  lift train --candidate indicalign --recipe stress --seed 1 --check
 """
 
 REGISTER_HELP = """\
@@ -64,6 +79,8 @@ def _train(args: argparse.Namespace) -> int:
     from lift.commands.run import _logging
 
     _logging()
+    if args.check:
+        return _check(args)
     from lift.train.lora import ParityFailed, RegistryConflict, TrainRefused, summary, train_lora
 
     try:
@@ -77,6 +94,20 @@ def _train(args: argparse.Namespace) -> int:
         print(f"lift train: {exc}", file=sys.stderr)
         return 1
     print("\n".join(summary(path)))
+    return 0
+
+
+def _check(args: argparse.Namespace) -> int:
+    """``lift train --check``: the examples the line would train on (counts and ids only), nothing written."""
+    from lift.train.lora import TrainRefused, check_lines, check_training
+
+    try:
+        report = check_training(args.candidate, args.recipe, args.seed, device=args.device, dtype=args.dtype,
+                                per_device_batch=args.per_device_batch, drop_unfit=args.drop_unfit)
+    except TrainRefused as exc:
+        print(f"lift train --check: refused: {exc}", file=sys.stderr)
+        return 2
+    print("\n".join(check_lines(report)))
     return 0
 
 
@@ -120,8 +151,10 @@ def register(sub: argparse._SubParsersAction) -> None:
                    help="sequences per micro-batch; must divide the effective batch 16, and gradient "
                         "accumulation makes up the rest (A100: 4; T4: 1). Default: configs/train.yaml")
     p.add_argument("--parity-dtype", choices=["fp32", "fp16"], default="fp32",
-                   help="merge parity precision: fp32 (must match token for token) or fp16 (a T4 only: "
-                        "the share that match is recorded and the adapter registered with a warning)")
+                   help="merge parity precision: fp32 (default: every token must match, or the adapter is "
+                        "not registered) or fp16, only on a GPU without native bf16 (a T4, where the fp32 "
+                        "base may not fit; refused on an A100 or L4): the share of prompts that match is "
+                        "recorded and the adapter registered with a warning, whatever that share")
     p.add_argument("--no-push", action="store_true",
                    help="do not push the adapter from inside the run (the runner's pushes still send it)")
     p.add_argument("--retrain", action="store_true",
@@ -129,6 +162,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--drop-unfit", action="store_true",
                    help="drop exactly the rows that leave no answer token within max_seq_len (recorded; "
                         "needs a dated docs/decisions.md entry); without it such rows stop the run")
+    p.add_argument("--check", action="store_true",
+                   help="report what this line would train on and stop: load the tokenizer only (no model, "
+                        "no GPU, no push, no registry), tokenize every row exactly as training does, print "
+                        "the counts and the rows left without a supervised token (id, prompt tokens, "
+                        "limit), write nothing, exit 0. Run it before a GPU run to decide on --drop-unfit")
     p.set_defaults(func=_train)
 
     p = sub.add_parser("register-adapter",

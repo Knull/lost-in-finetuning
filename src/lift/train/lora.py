@@ -10,6 +10,16 @@ Recipe and batch
 - The effective batch is the recipe's per_device_batch x grad_accum (16). ``--per-device-batch K`` must
   divide it and sets grad_accum to the quotient (A100: 4 x 4; T4: 1 x 16), so every GPU takes the same
   optimizer steps. max_seq_len is never below 512: the ~366-token preamble counts against it.
+- One process trains on one device: cuda:0, the first visible GPU, or the CPU (the tests). Run as a
+  plain process with several GPUs visible (a Kaggle T4 x2), the Trainer would count them all (n_gpu 2),
+  wrap the model in nn.DataParallel and put per_device_batch x n_gpu rows in every micro-batch: 32 rows
+  an optimizer step instead of 16, half the steps. ``sft_config`` therefore holds the Trainer to one GPU
+  (n_gpu 1, what the Trainer itself does for a model-parallel model) before the Trainer is built, which
+  takes its DataLoader batch from it; the other GPUs stay idle. The built Trainer's rows per optimizer
+  step (its DataLoader batch x accumulation x processes) must then equal the effective batch, or the run
+  is refused before its first step (a torchrun or accelerate launch, say), and the collator stops any
+  micro-batch with more rows than per_device_batch. lift_train.json and the manifest record n_gpu, the
+  visible GPUs, the Trainer's batch and the rows each optimizer step took.
 
 Data
 - data/sft/{candidate}/{dedup|raw}/sft_messages.jsonl (recipe dedup true: dedup), found through
@@ -31,6 +41,10 @@ Chat template on, loss on the answer only
   lists such rows (id, prompt tokens, limit). The remedies, each with a dated docs/decisions.md entry:
   raise max_seq_len, or drop the rows with ``--drop-unfit``, which drops exactly those rows and records
   their ids (never the default).
+- ``check_training`` (``lift train --check``) shows this before a GPU run: it builds every example the
+  way training does (``prepare``, one code path) with Global's tokenizer the only thing loaded (no model,
+  no GPU, no push, no registry), reports the counts and the rows left without a supervised token, and
+  writes nothing.
 - TRL gets the rows pre-tokenized (input_ids, labels) with ``skip_prepare_dataset``: its own preparation
   would cut them again and silently drop rows left without supervised tokens. ``loss_type="nll"``: TRL's
   default chunked loss patches the model's forward. The collator is TRL's, wrapped so every micro-batch's
@@ -44,10 +58,11 @@ Seeds and precision
   seed 2's first).
 - bf16 weights and bf16 autocast on a GPU with native bf16 (A100, L4), where configs/train.yaml's
   precision is the only one allowed, as for generation (decisions.md 27); fp16 weights and fp16
-  autocast on a T4, which has no bf16; fp32 on CPU (the tests). PEFT keeps the LoRA weights in fp32.
+  autocast on a T4, which has no bf16; fp32 on CPU (the tests). PEFT keeps the LoRA weights in fp32 (its
+  autocast_adapter_dtype), and the run stops before training if they are not: fp16 autocast cannot
+  unscale fp16 gradients, and Adam's updates lose precision in bf16.
 - All seeds of a recipe train on one GPU class and precision (the P03 plan): a seed is refused when
   another seed's adapter here was trained on another (its lift_train.json says so).
-- Training runs on cuda:0 (the Trainer places every batch on the first visible GPU) or on the CPU.
 
 Files
 - Nothing synced is written while training: the Trainer's output_dir and the staging folder are a
@@ -66,11 +81,19 @@ After training
   push is logged and recorded and never fails the run: the runners' own pushes send the folder again
   (sync compares content).
 - Parity: the training model is freed, then lift.train.merge.parity_check compares the merged and the
-  unmerged adapter's greedy outputs on 20 dev prompts (Gate 0's sample) on the base it was trained on.
+  unmerged adapter's greedy outputs, on the base it was trained on, on Gate 0's parity prompts
+  (``gate0_parity_sample``: the 20 dev prompts mixed over sets and languages that lift.gate0 draws for
+  its random-LoRA parity, ``mixed_sample(gate0.N_PARITY, split="dev", seed=gate0.SEED + 3)``).
   In fp32 they must match token for token, or the adapter is not registered and the run fails: it is
   saved and pushed, but nothing may evaluate it until the cause is understood (CLAUDE.md rule 9).
-  ``--parity-dtype fp16`` (a T4, where the fp32 base may not fit) records the share that match and
-  registers with a warning: fp16 rounds the merged weights differently.
+- The one exception is a GPU without native bf16 (a T4, where the fp32 base, about 13.4 GB, may not
+  fit): there ``--parity-dtype fp16`` checks parity in fp16, records the share of prompts that match
+  (registration.json, and the registry note "fp16 n/20 prompts token-identical (T4; fp32 not
+  checked)") and registers the adapter with a warning, whatever that share: fp16 rounds the merged
+  weights differently, so an exact match is not expected. fp16 parity is refused on a GPU with native
+  bf16 (an A100, an L4) and allowed on the CPU (the tests). An fp32 parity recorded later for the same
+  adapter hash (a resume where the fp32 base fits) decides instead, and ``lift register-adapter``
+  applies the same rule on the laptop.
 - Registration: an entry appended to configs/variants.yaml as text, so its comments stay: name, method
   adapter, the adapter, the seed, artifacts.adapter = the hash, location (the runs-repo path and push
   commit, never the repo id: LIFT_RUNS_REPO is a secret) and a note (candidate, recipe, date, GPU,
@@ -86,9 +109,11 @@ After training
   missing (the push; parity, unless registration.json holds one for this hash in that precision; the
   registration) and exits 0. ``--retrain`` first sets the folder aside under
   outputs/.aside/adapters/{name}-{utc stamp} (never synced), then trains anew.
-- One manifest per run (stage "train"): what was trained, on what, the supervised tokens per micro-batch
-  and per optimizer step, the loss curve, the training time, peak GPU memory, the hash, parity, pushes
-  and registration; status "failed" when the run stops on an error.
+- One manifest per run (stage "train"): what was trained, on what, the batch (the plan's and the
+  Trainer's: n_gpu, visible GPUs, rows per micro-batch and per optimizer step) and the rows each step
+  took, the supervised tokens per micro-batch and per optimizer step, the loss curve, the training time,
+  peak GPU memory, the hash, parity, pushes and registration; status "failed" when the run stops on an
+  error.
 
 Logs carry counts, ids, hashes and paths, never row or output text. While training, a heartbeat line
 (step, loss, elapsed) comes at least once a minute: the Colab and Kaggle runners kill a line silent for
@@ -129,7 +154,7 @@ RECIPE_TAGS = {"standard": "std", "stress": "stress"}      # adapter names say s
 PARITY_DTYPES = ("fp32", "fp16")
 MIN_SEQ_LEN = 512
 DATA_SEED_FACTOR = 1000
-PARITY_PROMPTS = 20               # Gate 0's merge-parity sample (decisions.md 27)
+GATE0_PARITY_SEED_OFFSET = 3      # lift.gate0.run_gate0 draws its parity prompts with seed SEED + 3
 HEARTBEAT_SECONDS = 60.0
 IGNORE_INDEX = -100
 LIFT_TRAIN = "lift_train.json"
@@ -150,7 +175,9 @@ class TrainRefused(ValueError):
     """A request the recipe, the data or the hardware rules refuse, before any GPU time is spent (a
     candidate or seed the recipe does not allow, a batch that does not divide the effective batch, a
     precision the GPU must not use, a stale or malformed training file, rows the template leaves nothing
-    to learn from, a push that cannot work). The message names the remedy; ``lift train`` exits 2."""
+    to learn from, a push that cannot work), or, once the model is loaded, before the first training
+    step (a Trainer that would not take the recipe's batch). The message names the remedy; ``lift
+    train`` exits 2."""
 
 
 class ParityFailed(RuntimeError):
@@ -242,10 +269,13 @@ class Plan:
 
 def plan_training(candidate: str, recipe: str, seed: int, *, model_id: str | None = None,
                   revision: str | None = None, device: str = "cuda:0", dtype: str | None = None,
-                  per_device_batch: int | None = None, max_steps: int | None = None) -> Plan:
+                  per_device_batch: int | None = None, max_steps: int | None = None,
+                  hardware: bool = True) -> Plan:
     """Check a request against the recipe and the hardware rules; nothing is loaded. ``model_id`` and
     ``revision`` default to models.global, whose revision must then be pinned; a caller passing
-    ``model_id`` (the tests: a local tiny model) vouches for it."""
+    ``model_id`` (the tests: a local tiny model) vouches for it. ``hardware=False`` leaves out the
+    checks that ask the GPU (that it exists, and the precision it may train in), for ``check_training``,
+    which runs where there is none."""
     cfg = recipe_config(recipe)
     candidates = list(config.load("train").get("candidates") or [])
     if candidate not in candidates:
@@ -273,7 +303,8 @@ def plan_training(candidate: str, recipe: str, seed: int, *, model_id: str | Non
     from lift.models.load import resolved_revision
 
     rev = resolved_revision(model_id, revision or config.get("models.global.revision"))
-    _check_precision(dtype, device, str(cfg["precision"]))
+    if hardware:
+        _check_precision(dtype, device, str(cfg["precision"]))
     return Plan(candidate=candidate, recipe=recipe, seed=int(seed), cfg=cfg, model_id=model_id,
                 model_rev=rev, device=device, dtype=dtype, per_device_batch=per_device, grad_accum=accum,
                 max_steps=None if max_steps is None else int(max_steps))
@@ -294,9 +325,9 @@ def _device(device: str) -> str:
     name = str(device).strip()
     name = "cuda:0" if name == "cuda" else name
     if name not in ("cpu", "cuda:0"):
-        raise TrainRefused(f"lift train runs on cuda:0 (or cpu, for the tests), not {device!r}: the "
-                           "Trainer places every batch on the first visible GPU. To train on another GPU, "
-                           "make it the first visible one (CUDA_VISIBLE_DEVICES)")
+        raise TrainRefused(f"lift train runs on one device, cuda:0 (or cpu, for the tests), not {device!r}: "
+                           "it holds the Trainer to the first visible GPU, however many are visible. To "
+                           "train on another GPU, make it the first visible one (CUDA_VISIBLE_DEVICES)")
     return name
 
 
@@ -501,49 +532,98 @@ def data_stats(examples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+@dataclass(frozen=True)
+class Prepared:
+    """A run's rows as training takes them, before any model loads (``prepare``)."""
+
+    data: TrainingData
+    n_heldout: int                      # held-out utility prompts the user turns were checked against
+    tokenizer: Any
+    max_len: int
+    examples: list[dict[str, Any]]      # every row's example, in the file's order
+    unfit: list[dict[str, Any]]         # rows left without a supervised token: id, prompt tokens, limit
+
+
+def prepare(plan: Plan) -> Prepared:
+    """The examples of a run, built the one way ``train_lora`` and ``check_training`` share: the training
+    file (checked against report.json), the held-out guard, Global's tokenizer at the plan's revision,
+    then every row through ``build_example``. Loads no model and writes nothing."""
+    from lift.models.load import load_tokenizer
+
+    data = load_training_data(plan.candidate, plan.cfg)
+    n_heldout = check_heldout(data.rows)
+    tokenizer = load_tokenizer(plan.model_id, plan.model_rev)
+    max_len = int(plan.cfg["max_seq_len"])
+    examples, unfit = build_examples(tokenizer, data.rows, max_len)
+    return Prepared(data=data, n_heldout=n_heldout, tokenizer=tokenizer, max_len=max_len, examples=examples,
+                    unfit=unfit)
+
+
+def trained_examples(prepared: Prepared, *, drop_unfit: bool) -> list[dict[str, Any]]:
+    """The examples that train: all of them, unless some rows are left without a supervised token, which
+    stops the run (``unfit_message``) or, with ``drop_unfit``, are dropped, exactly those."""
+    if prepared.unfit and not drop_unfit:
+        raise TrainRefused(unfit_message(prepared.unfit, prepared.max_len))
+    return [e for e in prepared.examples if e["n_supervised"]]
+
+
 # --- training -----------------------------------------------------------------------------------------
 
 
 class SupervisedTokenCounter:
     """Wraps TRL's collator. Each micro-batch's supervised tokens are ``labels[:, 1:] != -100``, the
     positions the shifted causal-LM loss scores; a micro-batch with none raises (the preamble crowding
-    out the target). The DataLoader collates one micro-batch ahead of the one the Trainer uses
-    (accelerate looks ahead for the end), so counts wait in collation order and are booked when the
-    Trainer reports a micro-batch used (``consumed``, ``step_end``): exact per micro-batch and per
-    optimizer step. A batch collated ahead that training never reached (max_steps) stays unbooked."""
+    out the target). Its rows are counted too, and with ``max_rows`` (the plan's per-device batch) a
+    micro-batch with more raises before the step uses it: the DataLoader's own batch, whatever the
+    Trainer's arguments claim (nn.DataParallel over two GPUs collates two rows for one). The DataLoader
+    collates one micro-batch ahead of the one the Trainer uses (accelerate looks ahead for the end), so
+    counts wait in collation order and are booked when the Trainer reports a micro-batch used
+    (``consumed``, ``step_end``): exact per micro-batch and per optimizer step. A batch collated ahead
+    that training never reached (max_steps) stays unbooked."""
 
-    def __init__(self, collate: Callable[[list[dict[str, Any]]], dict[str, Any]]) -> None:
+    def __init__(self, collate: Callable[[list[dict[str, Any]]], dict[str, Any]], *,
+                 max_rows: int | None = None) -> None:
         self._collate = collate
-        self._pending: deque[int] = deque()
-        self._step: list[int] = []
+        self.max_rows = max_rows
+        self._pending: deque[tuple[int, int]] = deque()       # (supervised tokens, rows) per micro-batch
+        self._step: list[tuple[int, int]] = []
         self.per_batch: list[int] = []
         self.per_step: list[int] = []
+        self.rows_per_batch: list[int] = []
+        self.rows_per_step: list[int] = []
 
     @property
     def in_step(self) -> int:
         return len(self._step)
 
     def __call__(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
+        if self.max_rows is not None and len(examples) > self.max_rows:
+            raise RuntimeError(f"the Trainer's DataLoader put {len(examples)} rows in one micro-batch, but "
+                               f"the recipe takes {self.max_rows} (several GPUs used through "
+                               "nn.DataParallel?): stopped before any step trained on it. lift train runs on "
+                               "one GPU: make one visible (CUDA_VISIBLE_DEVICES=0) and look at sft_config")
         batch = self._collate(examples)
         n = int((batch["labels"][:, 1:] != IGNORE_INDEX).sum())
         if n == 0:
             raise ValueError(f"a batch with zero supervised tokens ({len(examples)} rows): the prompt fills "
                              "every position the loss scores, so the step would learn nothing "
                              "(build_examples refuses such rows before training; this batch got past it)")
-        self._pending.append(n)
+        self._pending.append((n, len(examples)))
         return batch
 
     def consumed(self) -> None:
         if not self._pending:
             raise RuntimeError("the Trainer used a micro-batch the collator never built: the "
                                "supervised-token accounting is out of step with the training loop")
-        n = self._pending.popleft()
+        n, rows = self._pending.popleft()
         self.per_batch.append(n)
-        self._step.append(n)
+        self.rows_per_batch.append(rows)
+        self._step.append((n, rows))
 
     def step_end(self) -> None:
         self.consumed()
-        self.per_step.append(sum(self._step))
+        self.per_step.append(sum(n for n, _rows in self._step))
+        self.rows_per_step.append(sum(rows for _n, rows in self._step))
         self._step = []
 
 
@@ -622,7 +702,16 @@ def _callback(counter: SupervisedTokenCounter, heartbeat: Heartbeat) -> Any:
 
 
 def sft_config(plan: Plan, output_dir: Path) -> Any:
-    """The SFTConfig of a run (trl imported here). ``max_steps`` is set only when the caller asked."""
+    """The SFTConfig of a run (trl imported here), held to one device. ``max_steps`` is set only when the
+    caller asked.
+
+    Outside a distributed launch, TrainingArguments counts every visible GPU (n_gpu =
+    torch.cuda.device_count(), set by its device setup, which runs when the config is built); with n_gpu
+    over 1 the Trainer wraps the model in nn.DataParallel and makes each micro-batch per_device_batch x
+    n_gpu rows (32 rows an optimizer step on a Kaggle T4 x2, not 16). lift loads the model on cuda:0 and
+    trains it there alone, so n_gpu is set to 1 here, the override the Trainer itself applies to a
+    model-parallel model. It has to happen before the Trainer is built: Trainer.__init__ takes the batch
+    its DataLoader uses from this config (``make_trainer`` then checks it)."""
     from trl import SFTConfig
 
     cfg = plan.cfg
@@ -641,12 +730,18 @@ def sft_config(plan: Plan, output_dir: Path) -> Any:
     )
     if plan.max_steps is not None:
         kwargs["max_steps"] = plan.max_steps
-    return SFTConfig(**kwargs)
+    args = SFTConfig(**kwargs)
+    if args.n_gpu > 1:          # the device setup has run (SFTConfig.__post_init__), so this stays
+        args._n_gpu = 1
+    return args
 
 
 def lora_model(plan: Plan) -> tuple[Any, dict[str, Any]]:
     """Global loaded through lift.models.load (neutral generation config, frozen, eval) with trainable
-    LoRA on every target projection of every layer, initialised after ``set_seed(seed)``."""
+    LoRA on every target projection of every layer, initialised after ``set_seed(seed)``. The LoRA
+    weights must be fp32 on any base (PEFT's autocast_adapter_dtype casts them up from a bf16 or fp16
+    base), or this raises before training: fp16 autocast cannot unscale fp16 gradients, and Adam's
+    updates lose precision in bf16."""
     from peft import LoraConfig, get_peft_model
     from peft.tuners.lora import LoraLayer
     from transformers import set_seed
@@ -670,6 +765,11 @@ def lora_model(plan: Plan) -> tuple[Any, dict[str, Any]]:
                            "down_proj)")
     trainable, total = model.get_nb_trainable_parameters()
     dtypes = sorted({str(p.dtype).removeprefix("torch.") for p in model.parameters() if p.requires_grad})
+    if dtypes != ["float32"]:
+        raise RuntimeError(f"the trainable LoRA weights are {dtypes}, not float32, on a {plan.dtype} base: "
+                           "PEFT must keep them in fp32 (get_peft_model's autocast_adapter_dtype), since "
+                           "fp16 autocast cannot unscale fp16 gradients and Adam's updates lose precision "
+                           "in bf16")
     info = {"r": lora["r"], "alpha": lora["alpha"], "dropout": float(lora["dropout"]),
             "target_modules": targets, "bias": "none", "layers": layers, "wrapped_modules": wrapped,
             "trainable_params": int(trainable), "total_params": int(total), "trainable_dtypes": dtypes}
@@ -679,32 +779,69 @@ def lora_model(plan: Plan) -> tuple[Any, dict[str, Any]]:
 def make_trainer(model: Any, tokenizer: Any, examples: Sequence[Mapping[str, Any]], plan: Plan, *,
                  output_dir: Path, heartbeat: Heartbeat | None = None) -> tuple[Any, SupervisedTokenCounter]:
     """The SFTTrainer over the pre-tokenized examples (input_ids and labels only), with the counting
-    collator and the progress callback; the Trainer's own per-step printing gives way to the heartbeat."""
+    collator and the progress callback; the Trainer's own per-step printing gives way to the heartbeat.
+    Refused (TrainRefused) unless the built Trainer takes the recipe's batch (``check_batch``)."""
     from datasets import Dataset
     from transformers import PrinterCallback
     from trl import SFTTrainer
     from trl.trainer.sft_trainer import DataCollatorForLanguageModeling
 
-    counter = SupervisedTokenCounter(DataCollatorForLanguageModeling(pad_token_id=tokenizer.pad_token_id))
+    counter = SupervisedTokenCounter(DataCollatorForLanguageModeling(pad_token_id=tokenizer.pad_token_id),
+                                     max_rows=plan.per_device_batch)
     dataset = Dataset.from_list([{"input_ids": list(e["input_ids"]), "labels": list(e["labels"])}
                                  for e in examples])
     trainer = SFTTrainer(model=model, args=sft_config(plan, output_dir), train_dataset=dataset,
                          processing_class=tokenizer, data_collator=counter,
                          callbacks=[_callback(counter, heartbeat or Heartbeat(plan.name))])
     trainer.remove_callback(PrinterCallback)
+    check_batch(plan, trainer_batch(trainer))
     return trainer, counter
+
+
+def trainer_batch(trainer: Any) -> dict[str, int]:
+    """The batch a built Trainer takes: n_gpu (after ``sft_config``'s pin), its processes, the rows per
+    micro-batch its training DataLoader is built with, and the rows per optimizer step (that x gradient
+    accumulation x data-parallel processes: Trainer.get_total_train_batch_size); and the GPUs this
+    process sees (torch.cuda.device_count(): on a Kaggle T4 x2 the second stays idle)."""
+    import torch
+
+    args = trainer.args
+    return {"n_gpu": int(args.n_gpu), "visible_gpus": int(torch.cuda.device_count()),
+            "processes": int(args.world_size), "micro_batch": int(trainer._train_batch_size),
+            "per_step": int(trainer.get_total_train_batch_size(args))}
+
+
+def check_batch(plan: Plan, batch: Mapping[str, int]) -> None:
+    """Refuse a Trainer that would not take the recipe's batch: one process on at most one GPU, the
+    plan's per-device batch per micro-batch, its effective batch per optimizer step."""
+    if (batch["n_gpu"] <= 1 and batch["processes"] == 1 and batch["micro_batch"] == plan.per_device_batch
+            and batch["per_step"] == plan.effective_batch):
+        return
+    took = (f"{batch['per_step']} rows per optimizer step ({batch['micro_batch']} per micro-batch, "
+            f"{batch['processes']} process(es), n_gpu {batch['n_gpu']})")
+    raise TrainRefused(f"the Trainer would take {took}, not the recipe's {plan.effective_batch} "
+                       f"({plan.per_device_batch} x {plan.grad_accum} accumulation): lift train is one plain "
+                       "process on one GPU. Run it as `lift train`, not under torchrun or accelerate launch, "
+                       "with one GPU visible if need be (CUDA_VISIBLE_DEVICES=0)")
 
 
 def _fit(plan: Plan, tokenizer: Any, examples: Sequence[Mapping[str, Any]], scratch: Path,
          progress: dict[str, Any]) -> dict[str, Any]:
     """Train and save the adapter into ``scratch/adapter``; returns plain data only, so the model and
     the trainer die with this frame. While training, ``progress`` holds the counter and the trainer (its
-    log history), for the manifest of a run that stops midway; the trainer leaves it once training ends."""
+    log history), for the manifest of a run that stops midway; the trainer leaves it once training ends.
+    ``batch`` is the plan's batch beside the one the built Trainer takes (``trainer_batch``), and
+    ``rows_per_step`` the rows each optimizer step took, as the collator counted them."""
     import torch
 
     model, lora_info = lora_model(plan)
     trainer, counter = make_trainer(model, tokenizer, examples, plan, output_dir=scratch / "trainer")
-    progress.update(counter=counter, trainer=trainer)
+    batch = {"per_device": plan.per_device_batch, "grad_accum": plan.grad_accum,
+             "effective": plan.effective_batch, **trainer_batch(trainer)}
+    progress.update(counter=counter, trainer=trainer, batch=batch)
+    log.info("%s: %d rows per optimizer step (%d per micro-batch x %d accumulation) on %s, n_gpu %d, "
+             "%d GPU(s) visible", plan.name, batch["per_step"], batch["micro_batch"], plan.grad_accum,
+             plan.device, batch["n_gpu"], batch["visible_gpus"])
     cuda = plan.device.startswith("cuda")
     if cuda:
         torch.cuda.reset_peak_memory_stats(plan.device)
@@ -724,7 +861,8 @@ def _fit(plan: Plan, tokenizer: Any, examples: Sequence[Mapping[str, Any]], scra
     result = {
         "lora": lora_info, "staging": staging, "train_seconds": seconds, "peak_memory_bytes": peak,
         "global_step": int(trainer.state.global_step), "max_steps": int(trainer.state.max_steps),
-        "metrics": dict(output.metrics), "loss_curve": curve,
+        "metrics": dict(output.metrics), "loss_curve": curve, "batch": batch,
+        "rows_per_step": list(counter.rows_per_step),
         "supervised_tokens_per_batch": list(counter.per_batch),
         "supervised_tokens_per_step": list(counter.per_step),
         "trainer_log": {"log_history": history, "train_output": train_output,
@@ -875,18 +1013,36 @@ def _push(name: str) -> dict[str, Any]:
             "conflicts": list(report.conflicts)}
 
 
+def gate0_parity_seed() -> int:
+    """The seed of Gate 0's merge-parity sample: lift.gate0.run_gate0 draws it with SEED + 3."""
+    from lift import gate0
+
+    return gate0.SEED + GATE0_PARITY_SEED_OFFSET
+
+
+def gate0_parity_sample() -> list[Any]:
+    """Gate 0's merge-parity prompts, drawn as lift.gate0.run_gate0 draws them for its random-LoRA
+    parity (``mixed_sample(N_PARITY, split="dev", seed=SEED + 3)``: 20 dev prompts mixed over the safety
+    sets and languages), so an adapter's parity runs on the very prompts Gate 0's did."""
+    from lift import gate0
+    from lift.prompts import mixed_sample
+
+    return mixed_sample(gate0.N_PARITY, split="dev", seed=gate0_parity_seed())
+
+
 def _parity_texts(given: Sequence[str] | None) -> tuple[list[str], dict[str, Any]]:
-    """The parity prompts (Gate 0's: 20 dev prompts mixed over sets and languages, seed 0, unless
-    given) and how to find them again (pids, or the given texts' hashes; never the texts)."""
+    """The parity prompts (``gate0_parity_sample``, unless given) and how to find them again (pids, or
+    the given texts' hashes; never the texts)."""
     if given is not None:
         texts = [str(t) for t in given]
         if not texts:
             raise TrainRefused("parity_prompts is empty")
         return texts, {"source": "given", "n": len(texts), "sha256": [sha256_text(t) for t in texts]}
-    from lift.prompts import mixed_sample
+    from lift import gate0
 
-    records = mixed_sample(PARITY_PROMPTS, split="dev", seed=0)
-    source = f"lift.prompts.mixed_sample({PARITY_PROMPTS}, split='dev', seed=0)"
+    records = gate0_parity_sample()
+    source = (f"Gate 0's merge-parity sample: lift.prompts.mixed_sample({gate0.N_PARITY}, split='dev', "
+              f"seed={gate0_parity_seed()})")
     return [r.text for r in records], {"source": source, "n": len(records),
                                        "pids": [f"{r.set}_{r.lang}:{r.pid}" for r in records]}
 
@@ -1260,9 +1416,7 @@ def _train_record(plan: Plan, data: TrainingData, n_heldout: int, stats: Mapping
                  "rows_in_file": len(data.rows), "rows_trained": stats["rows"],
                  "dropped_unfit": {"count": len(unfit), "ids": [u["id"] for u in unfit]},
                  "heldout_prompts_checked": n_heldout},
-        "counts": dict(stats), "lora": fit["lora"],
-        "batch": {"per_device": plan.per_device_batch, "grad_accum": plan.grad_accum,
-                  "effective": plan.effective_batch},
+        "counts": dict(stats), "lora": fit["lora"], "batch": dict(fit["batch"]),
         "dtype": plan.dtype, "autocast": plan.dtype if plan.dtype in ("bf16", "fp16") else None,
         "model": {"id": plan.model_id, "revision": plan.model_rev}, "device": plan.device, "gpu": gpu,
         "gpu_capability": env["gpu_capability"], "stack": env, "versions": manifest.versions(),
@@ -1270,6 +1424,7 @@ def _train_record(plan: Plan, data: TrainingData, n_heldout: int, stats: Mapping
         "train": {"global_step": fit["global_step"], "max_steps": fit["max_steps"],
                   "train_runtime": metrics.get("train_runtime"), "train_seconds": fit["train_seconds"],
                   "train_loss": metrics.get("train_loss"), "peak_memory_bytes": fit["peak_memory_bytes"]},
+        "rows_per_step": fit["rows_per_step"],
         "supervised_tokens_per_step": fit["supervised_tokens_per_step"],
         "retrained_from": dict(replaced) if replaced else None, "created": _now(),
     }
@@ -1286,9 +1441,10 @@ def train_lora(candidate: str, recipe: str, seed: int, *, out_dir: Path | None =
 
     ``out_dir`` puts the adapter elsewhere: such an adapter is never pushed (``push`` must be False) or
     registered, since the push and the registry describe outputs/adapters/{name}. ``parity_prompts``
-    default to Gate 0's 20 dev prompts. ``registry`` (tests: a copy) defaults to configs/variants.yaml.
-    Raises TrainRefused (a refused request, before any GPU time), ParityFailed (fp32 merge parity
-    failed: saved and pushed, not registered) or RegistryConflict (another entry under the name)."""
+    default to Gate 0's 20 dev prompts (``gate0_parity_sample``). ``registry`` (tests: a file in tmp)
+    defaults to configs/variants.yaml. Raises TrainRefused (a refused request, before any GPU time, or a
+    Trainer off the recipe's batch, before its first step), ParityFailed (fp32 merge parity failed: saved
+    and pushed, not registered) or RegistryConflict (another entry under the name)."""
     from lift.models.variants import adapter_path
     from lift.train.merge import ADAPTER_WEIGHTS
 
@@ -1311,24 +1467,19 @@ def train_lora(candidate: str, recipe: str, seed: int, *, out_dir: Path | None =
                            "finished (it publishes the whole folder at once). Look at it, then rerun with "
                            "--retrain, which sets it aside")
     _check_same_hardware(plan)
-    data = load_training_data(plan.candidate, plan.cfg)
-    n_heldout = check_heldout(data.rows)
-    prompts, prompt_info = _parity_texts(parity_prompts) if parity else ([], None)
-    from lift.models.load import device_name, load_tokenizer
-
-    tokenizer = load_tokenizer(plan.model_id, plan.model_rev)
-    max_len = int(plan.cfg["max_seq_len"])
-    examples, unfit = build_examples(tokenizer, data.rows, max_len)
-    if unfit and not drop_unfit:
-        raise TrainRefused(unfit_message(unfit, max_len))
+    prepared = prepare(plan)
+    data, n_heldout, unfit, tokenizer = prepared.data, prepared.n_heldout, prepared.unfit, prepared.tokenizer
+    examples = trained_examples(prepared, drop_unfit=drop_unfit)
     if unfit:
-        examples = [e for e in examples if e["n_supervised"]]
         log.warning("%s: --drop-unfit drops %d rows the template leaves nothing to learn from: %s",
                     plan.name, len(unfit), [u["id"] for u in unfit])
+    prompts, prompt_info = _parity_texts(parity_prompts) if parity else ([], None)
     stats = data_stats(examples)
     log.info("%s: %d rows of %s (sha256 %s), %d truncated at %d tokens, %d supervised tokens; %d held-out "
              "prompts checked", plan.name, stats["rows"], data.repo_path, data.sha256[:12],
-             stats["truncated_rows"], max_len, stats["supervised_tokens"], n_heldout)
+             stats["truncated_rows"], prepared.max_len, stats["supervised_tokens"], n_heldout)
+    from lift.models.load import device_name
+
     replaced = _set_aside(final, plan.name) if retrain else None
     gpu = device_name(plan.device)
     from lift.manifest import finish_run, start_run
@@ -1362,7 +1513,8 @@ def train_lora(candidate: str, recipe: str, seed: int, *, out_dir: Path | None =
     except BaseException as exc:
         finish_run(run, status="failed", error=type(exc).__name__, **_so_far(fit, progress))
         raise
-    finish_run(run, status=post.status, supervised_tokens_per_batch=fit["supervised_tokens_per_batch"],
+    finish_run(run, status=post.status, batch=fit["batch"], rows_per_step=fit["rows_per_step"],
+               supervised_tokens_per_batch=fit["supervised_tokens_per_batch"],
                supervised_tokens_per_step=fit["supervised_tokens_per_step"], loss_curve=fit["loss_curve"],
                train_runtime=fit["metrics"].get("train_runtime"), train_seconds=fit["train_seconds"],
                peak_memory_bytes=fit["peak_memory_bytes"], lora=fit["lora"], data_stats=stats,
@@ -1411,11 +1563,13 @@ def _resume(plan: Plan, final: Path, *, push: bool, parity: bool, parity_prompts
 
 def _so_far(fit: Mapping[str, Any] | None, progress: dict[str, Any]) -> dict[str, Any]:
     """The counts a run that stopped had made: the finished training's, or the training under way's."""
-    keys = ("supervised_tokens_per_batch", "supervised_tokens_per_step", "loss_curve", "train_seconds")
+    keys = ("batch", "rows_per_step", "supervised_tokens_per_batch", "supervised_tokens_per_step",
+            "loss_curve", "train_seconds")
     if fit is not None:
         return {k: fit[k] for k in keys}
     counter, trainer = progress.get("counter"), progress.pop("trainer", None)
-    return {"supervised_tokens_per_batch": list(counter.per_batch) if counter else None,
+    return {"batch": progress.get("batch"), "rows_per_step": list(counter.rows_per_step) if counter else None,
+            "supervised_tokens_per_batch": list(counter.per_batch) if counter else None,
             "supervised_tokens_per_step": list(counter.per_step) if counter else None,
             "loss_curve": _curve(trainer.state.log_history) if trainer is not None else None}
 
@@ -1448,4 +1602,69 @@ def summary(directory: Path) -> list[str]:
         lines += [f"  {line}" for line in _laptop_lines(str(reg["name"]))]
     else:
         lines.append("  not registered" + (f": {reg['registry_error']}" if reg.get("registry_error") else ""))
+    return lines
+
+
+# --- lift train --check -------------------------------------------------------------------------------
+
+
+def check_training(candidate: str, recipe: str, seed: int, *, model_id: str | None = None,
+                   revision: str | None = None, device: str = "cuda:0", dtype: str | None = None,
+                   per_device_batch: int | None = None, drop_unfit: bool = False) -> dict[str, Any]:
+    """``lift train --check``: what the same request would train on, built exactly as ``train_lora``
+    builds it (``prepare``), so a person can decide on ``--drop-unfit`` before a GPU run.
+
+    Only Global's tokenizer is loaded, at the revision training uses (models.global, which must be
+    pinned, unless ``model_id`` is given): no model, no GPU or precision check (``plan_training``'s
+    ``hardware=False``), no push or preflight, no registry, no adapter folder, no manifest; nothing is
+    written. The request and the training file are checked as for training, so what training refuses
+    there raises TrainRefused here too; rows left without a supervised token are reported, not refused.
+    Returns counts, ids and hashes, never text: the counts of every row of the file (``data_stats``),
+    those rows (id, prompt tokens, limit), whether lift train would stop on them (it does without
+    ``drop_unfit``), and the counts of the rows that train once they are dropped."""
+    plan = plan_training(candidate, recipe, seed, model_id=model_id, revision=revision, device=device,
+                         dtype=dtype, per_device_batch=per_device_batch, hardware=False)
+    prepared = prepare(plan)
+    kept = trained_examples(prepared, drop_unfit=True)
+    return {
+        "name": plan.name, "candidate": plan.candidate, "recipe": plan.recipe, "seed": plan.seed,
+        "model": {"id": plan.model_id, "revision": plan.model_rev}, "max_seq_len": prepared.max_len,
+        "data": {"path": prepared.data.repo_path, "key": prepared.data.key, "sha256": prepared.data.sha256,
+                 "rows_in_file": len(prepared.data.rows), "heldout_prompts_checked": prepared.n_heldout},
+        "counts": data_stats(prepared.examples), "unfit": [dict(u) for u in prepared.unfit],
+        "drop_unfit": bool(drop_unfit), "stops": bool(prepared.unfit) and not drop_unfit,
+        "kept": data_stats(kept),
+    }
+
+
+def _spread_text(spread: Mapping[str, Any]) -> str:
+    return f"min {spread['min']}, mean {spread['mean']}, max {spread['max']}"
+
+
+def check_lines(report: Mapping[str, Any]) -> list[str]:
+    """What ``lift train --check`` prints (counts, ids, hashes and paths, never text)."""
+    data, counts, model = report["data"], report["counts"], report["model"]
+    limit, unfit, kept = report["max_seq_len"], report["unfit"], report["kept"]
+    lines = [f"{report['name']}: lift train --check (the tokenizer the only thing loaded; nothing written)",
+             f"  data: {data['path']} ({data['key']}, sha256 {data['sha256'][:12]}), {data['rows_in_file']} "
+             f"rows; none equals one of the {data['heldout_prompts_checked']} held-out utility prompts",
+             f"  tokenizer: {model['id']}@{model['revision'][:12]}; max_seq_len {limit}",
+             f"  rows: {counts['rows']}; truncated at {limit} tokens: {counts['truncated_rows']}",
+             f"  prompt tokens: {_spread_text(counts['prompt_tokens'])}",
+             f"  answer tokens: {_spread_text(counts['answer_tokens'])}",
+             f"  supervised tokens: {counts['supervised_tokens']} (per row: "
+             f"{_spread_text(counts['supervised_per_row'])})"]
+    if not unfit:
+        lines.append(f"  rows with zero supervised tokens: none; lift train trains on all {kept['rows']} "
+                     "rows")
+        return lines
+    lines.append(f"  rows with zero supervised tokens: {len(unfit)} (id, prompt tokens, limit)")
+    lines += [f"    {u['id']}, {u['prompt_tokens']}, {u['limit']}" for u in unfit]
+    then = f"{kept['rows']} rows, {kept['supervised_tokens']} supervised tokens"
+    if report["stops"]:
+        lines.append("  lift train stops on these rows. Remedies, each with a dated docs/decisions.md entry: "
+                     "raise max_seq_len in configs/train.yaml, or rerun with --drop-unfit, which drops "
+                     f"exactly these and trains on {then}")
+    else:
+        lines.append(f"  lift train --drop-unfit drops exactly these and trains on {then}")
     return lines
