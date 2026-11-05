@@ -161,18 +161,26 @@ SKIPPED = {
                "never mixed in one file. Judge each with the file's judge (its id names its precision and "
                "Controversial mode), or judge it again with its line, run once as a job line right after "
                "`lift sync pull`, followed by the line that failed"),
+    "short": ("are short of their frozen split (see the errors above): they await a reader's verdict on "
+              "their translation failures (or a rerun or rebuild of their prompt files, as the line says), "
+              "and nothing was generated for them. Do what each line says on the laptop, which ends with "
+              "`lift sync push`; a later job's `lift sync pull` brings the completed prompt files, and the "
+              "line that skipped the cell makes it"),
 }
 _SKIPPED_AS = {"stale": "stale", "precision": "made in another precision",
-               "judges": "judged by another judge"}
+               "judges": "judged by another judge", "short": "short of its frozen split"}
 REDRAW = "after P04 draws the key list again (lift validate second-judge-sample, then lift sync push)"
 
 
 def _kind(exc: Exception) -> str:
+    from lift.data.build import ShortCellError
     from lift.judge.pipeline import MixedJudgesError
     from lift.models.generate import OtherPrecisionError
 
     if isinstance(exc, OtherPrecisionError):
         return "precision"
+    if isinstance(exc, ShortCellError):
+        return "short"
     return "judges" if isinstance(exc, MixedJudgesError) else "stale"
 
 
@@ -180,19 +188,25 @@ def _skip(skipped: dict[str, dict[str, str]], variant: str, set_name: str, lang:
           exc: Exception, *, judged: str | None, dtype: str, generates: bool = True,
           keys: bool = False) -> None:
     """Log a cell the command cannot go on with and keep its remedy under its kind (``SKIPPED``), so the
-    command goes on with the other cells and lists it at the end. A cell made in another precision than
-    the run's ``dtype`` is listed as such whatever refusal came first (an API judge has no precision for
-    judge_file to check): a restart line run here would discard it. A stale cell's whole-cell restart
-    gets the lines its job needs under it (``_after_restart``)."""
+    command goes on with the other cells and lists it at the end. A cell short of its frozen split (a
+    ShortCellError, when its prompts are loaded) gets the error's ``remedy``: its prompt file's, done on the
+    laptop, which discards nothing. Any other cell made in another precision than the run's ``dtype`` is
+    listed as such whatever refusal came first (an API judge has no precision for judge_file to check): a
+    restart line run here would discard it. A stale cell's whole-cell restart gets the lines its job needs
+    under it (``_after_restart``)."""
     from lift.models.generate import made_in
 
     found = _kind(exc)
+    cell = f"{set_name}_{lang}_{split}"
+    if found == "short":
+        log.error("%s %s: %s, skipped: %s", variant, cell, _SKIPPED_AS[found], exc)
+        skipped.setdefault(found, {})[cell] = exc.remedy
+        return
     if found == "precision":
         made = exc.dtype
     else:
         made = "/".join(sorted(made_in(variant, set_name, lang, split) - {dtype}))
     kind = "precision" if made else found
-    cell = f"{set_name}_{lang}_{split}"
     if kind == found:
         log.error("%s %s: %s, skipped: %s", variant, cell, _SKIPPED_AS[kind], exc)
     else:                                      # its error's remedy is for a run in the cell's precision
@@ -306,6 +320,7 @@ def _generate(args: argparse.Namespace) -> int:
     langs = _names(args.langs, LANGS, LANGS)
     dtype = _dtype(args.dtype)
     _refuse_other_dtype(dtype, args.device)
+    from lift.data.build import ShortCellError
     from lift.models.generate import StaleOutputError, generate, generations_path
     from lift.models.variants import build_variant, get_spec
     from lift.prompts import load
@@ -315,7 +330,11 @@ def _generate(args: argparse.Namespace) -> int:
     skipped: dict[str, dict[str, str]] = {}
     for set_name in sets:
         for lang in langs:
-            prompts = load(set_name, lang, args.split)
+            try:
+                prompts = load(set_name, lang, args.split)
+            except ShortCellError as exc:      # awaits a reader's verdict: listed, the other cells go on
+                _skip(skipped, spec.name, set_name, lang, args.split, exc, judged=None, dtype=dtype)
+                continue
             if args.limit:
                 prompts = prompts[: args.limit]
             if not prompts:
@@ -519,11 +538,13 @@ def run_cells(holder: dict[str, Any], make_judge: Callable[[], Any], cells: Sequ
     after it is generated (both models loaded); without, every file is generated first, the
     generator is dropped and its memory released, then the judge is loaded and judges them all.
     A cell whose generations or judgements file is refused (StaleOutputError: stale, made in another
-    precision, judged by another judge) is logged and skipped, and the other cells go on: a cut-short
-    session must not block the rest. Its remedy goes into ``skipped[kind]`` (``SKIPPED``) under
+    precision, judged by another judge), or whose prompts are short of the frozen split (ShortCellError,
+    when they are loaded: nothing is generated), is logged and skipped, and the other cells go on: a
+    cut-short session must not block the rest. Its remedy goes into ``skipped[kind]`` (``SKIPPED``) under
     "{set}_{lang}_{split}"; without ``skipped``, one StaleOutputError listing them is raised once every
     other cell is done.
     """
+    from lift.data.build import ShortCellError
     from lift.judge.pipeline import judge_file
     from lift.models.generate import StaleOutputError, generate, generations_path
     from lift.prompts import load
@@ -541,7 +562,12 @@ def run_cells(holder: dict[str, Any], make_judge: Callable[[], Any], cells: Sequ
         _skip(left, name, set_name, lang, split, exc, judged="primary", dtype=dtype)
 
     def gen(set_name: str, lang: str) -> Path | None:
-        prompts = load(set_name, lang, split)[:limit] if limit else load(set_name, lang, split)
+        try:
+            prompts = load(set_name, lang, split)
+        except ShortCellError as exc:          # awaits a reader's verdict: listed, the other cells go on
+            skip(set_name, lang, exc)
+            return None
+        prompts = prompts[:limit] if limit else prompts
         if not prompts:
             log.warning("%s_%s has no %s prompts", set_name, lang, split)
             return None

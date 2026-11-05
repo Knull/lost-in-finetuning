@@ -436,9 +436,21 @@ def test_build_state_reads_new_and_old_summaries():
     short = {"easy_benign_zh": {"final": ["prb-test-0002", "prb-test-0003"]},
              "hard_benign_hi": {"fit": ["orb-0001"]}}
     awaiting = {"complete": False, "rerun_needed": False, "skipped": [], "short_cells": short}
+    # W2-01: the remedy names each language's --langs (the default sheets cover hi zh es only) and the
+    # failures sheet a reader may be filling already (spotcheck-sheets never overwrites one without
+    # --overwrite)
     assert build.build_state(awaiting) == (
-        "built; 3 fit/dev/final items await a reader's verdict (failures sheet: lift data spotcheck-sheets, "
-        "then lift data apply-spotchecks)")
+        "built; 3 fit/dev/final items await a reader's verdict on the failures sheet (fill in each "
+        "language's failures sheet if it exists (lift data spotcheck-sheets does not overwrite a sheet "
+        "without --overwrite), else make it: hi validation/sheets/spotcheck_hi_failures.csv (`lift data "
+        "spotcheck-sheets --langs hi`), zh validation/sheets/spotcheck_zh_failures.csv (`lift data "
+        "spotcheck-sheets --langs zh`); then `lift data apply-spotchecks --file <each filled sheet>`, then "
+        "`lift sync push`)")
+    assert build.reader_remedy(["ar"]) == (
+        "fill in its failures sheet, validation/sheets/spotcheck_ar_failures.csv, if it exists (lift data "
+        "spotcheck-sheets does not overwrite it without --overwrite), else make it with `lift data "
+        "spotcheck-sheets --langs ar`; then `lift data apply-spotchecks --file <the filled sheet>`, then "
+        "`lift sync push`")
     assert build.build_state({"complete": False, "rerun_needed": False, "skipped": skipped,
                               "short_cells": short}).startswith(
         "built; 1 files left out by --skip-translation (run without it to translate them); 3 fit/dev/final")
@@ -592,8 +604,12 @@ def test_a_cell_short_of_its_frozen_split_is_flagged_and_refused_until_a_reader_
     """R1-01: GlotLID reads a cached zh translation of a frozen final pid as Japanese (as it read the short
     all-Han outputs of prb-test-0240, 0484 and 0499 on the real build), so easy_benign_zh final is short of
     its frozen split. A rerun cannot add the item (rerun_needed stays False), but the build is not complete
-    and says what awaits a reader's verdict, and prompts.load, which generate, run-dev, judge and the
-    reported reads go through, refuses the short cell until the failures sheet resolves it."""
+    and says what awaits a reader's verdict, and prompts.load of that split, which generate, run-dev and the
+    reported reads go through, refuses the short cell until the failures sheet resolves it (W2-01: a
+    ShortCellError, which lift generate and run-dev list with its remedy)."""
+    from lift import gate0
+    from lift.judge import pipeline
+
     build.build_all(ctx=fixture_ctx())                        # freezes the splits, caches every translation
     final = sorted(p for p, s in split_file(dirs, "easy_benign")["assignments"].items() if s == "final")
     pid = final[0]
@@ -606,8 +622,8 @@ def test_a_cell_short_of_its_frozen_split_is_flagged_and_refused_until_a_reader_
     assert summary["short_cells"] == {"easy_benign_zh": {"final": [pid]}}
     assert report(dirs, "easy_benign_zh")["awaiting_review"] == {"final": [pid]}
     assert report(dirs, "easy_benign_hi")["awaiting_review"] == {}
-    state = ("built; 1 fit/dev/final items await a reader's verdict (failures sheet: lift data "
-             "spotcheck-sheets, then lift data apply-spotchecks)")
+    state = ("built; 1 fit/dev/final items await a reader's verdict on the failures sheet "
+             f"({build.reader_remedy(['zh'])})")
     assert build.build_state(summary) == build.build_state(report(dirs, "build")) == state
     lines = build.format_stats(build.stats(cfg=CFG)).splitlines()
     assert f"last build {summary['run_id']}: {state}" in lines
@@ -617,14 +633,23 @@ def test_a_cell_short_of_its_frozen_split_is_flagged_and_refused_until_a_reader_
 
     assert {r.pid for r in prompts.load("easy_benign", "hi", "final")} == set(final)     # a full cell reads
     assert {r.split for r in prompts.load("easy_benign", "zh", "dev")} == {"dev"}       # and so does zh dev
-    for split in ("final", None):
-        with pytest.raises(ValueError) as e:
-            prompts.load("easy_benign", "zh", split)
-        message = str(e.value)
-        assert (f"easy_benign_zh: easy_benign_zh.jsonl is short of its frozen split: final misses 1 of its "
-                f"{len(final)} frozen pids; 1 translation failures await a reader's verdict on the failures "
-                f"sheet, e.g. ['{pid}']: `lift data spotcheck-sheets --langs zh`, then `lift data "
-                "apply-spotchecks --file <the filled sheet>`, then `lift sync push`") == message
+    with pytest.raises(build.ShortCellError) as e:                     # the short cell's own split is refused
+        prompts.load("easy_benign", "zh", "final")
+    remedy = (f"1 translation failures await a reader's verdict on the failures sheet, e.g. ['{pid}']: "
+              + build.reader_remedy(["zh"]))
+    assert str(e.value) == (f"easy_benign_zh: easy_benign_zh.jsonl is short of its frozen split: final "
+                            f"misses 1 of its {len(final)} frozen pids; {remedy}")
+    assert (e.value.set_name, e.value.lang, e.value.missing, e.value.remedy) == (
+        "easy_benign", "zh", {"final": [pid]}, remedy)
+    assert "validation/sheets/spotcheck_zh_failures.csv" in remedy and "--langs zh`" in remedy
+    # W2-01: a read of every split only looks texts up by pid, so the short final does not stop judging the zh
+    # dev cell (texts_by_pid), Gate 0 (all_prompts) or the second judge's draw, which pools final's pids
+    every = prompts.load("easy_benign", "zh")
+    assert pid not in {r.pid for r in every} and {"dev", "final"} <= {r.split for r in every}
+    assert set(prompts.texts_by_pid("easy_benign", "zh")) == {r.pid for r in every}
+    framed = {("easy_benign", "zh", r.pid) for r in every if r.split in ("dev", "final")}
+    assert framed <= {(p.set, p.lang, p.pid) for p in gate0.all_prompts()}
+    assert pid in pipeline.second_judge_pids("easy_benign", "final", 1.0, 0)        # hi has it
 
     # the remedy works on the short cell: the failures sheet lists the item, and a reader's ok puts it back
     _, failures = build.write_spotcheck_sheets(ctx=fixture_ctx(lid=lid), langs=["zh"])
@@ -633,6 +658,13 @@ def test_a_cell_short_of_its_frozen_split_is_flagged_and_refused_until_a_reader_
     build.apply_spotchecks(failures, ctx=fixture_ctx(lid=lid))
     assert {r.pid for r in prompts.load("easy_benign", "zh", "final")} == set(final)
     assert report(dirs, "easy_benign_zh")["awaiting_review"] == {}
+    # W2-01: lift data stats lists the short cells the prompt files' reports hold now, not build.json's, so
+    # the cell apply-spotchecks completed is no longer listed, and the state of the last build reads complete
+    st = build.stats(cfg=CFG)
+    assert st["short_cells"] == {} and st["build"]["short_cells"] == {"easy_benign_zh": {"final": [pid]}}
+    lines = build.format_stats(st).splitlines()
+    assert f"last build {summary['run_id']}: complete" in lines
+    assert not [line for line in lines if "short of their frozen split" in line or "await" in line]
     summary = build.build_all(ctx=fixture_ctx(lid=lid))
     assert summary["complete"] and summary["short_cells"] == {} and build.build_state(summary) == "complete"
 
@@ -658,12 +690,16 @@ def test_a_frozen_pid_missing_for_another_reason_is_refused_with_its_remedy(dirs
     path = dirs.data / "prompts" / "hard_benign_hi.jsonl"
     rows = list(read_jsonl(path))
     write_jsonl(path, [r for r in rows if r["pid"] != ORB[0].pid])       # the report no longer fits the file
-    gone = sorted([ORB[0].pid, ORB[2].pid])
-    rebuild = (rf"2 are not explained \(its report is from another build of the file\), e.g. "
-               rf"\['{gone[0]}', '{gone[1]}'\]: rebuild it \(`lift data build --only hard_benign`\), then "
-               r"`lift sync push`")
-    with pytest.raises(ValueError, match=rebuild):
-        build.load_prompts("hard_benign", "hi")
+    gone: dict[str, list[str]] = {}
+    for pid in sorted([ORB[0].pid, ORB[2].pid]):
+        gone.setdefault(frozen[pid], []).append(pid)
+    for split, pids in gone.items():                                     # a read of one split names its own
+        rebuild = (rf"{len(pids)} are not explained \(its report is from another build of the file\), e.g. "
+                   rf"\[{', '.join(repr(p) for p in pids)}\]: rebuild it \(`lift data build --only "
+                   r"hard_benign`\), then `lift sync push`")
+        with pytest.raises(build.ShortCellError, match=rebuild):
+            build.load_prompts("hard_benign", "hi", split)
+    assert len(build.load_prompts("hard_benign", "hi")) == len(rows) - 1   # every split: the stamps only
 
 
 def test_a_blocked_translator_stops_all_translation_and_the_rest_is_built(dirs):
@@ -1583,9 +1619,9 @@ def test_stats_count_files_failures_and_exclusions(dirs, spot):
     assert "hard_benign_hi" in text and sft_line in text and "failures empty 1, wrong_lang 1" in text
     assert ("excluded = copies of a test prompt or a red-teaming repeat (duplicate_of, near_duplicate_of), "
             "train/val/fit texts a dev/final record has (same_text_as) and spot-check bad") in text
-    assert (f"last build {st['build']['run_id']}: built; 6 fit/dev/final items await a reader's verdict "
-            "(failures sheet: lift data spotcheck-sheets, then lift data apply-spotchecks)"
-            ) in text.splitlines()
+    assert st["short_cells"] == b["short_cells"]                       # nothing applied since the build
+    assert (f"last build {st['build']['run_id']}: built; 6 fit/dev/final items await a reader's verdict on "
+            f"the failures sheet ({build.reader_remedy(LANGS[1:])})") in text.splitlines()
     assert "  harmful_en: exclusions duplicate_of 1" in text.splitlines()
     assert not [t for t in fixture_texts() if t in text]
 

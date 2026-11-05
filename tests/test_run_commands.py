@@ -644,6 +644,87 @@ def test_generate_skips_a_stale_cell_and_exits_3(fake_prompt_files, tiny_model_d
     assert f"harmful_en_dev: {line}\n" in caplog.text
 
 
+SHORT_PID = "prb-test-0003"         # the frozen final pid frozen_cell leaves out of easy_benign zh
+
+
+def frozen_cell(tmp_path, monkeypatch):
+    """data/splits/easy_benign.json (in tmp) freezing prb-test-0000..0003 as final, and easy_benign prompt
+    files the real lift.data.build.load_prompts reads: en holds every frozen pid, zh all but SHORT_PID, which
+    zh's report lists as an open wrong_lang translation failure (it awaits a reader's verdict, as
+    prb-test-0240 does on the real data). Placeholder texts."""
+    from fakes import make_prompt
+
+    from lift import splits
+    from lift.io import sha256_file
+    from lift.paths import prompts_dir
+
+    pids = [f"prb-test-{i:04d}" for i in range(4)]
+    monkeypatch.setattr(splits, "SPLITS_DIR", tmp_path / "splits")
+    splits.save_split("easy_benign", dict.fromkeys(pids, "final"), seed=0, sizes={"final": 4})
+    for lang in ("en", "zh"):
+        path = prompts_dir() / f"easy_benign_{lang}.jsonl"
+        write_jsonl(path, [make_prompt(p, lang, "easy_benign", "final", text=f"q {p}").model_dump(mode="json")
+                           for p in pids if lang == "en" or p != SHORT_PID])
+        failures = [{"pid": SHORT_PID, "rule": "wrong_lang", "detail": "top=jpn_Jpan 0.99",
+                     "engine": "google", "resolved": None}] if lang == "zh" else []
+        report = {"set": "easy_benign", "lang": lang, "file": path.name, "sha256": sha256_file(path),
+                  "translation_failures": failures, "exclusions": []}
+        reports = prompts_dir() / "reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        (reports / f"easy_benign_{lang}.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def short_remedy():
+    """frozen_cell's zh final remedy, as lift.data.build.load_prompts names it."""
+    from lift.data import build
+
+    return (f"1 translation failures await a reader's verdict on the failures sheet, e.g. ['{SHORT_PID}']: "
+            + build.reader_remedy(["zh"]))
+
+
+def test_a_short_cell_is_listed_with_its_remedy_whatever_precision_its_file_was_made_in():
+    # W2-01: a short cell's remedy is its prompt file's, on the laptop; it discards nothing, so it is listed
+    # as short with that remedy even when its generations file was made in another precision than the run's
+    from lift.data.build import ShortCellError
+
+    write_generation("easy_benign", "zh", "final", dtype="fp16")
+    exc = ShortCellError("easy_benign_zh: short", set_name="easy_benign", lang="zh", missing={"final": ["p"]},
+                         remedy="the remedy")
+    skipped: dict[str, dict[str, str]] = {}
+    run_cmd._skip(skipped, "stock", "easy_benign", "zh", "final", exc, judged=None, dtype="bf16")
+    assert skipped == {"short": {"easy_benign_zh_final": "the remedy"}}
+    assert run_cmd._listing(skipped) == [
+        f"1 cells {run_cmd.SKIPPED['short']}:\n  easy_benign_zh_final: the remedy\n"]
+    head = " ".join(run_cmd.SKIPPED["short"].split())
+    assert "reader's verdict" in head and "nothing was generated" in head
+
+
+@pytest.mark.torch
+def test_generate_skips_a_short_cell_lists_its_remedy_and_exits_3(tiny_model_dir, tmp_path, monkeypatch,
+                                                                  caplog):
+    # W2-01: a cell short of its frozen split (easy_benign zh final on the real data, until the zh reader's
+    # verdicts are applied) stopped `lift generate` with a traceback, so no later cell of the line ran. It is
+    # skipped and listed with its remedy now, and the line exits 3, as for a stale cell.
+    pytest.importorskip("torch")
+    from lift.models import generate as gen
+    from lift.models import variants
+
+    pin()
+    frozen_cell(tmp_path, monkeypatch)
+    real_build = variants.build_variant
+    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: real_build(
+        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)))
+    short_runs(monkeypatch)
+    argv = ["generate", "--variant", "stock", "--split", "final", "--sets", "easy_benign", "--langs", "zh",
+            "en", "--device", "cpu", "--dtype", "bf16"]
+    assert main(argv) == 3
+    assert not gen.generations_path("stock", "easy_benign", "zh", "final").exists()
+    assert len(gen.read_generations(gen.generations_path("stock", "easy_benign", "en", "final"))) == 4
+    assert listing(caplog, "are short of their frozen split") == (
+        f"1 cells {run_cmd.SKIPPED['short']}:\n  easy_benign_zh_final: {short_remedy()}\n")
+    assert "easy_benign_zh_final: short of its frozen split, skipped" in caplog.text
+
+
 @pytest.mark.parametrize("role", ["primary", "second"])
 def test_judge_skips_a_stale_cell_and_exits_3(role, monkeypatch, caplog):
     # judge_file's refusal (a StaleOutputError) names the cell's restart line; lift judge lists it and
@@ -1426,6 +1507,24 @@ class TestRunCells:
             "made in fp16: run it with --dtype fp16 where fp16 runs, or leave it out with --sets/--langs")}}
         assert part.read_bytes() == before
         assert [judged("stock", *c) for c in cells] == [3, 0, 3, 3]
+
+    @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
+    def test_a_short_cell_is_listed_with_its_remedy_and_the_others_go_on(self, tiny_model_dir, tmp_path,
+                                                                         monkeypatch, mode):
+        # W2-01: run-dev met a cell short of its frozen split with a traceback, so no later cell ran
+        from lift.models.variants import build_variant
+        from lift.schemas import VariantSpec
+
+        frozen_cell(tmp_path, monkeypatch)
+        short_runs(monkeypatch)
+        holder = {"variant": build_variant(VariantSpec(name="stock", method="stock"), device="cpu",
+                                           dtype="fp32", model_id=str(tiny_model_dir))}
+        skipped: dict[str, dict[str, str]] = {}
+        run_cmd.run_cells(holder, lambda: self.Judge(), [("easy_benign", "zh"), ("easy_benign", "en")],
+                          split="final", concurrent=mode == "concurrent", interleave=mode == "interleave",
+                          lid=self.LID(), skipped=skipped)
+        assert skipped == {"short": {"easy_benign_zh_final": short_remedy()}}
+        assert [judged("stock", "easy_benign", lang, "final") for lang in ("zh", "en")] == [0, 4]
 
     @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
     def test_without_a_collector_the_other_cells_go_on_and_the_stale_ones_raise_at_the_end(self, setup,

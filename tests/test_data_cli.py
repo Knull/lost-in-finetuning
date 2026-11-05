@@ -168,13 +168,40 @@ def test_build_exits_0_and_lists_a_cell_short_of_its_frozen_split(dirs, monkeypa
     capsys.readouterr()
     assert main(["data", "build", "--only", "hard_benign", "--langs", "en", "hi"]) == 0
     out = capsys.readouterr().out
+    # W2-01: each line names the remedy with the cell's --langs (the default sheets are hi zh es only)
+    remedy = build.reader_remedy(["hi"])
+    assert "`lift data spotcheck-sheets --langs hi`" in remedy and "spotcheck_hi_failures.csv" in remedy
     assert (f"hard_benign_hi is short of its frozen split ({first.split} 1), awaiting a reader's verdict on "
-            f"the failures sheet: {first.pid}") in out.splitlines()
-    assert out.splitlines()[-1].startswith("built; 1 fit/dev/final items await a reader's verdict (failures "
-                                           "sheet: lift data spotcheck-sheets, then lift data "
-                                           "apply-spotchecks); summary in ")
+            f"the failures sheet: {first.pid}; {remedy}") in out.splitlines()
+    assert out.splitlines()[-1].startswith("built; 1 fit/dev/final items await a reader's verdict on the "
+                                           f"failures sheet ({remedy}); summary in ")
     assert main(["data", "stats"]) == 0
     assert f"  short of their frozen split: hard_benign_hi ({first.split} 1)" in capsys.readouterr().out
+
+
+def test_sheets_and_apply_exit_1_when_a_prompt_file_is_refused(dirs, monkeypatch, capsys, caplog):
+    # W2-01 (R1-01 follow-up): load_prompts refuses a prompt file whose committed split file is missing (or
+    # that carries a split stamp the committed split does not give) with a ValueError; spotcheck-sheets and
+    # apply-spotchecks log it and exit 1, as for a missing file, instead of a traceback
+    use_fixtures(monkeypatch)
+    assert main(["data", "build", "--only", "hard_benign", "--langs", "en"]) == 0
+    first = build.load_prompts("hard_benign", "en")[0]
+    use_fixtures(monkeypatch, translator=FakeTranslator(empty_for=[first.text]))
+    assert main(["data", "build"]) == 0                                 # hard_benign hi: one open failure
+    sheet = dirs.sheets / "sheet.csv"
+    sheet.parent.mkdir(parents=True)
+    write_sheet(sheet, [{"item_id": f"hi-{first.pid}", "set": "hard_benign", "english": first.text,
+                         "translation": "", "verdict": "bad", "corrected": "", "note": ""}])
+    (dirs.splits / "hard_benign.json").unlink()                          # a checkout without it
+    capsys.readouterr()
+    caplog.set_level(logging.ERROR)
+    missing = "hard_benign_en: the committed split file"
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 1
+    assert missing in caplog.text and "is missing" in caplog.text and "Traceback" not in caplog.text
+    caplog.clear()
+    assert main(["data", "spotcheck-sheets", "--langs", "hi"]) == 1
+    assert "hard_benign_hi: the committed split file" in caplog.text and "Traceback" not in caplog.text
+    assert capsys.readouterr().out == "" and not (dirs.sheets / "spotcheck_hi.csv").exists()
 
 
 def test_stats_sheets_and_apply_on_a_built_fixture(dirs, monkeypatch, capsys, caplog):

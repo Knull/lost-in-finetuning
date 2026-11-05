@@ -516,11 +516,13 @@ def second_judge_pids(set_name: str, split: str, fraction: float, seed: int) -> 
     exactly): of the pids of that split in every language with a prompt file (a record marked
     ``extra.excluded`` left out), the first ceil(fraction x n) by ``_rank(seed, "second", set,
     split, pid)``. Drawn by pid, never by generation key (which differs per variant and language), so
-    the same prompts are drawn in every variant and language, whatever the file order."""
+    the same prompts are drawn in every variant and language, whatever the file order. Each language's
+    split is read as its file holds it (``allow_short``): this only pools pids, so one language short of
+    its frozen split (whose own cell lift generate refuses) never stops the draw in the others."""
     population: set[str] = set()
     for lang in config.get("languages.all"):
         try:
-            records = prompts.load(set_name, lang, split)
+            records = prompts.load(set_name, lang, split, allow_short=True)
         except FileNotFoundError:
             continue
         population.update(p.pid for p in records if not p.extra.get("excluded"))
