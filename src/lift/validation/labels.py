@@ -23,7 +23,10 @@
   by label, rows kept together, leaves the ids in neither order and is fine.
 - Which sheet a file belongs to (the main one or the Hindi overlap) follows from its ids.
 - Re-importing a sheet replaces its labels. The import records which draw of the round it
-  belongs to, so a later re-draw cannot be scored against old labels.
+  belongs to, so a later re-draw cannot be scored against old labels, and every warning it gave
+  (labels/{sheet}.meta.json ``warnings``), which every score reports by sheet
+  (lift.validation.score: ``checks.import_warnings``), so a sheet imported with one is never scored
+  as if clean.
 
 Messages carry row numbers, ids and counts, never sheet text.
 """
@@ -259,6 +262,7 @@ def import_labels(round_no: int, lang: str, file: Path, *, annotator: str | None
         "rows": parsed["rows"], "items_on_sheet": parsed["items_on_sheet"],
         "labelled": len(records), "skipped": parsed["skipped"], "unlabelled": parsed["unlabelled"],
         "missing": parsed["missing"], "changed_text": parsed["changed"],
+        "warnings": parsed["warnings"],           # every score reports them (checks.import_warnings)
         "label_counts": {c: counts.get(c, 0) for c in LABELS},
         "replaced": None if previous is None else {
             "labels": len(previous),
