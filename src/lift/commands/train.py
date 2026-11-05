@@ -11,8 +11,9 @@ but not registered, and nothing may evaluate it until the cause is understood: C
 registry already holds another entry under the name; 2 a refused request, before any GPU time (a
 candidate or seed the recipe does not allow, a per-device batch that does not divide the effective
 batch, a precision the GPU must not use, a stale or malformed training file, rows the template leaves no
-answer token in, a push that cannot work). Unpinned revisions stop it like lift generate (exit 1). It
-never exits 3: a job runner treats any other exit as the line failing.
+answer token in, a push that cannot work) or before the first training step (a Trainer that would not
+take the recipe's batch: a torchrun launch, say). Unpinned revisions stop it like lift generate (exit 1).
+It never exits 3: a job runner treats any other exit as the line failing.
 
 ``lift register-adapter NAME [NAME ...]`` is the laptop's half: a GPU runtime's configs/ edit dies with
 the session (configs/ travels by git, not by lift sync). After ``lift sync pull`` it recomputes each
@@ -31,7 +32,8 @@ import sys
 
 TRAIN_HELP = """\
 Train one Hindi LoRA adapter of Tiny Aya Global (configs/train.yaml; rules in lift.train.lora): chat
-template on, loss on the answer tokens only, the effective batch 16 on every GPU. The adapter goes to
+template on, loss on the answer tokens only, the effective batch 16 on every GPU, one process on one GPU
+(cuda:0: a second visible GPU, as on a Kaggle T4 x2, stays idle). The adapter goes to
 outputs/adapters/adapter-{candidate}-{std|stress}-s{seed}/ and to the runs repo at once; then merged and
 unmerged greedy outputs are compared in fp32 (merge parity) and the adapter is registered in this
 machine's configs/variants.yaml. A GPU runtime loses that edit with the session: on the laptop run

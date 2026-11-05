@@ -10,6 +10,16 @@ Recipe and batch
 - The effective batch is the recipe's per_device_batch x grad_accum (16). ``--per-device-batch K`` must
   divide it and sets grad_accum to the quotient (A100: 4 x 4; T4: 1 x 16), so every GPU takes the same
   optimizer steps. max_seq_len is never below 512: the ~366-token preamble counts against it.
+- One process trains on one device: cuda:0, the first visible GPU, or the CPU (the tests). Run as a
+  plain process with several GPUs visible (a Kaggle T4 x2), the Trainer would count them all (n_gpu 2),
+  wrap the model in nn.DataParallel and put per_device_batch x n_gpu rows in every micro-batch: 32 rows
+  an optimizer step instead of 16, half the steps. ``sft_config`` therefore holds the Trainer to one GPU
+  (n_gpu 1, what the Trainer itself does for a model-parallel model) before the Trainer is built, which
+  takes its DataLoader batch from it; the other GPUs stay idle. The built Trainer's rows per optimizer
+  step (its DataLoader batch x accumulation x processes) must then equal the effective batch, or the run
+  is refused before its first step (a torchrun or accelerate launch, say), and the collator stops any
+  micro-batch with more rows than per_device_batch. lift_train.json and the manifest record n_gpu, the
+  visible GPUs, the Trainer's batch and the rows each optimizer step took.
 
 Data
 - data/sft/{candidate}/{dedup|raw}/sft_messages.jsonl (recipe dedup true: dedup), found through
@@ -47,7 +57,6 @@ Seeds and precision
   autocast on a T4, which has no bf16; fp32 on CPU (the tests). PEFT keeps the LoRA weights in fp32.
 - All seeds of a recipe train on one GPU class and precision (the P03 plan): a seed is refused when
   another seed's adapter here was trained on another (its lift_train.json says so).
-- Training runs on cuda:0 (the Trainer places every batch on the first visible GPU) or on the CPU.
 
 Files
 - Nothing synced is written while training: the Trainer's output_dir and the staging folder are a
@@ -86,9 +95,11 @@ After training
   missing (the push; parity, unless registration.json holds one for this hash in that precision; the
   registration) and exits 0. ``--retrain`` first sets the folder aside under
   outputs/.aside/adapters/{name}-{utc stamp} (never synced), then trains anew.
-- One manifest per run (stage "train"): what was trained, on what, the supervised tokens per micro-batch
-  and per optimizer step, the loss curve, the training time, peak GPU memory, the hash, parity, pushes
-  and registration; status "failed" when the run stops on an error.
+- One manifest per run (stage "train"): what was trained, on what, the batch (the plan's and the
+  Trainer's: n_gpu, visible GPUs, rows per micro-batch and per optimizer step) and the rows each step
+  took, the supervised tokens per micro-batch and per optimizer step, the loss curve, the training time,
+  peak GPU memory, the hash, parity, pushes and registration; status "failed" when the run stops on an
+  error.
 
 Logs carry counts, ids, hashes and paths, never row or output text. While training, a heartbeat line
 (step, loss, elapsed) comes at least once a minute: the Colab and Kaggle runners kill a line silent for
@@ -150,7 +161,9 @@ class TrainRefused(ValueError):
     """A request the recipe, the data or the hardware rules refuse, before any GPU time is spent (a
     candidate or seed the recipe does not allow, a batch that does not divide the effective batch, a
     precision the GPU must not use, a stale or malformed training file, rows the template leaves nothing
-    to learn from, a push that cannot work). The message names the remedy; ``lift train`` exits 2."""
+    to learn from, a push that cannot work), or, once the model is loaded, before the first training
+    step (a Trainer that would not take the recipe's batch). The message names the remedy; ``lift
+    train`` exits 2."""
 
 
 class ParityFailed(RuntimeError):
@@ -294,9 +307,9 @@ def _device(device: str) -> str:
     name = str(device).strip()
     name = "cuda:0" if name == "cuda" else name
     if name not in ("cpu", "cuda:0"):
-        raise TrainRefused(f"lift train runs on cuda:0 (or cpu, for the tests), not {device!r}: the "
-                           "Trainer places every batch on the first visible GPU. To train on another GPU, "
-                           "make it the first visible one (CUDA_VISIBLE_DEVICES)")
+        raise TrainRefused(f"lift train runs on one device, cuda:0 (or cpu, for the tests), not {device!r}: "
+                           "it holds the Trainer to the first visible GPU, however many are visible. To "
+                           "train on another GPU, make it the first visible one (CUDA_VISIBLE_DEVICES)")
     return name
 
 
@@ -507,43 +520,57 @@ def data_stats(examples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 class SupervisedTokenCounter:
     """Wraps TRL's collator. Each micro-batch's supervised tokens are ``labels[:, 1:] != -100``, the
     positions the shifted causal-LM loss scores; a micro-batch with none raises (the preamble crowding
-    out the target). The DataLoader collates one micro-batch ahead of the one the Trainer uses
-    (accelerate looks ahead for the end), so counts wait in collation order and are booked when the
-    Trainer reports a micro-batch used (``consumed``, ``step_end``): exact per micro-batch and per
-    optimizer step. A batch collated ahead that training never reached (max_steps) stays unbooked."""
+    out the target). Its rows are counted too, and with ``max_rows`` (the plan's per-device batch) a
+    micro-batch with more raises before the step uses it: the DataLoader's own batch, whatever the
+    Trainer's arguments claim (nn.DataParallel over two GPUs collates two rows for one). The DataLoader
+    collates one micro-batch ahead of the one the Trainer uses (accelerate looks ahead for the end), so
+    counts wait in collation order and are booked when the Trainer reports a micro-batch used
+    (``consumed``, ``step_end``): exact per micro-batch and per optimizer step. A batch collated ahead
+    that training never reached (max_steps) stays unbooked."""
 
-    def __init__(self, collate: Callable[[list[dict[str, Any]]], dict[str, Any]]) -> None:
+    def __init__(self, collate: Callable[[list[dict[str, Any]]], dict[str, Any]], *,
+                 max_rows: int | None = None) -> None:
         self._collate = collate
-        self._pending: deque[int] = deque()
-        self._step: list[int] = []
+        self.max_rows = max_rows
+        self._pending: deque[tuple[int, int]] = deque()       # (supervised tokens, rows) per micro-batch
+        self._step: list[tuple[int, int]] = []
         self.per_batch: list[int] = []
         self.per_step: list[int] = []
+        self.rows_per_batch: list[int] = []
+        self.rows_per_step: list[int] = []
 
     @property
     def in_step(self) -> int:
         return len(self._step)
 
     def __call__(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
+        if self.max_rows is not None and len(examples) > self.max_rows:
+            raise RuntimeError(f"the Trainer's DataLoader put {len(examples)} rows in one micro-batch, but "
+                               f"the recipe takes {self.max_rows} (several GPUs used through "
+                               "nn.DataParallel?): stopped before any step trained on it. lift train runs on "
+                               "one GPU: make one visible (CUDA_VISIBLE_DEVICES=0) and look at sft_config")
         batch = self._collate(examples)
         n = int((batch["labels"][:, 1:] != IGNORE_INDEX).sum())
         if n == 0:
             raise ValueError(f"a batch with zero supervised tokens ({len(examples)} rows): the prompt fills "
                              "every position the loss scores, so the step would learn nothing "
                              "(build_examples refuses such rows before training; this batch got past it)")
-        self._pending.append(n)
+        self._pending.append((n, len(examples)))
         return batch
 
     def consumed(self) -> None:
         if not self._pending:
             raise RuntimeError("the Trainer used a micro-batch the collator never built: the "
                                "supervised-token accounting is out of step with the training loop")
-        n = self._pending.popleft()
+        n, rows = self._pending.popleft()
         self.per_batch.append(n)
-        self._step.append(n)
+        self.rows_per_batch.append(rows)
+        self._step.append((n, rows))
 
     def step_end(self) -> None:
         self.consumed()
-        self.per_step.append(sum(self._step))
+        self.per_step.append(sum(n for n, _rows in self._step))
+        self.rows_per_step.append(sum(rows for _n, rows in self._step))
         self._step = []
 
 
@@ -622,7 +649,16 @@ def _callback(counter: SupervisedTokenCounter, heartbeat: Heartbeat) -> Any:
 
 
 def sft_config(plan: Plan, output_dir: Path) -> Any:
-    """The SFTConfig of a run (trl imported here). ``max_steps`` is set only when the caller asked."""
+    """The SFTConfig of a run (trl imported here), held to one device. ``max_steps`` is set only when the
+    caller asked.
+
+    Outside a distributed launch, TrainingArguments counts every visible GPU (n_gpu =
+    torch.cuda.device_count(), set by its device setup, which runs when the config is built); with n_gpu
+    over 1 the Trainer wraps the model in nn.DataParallel and makes each micro-batch per_device_batch x
+    n_gpu rows (32 rows an optimizer step on a Kaggle T4 x2, not 16). lift loads the model on cuda:0 and
+    trains it there alone, so n_gpu is set to 1 here, the override the Trainer itself applies to a
+    model-parallel model. It has to happen before the Trainer is built: Trainer.__init__ takes the batch
+    its DataLoader uses from this config (``make_trainer`` then checks it)."""
     from trl import SFTConfig
 
     cfg = plan.cfg
@@ -641,7 +677,10 @@ def sft_config(plan: Plan, output_dir: Path) -> Any:
     )
     if plan.max_steps is not None:
         kwargs["max_steps"] = plan.max_steps
-    return SFTConfig(**kwargs)
+    args = SFTConfig(**kwargs)
+    if args.n_gpu > 1:          # the device setup has run (SFTConfig.__post_init__), so this stays
+        args._n_gpu = 1
+    return args
 
 
 def lora_model(plan: Plan) -> tuple[Any, dict[str, Any]]:
@@ -679,32 +718,69 @@ def lora_model(plan: Plan) -> tuple[Any, dict[str, Any]]:
 def make_trainer(model: Any, tokenizer: Any, examples: Sequence[Mapping[str, Any]], plan: Plan, *,
                  output_dir: Path, heartbeat: Heartbeat | None = None) -> tuple[Any, SupervisedTokenCounter]:
     """The SFTTrainer over the pre-tokenized examples (input_ids and labels only), with the counting
-    collator and the progress callback; the Trainer's own per-step printing gives way to the heartbeat."""
+    collator and the progress callback; the Trainer's own per-step printing gives way to the heartbeat.
+    Refused (TrainRefused) unless the built Trainer takes the recipe's batch (``check_batch``)."""
     from datasets import Dataset
     from transformers import PrinterCallback
     from trl import SFTTrainer
     from trl.trainer.sft_trainer import DataCollatorForLanguageModeling
 
-    counter = SupervisedTokenCounter(DataCollatorForLanguageModeling(pad_token_id=tokenizer.pad_token_id))
+    counter = SupervisedTokenCounter(DataCollatorForLanguageModeling(pad_token_id=tokenizer.pad_token_id),
+                                     max_rows=plan.per_device_batch)
     dataset = Dataset.from_list([{"input_ids": list(e["input_ids"]), "labels": list(e["labels"])}
                                  for e in examples])
     trainer = SFTTrainer(model=model, args=sft_config(plan, output_dir), train_dataset=dataset,
                          processing_class=tokenizer, data_collator=counter,
                          callbacks=[_callback(counter, heartbeat or Heartbeat(plan.name))])
     trainer.remove_callback(PrinterCallback)
+    check_batch(plan, trainer_batch(trainer))
     return trainer, counter
+
+
+def trainer_batch(trainer: Any) -> dict[str, int]:
+    """The batch a built Trainer takes: n_gpu (after ``sft_config``'s pin), its processes, the rows per
+    micro-batch its training DataLoader is built with, and the rows per optimizer step (that x gradient
+    accumulation x data-parallel processes: Trainer.get_total_train_batch_size); and the GPUs this
+    process sees (torch.cuda.device_count(): on a Kaggle T4 x2 the second stays idle)."""
+    import torch
+
+    args = trainer.args
+    return {"n_gpu": int(args.n_gpu), "visible_gpus": int(torch.cuda.device_count()),
+            "processes": int(args.world_size), "micro_batch": int(trainer._train_batch_size),
+            "per_step": int(trainer.get_total_train_batch_size(args))}
+
+
+def check_batch(plan: Plan, batch: Mapping[str, int]) -> None:
+    """Refuse a Trainer that would not take the recipe's batch: one process on at most one GPU, the
+    plan's per-device batch per micro-batch, its effective batch per optimizer step."""
+    if (batch["n_gpu"] <= 1 and batch["processes"] == 1 and batch["micro_batch"] == plan.per_device_batch
+            and batch["per_step"] == plan.effective_batch):
+        return
+    took = (f"{batch['per_step']} rows per optimizer step ({batch['micro_batch']} per micro-batch, "
+            f"{batch['processes']} process(es), n_gpu {batch['n_gpu']})")
+    raise TrainRefused(f"the Trainer would take {took}, not the recipe's {plan.effective_batch} "
+                       f"({plan.per_device_batch} x {plan.grad_accum} accumulation): lift train is one plain "
+                       "process on one GPU. Run it as `lift train`, not under torchrun or accelerate launch, "
+                       "with one GPU visible if need be (CUDA_VISIBLE_DEVICES=0)")
 
 
 def _fit(plan: Plan, tokenizer: Any, examples: Sequence[Mapping[str, Any]], scratch: Path,
          progress: dict[str, Any]) -> dict[str, Any]:
     """Train and save the adapter into ``scratch/adapter``; returns plain data only, so the model and
     the trainer die with this frame. While training, ``progress`` holds the counter and the trainer (its
-    log history), for the manifest of a run that stops midway; the trainer leaves it once training ends."""
+    log history), for the manifest of a run that stops midway; the trainer leaves it once training ends.
+    ``batch`` is the plan's batch beside the one the built Trainer takes (``trainer_batch``), and
+    ``rows_per_step`` the rows each optimizer step took, as the collator counted them."""
     import torch
 
     model, lora_info = lora_model(plan)
     trainer, counter = make_trainer(model, tokenizer, examples, plan, output_dir=scratch / "trainer")
-    progress.update(counter=counter, trainer=trainer)
+    batch = {"per_device": plan.per_device_batch, "grad_accum": plan.grad_accum,
+             "effective": plan.effective_batch, **trainer_batch(trainer)}
+    progress.update(counter=counter, trainer=trainer, batch=batch)
+    log.info("%s: %d rows per optimizer step (%d per micro-batch x %d accumulation) on %s, n_gpu %d, "
+             "%d GPU(s) visible", plan.name, batch["per_step"], batch["micro_batch"], plan.grad_accum,
+             plan.device, batch["n_gpu"], batch["visible_gpus"])
     cuda = plan.device.startswith("cuda")
     if cuda:
         torch.cuda.reset_peak_memory_stats(plan.device)
@@ -724,7 +800,8 @@ def _fit(plan: Plan, tokenizer: Any, examples: Sequence[Mapping[str, Any]], scra
     result = {
         "lora": lora_info, "staging": staging, "train_seconds": seconds, "peak_memory_bytes": peak,
         "global_step": int(trainer.state.global_step), "max_steps": int(trainer.state.max_steps),
-        "metrics": dict(output.metrics), "loss_curve": curve,
+        "metrics": dict(output.metrics), "loss_curve": curve, "batch": batch,
+        "rows_per_step": list(counter.rows_per_step),
         "supervised_tokens_per_batch": list(counter.per_batch),
         "supervised_tokens_per_step": list(counter.per_step),
         "trainer_log": {"log_history": history, "train_output": train_output,
@@ -1260,9 +1337,7 @@ def _train_record(plan: Plan, data: TrainingData, n_heldout: int, stats: Mapping
                  "rows_in_file": len(data.rows), "rows_trained": stats["rows"],
                  "dropped_unfit": {"count": len(unfit), "ids": [u["id"] for u in unfit]},
                  "heldout_prompts_checked": n_heldout},
-        "counts": dict(stats), "lora": fit["lora"],
-        "batch": {"per_device": plan.per_device_batch, "grad_accum": plan.grad_accum,
-                  "effective": plan.effective_batch},
+        "counts": dict(stats), "lora": fit["lora"], "batch": dict(fit["batch"]),
         "dtype": plan.dtype, "autocast": plan.dtype if plan.dtype in ("bf16", "fp16") else None,
         "model": {"id": plan.model_id, "revision": plan.model_rev}, "device": plan.device, "gpu": gpu,
         "gpu_capability": env["gpu_capability"], "stack": env, "versions": manifest.versions(),
@@ -1270,6 +1345,7 @@ def _train_record(plan: Plan, data: TrainingData, n_heldout: int, stats: Mapping
         "train": {"global_step": fit["global_step"], "max_steps": fit["max_steps"],
                   "train_runtime": metrics.get("train_runtime"), "train_seconds": fit["train_seconds"],
                   "train_loss": metrics.get("train_loss"), "peak_memory_bytes": fit["peak_memory_bytes"]},
+        "rows_per_step": fit["rows_per_step"],
         "supervised_tokens_per_step": fit["supervised_tokens_per_step"],
         "retrained_from": dict(replaced) if replaced else None, "created": _now(),
     }
@@ -1286,9 +1362,10 @@ def train_lora(candidate: str, recipe: str, seed: int, *, out_dir: Path | None =
 
     ``out_dir`` puts the adapter elsewhere: such an adapter is never pushed (``push`` must be False) or
     registered, since the push and the registry describe outputs/adapters/{name}. ``parity_prompts``
-    default to Gate 0's 20 dev prompts. ``registry`` (tests: a copy) defaults to configs/variants.yaml.
-    Raises TrainRefused (a refused request, before any GPU time), ParityFailed (fp32 merge parity
-    failed: saved and pushed, not registered) or RegistryConflict (another entry under the name)."""
+    default to Gate 0's 20 dev prompts. ``registry`` (tests: a file in tmp) defaults to
+    configs/variants.yaml. Raises TrainRefused (a refused request, before any GPU time, or a Trainer off
+    the recipe's batch, before its first step), ParityFailed (fp32 merge parity failed: saved and pushed,
+    not registered) or RegistryConflict (another entry under the name)."""
     from lift.models.variants import adapter_path
     from lift.train.merge import ADAPTER_WEIGHTS
 
@@ -1362,7 +1439,8 @@ def train_lora(candidate: str, recipe: str, seed: int, *, out_dir: Path | None =
     except BaseException as exc:
         finish_run(run, status="failed", error=type(exc).__name__, **_so_far(fit, progress))
         raise
-    finish_run(run, status=post.status, supervised_tokens_per_batch=fit["supervised_tokens_per_batch"],
+    finish_run(run, status=post.status, batch=fit["batch"], rows_per_step=fit["rows_per_step"],
+               supervised_tokens_per_batch=fit["supervised_tokens_per_batch"],
                supervised_tokens_per_step=fit["supervised_tokens_per_step"], loss_curve=fit["loss_curve"],
                train_runtime=fit["metrics"].get("train_runtime"), train_seconds=fit["train_seconds"],
                peak_memory_bytes=fit["peak_memory_bytes"], lora=fit["lora"], data_stats=stats,
@@ -1411,11 +1489,13 @@ def _resume(plan: Plan, final: Path, *, push: bool, parity: bool, parity_prompts
 
 def _so_far(fit: Mapping[str, Any] | None, progress: dict[str, Any]) -> dict[str, Any]:
     """The counts a run that stopped had made: the finished training's, or the training under way's."""
-    keys = ("supervised_tokens_per_batch", "supervised_tokens_per_step", "loss_curve", "train_seconds")
+    keys = ("batch", "rows_per_step", "supervised_tokens_per_batch", "supervised_tokens_per_step",
+            "loss_curve", "train_seconds")
     if fit is not None:
         return {k: fit[k] for k in keys}
     counter, trainer = progress.get("counter"), progress.pop("trainer", None)
-    return {"supervised_tokens_per_batch": list(counter.per_batch) if counter else None,
+    return {"batch": progress.get("batch"), "rows_per_step": list(counter.rows_per_step) if counter else None,
+            "supervised_tokens_per_batch": list(counter.per_batch) if counter else None,
             "supervised_tokens_per_step": list(counter.per_step) if counter else None,
             "loss_curve": _curve(trainer.state.log_history) if trainer is not None else None}
 
