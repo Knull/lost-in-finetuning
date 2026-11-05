@@ -1469,6 +1469,9 @@ def test_a_cell_begun_under_other_labelling_rules_is_never_finished_or_reported(
     assert now.guard.stats["pairs"] == 0 and len(list(read_jsonl(out))) == 3
     with pytest.raises(ValueError, match="not the configured primary judge"):
         pipeline.load_labels(*CELL, complete=False)
+    before = f"{GUARD_ID}#bf16#strict"                # a file judged before judge ids named their rules
+    assert "only in their labelling rules" in str(pipeline._mixed_judges(out, [before], now.judge_id, "bf16",
+                                                                          line))
 
 
 def test_a_cell_judged_under_other_labelling_rules_is_judged_again_not_reported(fake_prompt_files,
