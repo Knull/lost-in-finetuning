@@ -782,9 +782,10 @@ Start cells over that lift generate, judge or run-dev skipped as stale (begun un
 made from other inputs; the error names the exact line). For each --sets x --langs cell, the
 generations file, every judgements file and every AuditKIT record of the cell (with --judge, only that
 judge's judgements file and records) is copied to outputs/.aside/<UTC stamp>/, which is never synced,
-and left EMPTY: the next lift sync push replaces the runs repo's copies (an empty record is retired;
-a copy there that changed since this machine's last sync is reported as an emptied-file conflict
-instead, which lift sync push --force settles: R1-08), and run-dev (or generate, then judge) fills the
+and left EMPTY: the next lift sync push replaces the runs repo's copies (an empty record is retired)
+unless the cell's files there changed since this machine's last sync, when lift sync names what settles
+it (R1-08, decisions item 63: lift sync push --force when only the files the restart emptied changed
+there, else lift sync pull, then lift sync push), and run-dev (or generate, then judge) fills the
 cell again. The log names the line that refills any other judge's judgements it set aside, a judge
 run-dev never runs: the second judge's, over P04's key list (drawn again first when the cell's
 generation keys changed: a fixed prompt text or another configuration), or with --sample 0.10 while
@@ -880,9 +881,10 @@ def _restart(args: argparse.Namespace) -> int:
                   f"{precision}) fills the generations, the primary judge's judgements and its AuditKIT "
                   "record again")
     log.info("%d file(s) emptied and %d AuditKIT record(s) retired: the next lift sync push replaces the "
-             "runs repo's copies (an empty record is retired there too; a copy there that changed since this "
-             "machine's last sync is reported as an emptied-file conflict instead, which lift sync push "
-             "--force settles), and %s", emptied, retired, refill)
+             "runs repo's copies (an empty record is retired there too) unless the cell's files there "
+             "changed since this machine's last sync, when lift sync names what settles it (R1-08, decisions "
+             "item 63: lift sync push --force when only the files the restart emptied changed there, else "
+             "lift sync pull, then lift sync push), and %s", emptied, retired, refill)
     if refills:
         redraw = ("; when its generation keys changed (a fixed prompt text or another configuration, as the "
                   f"listing that named this restart says), run a --keys line only {REDRAW}")

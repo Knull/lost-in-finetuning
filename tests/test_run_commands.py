@@ -405,18 +405,21 @@ def test_restart_sets_exactly_the_cells_files_aside_and_leaves_them_empty(judge,
     assert "har-0001" not in caplog.text and "har-0000" not in caplog.text
 
 
-def test_restart_says_the_next_push_may_report_an_emptied_conflict_instead(caplog):
-    # W2-04 (R1-08): the next lift sync push replaces the runs repo's copies only when the Hub's copy has not
-    # changed since this machine's last sync; otherwise the push reports the emptied file as a conflict (a
-    # merge would fill it again), which lift sync push --force settles. The help and the log said it always
-    # replaced them.
+def test_restart_says_the_next_push_replaces_the_runs_repo_copies_unless_they_changed_there(caplog):
+    # W2-04 (R1-08): the help and the log said the next lift sync push always replaces the runs repo's copies.
+    # It does unless the cell's files there changed since this machine's last sync. W3 (docs, VERIFY-5): they
+    # then said such a copy is an emptied-file conflict, which lift sync push --force settles, which holds
+    # only when nothing but the emptied files changed there (decisions item 63); otherwise the push holds the
+    # emptied file back with the others, and lift sync pull, then lift sync push settles it.
     caplog.set_level(logging.INFO, logger="lift.run")
     restart_tree()
     assert main([*RESTART, "--sets", "harmful", "--langs", "hi"]) == 0
     [done] = [r.getMessage() for r in caplog.records if "the next lift sync push" in r.getMessage()]
+    settles = ("lift sync names what settles it (R1-08, decisions item 63: lift sync push --force when only "
+               "the files the restart emptied changed there, else lift sync pull, then lift sync push)")
     for text in (done, " ".join(run_cmd.RESTART_HELP.split())):
-        assert "changed since this machine's last sync" in text and "lift sync push --force" in text, text
-        assert "emptied-file conflict" in text, text
+        assert "unless the cell's files there changed since this machine's last sync" in text, text
+        assert settles in text and "emptied-file conflict" not in text, text
 
 
 def test_skipped_judges_cells_name_the_restart_line_when_only_the_labelling_rules_differ():
