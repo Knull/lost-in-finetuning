@@ -448,16 +448,24 @@ def test_an_id_column_sorted_on_its_own_stops_the_import(world, tmp_path):
     assert label_files(world) == []
 
 
-def test_a_label_column_sorted_on_its_own_is_a_warning(world, tmp_path):
+def test_a_label_column_sorted_on_its_own_stops_the_import(world, tmp_path):
+    # R1-44: the labels no longer sit next to their items, and the prompt and response cells, which stay
+    # where they were, cannot show it: the import stops before anything is written.
     rows = filled(world)
     labels = [row[LABEL] for row in rows[2:]]
     assert len(set(labels)) >= 3 and labels != sorted(labels)
     assert import_labels(1, "zh", write(tmp_path / "as_made.csv", rows))["warnings"] == []
-    for row, label in zip(rows[2:], sorted(labels), strict=True):
-        row[LABEL] = label
-    out = import_labels(1, "zh", write(tmp_path / "sorted.csv", rows))
-    assert out["warnings"]
-    assert labels_of(world) == expected(rows)                 # a warning, not an error
+    as_made = labels_of(world)
+    for reverse in (False, True):                             # alphabetical order either way round
+        alone = [row[:LABEL] + [label] + row[LABEL + 1:]
+                 for row, label in zip(rows[2:], sorted(labels, reverse=reverse), strict=True)]
+        with pytest.raises(ValidateError, match="sorted on its own"):
+            import_labels(1, "zh", write(tmp_path / "sorted.csv", rows[:2] + alone))
+        assert labels_of(world) == as_made                    # the earlier import is untouched
+    # The whole sheet sorted by label, rows kept together: every label still sits next to its item.
+    by_label = rows[:2] + sorted(rows[2:], key=lambda row: row[LABEL])
+    out = import_labels(1, "zh", write(tmp_path / "by_label.csv", by_label))
+    assert out["warnings"] == [] and labels_of(world) == expected(rows)
 
 
 # Re-imports and the overlap sheet --------------------------------------------------------------
