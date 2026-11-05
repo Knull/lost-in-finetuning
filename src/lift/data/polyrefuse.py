@@ -1,7 +1,8 @@
 """PolyRefuse loaders and alignment checks (mainlp/Multilingual-Refusal, Apache-2.0). Implemented in P01.
 
 The clone lives at ``data/raw/Multilingual-Refusal`` at the commit pinned in configs/project.yaml
-(``sources.polyrefuse.commit``), checked on every build. Field mapping, verified Nov 3 at 985169d:
+(``sources.polyrefuse.commit``), checked on every build: HEAD must be the pin and the working tree
+clean, untracked files included (``check_commit``). Field mapping, verified Nov 3 at 985169d:
 
 - Every file is one JSON array written with ``json.dump(rows, f, indent=4)``: ``\\u`` escapes, LF, no
   trailing newline. Windows' system git config sets core.autocrlf=true, so every git call here
@@ -89,7 +90,8 @@ class AlignmentError(ValueError):
 
 
 class CommitMismatch(RuntimeError):
-    """The clone is not at the pinned commit, or no commit is pinned."""
+    """The clone is not at the pinned commit (or its working tree differs from it), or no commit is
+    pinned."""
 
 
 def default_root() -> Path:
@@ -102,9 +104,10 @@ def ensure_clone(root: Path | None = None, *, cfg: Mapping[str, Any] | None = No
     """The clone at the pinned commit, made first if ``root`` is missing (or an empty folder).
 
     A new clone is ``git init`` + ``fetch --depth 1 origin <sha>`` + ``checkout FETCH_HEAD``, with
-    core.autocrlf=false on every call and in the clone's own config. An existing clone is only
-    checked, never moved: CommitMismatch if it is at another commit. A failed clone leaves a partial
-    folder; delete it and rerun.
+    core.autocrlf=false on every call and in the clone's own config. Every clone, new or existing, is
+    checked (``check_commit``) and never moved: CommitMismatch if it is at another commit or its
+    working tree, untracked files included, differs from it. A failed clone leaves a partial folder;
+    delete it and rerun.
     """
     cfg = _cfg(cfg)
     pin = _pinned(cfg)
@@ -137,12 +140,25 @@ def head_commit(root: Path) -> str:
 
 
 def check_commit(root: Path, *, cfg: Mapping[str, Any] | None = None) -> str:
-    """The clone's HEAD sha. CommitMismatch unless it is ``sources.polyrefuse.commit``."""
+    """The clone's HEAD sha. CommitMismatch unless it is ``sources.polyrefuse.commit`` and the working
+    tree is that commit's, untracked files included (``git status --porcelain --untracked-files=all``
+    prints nothing): an edited or added file would reach the prompt files while build.json names the
+    pinned commit. The message names the count and the first paths, never their content; a failing
+    ``git status`` is a CommitMismatch too."""
     pin = _pinned(_cfg(cfg))
     head = head_commit(root)
     if head != pin:
         raise CommitMismatch(f"{root} is at commit {head}, but sources.polyrefuse.commit pins {pin}; "
                              "delete the clone and rerun (a new pin needs a docs/decisions.md entry)")
+    try:
+        status = _git(root, "status", "--porcelain", "--untracked-files=all")
+    except subprocess.CalledProcessError as e:
+        raise CommitMismatch(f"{root}: git status failed ({_stderr(e)}); delete the clone and rerun") from e
+    changed = [line[3:] for line in status.splitlines() if line.strip()]     # "XY path" (porcelain v1)
+    if changed:
+        raise CommitMismatch(f"{root} is at the pinned commit {pin[:12]}, but its working tree differs from "
+                             f"it in {len(changed)} paths (e.g. {changed[:5]}): edited or added files would "
+                             "reach the prompt files; delete the clone and rerun")
     return head
 
 
