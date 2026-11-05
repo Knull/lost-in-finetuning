@@ -174,6 +174,7 @@ def test_only_a_read_of_one_split_refuses_a_cell_short_of_its_frozen_split(commi
 def test_a_missing_split_file_is_refused_never_read_as_a_missing_prompt_file(tmp_path, monkeypatch):
     # R1-19: FileNotFoundError tells second_judge_pids (and Gate 0's all_prompts) that a language has no
     # prompt file, and they go on without it; a missing committed split file must stop them instead
+    from lift import gate0
     from lift.data import build
     from lift.judge import pipeline
 
@@ -187,3 +188,9 @@ def test_a_missing_split_file_is_refused_never_read_as_a_missing_prompt_file(tmp
         pipeline.second_judge_pids("harmful", "final", 1.0, 0)
     with pytest.raises(FileNotFoundError, match="lift data build --only harmful --langs en"):
         prompts.load("harmful", "en")                                  # no prompt file is still that
+    # W3 (VERIFY-1): Gate 0's all_prompts goes on without redteam_hi and utility_hi only when a file is
+    # missing (FileNotFoundError); a utility_hi it cannot check (SplitStampError, a ValueError) stops it
+    assert gate0.all_prompts(sets=(), langs=()) == []
+    write_prompt_file("utility", "hi", {"utl-aya-00001": "dev"})
+    with pytest.raises(build.SplitStampError, match="utility_hi: the committed split file .*utility.json"):
+        gate0.all_prompts(sets=(), langs=())
