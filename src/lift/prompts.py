@@ -3,8 +3,10 @@
 The file format belongs to P01: ``lift.data.build.load_prompts`` reads data/prompts/{set}_{lang}.jsonl
 and checks every record's split stamp against the committed data/splits/{set}.json first (ValueError
 for a stamp the committed split does not give, or a missing split file), so dev/final membership never
-comes from a synced file alone. This module checks what it gets back, so a mislabelled or duplicated
-record fails here instead of producing a wrong denominator downstream.
+comes from a synced file alone, and refuses a cell short of its frozen split (ValueError naming the
+remedy: most often a translation failure that awaits a reader's verdict on the failures sheet). This
+module checks what it gets back, so a mislabelled or duplicated record fails here instead of producing
+a wrong denominator downstream.
 """
 
 from __future__ import annotations
@@ -21,7 +23,8 @@ SAFETY_SETS: tuple[str, ...] = ("harmful", "easy_benign", "hard_benign")
 
 def load(set_name: str, lang: str, split: str | None = None) -> list[PromptRecord]:
     """PromptRecords of one set and language (optionally one split), sorted by pid. The split is the
-    committed one (build.load_prompts refuses a file whose stamps differ from data/splits)."""
+    committed one (build.load_prompts refuses a file whose stamps differ from data/splits), and every
+    frozen pid of the splits returned is there (or was left out on purpose: a reader's bad verdict)."""
     from lift.data import build
 
     rows = build.load_prompts(set_name, lang, split)
