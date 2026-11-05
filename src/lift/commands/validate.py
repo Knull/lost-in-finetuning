@@ -153,6 +153,13 @@ def _score(args: argparse.Namespace) -> int:
               f"{', '.join(checks['labels_changed_since_decision'])}")
     if checks["loose_disabled"]:
         print("  warning: Qwen3Guard native fields disagree with the stored labels; loose view withheld")
+    if checks.get("other_judges"):
+        print("  warning: judgements by a judge the config does not name were skipped, never scored (by "
+              "judge id): " + ", ".join(f"{j} {n}" for j, n in sorted(checks["other_judges"].items())))
+    if checks.get("import_warnings"):
+        print("  warning: sheets imported with warnings, not corrected in these scores "
+              "(checks.import_warnings): "
+              + ", ".join(f"{name} {len(ws)}" for name, ws in sorted(checks["import_warnings"].items())))
     stem = "all" if args.round_no is None else f"round{args.round_no}"
     print(f"  wrote {metrics_dir() / (stem + '.json')} and .md"
           + (f", and {gate1_path()} (Gate 1)" if 1 in doc["rounds"] else ""))
@@ -322,15 +329,25 @@ def _utility_score(args: argparse.Namespace) -> int:
               + ("" if out["complete"] else f"; incomplete: {out['n_missing']} without a verdict"))
     if out["n_superseded"]:
         print(f"  left out {out['n_superseded']} pairs whose outputs were remade after the sheet was made")
+    if out.get("import_warnings"):
+        print("  warning: the sheet was imported with warnings, not corrected in this score "
+              f"(import_warnings): {len(out['import_warnings'])}")
     print(f"  wrote {metrics_dir() / 'utility.json'} and .md")
     return 0
 
 
 def _judge_flags(s: argparse.ArgumentParser) -> None:
+    # lift.validation.outputs._matches: the whole id, the id up to its first '#', or the model alone.
     s.add_argument("--qwen3guard-judge", default=None, metavar="ID",
-                   help="the Qwen3Guard judge id (or id@revision) to use if several are found")
+                   help="the Qwen3Guard judge to read when several fit the configured one (two revisions "
+                        "while configs/project.yaml pins none): its whole id, or model@revision. A pin "
+                        "chooses only among the configured judge's ids; the model alone matches every "
+                        "revision")
     s.add_argument("--frontier-judge", default=None, metavar="ID",
-                   help="the frontier judge id (or id@revision) to use if several are found")
+                   help="the frontier judge to read when several fit the configured one (two API versions): "
+                        "its whole id, or the id up to its first '#'. A pin chooses only among the "
+                        "configured judge's ids; provider/model alone matches every API version, so give "
+                        "the whole id to choose one")
 
 
 def _prompt_flag(s: argparse.ArgumentParser) -> None:

@@ -100,10 +100,15 @@ def write_prompt_file(set_name, lang, stamps):
 def test_load_takes_no_split_stamp_the_committed_split_does_not_give(committed_split):
     # R1-19: data/prompts travels through the runs repo, data/splits through git; a file stamped from another
     # assignment would put a frozen-final prompt into dev selection and a dev prompt into the final eval
+    from lift.data import build
+
     write_prompt_file("harmful", "hi", {"prh-test-0000": "dev", "prh-test-0001": "final"})
     for split in ("dev", "final", None):
         with pytest.raises(ValueError) as e:
             prompts.load("harmful", "hi", split)
+        # W3-05: its own ValueError, which P04's scores (lift.validation.outputs.Prompts) never take for a
+        # prompt file that is missing
+        assert isinstance(e.value, build.SplitStampError)
         message = str(e.value)
         assert ("harmful_hi: 2 records of harmful_hi.jsonl carry another split than the committed split "
                 "gives them, e.g. prh-test-0000 dev (frozen final), prh-test-0001 final (frozen dev)"
@@ -154,7 +159,7 @@ def test_only_a_read_of_one_split_refuses_a_cell_short_of_its_frozen_split(commi
     assert prompts.load("harmful", "hi", "final", allow_short=True) == []
     with pytest.raises(build.ShortCellError) as e:
         prompts.load("harmful", "hi", "final")
-    assert isinstance(e.value, ValueError)
+    assert isinstance(e.value, ValueError) and not isinstance(e.value, build.SplitStampError)
     assert (e.value.set_name, e.value.lang) == ("harmful", "hi")
     assert e.value.missing == {"final": ["prh-test-0000"]}
     assert e.value.remedy == ("1 are not explained (its report is missing), e.g. ['prh-test-0000']: rebuild "
@@ -169,6 +174,7 @@ def test_only_a_read_of_one_split_refuses_a_cell_short_of_its_frozen_split(commi
 def test_a_missing_split_file_is_refused_never_read_as_a_missing_prompt_file(tmp_path, monkeypatch):
     # R1-19: FileNotFoundError tells second_judge_pids (and Gate 0's all_prompts) that a language has no
     # prompt file, and they go on without it; a missing committed split file must stop them instead
+    from lift.data import build
     from lift.judge import pipeline
 
     monkeypatch.setattr(splits, "SPLITS_DIR", tmp_path / "no-splits")
@@ -176,7 +182,7 @@ def test_a_missing_split_file_is_refused_never_read_as_a_missing_prompt_file(tmp
     missing = r"harmful_hi: the committed split file .*harmful.json is missing"
     with pytest.raises(ValueError, match=missing) as e:
         prompts.load("harmful", "hi")
-    assert not isinstance(e.value, FileNotFoundError)
+    assert not isinstance(e.value, FileNotFoundError) and isinstance(e.value, build.SplitStampError)
     with pytest.raises(ValueError, match="harmful.json is missing"):
         pipeline.second_judge_pids("harmful", "final", 1.0, 0)
     with pytest.raises(FileNotFoundError, match="lift data build --only harmful --langs en"):

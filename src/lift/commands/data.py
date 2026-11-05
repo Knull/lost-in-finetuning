@@ -19,12 +19,14 @@ build with a traceback (a split file that no longer matches the sources, a PolyR
 commit, an NLLB failure).
 ``lift data apply-spotchecks``: 0 when applied (or nothing new), 1 when the sheet or the
 translation cache is refused (SheetError), a file is missing, a prompt file is refused (load_prompts'
-ValueError: a missing committed split file, a split stamp the committed split does not give) or a
+SplitStampError: a missing committed split file, a split stamp the committed split does not give) or a
 package (GlotLID's fasttext) is, all before a verdict is stored, or the rebuild stops on a ValueError
-(each logged in one line, no traceback); 3 when the rebuild lost records (listed; the verdicts are
-stored, and the files' reports say why). ``spotcheck-sheets``: 1 when a sheet exists (no --overwrite),
-a file is missing, a prompt file is refused (as above) or the translation cache lacks a failure's
-engine output.
+after the verdicts are stored (each logged in one line, no traceback; that line says the verdicts are
+stored and names the ``lift data build --only <sets> --langs <lang> --cache-only`` line that rebuilds
+their files from them, since applying the sheet again finds them stored and rebuilds nothing); 3 when
+the rebuild lost records (listed; the verdicts are stored, and the files' reports say why).
+``spotcheck-sheets``: 1 when a sheet exists (no --overwrite), a file is missing, a prompt file is
+refused (as above) or the translation cache lacks a failure's engine output.
 """
 
 from __future__ import annotations
@@ -140,7 +142,9 @@ def _apply(args: argparse.Namespace) -> int:
     try:
         result = apply_spotchecks(args.file, ctx=BuildContext.default(), dry_run=args.dry_run)
     except (ValueError, FileNotFoundError, ImportError) as e:
-        # ValueError: a SheetError, or a prompt file load_prompts refused; ImportError: before any verdict
+        # ValueError: a SheetError or a prompt file load_prompts refused (nothing stored), or the rebuild
+        # stopped after the verdicts were stored (the message says so and names the rebuild line);
+        # ImportError: before any verdict
         log.error("%s", e)
         return 1
     for name, t in result["files"].items():
@@ -219,7 +223,10 @@ def register(sub: argparse._SubParsersAction) -> None:
                         description="Check a filled sheet against the build and the stored verdicts, store "
                                     "the new verdicts and rebuild their files from the translation cache. "
                                     "Exit 0 when applied, 1 when the sheet, the cache or a prompt file is "
-                                    "refused (nothing applied), 3 when the rebuild lost records.")
+                                    "refused (nothing applied) or the rebuild stops (the verdicts are "
+                                    "stored: applying the sheet again rebuilds nothing, so rebuild their "
+                                    "files with the `lift data build ... --cache-only` line it names), 3 "
+                                    "when the rebuild lost records.")
     a.add_argument("--file", required=True, type=Path,
                    help="the filled sheet, saved as CSV UTF-8 (commas, semicolons or tabs); a relative path "
                         "that does not exist here is looked up in the validation tree (validation/... "

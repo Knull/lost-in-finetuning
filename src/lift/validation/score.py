@@ -19,7 +19,11 @@ skipped and counted by judge id (``checks.other_judges``), and its item waits fo
 
 Only the main reader's labels are the ground truth; the Hindi overlap sheet is used for
 inter-annotator agreement only. Items without a label (skipped, unlabelled, missing) are left out
-and counted. A judge failure is a judgement (the pipeline records it as unclear) and counts like
+and counted. A sheet imported with warnings (an edited cell, a label column sorted on its own after
+an id sort: lift.validation.labels records them with its labels) is scored, but never as if clean:
+its warnings are reported by sheet (``checks.import_warnings``, a line in the .md and in the
+command's output), and an import that recorded none (made before they were recorded) gets one that
+says so. A judge failure is a judgement (the pipeline records it as unclear) and counts like
 any other. A missing judgement (the judge has not run on the item yet) shows as incomplete
 coverage: the metrics then cover only the judged items, and the bar check is withheld, as it is
 while a language's sheets are not all imported (``meets_bar`` is given only with status "ok"). Results
@@ -55,14 +59,18 @@ Each labelled item's output is looked up in its generations file. The harness re
 file when one of its prompts is fixed, and the other prompts come back under the same keys but
 maybe with other text. So an item whose text changed under its key, or whose key is gone and lacks a
 judgement, is left out as ``superseded`` and counted. A missing or half-regenerated file proves
-nothing: the item stays. A judgement counts only if its ``output_sha`` (the sha256 of the output it
-judged, which P02 records) is that of the output now under the item's key, or of the output the
-reader was shown when the generations file cannot be read (``output_sha`` in the round's keys); any
-other judgement is skipped and counted (``checks.stale_judgements``), and the item waits for its
-judge. A round drawn in another precision than ``generation.dtype`` (a T4 run) is scored, and
-decided on, only while Gate 0's licence covers each of its cells (lift.validation.outputs.
-check_licence: its generations and the judgements scored, also for a file not readable here):
-otherwise it is refused before anything is written.
+nothing: the item stays. So does a prompt file that is missing here (counted,
+``checks.prompt_file_missing``), but one that is here and refused (lift.validation.outputs.
+PromptFileError: split stamps the committed split does not give, a stale or foreign copy; a missing
+split file; records that do not parse) stops the score, as it stops the draw. A judgement counts
+only if its ``output_sha`` (the sha256 of the output it judged, which P02 records) is that of the
+output now under the item's key, or of the output the reader was shown when the generations file
+cannot be read (``output_sha`` in the round's keys); any other judgement is skipped and counted
+(``checks.stale_judgements``), and the item waits for its judge. A round drawn in another
+precision than ``generation.dtype`` (a T4 run) is scored, and decided on, only while Gate 0's
+licence covers each of its cells (lift.validation.outputs.check_licence: its generations and the
+judgements scored, also for a file not readable here): otherwise it is refused before anything is
+written.
 
 ``decide_primary_judge()`` applies ``judges.decision_rule`` to round 1, pooled over the four
 languages: the frontier judge becomes primary only if it agrees with the readers at least 5 points
@@ -96,9 +104,10 @@ from lift.judge.labels import final_label, map_frontier, map_qwen3guard
 from lift.schemas import LABELS, JudgementRecord
 from lift.stats.agreement import binary, cohens_kappa, meets_bar, percent_agreement
 from lift.stats.paired import mcnemar_exact, paired_bootstrap
-from lift.validation.labels import labels_path, read_labels, read_labels_meta
+from lift.validation.labels import labels_meta_path, labels_path, read_labels, read_labels_meta
 from lift.validation.outputs import (
     LicenceError,
+    PromptFileError,
     Prompts,
     Target,
     check_licence,
@@ -280,6 +289,16 @@ def _unlicensed(round_no: int, err: LicenceError) -> LicenceError:
                         f"was scored or written. {err}")
 
 
+def import_warnings(meta: dict | None, meta_file: str) -> list[str]:
+    """The warnings an imported sheet's import gave, as its meta file (``meta_file``, ``meta`` its content)
+    records them (lift.validation.labels; the utility sheet's too). An import that recorded none, made
+    before they were recorded, or whose meta file is gone, gets one that says so: never taken for clean."""
+    if meta is None or "warnings" not in meta:
+        return [f"{meta_file} records no import warnings (imported before they were recorded, or the file "
+                "is gone): import the filled sheet again to check it"]
+    return [str(w) for w in meta["warnings"]]
+
+
 def _not_labelled_reason(item_id: str, meta: dict | None) -> str:
     if meta is None:
         return "not_imported"
@@ -328,6 +347,11 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
                     "failure_reasons": {"qwen3guard": Counter(), "frontier": Counter()},
                     "loose_unavailable": 0, "strict_native_mismatch": 0, "frontier_native_mismatch": 0,
                     "prompt_changed_since_draw": 0, "prompt_file_missing": 0}
+    # A sheet imported with warnings (an edited cell, a label column sorted on its own after an id sort) is
+    # scored, but never as if clean: every warning its import gave, by sheet.
+    checks["import_warnings"] = {
+        name: warned for name, info in sorted(sheets.items())
+        if info["imported"] and (warned := import_warnings(metas[name], labels_meta_path(name).name))}
     prompts = Prompts()
     cells: dict[tuple[str, str, str, str], tuple[dict, set[str]] | None] = {}
 
@@ -346,6 +370,8 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
                                  dtype=draw.get("dtype"))
             except LicenceError as e:
                 raise _unlicensed(it["round"], e) from None
+            except PromptFileError:
+                raise                      # here but refused (a stale or foreign copy): never "unknown"
             except ValidateError:
                 pool = None
             cells[cell] = None if pool is None else ({r.pid: r for r in pool.records}, set(pool.missing))
@@ -421,11 +447,10 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
             if reason := _failure_reason(f):
                 checks["judge_failures"]["frontier"] += 1
                 checks["failure_reasons"]["frontier"][reason] += 1
-        try:
-            current = prompts.get(it["set"], it["lang"]).get(it["pid"])
-        except ValidateError:
-            checks["prompt_file_missing"] += 1
+        if not prompts.exists(it["set"], it["lang"]):
+            checks["prompt_file_missing"] += 1         # missing here proves nothing; refused stops the score
         else:
+            current = prompts.get(it["set"], it["lang"]).get(it["pid"])
             checks["prompt_changed_since_draw"] += (
                 current is None or sha256_text(current.text) != it.get("prompt_sha", ""))
         rows.append((it, label, views))
@@ -732,6 +757,11 @@ def render_score(doc: dict) -> str:
     reasons = doc["humans"]["pooled"]["not_labelled_by_reason"]
     if reasons:
         lines += ["", "Not labelled: " + ", ".join(f"{k} {v}" for k, v in sorted(reasons.items())) + "."]
+    warned = doc["checks"].get("import_warnings")
+    if warned:
+        lines += ["", "Imported with warnings, which these numbers do not correct (check each sheet before "
+                      "trusting its scores): "
+                  + " ".join(f"{name}: {'; '.join(ws)}." for name, ws in sorted(warned.items()))]
     for view, j in doc["judges"].items():
         title = j["title"] + (" (primary judge)" if view == doc["primary_view"] else "")
         lines += ["", f"## {title}", "", f"Judge id: `{j['judge_id'] or 'none found'}`", "",

@@ -110,7 +110,9 @@ then checks every row against the current build and the stored verdicts, raising
 every problem (a legacy-encoding save among them) before anything is written; then it appends the
 verdicts that differ from the stored ones to interim/translations/spotchecks.jsonl and rebuilds those
 files from the cache (no translation engine is called; the sources load as in a build; splits
-untouched), listing any record the rebuild lost. Every
+untouched), listing any record the rebuild lost. A rebuild that stops after the verdicts are stored
+says so and names the ``lift data build --only <sets> --langs <lang> --cache-only`` line that rebuilds
+the files from them: applying the sheet again finds them stored and rebuilds nothing. Every
 build applies the latest verdict per (lang, pid): fixed replaces the text (checked; edited when it
 differs) if the English is unchanged; ok marks it checked and bad moves it to prompts/excluded/ if
 the reader saw the engine output the build has; a verdict on a failed item builds the record from
@@ -142,12 +144,12 @@ carry run_timestamp, wall_clock_seconds, created_at and provenance timestamps.
                                          sheet applied; the latest per (lang, pid) wins)
     sft/...                              the candidates and sft/report.json (lift.data.sft)
 ``load_prompts`` reads the prompt files for every later stage (lift.prompts.load wraps it) and checks
-every record's split stamp against the committed split first: data/prompts travels through the runs
-repo, data/splits through git. A read of one split also refuses a cell short of its frozen split
-(``ShortCellError``), so nothing is generated or reported on fewer prompts than the frozen split holds:
-every stage that makes or reports a cell reads its split. A read of every split, whose callers only
-look texts up by pid, checks the stamps alone. Logs, reports and exception messages carry counts,
-pids, labels and hashes, never prompt text.
+every record's split stamp against the committed split first (``SplitStampError``, also for a missing
+split file): data/prompts travels through the runs repo, data/splits through git. A read of one split
+also refuses a cell short of its frozen split (``ShortCellError``), so nothing is generated or reported
+on fewer prompts than the frozen split holds: every stage that makes or reports a cell reads its
+split. A read of every split, whose callers only look texts up by pid, checks the stamps alone. Logs,
+reports and exception messages carry counts, pids, labels and hashes, never prompt text.
 """
 
 from __future__ import annotations
@@ -232,6 +234,15 @@ class ShortCellError(ValueError):
         self.set_name, self.lang = set_name, lang
         self.missing = {split: list(pids) for split, pids in missing.items()}
         self.remedy = remedy
+
+
+class SplitStampError(ValueError):
+    """A prompt file whose records carry another split than the committed split gives them (a stale or
+    foreign copy, stamped from another split assignment), or whose set's committed split file is missing,
+    so its stamps cannot be checked (``_check_stamps``). A ValueError, so the callers that go on without a
+    language on one (judge.pipeline.second_judge_pids, Gate 0's all_prompts) are unchanged; P04's scores,
+    which go on without a prompt file that is missing here, stop on it (lift.validation.outputs.Prompts
+    makes it a PromptFileError): the file is here, and wrong."""
 
 
 def reader_remedy(langs: Iterable[str]) -> str:
@@ -1298,8 +1309,10 @@ def load_prompts(set_name: str, lang: str, split: str | None = None, *, allow_sh
     committed split's, never the stamp a synced file carries: every record, before the split filter,
     must carry the split ``_check_stamps`` gives it (data/splits/{set}.json for a pid it covers, a
     PolyRefuse train/val pid its own segment, redteam "final"). A wrong stamp, or a missing split
-    file, raises ValueError, never FileNotFoundError: that means "no prompt file" to the callers that
-    go on without the language (judge.pipeline.second_judge_pids, Gate 0's all_prompts).
+    file, raises SplitStampError (a ValueError), never FileNotFoundError: a ValueError means "no prompt
+    file" to the callers that go on without the language (judge.pipeline.second_judge_pids, Gate 0's
+    all_prompts), while P04's scores, which go on without a prompt file that is missing, stop on it
+    (lift.validation.outputs.PromptFileError).
 
     Then a read of one split (``split`` given) needs every frozen pid of it (fit, dev or final: the split
     file's) in the file unless its report lists it among its exclusions (a reader's spot-check bad, a fit
@@ -1334,17 +1347,18 @@ def load_prompts(set_name: str, lang: str, split: str | None = None, *, allow_sh
 
 def _check_stamps(set_name: str, lang: str, path: Path, items: Sequence) -> dict[str, str] | None:
     """The committed split of ``set_name`` (None for redteam, which has no split file), once every item
-    of its prompt file at ``path`` carries the split ``_stamp_of`` gives it. ValueError naming the count,
-    the first pids and the remedy otherwise, or when the committed split file is missing."""
+    of its prompt file at ``path`` carries the split ``_stamp_of`` gives it. SplitStampError naming the
+    count, the first pids and the remedy otherwise, or when the committed split file is missing."""
     mapping: dict[str, str] | None = None
     if set_name in SPLIT_SETS:
         try:
             mapping = splits.load_split(set_name)
         except FileNotFoundError:
             shown = _shown(splits.SPLITS_DIR / f"{set_name}.json")
-            raise ValueError(f"{set_name}_{lang}: the committed split file {shown} is missing, so the split "
-                             "stamps of the prompt file cannot be checked: split files are committed "
-                             "(data/splits) and never recomputed; run from a checkout that has it") from None
+            raise SplitStampError(f"{set_name}_{lang}: the committed split file {shown} is missing, so the "
+                                  "split stamps of the prompt file cannot be checked: split files are "
+                                  "committed (data/splits) and never recomputed; run from a checkout that "
+                                  "has it") from None
     wrong = []
     for item in items:
         pid, stamp = (item["pid"], item["split"]) if isinstance(item, dict) else (item.pid, item.split)
@@ -1352,10 +1366,10 @@ def _check_stamps(set_name: str, lang: str, path: Path, items: Sequence) -> dict
         if stamp != want:
             wrong.append(f"{pid} {stamp} ({why})")
     if wrong:
-        raise ValueError(f"{set_name}_{lang}: {len(wrong)} records of {path.name} carry another split than "
-                         f"the committed split gives them, e.g. {', '.join(wrong[:5])}: the file was stamped "
-                         "from another split assignment (a stale or foreign copy); rebuild it (`lift data "
-                         f"build --only {set_name}`), then `lift sync push`")
+        raise SplitStampError(f"{set_name}_{lang}: {len(wrong)} records of {path.name} carry another split "
+                              f"than the committed split gives them, e.g. {', '.join(wrong[:5])}: the file "
+                              "was stamped from another split assignment (a stale or foreign copy); rebuild "
+                              f"it (`lift data build --only {set_name}`), then `lift sync push`")
     return mapping
 
 
@@ -1751,7 +1765,11 @@ def apply_spotchecks(path: str | Path, *, ctx: BuildContext | None = None,
     appended to interim/translations/spotchecks.jsonl and their files rebuilt from the cache, splits
     untouched (an "error" or "empty" failure keeps its rule and detail, not "not cached":
     run.previous_failures). A pid that was in a rebuilt prompt file and is neither in it nor in its
-    new report's exclusions afterwards is lost (ERROR).
+    new report's exclusions afterwards is lost (ERROR). A rebuild that stops after the verdicts are
+    stored cannot be retried by applying the sheet again (they are stored, so unchanged): a ValueError
+    becomes one that names the stored verdicts, the files and the ``lift data build --only <sets>
+    --langs <lang> --cache-only`` line that rebuilds the files from them (_stored_note, _rebuild_note);
+    any other exception is logged so (ERROR) and raised as it is.
 
     Returns sheet, rows, reviewed (rows with a verdict) = new + unchanged, unreviewed, dry_run; files:
     per file ok (count), fixed and bad (pids) of the new verdicts, unchanged and unreviewed (counts);
@@ -1886,9 +1904,16 @@ def apply_spotchecks(path: str | Path, *, ctx: BuildContext | None = None,
         src = _prepare(run, {s for s, _ in pairs})
         ctx.load_lid()
         _append_verdicts(entries)
-        run.verdicts = _read_verdicts()
-        for set_name, lang in pairs:
-            _build_file(run, src, set_name, lang)
+        try:
+            run.verdicts = _read_verdicts()
+            for set_name, lang in pairs:
+                _build_file(run, src, set_name, lang)
+        except ValueError as e:              # one line in the CLI: it must say the verdicts are stored
+            stored = _stored_note(path, len(entries), pairs, cfg)
+            raise ValueError(f"{stored}: {e}. {_rebuild_note(pairs, cfg)}") from e
+        except BaseException:                # a traceback follows: say what is stored first
+            log.error("%s. %s", _stored_note(path, len(entries), pairs, cfg), _rebuild_note(pairs, cfg))
+            raise
         summary["rebuilt"] = [f"{s}_{lang}" for s, lang in pairs]
         summary["files_rebuilt"] = {f"{s}_{lang}": run.files.get(f"{s}_{lang}") for s, lang in pairs}
         summary["lost"] = _lost(before)
@@ -1906,6 +1931,26 @@ def _in_order(pairs: Iterable[tuple[str, str]], cfg: Mapping[str, Any]) -> list[
     """(set, lang) pairs in SETS order, then languages.all order."""
     order = {s: i for i, s in enumerate(SETS)}
     return sorted(pairs, key=lambda p: (order[p[0]], cfg["languages"]["all"].index(p[1])))
+
+
+def _stored_note(sheet: Path, n: int, pairs: Sequence[tuple[str, str]], cfg: Mapping[str, Any]) -> str:
+    """What a rebuild that stops after ``_append_verdicts`` leaves: the verdicts stored, the files not."""
+    names = ", ".join(f"{s}_{lang}" for s, lang in _in_order(pairs, cfg))
+    return (f"{sheet.name}: {n} new verdicts are stored in {_shown(_verdicts_path())}, but the rebuild of "
+            f"their files ({names}) stopped")
+
+
+def _rebuild_note(pairs: Sequence[tuple[str, str]], cfg: Mapping[str, Any]) -> str:
+    """The remedy for ``_stored_note``: every build applies the stored verdicts, and --cache-only rebuilds
+    from the cache as apply_spotchecks does (no engine called), one line per language."""
+    sets: dict[str, list[str]] = {}
+    for set_name, lang in _in_order(pairs, cfg):
+        sets.setdefault(lang, []).append(set_name)
+    lines = " and ".join(f"`lift data build --only {' '.join(names)} --langs {lang} --cache-only`"
+                         for lang, names in sorted(sets.items(),
+                                                   key=lambda x: cfg["languages"]["all"].index(x[0])))
+    return ("Applying the sheet again finds them stored and rebuilds nothing: once the cause is fixed, "
+            f"rebuild the files from them with {lines}, then `lift sync push`")
 
 
 def _lossy(cell: str, current: str) -> bool:

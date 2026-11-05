@@ -11,8 +11,13 @@ answer and the candidate adapter's answer to the same instruction.
   columns, never which model wrote which. The reader puts A, B or tie in ``preference``.
 - Pairs whose stock or candidate output was remade after the sheet was made are left out of the
   score and counted, since verdicts are joined by pid and would be about answers the reader never
-  saw. A sheet drawn in another precision than ``generation.dtype`` (``--dtype``) is drawn and
+  saw. A generations or prompt file that is missing here proves nothing, but a prompt file that is
+  here and refused (lift.validation.outputs.PromptFileError: a stale or foreign copy) stops the
+  score. A sheet drawn in another precision than ``generation.dtype`` (``--dtype``) is drawn and
   scored only while Gate 0's licence covers both cells (lift.validation.outputs.check_licence).
+- The import records its warnings with the preferences (labels/utility_hi.meta.json), and the
+  score reports them (``import_warnings``), so a sheet imported with one is never scored as if
+  clean (lift.validation.score.import_warnings).
 - Scoring turns the reader's preference into the candidate's score (win 1, tie 0.5, loss 0) and
   compares it with the utility judge's UtilityVerdict, whose score averages both presentation
   orders (above 0.5 is a win, 0.5 a tie, below 0.5 a loss). Reported: agreement and kappa on
@@ -49,6 +54,7 @@ from lift.stats.paired import paired_bootstrap, win_rate
 from lift.validation.labels import parse_filled
 from lift.validation.outputs import (
     LicenceError,
+    PromptFileError,
     Prompts,
     check_licence,
     fields_of,
@@ -57,7 +63,7 @@ from lift.validation.outputs import (
     variant_info,
 )
 from lift.validation.sample import DEFAULT_SEED, archive, blind_id, rank
-from lift.validation.score import confusion
+from lift.validation.score import confusion, import_warnings
 from lift.validation.store import (
     ValidateError,
     check_writable,
@@ -240,7 +246,7 @@ def import_preferences(file: Path, *, annotator: str = "hi-a") -> dict:
                "rows": parsed["rows"], "items_on_sheet": parsed["items_on_sheet"],
                "labelled": len(records), "skipped": parsed["skipped"],
                "unlabelled": parsed["unlabelled"], "missing": parsed["missing"],
-               "changed_text": parsed["changed"],
+               "changed_text": parsed["changed"], "warnings": parsed["warnings"],   # the score reports them
                "preference_counts": {k: counts.get(k, 0) for k in ("A", "B", "tie")}}
     write_json(utility_meta_path(), summary)
     return {**summary, "labels_path": str(utility_labels_path()), "warnings": parsed["warnings"]}
@@ -367,9 +373,9 @@ def score_utility(*, verdict_files: list[Path] | None = None, judge_id: str | No
         try:
             pool = load_pool(*cell, prompts, prompt_check=doc.get("prompt_check", True),
                              dtype=doc.get("dtype"))
-        except LicenceError:
+        except (LicenceError, PromptFileError):  # a prompt file here but refused is never "unreadable"
             raise
-        except ValidateError:
+        except ValidateError:          # a missing prompt file, or a generations file not readable now
             pool = None
         # A sheet drawn in another precision than generation.dtype is scored only while Gate 0's licence
         # covers both cells: load_pool checks the records it keeps, and this also a file not readable here.
@@ -406,6 +412,9 @@ def score_utility(*, verdict_files: list[Path] | None = None, judge_id: str | No
         "n_sheet": len(items), "n_labelled": len(labelled), "n_judged": len(pairs),
         "n_missing": len(labelled) - len(pairs), "n_superseded": len(superseded),
         "complete": bool(labelled) and len(pairs) == len(labelled),
+        # the import's warnings: a sheet imported with one is never scored as if clean
+        "import_warnings": import_warnings(meta if utility_meta_path().is_file() else None,
+                                           utility_meta_path().name),
         "created": date.today().isoformat(),
     }
     if pairs:
@@ -458,6 +467,9 @@ def render_utility(out: dict) -> str:
         + (f" Left out because their outputs were remade after the sheet was made: {out['n_superseded']}."
            if out["n_superseded"] else ""),
     ]
+    if out.get("import_warnings"):
+        lines += ["", "Imported with warnings, which this score does not correct (check the sheet before "
+                      "trusting it): " + "; ".join(out["import_warnings"]) + "."]
     if out["n_judged"]:
         hw, jw, d = out["human_win_rate"], out["judge_win_rate"], out["judge_minus_human"]
         lines += [
