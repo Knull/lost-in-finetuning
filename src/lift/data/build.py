@@ -110,7 +110,9 @@ then checks every row against the current build and the stored verdicts, raising
 every problem (a legacy-encoding save among them) before anything is written; then it appends the
 verdicts that differ from the stored ones to interim/translations/spotchecks.jsonl and rebuilds those
 files from the cache (no translation engine is called; the sources load as in a build; splits
-untouched), listing any record the rebuild lost. Every
+untouched), listing any record the rebuild lost. A rebuild that stops after the verdicts are stored
+says so and names the ``lift data build --only <sets> --langs <lang> --cache-only`` line that rebuilds
+the files from them: applying the sheet again finds them stored and rebuilds nothing. Every
 build applies the latest verdict per (lang, pid): fixed replaces the text (checked; edited when it
 differs) if the English is unchanged; ok marks it checked and bad moves it to prompts/excluded/ if
 the reader saw the engine output the build has; a verdict on a failed item builds the record from
@@ -1751,7 +1753,11 @@ def apply_spotchecks(path: str | Path, *, ctx: BuildContext | None = None,
     appended to interim/translations/spotchecks.jsonl and their files rebuilt from the cache, splits
     untouched (an "error" or "empty" failure keeps its rule and detail, not "not cached":
     run.previous_failures). A pid that was in a rebuilt prompt file and is neither in it nor in its
-    new report's exclusions afterwards is lost (ERROR).
+    new report's exclusions afterwards is lost (ERROR). A rebuild that stops after the verdicts are
+    stored cannot be retried by applying the sheet again (they are stored, so unchanged): a ValueError
+    becomes one that names the stored verdicts, the files and the ``lift data build --only <sets>
+    --langs <lang> --cache-only`` line that rebuilds the files from them (_stored_note, _rebuild_note);
+    any other exception is logged so (ERROR) and raised as it is.
 
     Returns sheet, rows, reviewed (rows with a verdict) = new + unchanged, unreviewed, dry_run; files:
     per file ok (count), fixed and bad (pids) of the new verdicts, unchanged and unreviewed (counts);
@@ -1886,9 +1892,16 @@ def apply_spotchecks(path: str | Path, *, ctx: BuildContext | None = None,
         src = _prepare(run, {s for s, _ in pairs})
         ctx.load_lid()
         _append_verdicts(entries)
-        run.verdicts = _read_verdicts()
-        for set_name, lang in pairs:
-            _build_file(run, src, set_name, lang)
+        try:
+            run.verdicts = _read_verdicts()
+            for set_name, lang in pairs:
+                _build_file(run, src, set_name, lang)
+        except ValueError as e:              # one line in the CLI: it must say the verdicts are stored
+            stored = _stored_note(path, len(entries), pairs, cfg)
+            raise ValueError(f"{stored}: {e}. {_rebuild_note(pairs, cfg)}") from e
+        except BaseException:                # a traceback follows: say what is stored first
+            log.error("%s. %s", _stored_note(path, len(entries), pairs, cfg), _rebuild_note(pairs, cfg))
+            raise
         summary["rebuilt"] = [f"{s}_{lang}" for s, lang in pairs]
         summary["files_rebuilt"] = {f"{s}_{lang}": run.files.get(f"{s}_{lang}") for s, lang in pairs}
         summary["lost"] = _lost(before)
@@ -1906,6 +1919,26 @@ def _in_order(pairs: Iterable[tuple[str, str]], cfg: Mapping[str, Any]) -> list[
     """(set, lang) pairs in SETS order, then languages.all order."""
     order = {s: i for i, s in enumerate(SETS)}
     return sorted(pairs, key=lambda p: (order[p[0]], cfg["languages"]["all"].index(p[1])))
+
+
+def _stored_note(sheet: Path, n: int, pairs: Sequence[tuple[str, str]], cfg: Mapping[str, Any]) -> str:
+    """What a rebuild that stops after ``_append_verdicts`` leaves: the verdicts stored, the files not."""
+    names = ", ".join(f"{s}_{lang}" for s, lang in _in_order(pairs, cfg))
+    return (f"{sheet.name}: {n} new verdicts are stored in {_shown(_verdicts_path())}, but the rebuild of "
+            f"their files ({names}) stopped")
+
+
+def _rebuild_note(pairs: Sequence[tuple[str, str]], cfg: Mapping[str, Any]) -> str:
+    """The remedy for ``_stored_note``: every build applies the stored verdicts, and --cache-only rebuilds
+    from the cache as apply_spotchecks does (no engine called), one line per language."""
+    sets: dict[str, list[str]] = {}
+    for set_name, lang in _in_order(pairs, cfg):
+        sets.setdefault(lang, []).append(set_name)
+    lines = " and ".join(f"`lift data build --only {' '.join(names)} --langs {lang} --cache-only`"
+                         for lang, names in sorted(sets.items(),
+                                                   key=lambda x: cfg["languages"]["all"].index(x[0])))
+    return ("Applying the sheet again finds them stored and rebuilds nothing: once the cause is fixed, "
+            f"rebuild the files from them with {lines}, then `lift sync push`")
 
 
 def _lossy(cell: str, current: str) -> bool:
