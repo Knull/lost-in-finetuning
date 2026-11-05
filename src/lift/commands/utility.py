@@ -175,7 +175,9 @@ def _utility(args: argparse.Namespace) -> int:
     if args.judge == "fallback":
         _refuse_other_dtype(dtype, args.device)
     pending: tuple[type[BaseException], ...] = ()
-    if args.judge == "frontier" and not args.sync:
+    if args.judge == "frontier":
+        # Also under --sync: a synchronous pass first collects an earlier batch that holds its requests
+        # (they are paid for), and stops with FrontierBatchPending while that batch still runs.
         from lift.judge import frontier
 
         pending = (frontier.FrontierBatchPending,)

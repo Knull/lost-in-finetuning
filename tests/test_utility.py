@@ -115,7 +115,8 @@ class FakeJudge:
     """The frontier judge's interface (pairwise, prefill_pairwise, judge_id, stats) over a table by pid of
     (the winner when the candidate is shown as A, the winner when it is shown as B); None is a failed order.
     Which order a pair is in is told from where the candidate's answer (``candidate``: {pid: output}) is.
-    Every call is recorded; ``pending`` is raised by prefill_pairwise."""
+    Every call is recorded; ``pending`` is raised by prefill_pairwise, ``sync_pending`` by pairwise (a
+    synchronous pass that meets an earlier batch still running)."""
 
     def __init__(self, candidate: dict[str, str], table: dict | None = None, *, judge_id: str = JUDGE_ID,
                  pending: BaseException | None = None) -> None:
@@ -123,6 +124,7 @@ class FakeJudge:
         self.table = table if table is not None else {pid: ("A", "B") for pid in PIDS}
         self.judge_id = judge_id
         self.pending = pending
+        self.sync_pending: BaseException | None = None
         self.calls: list[tuple[list, list, list]] = []
         self.prefills: list[dict] = []
 
@@ -138,6 +140,8 @@ class FakeJudge:
                 "usd": 0.0}
 
     def pairwise(self, instructions, a, b):
+        if self.sync_pending is not None:
+            raise self.sync_pending
         self.calls.append((list(instructions), list(a), list(b)))
         out = []
         for instruction, shown_a, shown_b in zip(instructions, a, b, strict=True):
@@ -849,6 +853,18 @@ def test_sync_skips_the_prefill_and_no_wait_exits_3_while_batches_run(cli, caplo
     assert main([*argv, "--no-wait"]) == 3
     assert cli.prefills[-1]["wait"] is False and len(cli.calls) == 1
     assert "1 batch still in progress" in caplog.text and "rerun the same line to collect" in caplog.text
+
+
+def test_a_sync_run_that_meets_a_running_earlier_batch_exits_3_and_pays_nothing(cli, caplog):
+    # A synchronous pass collects an earlier batch holding its requests, and stops while it still runs
+    # (FrontierBatchPending): done for now, the same line collects later; never a traceback and exit 1.
+    cli.sync_pending = Pending("an earlier batch holding these requests is still in progress")
+    assert main([*ARGV, "--judge-only", "--sync"]) == 3
+    assert not cli.prefills and not cli.calls
+    assert not utility.verdicts_path("frontier", CANDIDATE, SPLIT).exists()
+    assert "still in progress" in caplog.text and "rerun the same line to collect" in caplog.text
+    runs = [json.loads(p.read_text(encoding="utf-8")) for p in manifests_dir().glob("utility-*.json")]
+    assert [r["status"] for r in runs] == ["pending"]
 
 
 def test_a_refused_auditkit_record_exits_3_with_the_metrics_written(cli, monkeypatch, caplog):
