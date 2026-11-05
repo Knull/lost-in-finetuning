@@ -509,6 +509,9 @@ def _current(doc: Mapping[str, Any], name: str, dtype: str) -> dict[str, Any]:
     if changed:
         raise StaleMetrics("; ".join(changed))
     pairing = utility.pair_generations(name, "dev", dtype=dtype)
+    # The file hashes and the adapter hash do not move when models.global is re-pinned, the harness version
+    # is bumped or the registry entry's intervention changes; the check records lift utility keeps do.
+    utility.check_answers(pairing)
     utility.current_verdicts(files["verdicts"], pairing)
     return {"files": {_shown(path): now[what] for what, path in files.items()},
             "adapter_pinned": bool(pinned)}
