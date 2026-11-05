@@ -935,23 +935,34 @@ def test_judge_only_refuses_the_answers_of_a_replaced_adapter_and_retires_their_
 
 def move_checkout(move: str, registry: dict, monkeypatch, *, back: bool = False) -> None:
     """Move what this checkout says the answers must be made from away from what the GPU job's ref said
-    (``back``: return it, as a git pull to that ref does): the candidate's registry entry, the harness
-    version or the models.global pin."""
+    (``back``: return it, as a git pull to that ref does): the candidate's registry entry (another one, or
+    none), the harness version or the models.global pin."""
     if move == "registry":
         registry[CANDIDATE] = entry(CANDIDATE, adapter=ADAPTER if back else "b" * 64)
+    elif move == "unregistered":
+        if back:
+            registry[CANDIDATE] = entry(CANDIDATE)
+        else:
+            registry.pop(CANDIDATE)
     elif move == "harness":
         monkeypatch.setattr(gen, "HARNESS_VERSION", META["harness"] if back else 2)
     else:
         config.load("project")["models"]["global"]["revision"] = META["model_rev"] if back else "d" * 40
 
 
-@pytest.mark.parametrize("move", ["registry", "harness", "pin"])
+BEHIND = "this checkout is behind the ref the GPU job ran, update it (git pull)"
+
+
+@pytest.mark.parametrize("move, remedy", [
+    ("registry", BEHIND), ("harness", BEHIND), ("pin", BEHIND),
+    ("unregistered", "update this checkout (git pull) if the ref the GPU job ran has its entry"),
+], ids=["registry", "harness", "pin", "unregistered"])
 def test_a_refusal_a_git_pull_settles_keeps_the_answer_checks_so_judge_only_passes_again_with_no_gpu_line(
-        cli, registry, monkeypatch, caplog, move):
-    # V03: this checkout's registry entry, harness or pin differs from the GPU job's ref, so --judge-only
-    # refuses the pair (exit 3, naming `git pull`) and retires its verdicts, metrics and AuditKIT record.
-    # It never retired the answer checks, which only a GPU line can make again: once the checkout is
-    # updated, --judge-only judges the pair again with no GPU line, and Gate 1 counts it.
+        cli, registry, monkeypatch, caplog, move, remedy):
+    # V03: this checkout's registry entry (another, or none), harness or pin differs from the GPU job's ref,
+    # so --judge-only refuses the pair (exit 3, naming `git pull`) and retires its verdicts, metrics and
+    # AuditKIT record. It never retired the answer checks, which only a GPU line can make again: once the
+    # checkout is updated, --judge-only judges the pair again with no GPU line, and Gate 1 counts it.
     from lift import gates
 
     config.load("project")["models"]["global"]["revision"] = META["model_rev"]      # as the GPU job ran
@@ -960,7 +971,7 @@ def test_a_refusal_a_git_pull_settles_keeps_the_answer_checks_so_judge_only_pass
     move_checkout(move, registry, monkeypatch)
     caplog.clear()
     assert main([*ARGV, "--judge-only"]) == 3
-    assert "this checkout is behind the ref the GPU job ran, update it (git pull)" in caplog.text
+    assert remedy in caplog.text and "check them again on a GPU runtime" not in caplog.text
     assert all(path.read_bytes() == b"" for path in derived_files()) and checks_now() == checks
     assert gates.utility_fact("aya")["status"] == "missing"
     move_checkout(move, registry, monkeypatch, back=True)                       # git pull

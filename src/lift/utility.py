@@ -508,9 +508,10 @@ def _check_side(name: str, candidate: str, split: str, dtype: str, records: Sequ
             spec = get_spec(name)
         except KeyError:
             spec = None
-            problems.append(f"{name} is not in configs/variants.yaml, so nothing says what its answers must "
-                            "be made from: register it (an adapter with `lift register-adapter`) and commit "
-                            "the entry, then check them again on a GPU runtime")
+            problems.append(f"{name} is not in configs/variants.yaml here, so nothing says what its answers "
+                            "must be made from: update this checkout (git pull) if the ref the GPU job ran "
+                            "has its entry, or register it (an adapter with `lift register-adapter`) and "
+                            "commit the entry. Its check is kept, and read again against that entry")
         moved = []
         if spec is not None and intervention_digest(spec) != doc["intervention"]:
             moved.append("intervention digest (method, adapter, seed, params, artifacts)")
