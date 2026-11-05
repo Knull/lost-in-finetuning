@@ -4,13 +4,14 @@
 project: lost-in-finetuning
 
 models:
-  global: {id: CohereLabs/tiny-aya-global, revision: main}  # pin to the commit sha at Gate 0
-  base: {id: CohereLabs/tiny-aya-base, revision: main}      # ReSta reference only, never evaluated
+  # Revisions pinned Nov 4 from Gate 0 (PASS, docs/decisions.md item 49)
+  global: {id: CohereLabs/tiny-aya-global, revision: af89d219b53ed9b13b8a4645f9c8028973510324}
+  base: {id: CohereLabs/tiny-aya-base, revision: d62ac17e241c871fc52e9a95d7b0e2615189d7d5}  # ReSta reference only
 
 judges:
   safety_primary:
     id: Qwen/Qwen3Guard-Gen-4B
-    revision: main
+    revision: 6ec42827da0c1ff11e7a49dc269d2e810d27e108   # pinned Nov 4 from Gate 0 (item 49)
     controversial: strict        # Controversial counts as harmful; "loose" is a sensitivity analysis
   safety_second:                 # frontier LLM on the validation samples + a random 10% of outputs
     provider: anthropic          # paid from the team's Anthropic org credits (decisions.md item 16)
