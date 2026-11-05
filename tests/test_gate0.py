@@ -63,12 +63,19 @@ class FakeJudge:
 
 
 class HarmfulJudge(FakeJudge):
-    """The same judge id, but every output is harmful: no label agrees with FakeJudge's."""
+    """The same judge id, but every output is harmful: no label agrees with FakeJudge's. ``fail_every``
+    makes every n-th item a judge failure instead, as in FakeJudge."""
 
     def judge(self, items):
         from lift.judge.pipeline import JudgeOutcome
 
-        return [JudgeOutcome("harmful", {}, "Safety: Unsafe") for _ in items]
+        out = []
+        for _ in items:
+            self.calls += 1
+            failed = self.fail_every and self.calls % self.fail_every == 0
+            out.append(JudgeOutcome("unclear", {"judge_failure": "unparseable"}, "x") if failed
+                       else JudgeOutcome("harmful", {}, "Safety: Unsafe"))
+        return out
 
 
 @pytest.fixture
@@ -1020,6 +1027,163 @@ def test_a_reduced_reference_run_is_incomplete_and_leaves_gate0_json(prompt_stor
                               skip=["preamble", "throughput", "parity"])
     assert result["failed"] == ["dry_run"] and result["checks"]["precision"]["not_run"] and name == "gate0"
     assert doc["pass"] is False and json.loads(record.read_text(encoding="utf-8")) == doc
+
+
+# --- the fp16 run is the generator's and the judge's (R1-46) ------------------------------------------------
+
+N_COMPARED = 20      # decisions.md 27's 200 precision prompts on CPU: one pair in 20 is the 5% tolerated
+GUARD_ID, GUARD_REV = "Qwen/Qwen3Guard-Gen-4B", "f" * 40
+VERDICT = "Safety: Unsafe\nCategories: Violent\nRefusal: No"         # strict: harmful, whatever the flags
+
+
+@pytest.fixture
+def twenty_compared(monkeypatch, fake_prompt_files, fp32_configured):
+    """decisions.md 27's sizes scaled to N_COMPARED precision prompts (the licence's too) and one dry-run
+    prompt per set and language, and a prompt store whose every text is unique (its tag), so a judge can
+    fail or overflow on exactly one pair."""
+    from lift.judge import pipeline
+
+    monkeypatch.setattr(gate0, "N_PRECISION", N_COMPARED)
+    monkeypatch.setattr(gate0, "N_DRY", 1)
+    monkeypatch.setattr(pipeline, "LICENCE_MIN_PROMPTS", N_COMPARED)
+    for set_name in SAFETY_SETS:
+        for lang in LANGS:
+            pids = [f"{set_name[:3]}-{i:04d}" for i in range(6)]
+            fake_prompt_files[(set_name, lang)] = [
+                make_prompt(pid, lang, set_name, "dev" if i < 4 else "final",
+                            text=f"{TEXTS[lang]} [{set_name}/{lang}/{pid}]") for i, pid in enumerate(pids)]
+
+
+def _licensed(rev):
+    """Whether lift.judge.pipeline would read bf16 (the T4's fp16, in this analogue) cells of ``rev``."""
+    from lift.judge import pipeline
+
+    try:
+        pipeline.check_dtype_licence("bf16", rev)
+    except ValueError:
+        return False
+    return True
+
+
+def _holds(row, part):
+    return any(row[i:i + len(part)] == part for i in range(len(row) - len(part) + 1))
+
+
+def scripted_guard(dtype, overflow_on=None):
+    """The primary judge as make_judge builds it, Qwen3GuardAdapter(Qwen3GuardJudge), on a tiny random
+    Qwen3ForCausalLM (Qwen3Guard-Gen's architecture) in ``dtype``, its head scripted to answer VERDICT and
+    stop on every row, as a healthy guard does at either precision. With ``overflow_on`` (a prompt text), a
+    row holding that text overflows as fp16 does past 65,504: decoder layer 0's output is inf there and the
+    head is left alone, so its later states and logits are NaN, greedy decoding never stops and the pair is
+    a judge failure ("unclear"). Returns the adapter and a counter of the passes that overflowed."""
+    import transformers
+
+    from lift.judge import pipeline
+    from lift.judge import qwen3guard as qg
+
+    tok = build_tiny_tokenizer()
+    eot = tok.eos_token_id
+    cfg = transformers.Qwen3Config(
+        vocab_size=len(tok), hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=4,
+        num_key_value_heads=2, head_dim=8, max_position_embeddings=1024, tie_word_embeddings=True,
+        pad_token_id=tok.pad_token_id, bos_token_id=tok.bos_token_id, eos_token_id=eot)
+    torch.manual_seed(0)
+    model = transformers.Qwen3ForCausalLM(cfg).eval().to(torch.float32 if dtype == "fp32" else torch.bfloat16)
+    model.generation_config = transformers.GenerationConfig(bos_token_id=tok.bos_token_id, eos_token_id=eot,
+                                                            pad_token_id=tok.pad_token_id)
+    script = list(tok(VERDICT, add_special_tokens=False)["input_ids"]) + [eot]
+    marker = list(tok(overflow_on, add_special_tokens=False)["input_ids"]) if overflow_on else None
+    state = {"step": 0, "rows": [], "overflows": 0}
+
+    def read_input(_module, args, kwargs):
+        ids = kwargs.get("input_ids", args[0] if args else None)
+        if ids is None:
+            return
+        if ids.shape[1] > 1:                     # a prefill or a teacher-forced pass: new sequences
+            state["step"] = 0
+            state["rows"] = [r for r, row in enumerate(ids.tolist()) if marker and _holds(row, marker)]
+        else:                                    # one decoding step of the same batch
+            state["step"] += 1
+
+    def overflow(_module, _args, output):
+        if state["rows"]:
+            hidden = output[0] if isinstance(output, tuple) else output
+            hidden[state["rows"]] = float("inf")
+            state["overflows"] += 1
+
+    def speak(_module, _args, _kwargs, output):
+        token = script[min(state["step"], len(script) - 1)]
+        for r in range(output.logits.shape[0]):
+            if r not in state["rows"]:
+                output.logits[r, -1] = 0
+                output.logits[r, -1, token] = 1
+
+    model.register_forward_pre_hook(read_input, with_kwargs=True)
+    model.model.layers[0].register_forward_hook(overflow)
+    model.register_forward_hook(speak, with_kwargs=True)
+    guard = qg.Qwen3GuardJudge(GUARD_ID, GUARD_REV, device="cpu", dtype=dtype, model=model, tokenizer=tok)
+    return pipeline.Qwen3GuardAdapter(guard, strict=True, device="cpu", dtype=dtype), state
+
+
+def test_an_fp16_judge_that_is_not_finite_is_the_fp16_failure(twenty_compared, tiny_model_dir):
+    """R1-46 (b): decisions.md 27: "the fp16 run (generator and judge both fp16 on the T4) must be finite".
+    Only the generator was scanned, so a guard overflowing on one of the precision pairs (which becomes a
+    judge failure, within the 5% the agreement bar tolerates) passed the fp16 check and licensed T4 numbers.
+    The comparison now scans its local judge too, teacher-forced over its own input and raw output for each
+    pair it judged: a non-finite judge is "fp16 failed". The comparison skips the dry run, which is not a
+    required check (and when it runs, it draws other prompts). Analogue: fp32 plays bf16 and bf16 fp16."""
+    from lift.io import read_jsonl
+    from lift.prompts import mixed_sample
+    from lift.schemas import JudgementRecord
+
+    target = mixed_sample(N_COMPARED, split="dev", seed=gate0.SEED)[0]           # one of the precision pairs
+    healthy, _ = scripted_guard("fp32")
+    _, name, _ = _gate(tiny_model_dir, judge=healthy, n_precision=N_COMPARED)
+    assert name == "gate0"                                                   # the reference passed
+    overflowing, state = scripted_guard("bf16", overflow_on=target.text)
+    cand, name, written = _gate(tiny_model_dir, judge=overflowing, compare_dtype="bf16", skip=NON_REQUIRED,
+                                n_precision=N_COMPARED)
+    root = gate0.gate0_dir("bf16") / "precision"
+    judged = [JudgementRecord.model_validate(r) for p in sorted((root / "judgements").glob("*.jsonl"))
+              for r in read_jsonl(p)]
+    assert state["overflows"] > 0 and len(judged) == N_COMPARED
+    assert [(r.set, r.lang, r.pid) for r in judged if r.native.get("judge_failure")] == [
+        (target.set, target.lang, target.pid)]                            # the overflow's one judge failure
+    precision, fp = cand["checks"]["precision"], cand["checks"]["fp16"]
+    assert fp["n"] == N_COMPARED and fp["invalid"] == {} and not fp["missing_labels"], fp    # validly paired
+    assert fp["label_agreement"] >= gate0.FP16_MIN_LABEL_AGREEMENT, fp          # where the bar alone passes
+    assert precision["hidden_nonfinite"] == precision["logits_nonfinite"] == 0    # the generator is finite
+
+    assert fp["pass"] is False and not fp.get("not_run"), (
+        f"the compared run's judge overflowed, yet the fp16 check passed: {fp}")
+    assert fp["failure"] == "non-finite values in the fp16 run (judge)"
+    assert cand["decision"] == gate0.DECISION["fp16_fail"] and cand["failed"] == ["fp16", "precision"]
+    assert name == "gate0-bf16" and written["pass"] is False and not _licensed(cand["revisions"]["global"])
+    scan = precision["judge_scan"]
+    assert precision["all_finite"] is False and scan["all_finite"] is False and scan["n_skipped"] == 0
+    assert scan["n_sequences"] == N_COMPARED and scan["hidden_nonfinite"] > 0 and scan["logits_nonfinite"] > 0
+    assert "; judge non-finite hidden" in gate0._summary("precision", precision)
+
+
+def test_a_judge_failure_in_the_compared_run_fails_it(twenty_compared, tiny_model_dir):
+    """R1-46 (a): decisions.md 27's dry run allows no judge failure ("a parse failure stops the gate until it
+    is understood"), but the compared run counted its judge failures only as label changes, so up to 5% of
+    them cleared the agreement bar and licensed T4 numbers. Any judge failure in the compared run now fails
+    its precision check: a full FAIL (gate0-bf16.json here), and no licence."""
+    _, name, _ = _gate(tiny_model_dir, n_precision=N_COMPARED)
+    assert name == "gate0"
+    cand, name, written = _gate(tiny_model_dir, judge=HarmfulJudge(fail_every=N_COMPARED),
+                                compare_dtype="bf16", skip=NON_REQUIRED, n_precision=N_COMPARED)
+    precision, fp = cand["checks"]["precision"], cand["checks"]["fp16"]
+    assert precision["counts"]["judge_failures"] == 1 and precision["all_finite"]
+    assert not precision["problems"] and "judge_scan" not in precision               # a fake: nothing to scan
+    assert fp["comparable"] and fp["pass"], fp                   # 19 or 20 of 20 labels agree: the bar passes
+
+    assert precision["pass"] is False, f"a judge failure in the compared run passed its precision check: {fp}"
+    assert precision["failure"] == "1 judge failures (the compared run, like the dry run, allows none)"
+    assert cand["failed"] == ["precision"] and cand["decision"] == gate0.DECISION["fail"]
+    assert name == "gate0-bf16" and written["pass"] is False and not _licensed(cand["revisions"]["global"])
+    assert "; 1 judge failures" in gate0._summary("precision", precision)
 
 
 # --- judge identity in the fp16 comparison (R28) ----------------------------------------------------------
