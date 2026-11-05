@@ -227,7 +227,9 @@ exits 1. Any other failing line still ends the job. A cell is skipped when:
 
 `lift restart` moves the cell's files to `outputs/.aside/<UTC stamp>/` on the VM, which is never
 synced, and leaves each one empty; it empties the cell's AuditKIT records too (an empty record is a
-retired one). The checkpoint push after it replaces the runs repo's copies with the empty files, and
+retired one). The checkpoint push after it replaces the runs repo's copies with the empty files (if
+another machine pushed the cell since this machine's last sync, it keeps the runs repo's copies and
+reports a conflict instead, emptied here by lift restart, which `lift sync push --force` settles), and
 the line after it refills them. With `--judge ROLE` it does this only for that judge's file and
 records. Its log names the `lift judge ... --judge ROLE` line (with P04's `--keys` for the second
 judge) that refills another judge's file it set aside: `lift run-dev` refills only the primary's. It

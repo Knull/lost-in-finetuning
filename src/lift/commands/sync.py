@@ -48,14 +48,18 @@ _ONLY = ("limit the sync to this path (repeatable): data/prompts, data/sft, data
 _COMMANDS = {
     "push": ("upload new and changed local files. Append-only JSONL changed on both sides is merged by "
              "key; any other file changed on both sides, or a merge that would pick between two records "
-             "of one key, stays as it is on the Hub and its local copy goes to "
-             "conflicts/<utc-timestamp>/<path>. Judgements and AuditKIT records go up only with the "
-             "generations they pair with, and so does a merge of them",
+             "of one key, break a rule the file's readers enforce, or fill again a generations or "
+             "judgements file lift restart emptied on one side (it holds no records there), stays as it "
+             "is on the Hub and its local copy goes to conflicts/<utc-timestamp>/<path>. Judgements and "
+             "AuditKIT records go up only with the generations they pair with, and so does a merge of them",
              "on a conflict, upload the local copy over the Hub's (never judgements or AuditKIT records "
              "that do not pair with their cell's generations)"),
     "pull": ("download new and changed files from the Hub, never overwriting a local edit. Append-only "
-             "JSONL changed on both sides is merged by key; any other conflict keeps the local copy, and so "
-             "do the judgements and AuditKIT records of a cell whose generations conflict",
+             "JSONL changed on both sides is merged by key, unless the merge would pick between two records "
+             "of one key, break a rule the file's readers enforce, hold judgements that do not pair with the "
+             "generations here, or fill again a generations or judgements file lift restart emptied on one "
+             "side (it holds no records there); such a merge, and any other conflict, keeps the local copy, "
+             "and so do the judgements and AuditKIT records of a cell whose generations conflict",
              "on a conflict, replace the local copy with the Hub's and keep the local one under "
              "outputs/.sync-backup/<utc-timestamp>/<path>"),
     "status": ("dry run: show what pull and push would do", None),
