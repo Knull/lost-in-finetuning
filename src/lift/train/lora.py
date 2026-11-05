@@ -82,8 +82,14 @@ After training
   its random-LoRA parity, ``mixed_sample(gate0.N_PARITY, split="dev", seed=gate0.SEED + 3)``).
   In fp32 they must match token for token, or the adapter is not registered and the run fails: it is
   saved and pushed, but nothing may evaluate it until the cause is understood (CLAUDE.md rule 9).
-  ``--parity-dtype fp16`` (a T4, where the fp32 base may not fit) records the share that match and
-  registers with a warning: fp16 rounds the merged weights differently.
+- The one exception is a GPU without native bf16 (a T4, where the fp32 base, about 13.4 GB, may not
+  fit): there ``--parity-dtype fp16`` checks parity in fp16, records the share of prompts that match
+  (registration.json, and the registry note "fp16 n/20 prompts token-identical (T4; fp32 not
+  checked)") and registers the adapter with a warning, whatever that share: fp16 rounds the merged
+  weights differently, so an exact match is not expected. fp16 parity is refused on a GPU with native
+  bf16 (an A100, an L4) and allowed on the CPU (the tests). An fp32 parity recorded later for the same
+  adapter hash (a resume where the fp32 base fits) decides instead, and ``lift register-adapter``
+  applies the same rule on the laptop.
 - Registration: an entry appended to configs/variants.yaml as text, so its comments stay: name, method
   adapter, the adapter, the seed, artifacts.adapter = the hash, location (the runs-repo path and push
   commit, never the repo id: LIFT_RUNS_REPO is a secret) and a note (candidate, recipe, date, GPU,

@@ -35,9 +35,12 @@ Train one Hindi LoRA adapter of Tiny Aya Global (configs/train.yaml; rules in li
 template on, loss on the answer tokens only, the effective batch 16 on every GPU, one process on one GPU
 (cuda:0: a second visible GPU, as on a Kaggle T4 x2, stays idle). The adapter goes to
 outputs/adapters/adapter-{candidate}-{std|stress}-s{seed}/ and to the runs repo at once; then merged and
-unmerged greedy outputs are compared in fp32 (merge parity) and the adapter is registered in this
-machine's configs/variants.yaml. A GPU runtime loses that edit with the session: on the laptop run
-`lift sync pull`, then `lift register-adapter NAME`, and commit configs/variants.yaml.
+unmerged greedy outputs are compared in fp32 (merge parity: every token must match, or the adapter is
+not registered) and the adapter is registered in this machine's configs/variants.yaml. The one exception
+is a GPU without native bf16 (a T4): there --parity-dtype fp16 records the share of prompts that match
+and registers the adapter with a warning, whatever that share. A GPU runtime loses the registry edit
+with the session: on the laptop run `lift sync pull`, then `lift register-adapter NAME`, and commit
+configs/variants.yaml.
 
 Every training row is tokenized before the model loads; rows whose prompt alone (the ~366-token
 preamble and a long user turn) fills max_seq_len stop the run with their ids, unless --drop-unfit drops
@@ -122,8 +125,10 @@ def register(sub: argparse._SubParsersAction) -> None:
                    help="sequences per micro-batch; must divide the effective batch 16, and gradient "
                         "accumulation makes up the rest (A100: 4; T4: 1). Default: configs/train.yaml")
     p.add_argument("--parity-dtype", choices=["fp32", "fp16"], default="fp32",
-                   help="merge parity precision: fp32 (must match token for token) or fp16 (a T4 only: "
-                        "the share that match is recorded and the adapter registered with a warning)")
+                   help="merge parity precision: fp32 (default: every token must match, or the adapter is "
+                        "not registered) or fp16, only on a GPU without native bf16 (a T4, where the fp32 "
+                        "base may not fit; refused on an A100 or L4): the share of prompts that match is "
+                        "recorded and the adapter registered with a warning, whatever that share")
     p.add_argument("--no-push", action="store_true",
                    help="do not push the adapter from inside the run (the runner's pushes still send it)")
     p.add_argument("--retrain", action="store_true",
