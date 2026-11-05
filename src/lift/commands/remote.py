@@ -24,8 +24,9 @@ examples (PowerShell, repo root, venv active; --ref must hold P01 and P02, see c
 Before any VM, the runs repo is checked as `lift sync check --write` does. The job pushes its outputs
 after every line and once more at the end, also after a failure; a push that exits 1 is tried again,
 and once more from this laptop before the VM is stopped; one that exits 2 (a problem no retry can
-fix) never is. A generate, judge or run-dev line that exits 3 (done, but some cells were skipped,
-each listed with its remedy) does not stop the job: its next lines run, and lift remote exits 1. The
+fix) never is. A generate, judge, run-dev, utility, belebele or heldout-loss line that exits 3 (done,
+but some cells were skipped or left for a rerun, each listed with its remedy) does not stop the job:
+its next lines run, and lift remote exits 1. lift train and lift gate never exit 3. The
 job stops itself 30 minutes before --max-hours. Ctrl+C asks the job to stop and push, waits up to 15
 minutes for it (up to 55 while its log shows a push running), then stops the VM; a stop request that
 cannot be uploaded is tried again while it waits, never a reason to stop sooner. A second Ctrl+C
