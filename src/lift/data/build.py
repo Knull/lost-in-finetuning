@@ -133,7 +133,10 @@ carry run_timestamp, wall_clock_seconds, created_at and provenance timestamps.
                                          lang pid set verdict corrected note source_sha seen_sha
                                          sheet applied; the latest per (lang, pid) wins)
     sft/...                              the candidates and sft/report.json (lift.data.sft)
-Logs, reports and exception messages carry counts, pids, labels and hashes, never prompt text.
+``load_prompts`` reads the prompt files for every later stage (lift.prompts.load wraps it) and checks
+every record's split stamp against the committed split first: data/prompts travels through the runs
+repo, data/splits through git. Logs, reports and exception messages carry counts, pids, labels and
+hashes, never prompt text.
 """
 
 from __future__ import annotations
@@ -1217,7 +1220,14 @@ def _write_json(path: Path, obj: Any) -> None:
 
 def load_prompts(set_name: str, lang: str, split: str | None = None) -> list:
     """Read data/prompts/{set}_{lang}.jsonl (PromptRecords; belebele: dicts), optionally one split.
-    Excluded records (prompts/excluded/) are never returned."""
+    Excluded records (prompts/excluded/) are never returned.
+
+    The one reader of the prompt files (lift.prompts.load wraps it), so dev/final membership is the
+    committed split's, never the stamp a synced file carries: every record, before the split filter,
+    must carry the split ``_check_stamps`` gives it (data/splits/{set}.json for a pid it covers, a
+    PolyRefuse train/val pid its own segment, redteam "final"). A wrong stamp, or a missing split
+    file, raises ValueError, never FileNotFoundError: that means "no prompt file" to the callers that
+    go on without the language (judge.pipeline.second_judge_pids, Gate 0's all_prompts)."""
     if set_name not in SETS or set_name == "sft":
         raise ValueError(f"unknown prompt set {set_name!r}; choose from {[s for s in SETS if s != 'sft']}")
     if split is not None and split not in _SPLIT_NAMES:
@@ -1228,9 +1238,53 @@ def load_prompts(set_name: str, lang: str, split: str | None = None) -> list:
                                 f"--langs {lang}`")
     rows = list(read_jsonl(path))
     items: list = rows if set_name == "belebele" else [PromptRecord.model_validate(row) for row in rows]
+    _check_stamps(set_name, lang, path, items)
     if split is not None:
         items = [x for x in items if (x["split"] if set_name == "belebele" else x.split) == split]
     return items
+
+
+def _check_stamps(set_name: str, lang: str, path: Path, items: Sequence) -> dict[str, str] | None:
+    """The committed split of ``set_name`` (None for redteam, which has no split file), once every item
+    of its prompt file at ``path`` carries the split ``_stamp_of`` gives it. ValueError naming the count,
+    the first pids and the remedy otherwise, or when the committed split file is missing."""
+    mapping: dict[str, str] | None = None
+    if set_name in SPLIT_SETS:
+        try:
+            mapping = splits.load_split(set_name)
+        except FileNotFoundError:
+            shown = _shown(splits.SPLITS_DIR / f"{set_name}.json")
+            raise ValueError(f"{set_name}_{lang}: the committed split file {shown} is missing, so the split "
+                             "stamps of the prompt file cannot be checked: split files are committed "
+                             "(data/splits) and never recomputed; run from a checkout that has it") from None
+    wrong = []
+    for item in items:
+        pid, stamp = (item["pid"], item["split"]) if isinstance(item, dict) else (item.pid, item.split)
+        want, why = _stamp_of(set_name, pid, mapping)
+        if stamp != want:
+            wrong.append(f"{pid} {stamp} ({why})")
+    if wrong:
+        raise ValueError(f"{set_name}_{lang}: {len(wrong)} records of {path.name} carry another split than "
+                         f"the committed split gives them, e.g. {', '.join(wrong[:5])}: the file was stamped "
+                         "from another split assignment (a stale or foreign copy); rebuild it (`lift data "
+                         f"build --only {set_name}`), then `lift sync push`")
+    return mapping
+
+
+def _stamp_of(set_name: str, pid: str, mapping: Mapping[str, str] | None) -> tuple[str | None, str]:
+    """The split a record of ``set_name`` must carry, and what a wrong stamp is shown with: the committed
+    split file's for a pid it covers (_in_scope), a PolyRefuse train/val pid's own segment (prh-train-*
+    train; prh-val-*, prb-val-* val), "final" for redteam; None for a pid the set's scheme lacks."""
+    if set_name == "redteam":
+        return "final", "redteam is final"
+    if _in_scope(set_name, pid):
+        frozen = (mapping or {}).get(pid)
+        return frozen, f"frozen {frozen}" if frozen else "not in the split file"
+    prefix = polyrefuse.PID_PREFIX[_KIND[set_name]]
+    for segment in ("train", "val"):
+        if pid.startswith(f"{prefix}-{segment}-"):
+            return segment, f"its pid says {segment}"
+    return None, f"not a {prefix} test, train or val pid"
 
 
 # ---------------------------------------------------------------------------- spot checks
