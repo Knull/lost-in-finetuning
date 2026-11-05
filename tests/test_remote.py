@@ -492,8 +492,9 @@ def test_job_stops_the_running_line_on_the_stop_file_then_pushes(job, tmp_path):
     hang = HangingProc(b"loading\n")
 
     def ask_to_stop(key):
-        if key == "lift run-dev --variant stock":
-            (root / "lift_job.stop").write_text("ctrl-c\n", encoding="ascii")
+        if key == "lift run-dev --variant stock":  # whole: the monitor polls, and must never read it empty
+            (root / "lift_job.stop.tmp").write_text("ctrl-c\n", encoding="ascii")
+            os.replace(root / "lift_job.stop.tmp", root / "lift_job.stop")
 
     vm = FakeVM(root, hook=ask_to_stop, procs={"lift run-dev --variant stock": [hang]})
     status, vm, _ = run_job(job, root, ["lift sync pull", "lift run-dev --variant stock", "lift info"], vm=vm,
