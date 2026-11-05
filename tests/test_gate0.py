@@ -397,10 +397,36 @@ def test_reference_gate_problem_names_what_is_wrong():
         "the bf16 Gate 0 (gate0.json) cannot be read (JSONDecodeError)"
 
 
-def test_run_gate0_end_to_end_on_cpu(stock, prompt_store, tiny_model_dir, isolated_dirs, cpu_sized):
+def test_run_gate0_end_to_end_on_cpu(stock, prompt_store, tiny_model_dir, isolated_dirs, cpu_sized,
+                                     monkeypatch):
+    # R2-24: every sample a check draws is dev (CLAUDE.md rule 1; prompt_store holds final prompts too): the
+    # splits of what each mixed_sample call returned, of what the parity check decoded (it keeps no records)
+    # and of every generation the precision and dry-run checks wrote.
+    from lift import prompts
+    from lift.io import read_jsonl
+
+    drawn, decoded = [], []
+    real_sample, real_parity = prompts.mixed_sample, gate0.check_parity
+
+    def mixed_sample(*args, **kwargs):
+        out = real_sample(*args, **kwargs)
+        drawn.append({p.split for p in out})
+        return out
+
+    def check_parity(model_id, revision, sample, **kwargs):
+        decoded.extend(p.split for p in sample)
+        return real_parity(model_id, revision, sample, **kwargs)
+
+    monkeypatch.setattr(prompts, "mixed_sample", mixed_sample)
+    monkeypatch.setattr(gate0, "check_parity", check_parity)
     result = gate0.run_gate0(device="cpu", model_id=str(tiny_model_dir), revision="local", judge=FakeJudge(),
                              lid=FakeLID(), n_precision=18, n_dry=1, batch_sizes=(2,), n_throughput=4,
                              max_new_tokens=6, resolve_pins=False)
+    assert drawn == [{"dev"}] * 4                     # throughput, precision, dry run, parity
+    assert decoded == ["dev"] * gate0.N_PARITY
+    for check in ("precision", "dry_run"):
+        files = sorted((gate0.gate0_dir("bf16") / check / "generations").glob("*.jsonl"))
+        assert [r["split"] for path in files for r in read_jsonl(path)] == ["dev"] * 18, check
     assert set(result["checks"]) == {"preamble", "precision", "throughput", "dry_run", "parity"}
     assert result["pass"], {k: v.get("pass") for k, v in result["checks"].items()}
     assert result["checks"]["parity"]["all_match"]
