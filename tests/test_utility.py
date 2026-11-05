@@ -1,8 +1,9 @@
 """lift.utility, ``lift utility`` and lift.judge.local_pairwise, offline: both orders scored and averaged,
 failures kept as ties and counted, verdict files that P04's blind check reads, the pairing refusals, the
-answer checks against the registry and their refusals, what a refused pair retires and keeps, the
-win-rate wiring, Hindi fidelity (tests/datafakes.py FakeLID), the command end to end over fake judges, and
-the fallback judge over a canned generator. Placeholder texts only; nothing is downloaded."""
+answer checks against the registry and their refusals, what a refused pair retires and keeps, what a GPU
+line that refuses a side as stale withdraws, the win-rate wiring, Hindi fidelity (tests/datafakes.py
+FakeLID), the command end to end over fake judges, and the fallback judge over a canned generator.
+Placeholder texts only; nothing is downloaded."""
 
 from __future__ import annotations
 
@@ -804,12 +805,13 @@ def checks_now() -> dict[str, bytes]:
 def gpu_line(cli, monkeypatch):
     """lift utility's GPU line with no GPU: models.global pinned to the answers' revision, and build_variant
     and generate replaced by stand-ins that record their calls. The stand-in generate leaves a file as it is,
-    as the real one leaves a current complete file, and refuses the file of each variant in ``stale`` as the
-    real one refuses a file made under another configuration."""
+    as the real one leaves a current complete file, refuses the file of each variant in ``stale`` as the
+    real one refuses a file made under another configuration, and the file of each variant in ``precision``
+    ({variant: dtype}) as the real one refuses a file made in another precision (OtherPrecisionError)."""
     from lift.models import variants
 
     config.load("project")["models"]["global"]["revision"] = META["model_rev"]
-    calls = SimpleNamespace(built=[], generated=[], stale=set())
+    calls = SimpleNamespace(built=[], generated=[], stale=set(), precision={})
 
     def build(spec, *, device, dtype):
         calls.built.append(spec.name)
@@ -823,6 +825,9 @@ def gpu_line(cli, monkeypatch):
         if name in calls.stale:
             raise gen.StaleOutputError(f"{out_path} holds records made under another configuration",
                                        command=gen.restart_command(name, "utility", "hi", SPLIT))
+        if name in calls.precision:
+            made = calls.precision[name]
+            raise gen.OtherPrecisionError(f"{out_path} holds generations made in {made}", dtype=made)
         return out_path
 
     monkeypatch.setattr(variants, "build_variant", build)
@@ -861,6 +866,52 @@ def test_a_side_generate_refuses_is_listed_with_its_restart_line_and_nothing_is_
     assert not cli.calls and not utility.metrics_paths(CANDIDATE, SPLIT)[0].exists()
     assert f"  {stale} utility_hi_dev: {RESTART.format(stale)}\n" in caplog.text
     assert "not judged, as a side's answers were skipped" in caplog.text
+
+
+@pytest.mark.parametrize("stale", ["stock", CANDIDATE])
+def test_a_side_the_gpu_line_refuses_as_stale_loses_its_check_so_judge_only_and_gate_1_refuse_it(
+        gpu_line, cli, stale, caplog):
+    # V04: generate compares a file with more than a check names (decoding settings, the chat template, the
+    # cache-key version), so the side it refuses as stale has its check withdrawn and the pair its derived
+    # files: the job's push carries that, and --judge-only (no new judge call) and Gate 1 refuse the answers
+    # the GPU line refused. The other side's check stands.
+    from lift import gates
+
+    assert main(ARGV) == 0 and len(cli.calls) == 1 and gates.utility_fact("aya")["status"] == "pass"
+    other = CANDIDATE if stale == "stock" else "stock"
+    kept = utility.checked_path(other, SPLIT).read_bytes()
+    derived = {path: path.read_bytes() for path in derived_files()}
+    gpu_line.stale.add(stale)
+    assert main([*ARGV, "--generate-only"]) == 3
+    listed = caplog.text
+    assert f"  {stale} utility_hi_dev: {RESTART.format(stale)}\n" in listed
+    assert utility.checked_path(stale, SPLIT).read_bytes() == b""
+    assert utility.checked_path(other, SPLIT).read_bytes() == kept
+    assert all(path.read_bytes() == b"" for path in derived)
+    caplog.clear()
+    assert main([*ARGV, "--judge-only"]) == 3 and len(cli.calls) == 1
+    assert f"no GPU line has checked its answers against {stale} as registered now" in caplog.text
+    assert RESTART.format(stale) in caplog.text                       # what to run before that GPU line
+    assert gates.utility_fact("aya")["status"] == "missing"
+    stamp, = (output_dir() / ".aside").iterdir()                      # copied aside, never removed
+    for path, data in derived.items():
+        copy = stamp / path.relative_to(output_dir())
+        assert copy.with_name(copy.name + (".aside" if path.suffix == ".jsonl" else "")).read_bytes() == data
+    assert f"{stale}'s answers are refused as stale here, so its answer check" in listed
+
+
+def test_a_side_made_in_another_precision_withdraws_nothing(gpu_line, cli, caplog):
+    # V04: a file made in another precision is not stale, so nothing is withdrawn: that precision's check and
+    # files stand, and --judge-only still reuses the verdicts.
+    assert main(ARGV) == 0 and len(cli.calls) == 1
+    files = [*(utility.checked_path(name, SPLIT) for name in ("stock", CANDIDATE)), *derived_files()]
+    before = {path: path.read_bytes() for path in files}
+    gpu_line.precision["stock"] = "fp16"
+    assert main([*ARGV, "--generate-only"]) == 3
+    assert "  stock utility_hi_dev: made in fp16" in caplog.text
+    assert {path: path.read_bytes() for path in files} == before
+    assert not (output_dir() / ".aside").exists() and "refused as stale here" not in caplog.text
+    assert main([*ARGV, "--judge-only"]) == 0 and len(cli.calls) == 1
 
 
 def test_judge_only_refuses_the_answers_of_a_replaced_adapter_and_retires_their_files(cli, registry, caplog):
@@ -1028,15 +1079,21 @@ def test_the_command_generates_stock_then_the_candidate_once_then_judges_and_ref
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     cfg_path.write_text(json.dumps({**cfg, "lora_alpha": 2 * cfg["lora_alpha"]}), encoding="utf-8")
     registry[CANDIDATE] = entry(CANDIDATE, adapter=adapter_hash(adapter))
+    stock_check = utility.checked_path("stock", SPLIT).read_bytes()
     for line in ([*argv, "--generate-only"], argv):      # the GPU lines refuse the old answers, judge nothing
         caplog.clear()
         assert main(line) == 3
         assert f"  {CANDIDATE} utility_hi_dev: {RESTART.format(CANDIDATE)}\n" in caplog.text
-    assert len(judge.calls) == 1 and metrics.read_bytes() == reported
     assert {name: path.read_bytes() for name, path in files.items()} == answers
-    # ... and so does the laptop's --judge-only, which loads no model; it retires the old adapter's metrics.
-    assert main([*ARGV, "--judge-only"]) == 3
-    assert len(judge.calls) == 1 and metrics.read_bytes() == b""
+    # V04: the first GPU line withdrew the old answers' check and retired the metrics derived from them (the
+    # job's push carries that); stock's answers stand.
+    assert reported and metrics.read_bytes() == b"" and len(judge.calls) == 1
+    assert utility.checked_path(CANDIDATE, SPLIT).read_bytes() == b""
+    assert utility.checked_path("stock", SPLIT).read_bytes() == stock_check
+    # ... so the laptop's --judge-only, which loads no model, refuses the old answers too.
+    caplog.clear()
+    assert main([*ARGV, "--judge-only"]) == 3 and len(judge.calls) == 1
+    assert f"no GPU line has checked its answers against {CANDIDATE} as registered now" in caplog.text
 
 
 SECTION_B = hasattr(frontier, "parse_pairwise_reply") and hasattr(frontier.FrontierJudge, "prefill_pairwise")
