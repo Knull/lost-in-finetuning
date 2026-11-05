@@ -292,9 +292,12 @@ secrets getter, and the `lift_env` path in cell 2.
   `lift restart` moves the cell's generations, judgements and AuditKIT records (with `--judge`,
   only that judge's judgements and records) under `outputs/.aside/`, which is never synced, and
   leaves empty files in their place; an empty record is retired, and readers skip it. The
-  checkpoint push after it then replaces the runs repo's copies (if another machine pushed the cell
-  since this machine's last sync, it keeps them and reports a conflict instead, emptied here by lift
-  restart, which `lift sync push --force` settles), and the job regenerates that cell
+  checkpoint push after it then replaces the runs repo's copies (if another machine pushed only
+  files the restart emptied since this machine's last sync, the push keeps the runs repo's copies
+  and reports a conflict instead, which `lift sync push --force` settles by completing the
+  restart; if it pushed any other file of the cell, such as more generations after a `--judge`
+  restart, the summary names its own remedy: for those, `lift sync pull`, then `lift sync push`),
+  and the job regenerates that cell
   and reuses the others. A restart without `--judge` also empties the other judges' judgements,
   which `lift run-dev` does not refill: its log names the line that does, such as
   `lift judge ... --judge second` with P04's `--keys` list (`--sample 0.10` when P04 has drawn
