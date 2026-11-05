@@ -685,6 +685,17 @@ def test_a_wrapper_that_decodes_the_batch_in_pieces_is_checked_as_a_whole(stock,
     assert sorted(exc.value.pids) == ["p-000", "p-001"] and not path.exists()
 
 
+# greedy_batch's refusal of inner decodes that do not partition the batch, as the pieces fall short of its
+# rows or cover one twice. W3 (watch, VERIFY-2): it said a wrapper "must pass logits_processor on to every
+# inner decode", which points the wrong way when the pieces over-cover: that wrapper did pass it on.
+PIECES = ("model.generate decoded the batch of {n} rows in pieces: the inner decodes that called the logits "
+          "processor checking decoding stays finite held {sizes} rows, {total} in all, ")
+EXACTLY_ONCE = ("A wrapper must decode each row exactly once, in one inner decode that passes "
+                "logits_processor on")
+UNCHECKED = PIECES + "fewer than the batch's {n}, so a row went unchecked. " + EXACTLY_ONCE
+TWICE = PIECES + "more than the batch's {n}, so a row was decoded more than once. " + EXACTLY_ONCE
+
+
 @pytest.mark.parametrize("poison", [1, None])
 def test_a_wrapper_that_decodes_in_pieces_must_pass_the_check_on_to_every_piece(stock, tmp_path, poison):
     # W3-01 (W2-02 follow-up): the check accepted a wrapper decoding in pieces once any piece had called it.
@@ -697,13 +708,13 @@ def test_a_wrapper_that_decodes_in_pieces_must_pass_the_check_on_to_every_piece(
     kw = dict(pad_id=tok.pad_token_id, stop_ids=gen.gen_config(stock, max_new_tokens=CAP)["stop_ids"],
               max_new_tokens=CAP, device="cpu")
     probe = _InPieces(stock.model, tok.pad_token_id, poison=poison, watched={0})
-    with pytest.raises(RuntimeError, match="must pass logits_processor on to every inner decode"):
+    with pytest.raises(RuntimeError, match=re.escape(UNCHECKED.format(n=2, sizes=[1], total=1))):
         gen.greedy_batch(probe, rows, **kw)
     assert probe.calls == 2                                     # both rows decoded, row 1 unchecked
     wrapped = dataclasses.replace(stock, model=_InPieces(stock.model, tok.pad_token_id, poison=poison,
                                                          watched={0}), base=stock.model)
     path = tmp_path / "g.jsonl"
-    with pytest.raises(RuntimeError, match="every inner decode") as exc:
+    with pytest.raises(RuntimeError, match="must decode each row exactly once") as exc:
         run(wrapped, path, ps=prompts([LONG, SHORT]), batch_size=2)
     assert not isinstance(exc.value, gen.StaleOutputError) and not path.exists()
 
@@ -723,9 +734,10 @@ def test_a_batch_decoded_in_pieces_is_checked_only_when_the_pieces_partition_it(
         assert [(o.ids, o.stopped, o.n_generated, o.nonfinite) for o in split] == whole
     poisoned = _InPieces(stock.model, tok.pad_token_id, poison=2, pieces=[[0], [1, 2]])     # SHORT overflows
     assert [o.nonfinite for o in gen.greedy_batch(poisoned, rows, **kw)] == [True, True, True]
-    for pieces in ([[0, 1, 2], [1]], [[0, 1], [1, 2]]):
-        with pytest.raises(RuntimeError, match="must pass logits_processor on to every inner decode"):
+    for pieces, sizes in (([[0, 1, 2], [1]], [3, 1]), ([[0, 1], [1, 2]], [2, 2])):
+        with pytest.raises(RuntimeError) as exc:
             gen.greedy_batch(_InPieces(stock.model, tok.pad_token_id, pieces=pieces), rows, **kw)
+        assert str(exc.value) == TWICE.format(n=3, sizes=sizes, total=4)      # each piece passed it on
 
 
 def test_the_watch_tells_inner_decodes_apart_by_their_ids():
@@ -748,11 +760,13 @@ def test_the_watch_tells_inner_decodes_apart_by_their_ids():
                 (watch((rows[:1], 3), (rows[1:], 2)), [1, 1]), (watch((rows[:1], 1), (lookalike, 2)), [1, 1])]
     for w, decodes in accepted:
         assert w.decodes == decodes and w.rows() == [False, False]
-    refused = [(watch((rows[:1], 3)), [1]), (watch((rows[1:], 1), (rows[1:], 2), (rows[:1], 1)), [1, 1, 1])]
-    for w, decodes in refused:
+    refused = [(watch((rows[:1], 3)), [1], UNCHECKED),
+               (watch((rows[1:], 1), (rows[1:], 2), (rows[:1], 1)), [1, 1, 1], TWICE)]
+    for w, decodes, message in refused:
         assert w.decodes == decodes
-        with pytest.raises(RuntimeError, match="must pass logits_processor on to every inner decode"):
+        with pytest.raises(RuntimeError) as exc:
             w.rows()
+        assert str(exc.value) == message.format(n=2, sizes=decodes, total=sum(decodes))
     nan = gen._NonFiniteWatch(3, stop_ids=[99], n_rows=2)        # the whole batch: still marked row by row
     scores = torch.zeros(2, 4)
     scores[1, 0] = float("nan")
