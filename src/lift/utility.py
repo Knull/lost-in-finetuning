@@ -1006,7 +1006,9 @@ def _judge_into(path: Path, pairing: Pairing, judge: Any, *, judge_dir: str, pre
     from lift.manifest import finish_run, start_run
 
     pending: tuple[type[BaseException], ...] = ()
-    if prefill:
+    if judge_dir == "frontier":
+        # With or without the prefill: a synchronous pass also stops with FrontierBatchPending while an
+        # earlier batch that holds its requests still runs (it collects such a batch rather than pay twice).
         from lift.judge import frontier
 
         pending = (frontier.FrontierBatchPending,)

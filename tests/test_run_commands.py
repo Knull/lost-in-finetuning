@@ -423,6 +423,22 @@ def test_a_failed_prefill_is_recorded_and_ends_the_line_before_any_cell(failure,
     assert run["judge_stats"] == {"calls": 0, "usd": spent}
 
 
+def test_a_batch_still_running_exits_3_and_judges_no_cell(monkeypatch, caplog):
+    # The prefill's wait ran out (or a synchronous pass met an earlier batch holding its requests): the
+    # batch goes on server-side, nothing is paid twice, and the same line collects it later.
+    from lift.judge.frontier import FrontierBatchPending
+
+    write_generation("harmful", "en", "dev")
+    judge = BulkJudge(fail=FrontierBatchPending("1 batch still in progress", batch_ids=["msgbatch_x"],
+                                                   n_pending=1, summary={}))
+    argv = bulk_judge(monkeypatch, judge)
+    assert main([*argv, "--langs", "en"]) == 3
+    assert [kind for kind, _keys in judge.events] == ["prefill"]
+    assert "rerun the same line to collect them" in caplog.text
+    [run] = prefill_manifests()
+    assert run["status"] == "failed" and run["error"] == "FrontierBatchPending"
+
+
 def test_a_judge_without_a_bulk_api_is_never_planned(monkeypatch):
     from lift.judge import pipeline
 

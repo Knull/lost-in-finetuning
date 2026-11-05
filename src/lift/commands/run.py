@@ -369,19 +369,31 @@ def _judge(args: argparse.Namespace) -> int:
     if local:                                  # an API judge has no precision and runs on no GPU of ours
         _refuse_other_dtype(dtype, device)
     judge = make_judge(args.judge, device=device, dtype=dtype if local else None)
-    if callable(getattr(judge, "prefill", None)):
-        _prefill(judge, paths, variant=args.variant, split=args.split, sample=args.sample, keys=keys)
+    pending: tuple[type[BaseException], ...] = ()
+    if not local:
+        # A Message Batch still running (the prefill's wait ran out, or a synchronous pass met an earlier
+        # batch holding its requests): done for now, nothing paid twice; the same line collects it later.
+        from lift.judge.frontier import FrontierBatchPending
+
+        pending = (FrontierBatchPending,)
     refused: dict[str, str] = {}
     skipped: dict[str, dict[str, str]] = {}
-    for (set_name, lang), path in paths.items():
-        try:
-            judge_file(path, judge=judge, sample=args.sample, keys=keys)
-        except StaleOutputError as exc:
-            _skip(skipped, args.variant, set_name, lang, args.split, exc, judged=args.judge, dtype=dtype,
-                  generates=False, keys=keys is not None)
-            continue
-        if args.judge == "primary":
-            _record(args.variant, set_name, lang, args.split, dtype=dtype, refused=refused)
+    try:
+        if callable(getattr(judge, "prefill", None)):
+            _prefill(judge, paths, variant=args.variant, split=args.split, sample=args.sample, keys=keys)
+        for (set_name, lang), path in paths.items():
+            try:
+                judge_file(path, judge=judge, sample=args.sample, keys=keys)
+            except StaleOutputError as exc:
+                _skip(skipped, args.variant, set_name, lang, args.split, exc, judged=args.judge, dtype=dtype,
+                      generates=False, keys=keys is not None)
+                continue
+            if args.judge == "primary":
+                _record(args.variant, set_name, lang, args.split, dtype=dtype, refused=refused)
+    except pending as exc:
+        log.warning("%s %s: %s. The batches go on server-side: rerun the same line to collect them and judge "
+                    "the rest", args.variant, args.split, exc)
+        return 3
     return _refused_exit(refused, skipped)
 
 
