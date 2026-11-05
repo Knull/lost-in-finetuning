@@ -5,8 +5,9 @@ stderr and writes stdout/stderr with errors="backslashreplace", so a cp1252 cons
 
 Exit status. ``lift data build``: 0 when nothing a rerun could add is missing (listed failures are
 expected and reported; a cell they leave short of its frozen split is listed too, as awaiting a
-reader's verdict on the failures sheet, and every later stage refuses it until then; files left out
-by --skip-translation are listed and need a run without it);
+reader's verdict on the failures sheet, with the remedy for its language (lift.data.build.reader_remedy),
+and every later stage that reads its split refuses it until then: lift generate and lift run-dev skip and
+list it; files left out by --skip-translation are listed and need a run without it);
 3 (EXIT_INCOMPLETE) when the summary's rerun_needed is set: translation was blocked (HTTP 429:
 Google refused this IP, wait 30 minutes or more; a streak: ten items in a row failed with network
 or service errors, check the network), a file was skipped because of the block, or items a rerun can
@@ -17,10 +18,13 @@ one line, no traceback; the items before it are cached), and on any other error,
 build with a traceback (a split file that no longer matches the sources, a PolyRefuse clone at another
 commit, an NLLB failure).
 ``lift data apply-spotchecks``: 0 when applied (or nothing new), 1 when the sheet or the
-translation cache is refused (SheetError), a file is missing or a package (GlotLID's fasttext) is,
-all before a verdict is stored; 3 when the rebuild lost records (listed; the verdicts are stored,
-and the files' reports say why). ``spotcheck-sheets``: 1 when a sheet exists (no --overwrite), a
-file is missing or the translation cache lacks a failure's engine output.
+translation cache is refused (SheetError), a file is missing, a prompt file is refused (load_prompts'
+ValueError: a missing committed split file, a split stamp the committed split does not give) or a
+package (GlotLID's fasttext) is, all before a verdict is stored, or the rebuild stops on a ValueError
+(each logged in one line, no traceback); 3 when the rebuild lost records (listed; the verdicts are
+stored, and the files' reports say why). ``spotcheck-sheets``: 1 when a sheet exists (no --overwrite),
+a file is missing, a prompt file is refused (as above) or the translation cache lacks a failure's
+engine output.
 """
 
 from __future__ import annotations
@@ -62,7 +66,7 @@ def _build(args: argparse.Namespace) -> int:
     from lift.paths import prompts_dir
 
     try:
-        from lift.data.build import BuildContext, blocked_advice, build_all, build_state
+        from lift.data.build import BuildContext, blocked_advice, build_all, build_state, reader_remedy
         from lift.data.translate import TranslationSetupError
     except ImportError as e:
         return _import_error(e)
@@ -87,8 +91,9 @@ def _build(args: argparse.Namespace) -> int:
     for name, cells in summary["short_cells"].items():
         counts = ", ".join(f"{split} {len(pids)}" for split, pids in cells.items())
         pids = [pid for split_pids in cells.values() for pid in split_pids]
+        listed = " ".join(pids[:10]) + (" ..." if len(pids) > 10 else "")
         print(f"{name} is short of its frozen split ({counts}), awaiting a reader's verdict on the failures "
-              f"sheet: {' '.join(pids[:10])}" + (" ..." if len(pids) > 10 else ""))
+              f"sheet: {listed}; {reader_remedy([name.rsplit('_', 1)[1]])}")
     if summary["sft"]:
         d = summary["sft"]["decision"]
         if d.get("rows") is not None:
@@ -120,7 +125,7 @@ def _sheets(args: argparse.Namespace) -> int:
     try:
         written = write_spotcheck_sheets(langs=args.langs, n=args.n, overwrite=args.overwrite,
                                          ctx=BuildContext.default())
-    except (FileExistsError, FileNotFoundError) as e:
+    except (FileExistsError, FileNotFoundError, ValueError) as e:     # ValueError: a prompt file refused
         log.error("%s", e)
         return 1
     for path in written:
@@ -130,11 +135,12 @@ def _sheets(args: argparse.Namespace) -> int:
 
 def _apply(args: argparse.Namespace) -> int:
     _setup()
-    from lift.data.build import BuildContext, SheetError, apply_spotchecks
+    from lift.data.build import BuildContext, apply_spotchecks
 
     try:
         result = apply_spotchecks(args.file, ctx=BuildContext.default(), dry_run=args.dry_run)
-    except (SheetError, FileNotFoundError, ImportError) as e:      # ImportError: before a verdict is stored
+    except (ValueError, FileNotFoundError, ImportError) as e:
+        # ValueError: a SheetError, or a prompt file load_prompts refused; ImportError: before any verdict
         log.error("%s", e)
         return 1
     for name, t in result["files"].items():
@@ -212,8 +218,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     a = data.add_parser("apply-spotchecks", help="apply a filled spot-check sheet (splits untouched)",
                         description="Check a filled sheet against the build and the stored verdicts, store "
                                     "the new verdicts and rebuild their files from the translation cache. "
-                                    "Exit 0 when applied, 1 when the sheet or the cache is refused (nothing "
-                                    "applied), 3 when the rebuild lost records.")
+                                    "Exit 0 when applied, 1 when the sheet, the cache or a prompt file is "
+                                    "refused (nothing applied), 3 when the rebuild lost records.")
     a.add_argument("--file", required=True, type=Path,
                    help="the filled sheet, saved as CSV UTF-8 (commas, semicolons or tabs); a relative path "
                         "that does not exist here is looked up in the validation tree (validation/... "
