@@ -15,6 +15,9 @@ Checks (each PASS, FAIL or NOT RUN; numbers go to outputs/metrics/gate0.json and
               run never replaces the outputs gate0.json judged (``_settle``).
   fp16        only with --compare-dtype fp16, on a T4: the same 200 prompts in fp16 against the stored
               bf16 run (pulled from the runs repo): greedy output agreement and judge-label agreement.
+              The fp16 run is the generator's and the judge's: its precision check also scans a local
+              judge (Qwen3Guard, teacher-forced over its own input and raw output for each pair), and
+              fails on any judge failure, as the dry run does.
               This decides whether T4 runs can ever be reported, so it counts only against a bf16 Gate 0
               that passed (gate0.json) for the same revision, on all of at least 200 prompts made with
               the same inputs and decoding settings, and only with the very outputs that Gate 0 judged
@@ -45,9 +48,9 @@ bf16, and the reference gate (no --compare-dtype) on one without (a T4), whose f
 replace the A100's gate0.json.
 
 Pass thresholds that the README leaves open are pinned in docs/decisions.md (Nov 3, P02):
-the fp16 run passes if every activation is finite and its final labels agree with bf16 on at least
-95% of the 200 prompts; exact token agreement is reported, not required (fp16 and bf16 round
-differently, so long greedy outputs are expected to diverge somewhere).
+the fp16 run passes if every activation of the generator and of the judge is finite and its final
+labels agree with bf16 on at least 95% of the 200 prompts; exact token agreement is reported, not
+required (fp16 and bf16 round differently, so long greedy outputs are expected to diverge somewhere).
 """
 
 from __future__ import annotations
@@ -192,9 +195,50 @@ def activation_scan(model: Any, tokenizer: Any, pairs: Sequence[tuple[str, str]]
     dtype: non-finite counts and the max |value| of every decoder layer's output (forward hooks on
     model.model.layers; output_hidden_states would give the final layer after the norm) and of the
     logits."""
-    import torch
-
     from lift.models.load import encode_chat
+
+    rows = [encode_chat(tokenizer, prompt) + list(tokenizer(output, add_special_tokens=False)["input_ids"])
+            for prompt, output in pairs]
+    return _scan_rows(model, rows, device=device)
+
+
+def judge_activation_scan(judge: Any, root: Path) -> dict[str, Any] | None:
+    """``activation_scan`` of the run's judge when it is a local Qwen3Guard (``judge.guard``), else None
+    (an API judge or a test fake has no model here): one teacher-forced pass of the guard over each pair it
+    judged under ``root``, its own input (the moderation prompt it rendered for the native prompt and the
+    output, tokenized as it tokenizes it) followed by its raw output. A pair the guard never ran (a
+    control-token string in it, an input too long for it) is skipped and counted in ``n_skipped``."""
+    guard = getattr(judge, "guard", None)
+    if getattr(guard, "model", None) is None:
+        return None
+    from lift.models.generate import read_generations
+    from lift.prompts import texts_by_pid
+    from lift.schemas import JudgementRecord
+
+    tok, rows, skipped = guard.tokenizer, [], 0
+    for gpath in sorted((root / "generations").glob("*.jsonl")):
+        set_name, lang, _split = gpath.stem.rsplit("_", 2)
+        texts = texts_by_pid(set_name, lang)
+        juds = [JudgementRecord.model_validate(j) for j in _read(root / "judgements" / gpath.name)]
+        raw = {j.key: j.raw for j in juds}
+        for g in read_generations(gpath):
+            if g.key not in raw:            # not judged: generate_and_judge lists it as a problem
+                continue
+            prompt = texts[g.pid]
+            if guard._has_control_tokens(prompt) or guard._has_control_tokens(g.output):
+                skipped += 1                # refused before the guard's model ran
+                continue
+            ids = list(tok(guard._render(prompt, g.output), add_special_tokens=False)["input_ids"])
+            if len(ids) + guard.max_new_tokens > guard.context:
+                skipped += 1                # too long for it: not run either
+                continue
+            rows.append(ids + list(tok(raw[g.key], add_special_tokens=False)["input_ids"]))
+    return {**_scan_rows(guard.model, rows, device=guard.device), "n_skipped": skipped}
+
+
+def _scan_rows(model: Any, rows: Sequence[Sequence[int]], *, device: str) -> dict[str, Any]:
+    """``activation_scan``'s teacher-forced passes and counts, over token id rows."""
+    import torch
 
     layers = model.model.layers
     max_abs = [0.0] * len(layers)
@@ -213,11 +257,9 @@ def activation_scan(model: Any, tokenizer: Any, pairs: Sequence[tuple[str, str]]
 
     handles = [layer.register_forward_hook(watch(i)) for i, layer in enumerate(layers)]
     try:
-        for prompt, output in pairs:
-            out_ids = tokenizer(output, add_special_tokens=False)["input_ids"]
-            ids = encode_chat(tokenizer, prompt) + list(out_ids)
+        for ids in rows:
             with torch.inference_mode():
-                logits = model(input_ids=torch.tensor([ids], device=device), use_cache=False).logits
+                logits = model(input_ids=torch.tensor([list(ids)], device=device), use_cache=False).logits
             finite = torch.isfinite(logits)
             logits_nonfinite += int((~finite).sum())
             if finite.any():
@@ -227,7 +269,7 @@ def activation_scan(model: Any, tokenizer: Any, pairs: Sequence[tuple[str, str]]
         for handle in handles:
             handle.remove()
     return {
-        "n_sequences": len(pairs), "hidden_nonfinite": sum(nonfinite), "logits_nonfinite": logits_nonfinite,
+        "n_sequences": len(rows), "hidden_nonfinite": sum(nonfinite), "logits_nonfinite": logits_nonfinite,
         "max_abs_per_layer": [round(v, 3) for v in max_abs], "logits_max_abs": round(logits_max, 3),
         "fp16_overflow_layers": [i for i, v in enumerate(max_abs) if v > FP16_MAX],
         "all_finite": sum(nonfinite) == 0 and logits_nonfinite == 0,
@@ -410,7 +452,8 @@ def _one_setting(rows: Sequence[dict[str, Any]], field: str) -> Any:
 def fp16_verdict(cmp: dict[str, Any], precision: dict[str, Any], n_precision: int, *,
                  reference: str, reference_problem: str | None) -> dict[str, Any]:
     """The fp16 check from ``compare_runs`` and the finished fp16 run's precision check (decisions.md,
-    entry 27). It fails only on a real result: a non-finite fp16 run, or a valid comparison under
+    entry 27). It fails only on a real result: a non-finite fp16 run (the generator's scan, or the local
+    judge's: the precision check's ``all_finite``), or a valid comparison under
     ``FP16_MIN_LABEL_AGREEMENT``. Without a valid comparison (no reference run, other prompts, fewer
     than ``N_PRECISION``, missing labels, pairs made from other inputs, or a reference whose own Gate 0
     did not pass for this revision on these very outputs: ``reference_problem``, see
@@ -419,7 +462,10 @@ def fp16_verdict(cmp: dict[str, Any], precision: dict[str, Any], n_precision: in
     out = {k: v for k, v in cmp.items() if k not in ("pass", "error")}
     out["min_label_agreement"] = FP16_MIN_LABEL_AGREEMENT
     if precision.get("all_finite") is False:
-        return {**out, "pass": False, "failure": "non-finite values in the fp16 run"}
+        scans = {"generator": precision, "judge": precision.get("judge_scan") or {}}
+        parts = [part for part, s in scans.items() if s.get("hidden_nonfinite") or s.get("logits_nonfinite")]
+        where = f" ({' and '.join(parts)})" if parts else ""
+        return {**out, "pass": False, "failure": f"non-finite values in the fp16 run{where}"}
     why = _not_comparable(cmp, n_precision, reference, reference_problem)
     if why:
         return {**out, "comparable": False, **not_run(why)}
@@ -773,7 +819,20 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
             scan = activation_scan(stock.model, stock.tokenizer, precision_pairs(root), device=device)
             out = {**scan, **run, "digest": precision_digest(root),
                    "pass": scan["all_finite"] and not run["problems"]}
-            return out if compare_dtype else _reduced(out, len(sample), N_PRECISION)
+            if not compare_dtype:
+                return _reduced(out, len(sample), N_PRECISION)
+            # The compared run is the generator's and the judge's (decisions.md 27): a local judge is scanned
+            # too, all_finite (what fp16_verdict reads) needs both scans, and, as in the dry run, any judge
+            # failure fails the check.
+            judge_scan = judge_activation_scan(judge, root)
+            if judge_scan is not None:
+                out.update(judge_scan=judge_scan, all_finite=scan["all_finite"] and judge_scan["all_finite"])
+            failures = run["counts"].get("judge_failures", 0)
+            out["pass"] = out["all_finite"] and not run["problems"] and not failures
+            if failures:
+                out["failure"] = (f"{failures} judge failures (the compared run, like the dry run, "
+                                  "allows none)")
+            return out
 
         def fp16() -> dict[str, Any]:
             if "all_finite" not in checks["precision"]:      # it raised: there is no fp16 run to compare
@@ -983,9 +1042,15 @@ def _summary(check: str, c: dict[str, Any]) -> str:
                 f"of {c.get('context')}, {c.get('n_too_long')} too long, "
                 f"reference tokenizer {c.get('reference_tokenizer_agreement')}")
     if check == "precision":
+        js, failures = c.get("judge_scan"), (c.get("counts") or {}).get("judge_failures")
+        judge = ""
+        if js:
+            judge = (f"; judge non-finite hidden {js.get('hidden_nonfinite')}, logits "
+                     f"{js.get('logits_nonfinite')}, fp16-overflow layers {js.get('fp16_overflow_layers')}")
+        judge += f"; {failures} judge failures" if failures else ""
         return (f"non-finite hidden {c.get('hidden_nonfinite')}, logits {c.get('logits_nonfinite')}, "
                 f"max |h| {max(c.get('max_abs_per_layer') or [0])}, "
-                f"fp16-overflow layers {c.get('fp16_overflow_layers')}{_lang_shares(c)}")
+                f"fp16-overflow layers {c.get('fp16_overflow_layers')}{judge}{_lang_shares(c)}")
     if check == "fp16":
         numbers = (f"n {c.get('n')}, label agreement {c.get('label_agreement')}, kappa {c.get('kappa')}, "
                    f"exact output {c.get('exact_output_agreement')}")
