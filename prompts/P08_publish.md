@@ -44,10 +44,11 @@ Every command does a dry run by default, printing what it would upload, and uplo
      reply a failure quotes: up to 200 characters of a frontier provider's refusal, up to 40 of a
      Qwen3Guard reply that did not parse): they stay out with every output text, as CLAUDE.md
      rule 6 gates judge logs, so a judgements file never goes up as it is. A failed judgement
-     keeps only that its judge failed, and the failure's kind. The validation reports
-     (`outputs/metrics/validation/*.json`) key their `checks.failure_reasons` counts by the first
-     60 characters of that text: they go in with those counts by kind instead. Upload files by
-     name, never a folder: a `*.full.json` AuditKIT record, which holds every completion, can sit
+     keeps only that its judge failed, and the failure's kind
+     (`lift.validation.score.failure_kind`: the text before its first ":" or quote). The
+     validation reports (`outputs/metrics/validation/*.json`, `checks.failure_reasons`) and
+     `outputs/metrics/judge_decision.json` (`failure_reasons`) already count failures by that
+     kind, so they go in as they are. Upload files by name, never a folder: a `*.full.json` AuditKIT record, which holds every completion, can sit
      beside the public one in `outputs/metrics/auditkit/`.
    - The raw completions (gated, manual approval): every judged output, refusals and benign
      answers included. Most outputs carry only Qwen3Guard's label, so no output is made public

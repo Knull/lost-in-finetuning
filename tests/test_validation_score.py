@@ -37,11 +37,12 @@ from validation_fakes import (
 from lift import config, manifest, splits
 from lift.io import read_jsonl, sha256_text, write_jsonl
 from lift.judge.labels import final_label, map_qwen3guard
+from lift.judge.qwen3guard import Qwen3GuardParseError, parse_response_moderation
 from lift.schemas import LABELS, HumanLabel, JudgementRecord, UnclearFlags
 from lift.stats.agreement import binary, cohens_kappa, meets_bar, percent_agreement
 from lift.validation.labels import import_labels
 from lift.validation.sample import load_round, make_sheets
-from lift.validation.score import decision_path, if_skipped, qwen3guard_label, score
+from lift.validation.score import decide_primary_judge, decision_path, if_skipped, qwen3guard_label, score
 from lift.validation.store import ValidateError, read_json, write_json
 
 VIEWS = ("qwen3guard_strict", "qwen3guard_loose", "frontier")
@@ -423,6 +424,41 @@ def test_a_judge_failure_counts_as_an_unclear_judgement(round1):
         block = block_of(out, view, "hi")
         check_block(block, [(truth_of(it), labels[view][it["key"]]) for it in hi])
         assert block["status"] == "ok"
+
+
+JUDGE_WORDS = "placeholder judge words: quoted back"      # stands in for the judge text a failure quotes
+
+
+def test_judge_failures_are_counted_by_kind_never_by_the_judges_text(round1):
+    # W3-08c follow-up: a failure's text can quote its judge (a frontier refusal's reason and an API message
+    # after their ":", the start of a Qwen3Guard reply that did not parse, with no ":" before it). The round
+    # files' checks.failure_reasons and judge_decision.json's failure_reasons, which go public with the logs,
+    # count failures by kind: the text before its first ":" or quote, bracket or parenthesis.
+    world, doc = round1
+    write_judgements(world)
+    with pytest.raises(Qwen3GuardParseError) as parse:
+        parse_response_moderation(JUDGE_WORDS)
+    parse_error = str(parse.value)
+    assert "placeholder judge words" in parse_error.split(":", 1)[0]       # the reply comes before any ":"
+    failures = {"qwen3guard": [parse_error, parse_error, "input too long for the judge (2048 tokens)",
+                               "'None' listed together with other categories"],
+                "frontier": [f"refused: {JUDGE_WORDS}", f"BadRequestError 400: {JUDGE_WORDS}",
+                             "unparseable judge output"]}
+    hi = iter(items(doc, "hi"))
+    for dirname, texts in failures.items():
+        for text in texts:
+            replace_judgement(world, dirname, next(hi)["key"], judge_label="unclear", label="unclear",
+                              native={"judge_failure": text})
+    import_sheets(world, doc, truth_of)
+    want = {"qwen3guard": {"expected 3 lines": 2, "input too long for the judge": 1, "other": 1},
+            "frontier": {"refused": 1, "BadRequestError 400": 1, "unparseable judge output": 1}}
+    out = score(1)
+    assert out["checks"]["judge_failures"] == {"qwen3guard": 4, "frontier": 3}
+    assert out["checks"]["failure_reasons"] == want
+    decided = decide_primary_judge(dry_run=True)
+    assert decided["failure_reasons"] == want
+    written = [p.read_text(encoding="utf-8") for p in (world.outputs / "metrics" / "validation").iterdir()]
+    assert written and not [t for t in [*written, json.dumps(decided)] if "placeholder" in t]
 
 
 def test_judges_are_told_apart_by_id_not_by_directory(round1):
