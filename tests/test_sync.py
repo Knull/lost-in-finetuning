@@ -1704,6 +1704,41 @@ def test_records_from_before_a_restart_never_go_back_over_the_hubs_empty_copy(tm
     assert sync.push(api=hub).ok and {p: hub.files[p] for p in emptied} == {p: b"" for p in emptied}
 
 
+@RESTARTS
+@pytest.mark.parametrize("side", ["here", "hub"])
+def test_status_plans_the_conflict_of_a_file_lift_restart_emptied(tmp_path, monkeypatch, judge_dir, side):
+    """R1-08 follow-up. B restarts the cell while A judges two more keys; then A's records go up (B's status
+    meets a file emptied here) or B's restart does (A's status meets one emptied on the Hub). status planned
+    that file as a merge (ok, exit 0) while push and pull refuse it. It downloads nothing, but an empty side
+    shows in the local file and in the Hub's tree entry, so it plans the conflict they report."""
+    cell = [gen_row(f"k{i}", f"p{i}") for i in range(1, 5)]
+    hub = FakeHub({GEN: lines(*(cell if judge_dir else cell[:2])), JUD: judged(cell[:2], "benign")})
+    emptied = [JUD] if judge_dir else [GEN, JUD]
+    a, b = tmp_path / "A", tmp_path / "B"
+    for where in (a, b):
+        machine(where, monkeypatch)
+        assert sync.pull(api=hub).ok
+    restart(judge_dir=judge_dir)                              # on B
+    machine(a, monkeypatch)
+    if not judge_dir:
+        append(local(GEN), lines(*cell[2:]))
+    append(local(JUD), judged(cell[2:], "benign"))
+    machine(a if side == "here" else b, monkeypatch)
+    assert sync.push(api=hub).ok
+    machine(b if side == "here" else a, monkeypatch)
+    calls, first = len(hub.calls), emptied[0]
+    planned = sync.status(api=hub)
+    assert [name for name, _ in hub.calls[calls:]] == ["dataset_info", "list_repo_tree"]
+    for report in planned.values():
+        assert not report.ok and report.emptied == {first: side}, report.direction
+        assert {p: report.files[p] for p in emptied} == {p: "conflict" for p in emptied}, report.direction
+        assert says(report, f"1 file(s) emptied {'here' if side == 'here' else 'on the Hub'} by lift restart",
+                    "would be kept")
+    for report in (sync.pull(api=hub), sync.push(api=hub)):     # what the real ones do
+        dry = planned[report.direction]
+        assert (dry.files, dry.emptied, dry.held) == (report.files, report.emptied, report.held)
+
+
 def test_an_auditkit_record_goes_up_only_if_it_counts_the_judgements_beside_it():
     """A record is the cell's numbers: its keys_sha256 and labels_sha256 must be those of the judgements the
     Hub will hold, else it is held back with the restart line of its judge's role."""
