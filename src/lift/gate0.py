@@ -750,6 +750,7 @@ def run_gate0(*, device: str = "cuda:0", judge_device: str | None = None, compar
         attempt("throughput", lambda: throughput(
             stock, mixed_sample(n_throughput, split="dev", seed=SEED + 1), batch_sizes,
             max_new_tokens=max_new_tokens))
+        _free()                         # its batches' cached blocks are room for the judge, not use
 
     needs_judge = {"precision", "fp16", "dry_run"} & set(to_run)
     if needs_judge and judge is None:
@@ -876,7 +877,12 @@ def _capability(device: str) -> tuple[int, int] | None:
 
 
 def _judge_memory_problem(device: str, judge_device: str | None) -> str | None:
-    """Why the judge cannot load next to the generator, or None: two GPUs, or one large enough."""
+    """Why the judge cannot load next to the generator, or None: two GPUs, or one large enough.
+
+    It reads the driver's free memory (torch.cuda.mem_get_info), which counts the blocks PyTorch's
+    caching allocator keeps for freed tensors as used. So run_gate0 calls ``_free`` (gc.collect and
+    torch.cuda.empty_cache) right after the throughput check, before this check: the blocks its batches
+    left would be reused by the judge's own allocations, and are room, not use."""
     if not str(device).startswith("cuda") or (judge_device and judge_device != device):
         return None
     import torch
