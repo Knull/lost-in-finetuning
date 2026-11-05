@@ -2,7 +2,7 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
-## Nov 4, 2026 (night): P03 training, utility, Belebele and gate details, before any adapter was trained
+## Nov 4-5, 2026 (night): P03 training, utility, Belebele and gate details, before any adapter was trained
 
 Pinned while writing P03 (branch p03-train). No adapter, utility verdict or Belebele score existed
 yet; Gate 0 had just passed on the A100. Numbered from 49.
@@ -54,10 +54,12 @@ yet; Gate 0 had just passed on the A100. Numbered from 49.
     cached system block, but both rubric system messages are under Sonnet 5.5's 512-token minimum, so
     no caching is expected (usage records it); the saving in item 16 is the batch's 50% alone.
 52. **Belebele and held-out loss** (`lift belebele`, `lift heldout-loss`).
-    - Belebele: exactly one BOS, then the frozen P/Q/A-D/Answer: text with the fields as published (no
-      stripping), no chat template. A letter's score is the log-probability of its tokens after
-      "Answer:" (the next-token log-probability when " A" is one token); ties go to the first letter
-      and are counted.
+    - Belebele: exactly one BOS, then the frozen P/Q/A-D/Answer: text, no chat template. It is
+      lm-evaluation-harness's Belebele template (`_default_template_yaml`, checked Nov 5): the question
+      is stripped (`{{question.strip()}}`) and the passage and options go in as published. Item 10 said
+      "lm-eval style", and about 115 items per language have trailing spaces, so this pins which. A
+      letter's score is the log-probability of its tokens after "Answer:" (the next-token
+      log-probability when " A" is one token); ties go to the first letter and are counted.
     - Held-out loss: the utility dev split unless --split final (rule 1), per-token NLL of the
       reference answer's assistant tokens, never truncated, pooled and by source (Aya references are
       human-written, IndicAlign's are machine-translated).

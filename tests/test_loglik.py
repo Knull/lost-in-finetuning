@@ -210,10 +210,11 @@ def manifests(stage: str) -> list[dict]:
 # --- the frozen format and the letters ------------------------------------------------------------------
 
 
-def test_the_belebele_format_is_frozen_and_keeps_the_texts_as_stored():
-    row = {"pid": "bel-001", "flores_passage": "p", "question": "q ", "mc_answer1": "a", "mc_answer2": "b",
+def test_the_belebele_format_is_lm_evals_with_only_the_question_stripped():
+    # lm-evaluation-harness's _default_template_yaml: "Q: {{question.strip()}}", options as published.
+    row = {"pid": "bel-001", "flores_passage": "p ", "question": " q ", "mc_answer1": "a ", "mc_answer2": "b",
            "mc_answer3": "c", "mc_answer4": "d"}
-    assert loglik.belebele_prompt(row) == "P: p\nQ: q \nA: a\nB: b\nC: c\nD: d\nAnswer:"
+    assert loglik.belebele_prompt(row) == "P: p \nQ: q\nA: a \nB: b\nC: c\nD: d\nAnswer:"
     assert loglik.FORMAT_VERSION == 1
     with pytest.raises(ValueError, match="mc_answer2"):
         loglik.belebele_prompt({**row, "mc_answer2": None})
