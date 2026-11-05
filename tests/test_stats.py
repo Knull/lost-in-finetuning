@@ -75,6 +75,29 @@ def test_holm_and_bh_known_values():
     assert benjamini_hochberg(p) == pytest.approx([0.02, 0.04, 0.04, 0.02])
 
 
+NAN, INF = float("nan"), float("inf")
+
+
+@pytest.mark.parametrize("p", [[0.01, NAN, 0.04], [0.001, NAN], [NAN, 0.02, 0.03], [NAN], [0.01, None],
+                               [0.01, INF], [-INF], [0.2, -0.01], [0.2, 1.5]],
+                         ids=["nan-among-three", "nan-beside-a-significant-one", "nan-first", "only-nan",
+                              "none", "inf", "minus-inf", "negative", "above-one"])
+def test_holm_and_bh_refuse_a_family_with_a_test_that_has_no_p_value(p):
+    # R2-26: Python's max(running, nan) keeps running, so Holm gave a test with no p-value a finite adjusted p
+    # (0.002 beside a 0.001 test), and np.minimum.accumulate spread one NaN over every BH q-value. A test with
+    # no p-value (an arm not run, a degenerate test) is listed as not run and left out of its family before
+    # the correction, so a family holding one is refused, as is a value that is not a probability.
+    for correct in (holm, benjamini_hochberg):
+        with pytest.raises(ValueError, match="listed as not run and left out of its family"):
+            correct(p)
+
+
+def test_holm_and_bh_take_the_ends_of_the_unit_interval_and_an_empty_family():
+    for correct in (holm, benjamini_hochberg):
+        assert correct([0.0, 1.0]) == [0.0, 1.0]
+        assert correct([]) == []
+
+
 def test_rates_keep_every_prompt_in_denominator():
     r = rates(["harmful", "refusal", "unclear", "benign"])
     assert r["n"] == 4

@@ -10,7 +10,8 @@ hard benign) within each language.
   from their dev and final outputs, the adapters and stock from their final outputs. 60 hi, 20
   each zh, es and en.
 - Together that is configs/project.yaml ``validation.per_language``: 120 Hindi in two rounds of
-  60, and 60 each in zh, es and en.
+  60, and 60 each in zh, es and en. A round is drawn or checked only while the two agree, languages
+  and counts (``check_plan``): an edit to one of them alone is refused, naming both.
 
 How a round is drawn:
 
@@ -46,7 +47,7 @@ from __future__ import annotations
 
 import re
 import shutil
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
@@ -131,6 +132,24 @@ ROUNDS: dict[int, RoundPlan] = {
                          Group("adapter", ("adapter",), ("final",)),
                          Group("stock", ("stock",), ("final",)))),
 }
+
+
+def check_plan() -> None:
+    """The round sizes (``ROUNDS``), added up per language, must be configs/project.yaml
+    ``validation.per_language``, keys and values: otherwise a ValidateError naming both, before anything
+    is drawn. The two change together, in one dated docs/decisions.md entry."""
+    totals: Counter[str] = Counter()
+    for plan in ROUNDS.values():
+        totals.update(plan.sizes)
+    configured = config.get("validation.per_language", None)
+    if configured != dict(totals):
+        shown = ("configs/project.yaml has no validation.per_language" if configured is None
+                 else f"configs/project.yaml validation.per_language is {configured}")
+        rounds = ", ".join(f"round {r} {plan.sizes}" for r, plan in sorted(ROUNDS.items()))
+        raise ValidateError(f"the validation rounds add up to {dict(totals)} items per language ({rounds}: "
+                            f"lift.validation.sample.ROUNDS), but {shown}. No round is drawn until they "
+                            "agree: the round sizes change with the config, in the same dated "
+                            "docs/decisions.md entry")
 
 
 def rank(seed: int, *parts: object) -> str:
@@ -245,6 +264,7 @@ def survey(round_no: int, *, variants: Sequence[str] | None = None, prompt_check
            prompts: Prompts | None = None, dtype: str | None = None) -> Survey:
     if round_no not in ROUNDS:
         raise ValidateError(f"there is no validation round {round_no} (rounds: {sorted(ROUNDS)})")
+    check_plan()
     plan = ROUNDS[round_no]
     groups, ignored = _pick_variants(plan, variants)
     prompts = prompts or Prompts()

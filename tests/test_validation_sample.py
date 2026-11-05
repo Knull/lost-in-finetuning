@@ -168,7 +168,29 @@ def test_the_two_rounds_add_up_to_the_configured_totals():
     assert ROUNDS[1].sizes == {"hi": 60, "zh": 40, "es": 40, "en": 40}
     assert ROUNDS[2].sizes == {"hi": 60, "zh": 20, "es": 20, "en": 20}
     per_language = config.get("validation.per_language")
+    assert set(ROUNDS[1].sizes) | set(ROUNDS[2].sizes) == set(per_language)
     assert {lang: ROUNDS[1].sizes[lang] + ROUNDS[2].sizes[lang] for lang in per_language} == per_language
+
+
+LOCKED_TOTALS = {"hi": 120, "zh": 60, "es": 60, "en": 60}            # README, Judging
+
+
+@pytest.mark.parametrize("per_language", [{**LOCKED_TOTALS, "hi": 100}, {"hi": 120, "zh": 60, "es": 60},
+                                          {**LOCKED_TOTALS, "ar": 60}, MISSING],
+                         ids=["a count changed", "a language dropped", "a language added", "missing"])
+def test_a_round_is_drawn_only_while_the_rounds_add_up_to_the_configured_totals(tmp_path, monkeypatch,
+                                                                                 per_language):
+    # R2-17: the round sizes are ROUNDS, and validation.per_language is what they add up to. An edit to one
+    # of them alone (a count, or a language dropped, which the static test above cannot see) is refused
+    # wherever a round is drawn or checked, naming both, before anything is read or written.
+    round1_world(tmp_path, monkeypatch)
+    patch_project(monkeypatch, "validation.per_language", per_language)
+    for draw in (make_sheets, check_round, build_round):
+        with pytest.raises(ValidateError, match=r"validation\.per_language") as refused:
+            draw(1)
+        assert str(LOCKED_TOTALS) in str(refused.value)                 # what the rounds add up to
+        assert ("has no" if per_language is MISSING else str(per_language)) in str(refused.value)
+    assert not keys_dir().exists() and not sheets_dir().exists()
 
 
 def test_allocate_splits_evenly_with_the_remainder_on_harmful_then_hard_benign():

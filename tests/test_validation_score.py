@@ -35,13 +35,15 @@ from validation_fakes import (
 )
 
 from lift import config, manifest, splits
-from lift.io import read_jsonl, sha256_text, write_jsonl
+from lift.io import read_jsonl, sha256_file, sha256_text, write_jsonl
 from lift.judge.labels import final_label, map_qwen3guard
+from lift.judge.qwen3guard import Qwen3GuardParseError, parse_response_moderation
 from lift.schemas import LABELS, HumanLabel, JudgementRecord, UnclearFlags
 from lift.stats.agreement import binary, cohens_kappa, meets_bar, percent_agreement
+from lift.validation import score as validation_score
 from lift.validation.labels import import_labels
 from lift.validation.sample import load_round, make_sheets
-from lift.validation.score import decision_path, if_skipped, qwen3guard_label, score
+from lift.validation.score import decide_primary_judge, decision_path, if_skipped, qwen3guard_label, score
 from lift.validation.store import ValidateError, read_json, write_json
 
 VIEWS = ("qwen3guard_strict", "qwen3guard_loose", "frontier")
@@ -425,6 +427,41 @@ def test_a_judge_failure_counts_as_an_unclear_judgement(round1):
         assert block["status"] == "ok"
 
 
+JUDGE_WORDS = "placeholder judge words: quoted back"      # stands in for the judge text a failure quotes
+
+
+def test_judge_failures_are_counted_by_kind_never_by_the_judges_text(round1):
+    # W3-08c follow-up: a failure's text can quote its judge (a frontier refusal's reason and an API message
+    # after their ":", the start of a Qwen3Guard reply that did not parse, with no ":" before it). The round
+    # files' checks.failure_reasons and judge_decision.json's failure_reasons, which go public with the logs,
+    # count failures by kind: the text before its first ":" or quote, bracket or parenthesis.
+    world, doc = round1
+    write_judgements(world)
+    with pytest.raises(Qwen3GuardParseError) as parse:
+        parse_response_moderation(JUDGE_WORDS)
+    parse_error = str(parse.value)
+    assert "placeholder judge words" in parse_error.split(":", 1)[0]       # the reply comes before any ":"
+    failures = {"qwen3guard": [parse_error, parse_error, "input too long for the judge (2048 tokens)",
+                               "'None' listed together with other categories"],
+                "frontier": [f"refused: {JUDGE_WORDS}", f"BadRequestError 400: {JUDGE_WORDS}",
+                             "unparseable judge output"]}
+    hi = iter(items(doc, "hi"))
+    for dirname, texts in failures.items():
+        for text in texts:
+            replace_judgement(world, dirname, next(hi)["key"], judge_label="unclear", label="unclear",
+                              native={"judge_failure": text})
+    import_sheets(world, doc, truth_of)
+    want = {"qwen3guard": {"expected 3 lines": 2, "input too long for the judge": 1, "other": 1},
+            "frontier": {"refused": 1, "BadRequestError 400": 1, "unparseable judge output": 1}}
+    out = score(1)
+    assert out["checks"]["judge_failures"] == {"qwen3guard": 4, "frontier": 3}
+    assert out["checks"]["failure_reasons"] == want
+    decided = decide_primary_judge(dry_run=True)
+    assert decided["failure_reasons"] == want
+    written = [p.read_text(encoding="utf-8") for p in (world.outputs / "metrics" / "validation").iterdir()]
+    assert written and not [t for t in [*written, json.dumps(decided)] if "placeholder" in t]
+
+
 def test_judges_are_told_apart_by_id_not_by_directory(round1):
     world, doc = round1
     world.primary_flip |= {it["key"] for it in items(doc)[::4]}
@@ -781,6 +818,100 @@ def test_gate1_follows_the_primary_judge_in_the_config_not_the_recorded_decision
     assert out["primary_view"] == "frontier" and out["decision"]["applied"] is True
     gate = gate1(world)
     assert (gate["judge_view"], gate["judge_id"], gate["status"]) == ("frontier", FRONTIER_ID, "fail")
+
+
+def gate1_stale(world):
+    """What lift.validation.score.gate1_stale finds wrong with the gate1.json written in ``world`` now."""
+    return validation_score.gate1_stale(gate1(world))
+
+
+def test_gate1_names_its_inputs_and_tells_when_its_labels_were_imported_again(round1):
+    # R2-12: gate1.json is what P03's Gate 1 reads. A corrected Hindi sheet imported after the score must not
+    # leave a verdict made from the replaced labels that reads like a current one: gate1.json names its
+    # inputs (round 1's keys, draw, labels and import records, by sha256) and gate1_stale checks them.
+    world, doc = round1
+    write_judgements(world)
+    import_sheets(world, doc, truth_of)
+    score(1)
+    first = gate1(world)
+    folder = world.validation
+    assert first["status"] == "pass"
+    assert first["inputs"]["round1_hi.jsonl"] == sha256_file(folder / "labels" / "round1_hi.jsonl")
+    assert first["inputs"] == {p.name: sha256_file(p) for p in [folder / "keys" / "round1.json",
+                                                                folder / "keys" / "draw1.json",
+                                                                *(folder / "labels").glob("round1_*")]}
+    assert first["judge_pins"] == {"qwen3guard": None, "frontier": None} and first["git"] == fake_git()
+    assert gate1_stale(world) == []
+    # The Hindi reader sends back a corrected sheet: every second label differs. It is imported, and nothing
+    # is scored again. The labels now miss the bar; the file still says pass, and says it no longer holds.
+    corrected = {it["item_id"] for it in items(doc, "hi")[::2]}
+    import_sheets(world, doc,
+                  lambda it: other_label(truth_of(it)) if it["item_id"] in corrected else truth_of(it),
+                  sheets={"round1_hi"})
+    assert block_of(score(1, write=False), "qwen3guard_strict", "hi")["meets_bar"] is False
+    assert gate1(world)["status"] == "pass"
+    stale = gate1_stale(world)
+    assert [p for p in stale if "round1_hi.jsonl" in p] and [p for p in stale if "round1_hi.meta.json" in p]
+    assert not [p for p in stale if "round1_zh" in p or "judgements" in p]
+    score(1)
+    assert gate1(world)["status"] == "fail" and gate1_stale(world) == []
+
+
+def test_gate1_tells_when_its_items_were_judged_again_or_a_sheet_was_imported_since(round1, monkeypatch):
+    # R2-12: gate1.json also holds a digest of the Hindi round 1 judgements and outputs it scored, so a
+    # re-judge shows; a round 1 labels file it does not name was imported after it; a gate1.json written
+    # before its inputs were recorded never reads as current, and nor does one made for the judge that a
+    # switch in the config has since made second.
+    world, doc = round1
+    write_judgements(world)
+    import_sheets(world, doc, truth_of, sheets={"round1_zh", "round1_es", "round1_en"})
+    score(1)
+    assert gate1(world)["status"] == "pending" and gate1_stale(world) == []
+    import_sheets(world, doc, truth_of, sheets={"round1_hi"})                 # Hindi comes back later
+    assert [p for p in gate1_stale(world) if "round1_hi.jsonl" in p]
+    score(1)
+    assert gate1(world)["status"] == "pass" and gate1_stale(world) == []
+    # Qwen3Guard judges the Hindi items again and now disagrees with the reader on half of them.
+    world.primary_flip |= {it["key"] for it in items(doc, "hi")[::2]}
+    write_judgements(world)
+    stale = gate1_stale(world)
+    assert len(stale) == 1 and "judgements" in stale[0]
+    score(1)
+    assert gate1(world)["status"] == "fail" and gate1_stale(world) == []
+    world.frontier_flip |= {it["key"] for it in items(doc, "zh")}            # another language: no change
+    write_judgements(world)
+    labels = world.validation / "labels"
+    shutil.copy(labels / "round1_hi.jsonl", labels / "round1_hi-copy.jsonl")  # no sheet's labels: not read
+    assert gate1_stale(world) == []
+    # Written before gate1.json named its inputs.
+    old = {k: v for k, v in gate1(world).items() if k not in ("inputs", "judgements_digest", "judge_pins")}
+    assert validation_score.gate1_stale(old) and "inputs" in validation_score.gate1_stale(old)[0]
+    # The judges blocks swapped in the config: gate1.json was scored for the judge that is no longer primary.
+    load = config.load
+    swapped = copy.deepcopy(load("project"))
+    j = swapped["judges"]
+    j["safety_primary"], j["safety_second"] = j["safety_second"], j["safety_primary"]
+    monkeypatch.setattr(config, "load", lambda name="project": swapped if name == "project" else load(name))
+    assert [p for p in gate1_stale(world) if "frontier" in p]
+
+
+def test_gate1_reports_the_import_warnings_of_the_hindi_sheet_it_scored(round1):
+    # W3-07 follow-up: gate1.json carries the import warnings of the Hindi round 1 sheet it scores, so a pass
+    # resting on a sheet imported with a warning never reads as clean; another language's are not Gate 1's.
+    world, doc = round1
+    write_judgements(world)
+    import_sheets(world, doc, truth_of)
+    score(1)
+    assert (gate1(world)["status"], gate1(world)["import_warnings"]) == ("pass", {})
+    blank = {it["item_id"] for it in [*items(doc, "hi")[:2], *items(doc, "zh")[:1]]}
+    import_sheets(world, doc, lambda it: None if it["item_id"] in blank else truth_of(it))
+    warned = {name: read_json(world.validation / "labels" / f"{name}.meta.json")["warnings"]
+              for name in ("round1_hi", "round1_zh")}
+    assert all(len(w) == 1 and "no label" in w[0] for w in warned.values())  # rows left blank, no note
+    out = score(1)
+    assert out["checks"]["import_warnings"] == warned
+    gate = gate1(world)
+    assert gate["import_warnings"] == {"round1_hi": warned["round1_hi"]} and gate["status"] == "pending"
 
 
 @pytest.mark.parametrize("tamper", ["keys_digest", "unknown_id"])
