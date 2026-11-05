@@ -40,20 +40,36 @@ def test_half_the_gain_boundary():
 
 
 def test_ties_go_to_the_cheaper_repair():
+    # R1-39: the cheaper setting has the lower win rate, so cost must decide before the win rate.
     sel = select_repair(STOCK, ADAPTER, [
-        cand("cast-m1.0", "cast", 0.120),
-        cand("wiseft-l0.50", "wiseft", 0.135),   # 1.5 points less drop: tied within 2 points
+        cand("cast-m1.0", "cast", 0.120, win=0.68),
+        cand("wiseft-l0.50", "wiseft", 0.135, win=0.62),   # 1.5 points less drop: tied within 2 points
     ], RULES)
     assert sel.winner == "wiseft-l0.50"
 
 
-def test_no_eligible_setting_freezes_best_and_rejects():
+def test_equal_cost_ties_go_to_the_higher_win_rate():
+    # R1-39: the winner has the higher win rate, the smaller drop and the later name.
     sel = select_repair(STOCK, ADAPTER, [
-        cand("cast-m2.0", "cast", 0.05, overref=0.40),
+        cand("wiseft-l0.25", "wiseft", 0.120, win=0.62),
+        cand("wiseft-l0.50", "wiseft", 0.135, win=0.68),   # tied within 2 points, same cost
+    ], RULES)
+    assert sel.eligible == ["wiseft-l0.25", "wiseft-l0.50"]
+    assert sel.winner == "wiseft-l0.50"
+
+
+def test_no_eligible_setting_freezes_best_and_rejects():
+    # R1-39: with nothing eligible, decision 7 freezes the fewest violations, then the largest drop; the
+    # 2-point tie margin does not apply.
+    sel = select_repair(STOCK, ADAPTER, [
+        cand("resta-a0.10", "resta", 0.02, overref=0.40, bele=0.55),  # largest drop, but two violations
+        cand("cast-m2.0", "cast", 0.05, overref=0.40),                # over-refuses: one violation
+        cand("wiseft-l0.50", "wiseft", 0.06, bele=0.55),              # Belebele -5: one; cheaper, 1 point
+                                                                      # less drop (within the tie margin)
         cand("wiseft-l0.75", "wiseft", 0.31),     # makes things worse: violates drop_ok only
     ], RULES)
     assert sel.verdict == "reject"
-    assert sel.winner in {"cast-m2.0", "wiseft-l0.75"}
+    assert sel.winner == "cast-m2.0"
     assert sel.eligible == []
 
 
