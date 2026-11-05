@@ -872,6 +872,19 @@ def _restart(args: argparse.Namespace) -> int:
 # --- registration -------------------------------------------------------------------------------------
 
 
+def _positive_int(value: str) -> int:
+    """The argparse type of --limit and --batch-size: a whole number of at least 1, refused at parse (exit
+    2) before any model loads otherwise. A negative batch size would decode empty batches for ever, a
+    --limit of 0 would mean no limit, and --limit -N would cut each cell's last N prompts."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a whole number, got {value!r}") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {number}")
+    return number
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("smoke", help="Gate 0: precision, throughput, dry run, preamble, merge parity (GPU)")
     p.add_argument("--device", default="cuda:0", help="generator device (default cuda:0)")
@@ -891,11 +904,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--sets", nargs="+", default=None, help=f"default: {' '.join(SAFETY_SETS)}")
     p.add_argument("--langs", nargs="+", default=None, help="default: all six")
     p.add_argument("--split", required=True, choices=["dev", "final"])
-    p.add_argument("--limit", type=int, default=None, help="first N prompts per set and language (by pid)")
+    p.add_argument("--limit", type=_positive_int, default=None,
+                   help="first N prompts per set and language (by pid; N >= 1)")
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default=None,
                    help="default: generation.dtype")
-    p.add_argument("--batch-size", type=int, default=None, help="default: chosen from free memory")
+    p.add_argument("--batch-size", type=_positive_int, default=None,
+                   help="default: chosen from free memory (a given one is at least 1)")
     p.set_defaults(func=_generate)
 
     p = sub.add_parser("judge", help="judge one variant's generations (every one, or a second-judge subset)")
@@ -920,11 +935,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--variant", required=True)
     p.add_argument("--langs", nargs="+", default=None, help="default: all six")
     p.add_argument("--sets", nargs="+", default=None, help=f"default: {' '.join(SAFETY_SETS)}")
-    p.add_argument("--limit", type=int, default=None, help="first N prompts per set and language (no record)")
+    p.add_argument("--limit", type=_positive_int, default=None,
+                   help="first N prompts per set and language (N >= 1; no record)")
     p.add_argument("--device", default="cuda:0", help="generator device")
     p.add_argument("--judge-device", default="auto", help="auto = cuda:1 if two GPUs, else cuda:0")
     p.add_argument("--dtype", choices=["bf16", "fp16"], default=None, help="default: generation.dtype")
-    p.add_argument("--batch-size", type=int, default=None)
+    p.add_argument("--batch-size", type=_positive_int, default=None,
+                   help="default: chosen from free memory (a given one is at least 1)")
     p.set_defaults(func=_run_dev)
 
     p = sub.add_parser("restart", help="start stale cells over: set their files aside, leave them empty "

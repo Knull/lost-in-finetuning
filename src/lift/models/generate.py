@@ -13,8 +13,9 @@ Behaviour:
   unclear rule reads; ``meta.n_generated`` counts every generated token for throughput.
 - A prompt that would not fit in the context with ``max_new_tokens`` more tokens raises; nothing is
   ever truncated.
-- Batches sorted by prompt length (longest first); batch size chosen from free memory unless given.
-  An out-of-memory error halves the batch and retries it (never skips a prompt).
+- Batches sorted by prompt length (longest first); batch size chosen from free memory unless given (a
+  given one must be at least 1). An out-of-memory error halves the batch and retries it (never skips a
+  prompt).
 - Decoding must stay finite. A row whose scores hold a NaN or +inf before its end-of-turn token (an
   fp16 overflow, typically) decodes garbage from then on (argmax over NaN picks id 0), which would be
   written as its output, often a cap hit cut short. So its batch raises NonFiniteOutputError before
@@ -616,6 +617,8 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
     from lift.manifest import finish_run, start_run
     from lift.models.load import check_neutral_generation_config, encode_chat
 
+    if batch_size is not None and batch_size < 1:   # a negative one would decode empty batches for ever
+        raise ValueError(f"batch_size must be at least 1, got {batch_size}")
     out_path = Path(out_path)
     check_neutral_generation_config(variant.hf_model)
     gen_cfg = gen_config(variant, max_new_tokens=max_new_tokens)
