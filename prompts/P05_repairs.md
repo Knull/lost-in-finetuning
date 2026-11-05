@@ -30,6 +30,16 @@ sweep, apply the selection rule (overall and per repair family), and hand over t
    `lift.models.variants`.
    - Put the parameters and artifact hashes in VariantSpec, so each setting gets its own cache
      keys.
+   - Every file a builder loads must match the hash its spec declares, checked at build time
+     (R1-05). Today only `checked_adapter` does this, for `artifacts.adapter`. Load each CAST
+     artifact through a check that refuses a declared sha256 the file no longer has, and have
+     `build_variant` refuse a builder whose loaded hashes differ from `spec.artifacts`. A CAST fit
+     re-run in place must change the keys or stop the run, never resume a cell under it.
+   - ReSta depends on Base's weights, so Base's revision must reach the key (R1-04). The resta
+     builder refuses a `models.base.revision` that is not a 40-hex sha (the `require_pinned` rule),
+     and records that sha in the spec it builds (for example `artifacts.base`) and in the registry
+     entry, so a re-pin of Base changes the ReSta keys. `lift generate` and `lift run-dev` require
+     the Base pin for a resta variant before torch loads.
    - Name each one by the scheme in configs/variants.yaml.
    - Belebele scoring for a CAST variant uses the same gate as generation.
 3. **`lift fit-cast --adapter NAME`.**
@@ -68,6 +78,8 @@ sweep, apply the selection rule (overall and per repair family), and hand over t
 - CAST: fitting on tiny synthetic prompts returns a condition; the gate fires per prompt; the
   always-on wrapper steers every prompt; artifacts round-trip with stable hashes.
 - Every setting yields a distinct cache key.
+- A CAST artifact changed after registration is refused at build time (R1-05), and a resta
+  variant is refused while Base is unpinned, with another Base sha giving another key (R1-04).
 - `lift select` on synthetic metrics gives the same answers as `tests/test_selection.py`.
 
 ## Done when

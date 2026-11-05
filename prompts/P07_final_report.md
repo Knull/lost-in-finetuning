@@ -45,6 +45,14 @@ record into the results tables, figures, verdicts and the cost section.
    - the verdict per adapter;
    - judge sensitivity: strict vs loose, the second judge vs the primary on its sample, and
      back-translation agreement for ar/th.
+
+   The second judge's cells can only be read with `load_records(judge="second",
+   complete=False)`, which checks that what is there is current but not that the sample is whole
+   (R1-10). A stopped frontier run leaves items unjudged on purpose, and they are simply absent.
+   So the second-judge numbers check coverage themselves: every key on P04's lists
+   (`validation/keys/second_judge/`, random.txt included) must have a judgement, and a missing one
+   is reported, never silently dropped from the denominator. The same goes for Qwen3Guard if the
+   decision rule moves it to the second role.
 4. **`lift report`.**
    - Markdown tables and CSV in `outputs/metrics/`.
    - Figures in `outputs/figures/`:

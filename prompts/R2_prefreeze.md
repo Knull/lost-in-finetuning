@@ -24,7 +24,11 @@ when two rounds in a row find nothing new.
   - Ties go to the cheaper repair.
 - **Final split untouched.** No generation file under `outputs/generations/*/*_final.jsonl`
   exists for any variant yet, except stock and the adapters if their final runs were started
-  deliberately. List anything you find.
+  deliberately. List anything you find. `lift generate` and `lift judge` still accept
+  `--split final` for any variant: R1 left that guard to P07's `lift final` (R1-06). So this
+  listing, and the runs repo's history of final files, is the only check before the tag.
+- **Repair cache keys (from R1).** Each CAST artifact a builder loads matches the hash its spec
+  declares (R1-05). ReSta's keys carry Base's pinned sha (R1-04).
 - **Cache keys and manifests.** Every sweep setting has its own keys, and each manifest
   records GPU time.
 - **Judge decision.** It follows `judges.decision_rule` on round 1 only.
