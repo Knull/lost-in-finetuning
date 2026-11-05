@@ -72,6 +72,20 @@ yet; Gate 0 had just passed on the A100. Numbered from 50 (item 49, the revision
       arithmetic. Without `--candidate` it prints the branch for each candidate, since the candidate is
       chosen from Gate 1.
 
+## Nov 4, 2026 (night): model and judge revisions pinned after Gate 0
+
+49. **The three revisions are pinned to the commit shas Gate 0 resolved.** `lift generate`,
+    `lift judge` and `lift run-dev` refuse anything else.
+    - `models.global.revision`: af89d219b53ed9b13b8a4645f9c8028973510324 (CohereLabs/tiny-aya-global)
+    - `models.base.revision`: d62ac17e241c871fc52e9a95d7b0e2615189d7d5 (CohereLabs/tiny-aya-base)
+    - `judges.safety_primary.revision`: 6ec42827da0c1ff11e7a49dc269d2e810d27e108
+      (Qwen/Qwen3Guard-Gen-4B)
+    - Gate 0: PASS on all five checks (preamble, throughput, precision, dry_run, parity), bf16 on a
+      Colab A100-SXM4-40GB, repo commit 53ebeda, `lift remote` job lift-20261104-222836-66ad. The
+      record is `outputs/metrics/gate0.json` in the runs repo.
+    - Why now: every revision was `main` until Gate 0, as planned (CLAUDE.md, "Pinned revisions").
+      No reported generation exists yet.
+
 ## Nov 4, 2026 (afternoon): how we reach Google Translate, before any translation was made
 
 48. **Google Translate through the Cloud Translation API v2 (NMT), not the web endpoint.** The
