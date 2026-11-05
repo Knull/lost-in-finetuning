@@ -41,6 +41,10 @@ Chat template on, loss on the answer only
   lists such rows (id, prompt tokens, limit). The remedies, each with a dated docs/decisions.md entry:
   raise max_seq_len, or drop the rows with ``--drop-unfit``, which drops exactly those rows and records
   their ids (never the default).
+- ``check_training`` (``lift train --check``) shows this before a GPU run: it builds every example the
+  way training does (``prepare``, one code path) with Global's tokenizer the only thing loaded (no model,
+  no GPU, no push, no registry), reports the counts and the rows left without a supervised token, and
+  writes nothing.
 - TRL gets the rows pre-tokenized (input_ids, labels) with ``skip_prepare_dataset``: its own preparation
   would cut them again and silently drop rows left without supervised tokens. ``loss_type="nll"``: TRL's
   default chunked loss patches the model's forward. The collator is TRL's, wrapped so every micro-batch's
@@ -265,10 +269,13 @@ class Plan:
 
 def plan_training(candidate: str, recipe: str, seed: int, *, model_id: str | None = None,
                   revision: str | None = None, device: str = "cuda:0", dtype: str | None = None,
-                  per_device_batch: int | None = None, max_steps: int | None = None) -> Plan:
+                  per_device_batch: int | None = None, max_steps: int | None = None,
+                  hardware: bool = True) -> Plan:
     """Check a request against the recipe and the hardware rules; nothing is loaded. ``model_id`` and
     ``revision`` default to models.global, whose revision must then be pinned; a caller passing
-    ``model_id`` (the tests: a local tiny model) vouches for it."""
+    ``model_id`` (the tests: a local tiny model) vouches for it. ``hardware=False`` leaves out the
+    checks that ask the GPU (that it exists, and the precision it may train in), for ``check_training``,
+    which runs where there is none."""
     cfg = recipe_config(recipe)
     candidates = list(config.load("train").get("candidates") or [])
     if candidate not in candidates:
@@ -296,7 +303,8 @@ def plan_training(candidate: str, recipe: str, seed: int, *, model_id: str | Non
     from lift.models.load import resolved_revision
 
     rev = resolved_revision(model_id, revision or config.get("models.global.revision"))
-    _check_precision(dtype, device, str(cfg["precision"]))
+    if hardware:
+        _check_precision(dtype, device, str(cfg["precision"]))
     return Plan(candidate=candidate, recipe=recipe, seed=int(seed), cfg=cfg, model_id=model_id,
                 model_rev=rev, device=device, dtype=dtype, per_device_batch=per_device, grad_accum=accum,
                 max_steps=None if max_steps is None else int(max_steps))
@@ -522,6 +530,41 @@ def data_stats(examples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "supervised_tokens": sum(e["n_supervised"] for e in examples),
         "supervised_per_row": _spread([e["n_supervised"] for e in examples]),
     }
+
+
+@dataclass(frozen=True)
+class Prepared:
+    """A run's rows as training takes them, before any model loads (``prepare``)."""
+
+    data: TrainingData
+    n_heldout: int                      # held-out utility prompts the user turns were checked against
+    tokenizer: Any
+    max_len: int
+    examples: list[dict[str, Any]]      # every row's example, in the file's order
+    unfit: list[dict[str, Any]]         # rows left without a supervised token: id, prompt tokens, limit
+
+
+def prepare(plan: Plan) -> Prepared:
+    """The examples of a run, built the one way ``train_lora`` and ``check_training`` share: the training
+    file (checked against report.json), the held-out guard, Global's tokenizer at the plan's revision,
+    then every row through ``build_example``. Loads no model and writes nothing."""
+    from lift.models.load import load_tokenizer
+
+    data = load_training_data(plan.candidate, plan.cfg)
+    n_heldout = check_heldout(data.rows)
+    tokenizer = load_tokenizer(plan.model_id, plan.model_rev)
+    max_len = int(plan.cfg["max_seq_len"])
+    examples, unfit = build_examples(tokenizer, data.rows, max_len)
+    return Prepared(data=data, n_heldout=n_heldout, tokenizer=tokenizer, max_len=max_len, examples=examples,
+                    unfit=unfit)
+
+
+def trained_examples(prepared: Prepared, *, drop_unfit: bool) -> list[dict[str, Any]]:
+    """The examples that train: all of them, unless some rows are left without a supervised token, which
+    stops the run (``unfit_message``) or, with ``drop_unfit``, are dropped, exactly those."""
+    if prepared.unfit and not drop_unfit:
+        raise TrainRefused(unfit_message(prepared.unfit, prepared.max_len))
+    return [e for e in prepared.examples if e["n_supervised"]]
 
 
 # --- training -----------------------------------------------------------------------------------------
@@ -1424,24 +1467,19 @@ def train_lora(candidate: str, recipe: str, seed: int, *, out_dir: Path | None =
                            "finished (it publishes the whole folder at once). Look at it, then rerun with "
                            "--retrain, which sets it aside")
     _check_same_hardware(plan)
-    data = load_training_data(plan.candidate, plan.cfg)
-    n_heldout = check_heldout(data.rows)
-    prompts, prompt_info = _parity_texts(parity_prompts) if parity else ([], None)
-    from lift.models.load import device_name, load_tokenizer
-
-    tokenizer = load_tokenizer(plan.model_id, plan.model_rev)
-    max_len = int(plan.cfg["max_seq_len"])
-    examples, unfit = build_examples(tokenizer, data.rows, max_len)
-    if unfit and not drop_unfit:
-        raise TrainRefused(unfit_message(unfit, max_len))
+    prepared = prepare(plan)
+    data, n_heldout, unfit, tokenizer = prepared.data, prepared.n_heldout, prepared.unfit, prepared.tokenizer
+    examples = trained_examples(prepared, drop_unfit=drop_unfit)
     if unfit:
-        examples = [e for e in examples if e["n_supervised"]]
         log.warning("%s: --drop-unfit drops %d rows the template leaves nothing to learn from: %s",
                     plan.name, len(unfit), [u["id"] for u in unfit])
+    prompts, prompt_info = _parity_texts(parity_prompts) if parity else ([], None)
     stats = data_stats(examples)
     log.info("%s: %d rows of %s (sha256 %s), %d truncated at %d tokens, %d supervised tokens; %d held-out "
              "prompts checked", plan.name, stats["rows"], data.repo_path, data.sha256[:12],
-             stats["truncated_rows"], max_len, stats["supervised_tokens"], n_heldout)
+             stats["truncated_rows"], prepared.max_len, stats["supervised_tokens"], n_heldout)
+    from lift.models.load import device_name
+
     replaced = _set_aside(final, plan.name) if retrain else None
     gpu = device_name(plan.device)
     from lift.manifest import finish_run, start_run
@@ -1564,4 +1602,69 @@ def summary(directory: Path) -> list[str]:
         lines += [f"  {line}" for line in _laptop_lines(str(reg["name"]))]
     else:
         lines.append("  not registered" + (f": {reg['registry_error']}" if reg.get("registry_error") else ""))
+    return lines
+
+
+# --- lift train --check -------------------------------------------------------------------------------
+
+
+def check_training(candidate: str, recipe: str, seed: int, *, model_id: str | None = None,
+                   revision: str | None = None, device: str = "cuda:0", dtype: str | None = None,
+                   per_device_batch: int | None = None, drop_unfit: bool = False) -> dict[str, Any]:
+    """``lift train --check``: what the same request would train on, built exactly as ``train_lora``
+    builds it (``prepare``), so a person can decide on ``--drop-unfit`` before a GPU run.
+
+    Only Global's tokenizer is loaded, at the revision training uses (models.global, which must be
+    pinned, unless ``model_id`` is given): no model, no GPU or precision check (``plan_training``'s
+    ``hardware=False``), no push or preflight, no registry, no adapter folder, no manifest; nothing is
+    written. The request and the training file are checked as for training, so what training refuses
+    there raises TrainRefused here too; rows left without a supervised token are reported, not refused.
+    Returns counts, ids and hashes, never text: the counts of every row of the file (``data_stats``),
+    those rows (id, prompt tokens, limit), whether lift train would stop on them (it does without
+    ``drop_unfit``), and the counts of the rows that train once they are dropped."""
+    plan = plan_training(candidate, recipe, seed, model_id=model_id, revision=revision, device=device,
+                         dtype=dtype, per_device_batch=per_device_batch, hardware=False)
+    prepared = prepare(plan)
+    kept = trained_examples(prepared, drop_unfit=True)
+    return {
+        "name": plan.name, "candidate": plan.candidate, "recipe": plan.recipe, "seed": plan.seed,
+        "model": {"id": plan.model_id, "revision": plan.model_rev}, "max_seq_len": prepared.max_len,
+        "data": {"path": prepared.data.repo_path, "key": prepared.data.key, "sha256": prepared.data.sha256,
+                 "rows_in_file": len(prepared.data.rows), "heldout_prompts_checked": prepared.n_heldout},
+        "counts": data_stats(prepared.examples), "unfit": [dict(u) for u in prepared.unfit],
+        "drop_unfit": bool(drop_unfit), "stops": bool(prepared.unfit) and not drop_unfit,
+        "kept": data_stats(kept),
+    }
+
+
+def _spread_text(spread: Mapping[str, Any]) -> str:
+    return f"min {spread['min']}, mean {spread['mean']}, max {spread['max']}"
+
+
+def check_lines(report: Mapping[str, Any]) -> list[str]:
+    """What ``lift train --check`` prints (counts, ids, hashes and paths, never text)."""
+    data, counts, model = report["data"], report["counts"], report["model"]
+    limit, unfit, kept = report["max_seq_len"], report["unfit"], report["kept"]
+    lines = [f"{report['name']}: lift train --check (the tokenizer the only thing loaded; nothing written)",
+             f"  data: {data['path']} ({data['key']}, sha256 {data['sha256'][:12]}), {data['rows_in_file']} "
+             f"rows; none equals one of the {data['heldout_prompts_checked']} held-out utility prompts",
+             f"  tokenizer: {model['id']}@{model['revision'][:12]}; max_seq_len {limit}",
+             f"  rows: {counts['rows']}; truncated at {limit} tokens: {counts['truncated_rows']}",
+             f"  prompt tokens: {_spread_text(counts['prompt_tokens'])}",
+             f"  answer tokens: {_spread_text(counts['answer_tokens'])}",
+             f"  supervised tokens: {counts['supervised_tokens']} (per row: "
+             f"{_spread_text(counts['supervised_per_row'])})"]
+    if not unfit:
+        lines.append(f"  rows with zero supervised tokens: none; lift train trains on all {kept['rows']} "
+                     "rows")
+        return lines
+    lines.append(f"  rows with zero supervised tokens: {len(unfit)} (id, prompt tokens, limit)")
+    lines += [f"    {u['id']}, {u['prompt_tokens']}, {u['limit']}" for u in unfit]
+    then = f"{kept['rows']} rows, {kept['supervised_tokens']} supervised tokens"
+    if report["stops"]:
+        lines.append("  lift train stops on these rows. Remedies, each with a dated docs/decisions.md entry: "
+                     "raise max_seq_len in configs/train.yaml, or rerun with --drop-unfit, which drops "
+                     f"exactly these and trains on {then}")
+    else:
+        lines.append(f"  lift train --drop-unfit drops exactly these and trains on {then}")
     return lines
