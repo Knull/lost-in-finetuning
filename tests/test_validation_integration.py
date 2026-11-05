@@ -828,6 +828,28 @@ def test_the_scores_stop_on_a_refused_prompt_file_and_count_only_a_missing_one(t
     assert score_utility()["n_judged"] == 10
 
 
+def test_the_scores_stop_on_a_refused_prompt_file_whose_generations_files_are_all_missing(tmp_path,
+                                                                                        monkeypatch):
+    # W3-05 follow-up: with no generations file of the set and language here, load_pool never reads the
+    # prompt file (a missing generations file proves nothing), so the scores' own read of it for each
+    # labelled item is the one that sees it is here and refused: that stops them too, never counted as a
+    # prompt file missing here.
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    import_truth(world)
+    assert scoring.score(1)["checks"]["prompt_file_missing"] == 0
+    swap_stamps(world.data / "prompts" / "harmful_hi.jsonl")
+    gone = sorted((world.outputs / "generations").rglob("harmful_hi_*.jsonl"))
+    assert len(gone) == 3                                # stock and the adapter on dev, stock on final
+    for path in gone:
+        path.unlink()
+    stamped = r"harmful_hi: 2 records of harmful_hi\.jsonl carry another split than the committed split"
+    with pytest.raises(outputs.PromptFileError, match=stamped):
+        scoring.score(1, write=False)
+    with pytest.raises(outputs.PromptFileError, match=stamped):
+        scoring.decide_primary_judge(dry_run=True)
+
+
 def test_a_cell_short_of_its_frozen_split_is_still_read_for_the_sheets(tmp_path, monkeypatch):
     # A translation failure leaves its pid out of the prompt file until a reader's verdict resolves it.
     # Every run refuses the short cell, but the validation reads it (allow_short): a sheet may show the
