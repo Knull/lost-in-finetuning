@@ -2789,3 +2789,66 @@ def test_readme_covers_skipped_cells_the_stop_request_and_watch():
     for words_in in (ctrl_c, cap, " ".join(remote_cmd.EXAMPLES.split())):
         assert "first Ctrl+C" in words_in and "goes on" in words_in, words_in
     assert "push retry" in ctrl_c and "push retry" in " ".join(remote_cmd.EXAMPLES.split())
+
+
+# R1-07: CLAUDE.md, Secrets: "Set them with a hidden prompt, never typed or pasted on a command line or
+# into a chat." Step 6 and .env.example typed each secret as a literal, lift remote's missing-secret text
+# said `$env:NAME = '...'` (`export NAME=...`), and the Claude Code advice had a session set what the
+# exit-6 banner names in its own command line, which only a value pasted into the chat could do.
+SECRET_NAME = r"(?:[A-Z][A-Z0-9_]*_(?:TOKEN|API_KEY)|NAME)\b"  # as CLAUDE.md lists them, or the placeholder
+# A quoted literal assigned in PowerShell, or a literal exported in a POSIX shell. A hidden prompt, a
+# variable or a subexpression is not a literal.
+TYPED_SECRET = re.compile(rf"\$env:(?P<ps>{SECRET_NAME})\s*=\s*[\"'](?!\$\()"
+                          rf"|\bexport\s+(?P<sh>{SECRET_NAME})=(?:[\"'](?!\$)|[^\s\"'$])")
+HIDDEN_PROMPT = re.compile(r"Read-Host\b[^\n]*-AsSecureString|\bread -r?s\b")
+
+
+def typed_secrets(text: str) -> list[str]:
+    """Where a secret is typed on a command line: the line number and the secret's name, never a value."""
+    return [f"line {text.count(chr(10), 0, m.start()) + 1}: {m.group('ps') or m.group('sh')}"
+            for m in TYPED_SECRET.finditer(text)]
+
+
+def hidden_prompt(name: str) -> str:
+    """Windows PowerShell 5.1's hidden prompt for one secret, as the runbooks give it."""
+    return f"[Net.NetworkCredential]::new('', (Read-Host -AsSecureString '{name}')).Password"
+
+
+@pytest.mark.parametrize("path", ["colab/README.md", "kaggle/README.md", ".env.example"])
+def test_no_runbook_types_a_secret_on_a_command_line(path):
+    assert typed_secrets((REPO_ROOT / path).read_text(encoding="utf-8")) == [], path
+
+
+def test_the_colab_setup_step_sets_each_secret_with_a_hidden_prompt():
+    step = readme().split("**Set the secrets**", 1)[1].split("\n7. **", 1)[0]
+    assert typed_secrets(step) == []
+    for name in ("GITHUB_TOKEN", "HF_TOKEN", "OPENAI_API_KEY"):
+        assert f"$env:{name} = {hidden_prompt(name)}" in step, name
+        # The one-time form for Claude Code sessions, typed in the user's own window.
+        assert f"[Environment]::SetEnvironmentVariable('{name}', {hidden_prompt(name)}, 'User')" in step, name
+
+
+@pytest.mark.parametrize("os_name", ["nt", "posix"], ids=["powershell", "posix-shell"])
+def test_lift_remote_never_says_to_type_a_missing_secret(monkeypatch, os_name):
+    ctx = types.SimpleNamespace(out=io.StringIO())
+    with monkeypatch.context() as mp:  # missing_message picks its example by os.name
+        mp.setattr(remote.os, "name", os_name)
+        launch = remote.missing_message(["GITHUB_TOKEN", "LIFT_RUNS_REPO", "HF_TOKEN"])  # a launch's exit 2
+        blocked = remote.retry_blocker(ctx, None, ["HF_TOKEN"])  # watch's push retry, from a shell without it
+        remote.kept_on_vm(ctx, "lift-r107", None, None, blocked)  # the exit-6 banner names what to set
+    banner = ctx.out.getvalue()
+    assert "KEEPS RUNNING" in banner and "missing HF_TOKEN:" in banner and "missing GITHUB_TOKEN," in launch
+    for text in (launch, banner):
+        assert typed_secrets(text) == [] and HIDDEN_PROMPT.search(text), text
+        assert "`hf auth login` with a WRITE token" in text
+    example = f"$env:NAME = {hidden_prompt('NAME')}" if os_name == "nt" else "read -rs NAME; export NAME"
+    assert example in launch
+
+
+def test_the_claude_code_advice_never_routes_a_secret_through_the_chat():
+    advice = " ".join(readme().split("**From Claude Code.**", 1)[1].split("\n\n", 1)[0].split())
+    assert "a 6 means" in advice and "lift remote watch" in advice
+    assert "never asks for or accepts a secret in the chat" in advice
+    # It loads what lift remote names from the user environment, in the command line that needs it.
+    assert "$env:HF_TOKEN = [Environment]::GetEnvironmentVariable('HF_TOKEN', 'User'); lift remote" in advice
+    assert "own terminal" in advice and "set what its banner names in the same command line" not in advice
