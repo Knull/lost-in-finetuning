@@ -50,7 +50,15 @@ Every command does a dry run by default, printing what it would upload, and uplo
      `outputs/metrics/judge_decision.json` (`failure_reasons`) already count failures by that
      kind, so they go in as they are. Upload files by name, never a folder: a `*.full.json`
      AuditKIT record, which holds every completion, can sit beside the public one in
-     `outputs/metrics/auditkit/`.
+     `outputs/metrics/auditkit/`. An AuditKIT record goes in only while
+     `lift.judge.pipeline.load_records` (`complete=True`, with the judge role and precision its
+     `metadata.lift` names) accepts its cell as it stands, and only if that read is the record's:
+     its labels and keys hash to the record's `labels_sha256` and `keys_sha256` (as
+     `lift.audit.record_safety` computes them) and its judge id is the record's `judge_id`; every
+     other record is dropped and listed with the reason (`lift.audit.load_record` reads a retired
+     one as None). A record outlives a change that makes its cell unreportable (a fixed prompt
+     text, other labelling rules, a re-registered variant, a re-pinned Global, a harness bump)
+     until that cell's `lift restart` retires it, so a record on disk proves nothing.
    - The raw completions (gated, manual approval): every judged output, refusals and benign
      answers included. Most outputs carry only Qwen3Guard's label, so no output is made public
      because of its label.
