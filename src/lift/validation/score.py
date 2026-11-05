@@ -38,8 +38,11 @@ Whenever round 1 is scored (alone or with round 2) this also writes
 outputs/metrics/validation/gate1.json, the Gate 1 check "validation round 1 meets the bar in Hindi"
 for the judge that configs/project.yaml makes primary (``judges.safety_primary``; a recorded but
 not yet applied decision is reported, not acted on): {"status": "pass" | "fail" | "pending",
-"meets_bar", "judge_view", "judge_id", "n", "agreement", "kappa", "not_labelled", ...}. It is
-pending while any Hindi round 1 row has no label and no 'skipped' note.
+"meets_bar", "judge_view", "judge_id", "items", "n", "agreement", "kappa", "not_labelled",
+"not_labelled_by_reason", "skipped", "superseded", "agreement_if_skipped", "robust_to_skips", ...}.
+It is pending while any Hindi round 1 row has no label and no 'skipped' note (``not_labelled``
+counts those rows). Deliberate skips are left out of the verdict and counted, with the agreement
+range had they been labelled and whether the agreement half of the bar holds across it.
 
 Each labelled item's output is looked up in its generations file. The harness regenerates a whole
 file when one of its prompts is fixed, and the other prompts come back under the same keys but
@@ -509,13 +512,30 @@ def _gaps(col: Collected, lang: str | None = None, round_no: int | None = None) 
 
 def gate1(col: Collected, bar: dict, created: str) -> dict:
     """Gate 1's validation check, "round 1 meets the bar in Hindi", for the judge that
-    configs/project.yaml makes primary, from round 1's Hindi items alone."""
+    configs/project.yaml makes primary, from round 1's Hindi items alone.
+
+    Every item of the Hindi round 1 main sheet is accounted for: ``items`` (the sheet's size), ``n``
+    (labelled and scored), ``superseded``, and ``not_labelled_by_reason`` (deliberate skips included,
+    ``skipped`` their count). ``not_labelled`` counts only the rows that keep the gate pending (no label
+    and no 'skipped' note). Skips stay out of the verdict; ``agreement_if_skipped`` is the agreement range
+    had they been labelled, each agreeing with the judge or not, n_agree/(n+s) to (n_agree+s)/(n+s) over
+    the n judged items, and ``robust_to_skips`` whether the agreement half of the bar gives the same verdict
+    at both ends (kappa is not bounded)."""
     view = primary_view()
     pairs = [(h, v[view]) for e, h, v in col.rows if e["round"] == 1 and e["lang"] == "hi"]
     sheets = [s for s in col.sheets.values() if s["round"] == 1 and s["slot"] == "a" and s["lang"] == "hi"]
     gaps = _gaps(col, "hi", 1)
     b = _with_status(view, agreement_block(pairs, bar), sheets, col.checks, gaps)
     status = "pending" if b["meets_bar"] is None else ("pass" if b["meets_bar"] else "fail")
+    why = Counter(reason for e, reason, _ in col.unlabelled if e["round"] == 1 and e["lang"] == "hi")
+    skips, judged = why.get("skipped", 0), b["n_judged"]
+    if b["n_agree"] is None:                                  # nothing judged yet
+        if_skipped, robust = None, None
+    else:
+        worst = Fraction(b["n_agree"], judged + skips)
+        best = Fraction(b["n_agree"] + skips, judged + skips)
+        need = Fraction(str(bar["agreement"]))
+        if_skipped, robust = {"lo": float(worst), "hi": float(best)}, (worst >= need) == (best >= need)
     recorded = recorded_decision()
     return {
         "gate": 1, "check": "validation round 1 meets the bar in Hindi", "round": 1, "lang": "hi",
@@ -524,9 +544,12 @@ def gate1(col: Collected, bar: dict, created: str) -> dict:
         "decision_recorded": recorded,
         "decision_applied": recorded is None or (recorded == "frontier") == (view == "frontier"),
         "bar": bar, "status": status, "meets_bar": b["meets_bar"], "block_status": b["status"],
+        "items": sum(s["n"] for s in sheets),
         "not_labelled": gaps,
+        "not_labelled_by_reason": dict(why), "skipped": skips,
         "superseded": sum(1 for e, _, _ in col.superseded if e["round"] == 1 and e["lang"] == "hi"),
         **{k: b[k] for k in ("n", "n_judged", "agreement", "kappa")},
+        "agreement_if_skipped": if_skipped, "robust_to_skips": robust,
         "created": created,
     }
 
