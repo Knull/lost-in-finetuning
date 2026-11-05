@@ -815,25 +815,28 @@ def test_generate_skips_a_short_cell_lists_its_remedy_and_exits_3(tiny_model_dir
     assert "easy_benign_zh_final: short of its frozen split, skipped" in caplog.text
 
 
-def frozen_generations(lang, pids, *, variant="stock"):
+def frozen_generations(lang, pids, *, variant="stock", dtype="bf16"):
     """easy_benign ``lang`` final generations of ``pids``, from frozen_cell's prompt texts, as lift generate
-    made them before a read of the split refused a cell short of its frozen split (R1-01). Placeholder
-    outputs."""
+    made them (in ``dtype``) before a read of the split refused a cell short of its frozen split (R1-01).
+    Placeholder outputs."""
     from lift.models.generate import generations_path
 
     write_jsonl(generations_path(variant, "easy_benign", lang, "final"), [{
         "key": sha256_text(f"{variant}:{lang}:{pid}"), "variant": variant, "pid": pid, "lang": lang,
         "set": "easy_benign", "split": "final", "prompt_sha": sha256_text(f"q {pid}"), "output": "o",
-        "n_prompt_tokens": 1, "n_new_tokens": 1, "hit_cap": False, "seconds": 0.1, "meta": {"dtype": "bf16"}}
+        "n_prompt_tokens": 1, "n_new_tokens": 1, "hit_cap": False, "seconds": 0.1, "meta": {"dtype": dtype}}
         for pid in pids])
 
 
-def test_judge_refuses_a_short_cells_record_with_its_remedy_and_exits_3(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize("made", ["bf16", "fp16"])
+def test_judge_refuses_a_short_cells_record_with_its_remedy_and_exits_3(made, tmp_path, monkeypatch, caplog):
     # W3-02: lift judge reads a cell's prompt texts by pid, so it judges a short cell's generations made
     # before R1-01 (easy_benign zh final on the real data). Its AuditKIT record then loaded the split outside
     # the record's refusal handling: ShortCellError was a traceback after the judgements were written, and no
     # later cell of the line ran. The record is refused with the error's remedy now (and the lines that then
-    # make it), the other cells are judged and recorded, and the line exits 3.
+    # make it), the other cells are judged and recorded, and the line exits 3. W3 (run-read, VERIFY-5): the
+    # remedy's lift generate line was in the judge run's precision (bf16 here, an API judge without --dtype),
+    # which lift generate refuses over the T4's fp16 cell; it is in the cell's own precision now.
     from lift.judge import pipeline
     from lift.judge.pipeline import JudgeOutcome
 
@@ -853,7 +856,7 @@ def test_judge_refuses_a_short_cells_record_with_its_remedy_and_exits_3(tmp_path
     frozen_cell(tmp_path, monkeypatch)
     pids = [f"prb-test-{i:04d}" for i in range(4)]
     for lang in ("zh", "en"):
-        frozen_generations(lang, [p for p in pids if lang == "en" or p != SHORT_PID])
+        frozen_generations(lang, [p for p in pids if lang == "en" or p != SHORT_PID], dtype=made)
     monkeypatch.setattr(pipeline, "judge_dir", lambda role: "frontier")
     monkeypatch.setattr(pipeline, "make_judge", lambda *a, **kw: Judge())
     monkeypatch.setattr("lift.lang.LangID", FakeLID)
@@ -863,6 +866,7 @@ def test_judge_refuses_a_short_cells_record_with_its_remedy_and_exits_3(tmp_path
     judged_n = [len(pipeline.load_judgements("stock", "easy_benign", lang, "final")) for lang in ("zh", "en")]
     assert judged_n == [3, 4] and recorded == ["en"]
     generate = "lift generate --variant stock --split final --sets easy_benign --langs zh"
+    generate += " --dtype fp16" if made == "fp16" else ""          # generation.dtype (bf16) is not named
     assert (f"  easy_benign_zh_final: short of its frozen split: {short_remedy()}; then, after a later job's "
             f"`lift sync pull`, `{generate}` makes the prompts the completed file adds, and the line that "
             "failed judges them and writes the record\n") in caplog.text
