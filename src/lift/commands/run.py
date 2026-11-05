@@ -763,6 +763,14 @@ other judge's judgements it set aside, a judge run-dev never runs: the second ju
 list (drawn again first when the cell's generation keys changed: a fixed prompt text or another
 configuration), or with --sample 0.10 while P04 has drawn none.
 
+A utility cell (--sets utility --langs hi) holds lift utility's answers. Its whole-cell restart also
+retires what lift utility derived from them, in every precision, copied aside and left empty in the same
+way: both judge dirs' verdict files (their copies named *.jsonl.aside, which P04's verdict scan passes
+over), the metrics, the AuditKIT utility records and the answer check (outputs/utility/checked/), of the
+variant and, for stock, of every candidate that holds any (each was paired with stock's answers), when
+the cell's answer file is here (one that is not was not started over). The log names the line that fills
+them again for each: lift utility --variant <candidate> --split <split>.
+
 --dtype is the precision this job makes the cells in (default: generation.dtype; the T4 passes
 --dtype fp16, as its restart lines say). A cell made in another precision is refused, and nothing is
 set aside: a restart would discard its outputs, which this precision cannot make again. --force
@@ -801,9 +809,30 @@ def _other_precision_refused(variant: str, split: str, cells: Sequence[tuple[str
     return bool(other) and not force
 
 
+UTILITY_CELL = ("utility", "hi")       # lift.utility's SET and LANG: the answers lift utility judges
+
+
+def _retire_utility(variant: str, split: str, *, aside: Path) -> tuple[int, list[str]]:
+    """Retire what lift utility derived from the answers a restart of ``variant``'s utility cell sets aside
+    (``lift.utility.retire``, every precision): the variant's own files (a candidate's verdicts, metrics,
+    AuditKIT utility records and answer check; stock's answer check) and, for stock, every candidate's that
+    holds any (``lift.utility.holders``), each having been paired with stock's answers. Logged by path;
+    returns how many files were retired and the candidates whose ``lift utility`` line fills them again."""
+    from lift import utility
+
+    candidates = utility.holders(split) if variant == utility.REFERENCE else [variant]
+    n = 0
+    for name in dict.fromkeys([variant, *candidates]):
+        for path, _records, copy in utility.retire(name, split, aside=aside):
+            if copy is not None:
+                n += 1
+                log.info("%s: lift utility's file retired: copied to %s and left empty", path, aside)
+    return n, candidates
+
+
 def _restart(args: argparse.Namespace) -> int:
     _logging()
-    from lift.models.generate import aside_root, restart_cell
+    from lift.models.generate import aside_root, generations_path, restart_cell
     from lift.models.variants import get_spec
     from lift.paths import judgements_dir
 
@@ -823,8 +852,9 @@ def _restart(args: argparse.Namespace) -> int:
     if _other_precision_refused(args.variant, args.split, cells, dtype, force=args.force):
         return 1
     aside = aside_root()
-    emptied, retired = 0, 0
+    emptied, retired, retired_utility = 0, 0, 0
     refills: list[tuple[Path, str]] = []
+    utility_refills: list[str] | None = None        # set when a utility cell was started over whole
     for set_name, lang in cells:
         done = restart_cell(args.variant, set_name, lang, args.split, aside=aside, judge_dir=judge)
         for path, n, copy in done:
@@ -842,18 +872,31 @@ def _restart(args: argparse.Namespace) -> int:
         set_aside = [p for p, _n, copy in done if copy is not None and p.is_relative_to(judgements_dir())]
         refills += _refills(args.variant, set_name, lang, args.split, set_aside,
                             judged=args.judge or "primary", dtype=dtype)
-    if not emptied + retired:
+        answers = generations_path(args.variant, set_name, lang, args.split)
+        if judge is None and (set_name, lang) == UTILITY_CELL and answers.is_file():   # here: started over
+            n_files, utility_refills = _retire_utility(args.variant, args.split, aside=aside)
+            retired_utility += n_files
+    if not emptied + retired + retired_utility:
         return 0
     precision = f", with --dtype {dtype}" if dtype != _dtype(None) else ""
+    fills = []
     if args.judge:
-        refill = (f"the line that failed judges the cell again (lift judge --judge {args.judge}, or lift "
-                  f"run-dev for the primary judge{precision})")
-    else:
-        refill = ("the line that failed (lift run-dev, or lift generate then lift judge"
-                  f"{precision}) fills the generations, the primary judge's judgements and its AuditKIT "
-                  "record again")
-    log.info("%d file(s) emptied and %d AuditKIT record(s) retired: the next lift sync push replaces the "
-             "runs repo's copies (an empty record is retired there too), and %s", emptied, retired, refill)
+        fills.append(f"the line that failed judges the cell again (lift judge --judge {args.judge}, or lift "
+                     f"run-dev for the primary judge{precision})")
+    elif any(cell != UTILITY_CELL for cell in cells):
+        fills.append("the line that failed (lift run-dev, or lift generate then lift judge"
+                     f"{precision}) fills the generations, the primary judge's judgements and its AuditKIT "
+                     "record again")
+    if utility_refills is not None:
+        tail = f" --split {args.split}{_dtype_flag(dtype)}`"
+        lines = [f"`lift utility --variant {c}{tail}" for c in utility_refills]
+        lines = lines or [f"`lift utility --variant <candidate>{tail} (any candidate's line makes stock's "
+                          "answers again)"]
+        fills.append(f"the utility cell's answers, verdicts, metrics and AuditKIT utility records are filled "
+                     f"again by {', '.join(lines)}, one line per candidate (the line that failed among them)")
+    log.info("%d file(s) emptied, %d AuditKIT record(s) and %d of lift utility's files retired: the next "
+             "lift sync push replaces the runs repo's copies (an empty record is retired there too), and %s",
+             emptied, retired, retired_utility, "; and ".join(fills))
     if refills:
         redraw = ("; when its generation keys changed (a fixed prompt text or another configuration, as the "
                   f"listing that named this restart says), run a --keys line only {REDRAW}")
