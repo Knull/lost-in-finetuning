@@ -158,6 +158,25 @@ def test_primary_judge_refuses_subsets():
         args.func(args)
 
 
+@pytest.mark.parametrize("command", ["generate", "run-dev"])
+@pytest.mark.parametrize("flag, value", [("--batch-size", "-1"), ("--batch-size", "0"), ("--limit", "-3"),
+                                         ("--limit", "0")])
+def test_a_batch_size_or_limit_below_one_is_refused_before_a_model_loads(command, flag, value, monkeypatch,
+                                                                         capsys):
+    # R2-14: both flags took any int. A negative --batch-size made generate() decode empty batches for ever
+    # (the job held the GPU until its deadline), --limit 0 meant no limit and --limit -N cut each cell's last
+    # N prompts, all with exit 0. A value below 1 is refused at parse now (exit 2), before a model loads.
+    pin(judge=True)
+    monkeypatch.setattr("lift.models.variants.build_variant", lambda *a, **kw: pytest.fail("a model loaded"))
+    argv = {"generate": ["generate", "--variant", "stock", "--split", "dev"],
+            "run-dev": ["run-dev", "--variant", "stock"]}[command]
+    with pytest.raises(SystemExit) as exc:
+        main([*argv, "--device", "cpu", flag, value])
+    assert exc.value.code == 2
+    assert f"argument {flag}: must be at least 1, got {value}" in capsys.readouterr().err
+    assert getattr(build_parser().parse_args([*argv, flag, "1"]), flag[2:].replace("-", "_")) == 1
+
+
 def test_study_commands_refuse_unpinned_revisions():
     # configs/project.yaml still says revision: main until Gate 0's shas are pinned.
     parser = build_parser()

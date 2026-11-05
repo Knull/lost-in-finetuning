@@ -829,6 +829,19 @@ def test_out_of_memory_halves_the_batch_and_never_skips(stock, tmp_path, monkeyp
         run(stock, tmp_path / "dead.jsonl", batch_size=2)
 
 
+@pytest.mark.parametrize("batch_size", [0, -1, -8])
+def test_a_batch_size_below_one_is_refused_before_anything_is_decoded(stock, tmp_path, monkeypatch,
+                                                                      batch_size):
+    # R2-14: generate() kept any truthy batch size. A negative one decoded empty batches for ever (todo[i:i +
+    # size] is empty once i + size <= i, and i never moves), logging a progress line each time; 0 meant
+    # "chosen from free memory". Refused now, as judge_file refuses its batch_size.
+    monkeypatch.setattr(gen, "greedy_batch", lambda *a, **kw: pytest.fail("a batch was decoded"))
+    path = tmp_path / "g.jsonl"
+    with pytest.raises(ValueError, match=rf"batch_size must be at least 1, got {batch_size}"):
+        gen.generate(stock, prompts(), out_path=path, batch_size=batch_size, max_new_tokens=CAP)
+    assert not path.exists()
+
+
 def test_too_long_prompt_raises_instead_of_truncating(stock, tmp_path):
     long = make_prompt("p-long", text="x" * 700)
     with pytest.raises(ValueError, match="p-long"):
