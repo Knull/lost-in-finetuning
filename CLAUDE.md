@@ -247,6 +247,6 @@ six languages, so pairing, splitting and clustering all go by pid.
     Hindi fidelity, `audit.record_utility`; `--generate-only` on the GPU, `--judge-only` on the
     laptop; judge.local_pairwise is the Qwen3-8B fallback, used only when asked for).
   - `lift belebele` and `lift heldout-loss` (models.loglik; scores in outputs/scores/).
-  - `lift gate 1|2` (lift.gates; outputs/metrics/gate{1,2}.json and .md). Decisions 49-53.
+  - `lift gate 1|2` (lift.gates; outputs/metrics/gate{1,2}.json and .md). Decisions 50-54.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

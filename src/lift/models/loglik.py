@@ -2,7 +2,7 @@
 the utility set's reference answers. Both are forward passes only, through one batched, resumable,
 cache-keyed scorer that treats every variant alike.
 
-Belebele (decisions.md items 10 and 52). The prompt is frozen and the same for every variant, with no
+Belebele (decisions.md items 10 and 53). The prompt is frozen and the same for every variant, with no
 chat template: lm-evaluation-harness's Belebele template (lm_eval/tasks/belebele/_default_template_yaml),
 which strips the question (``{{question.strip()}}``) and inserts the passage and the four options as
 published, so their few trailing spaces stay.
