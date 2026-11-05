@@ -292,9 +292,12 @@ secrets getter, and the `lift_env` path in cell 2.
   `lift restart` moves the cell's generations, judgements and AuditKIT records (with `--judge`,
   only that judge's judgements and records) under `outputs/.aside/`, which is never synced, and
   leaves empty files in their place; an empty record is retired, and readers skip it. The
-  checkpoint push after it then replaces the runs repo's copies (if another machine pushed the cell
-  since this machine's last sync, it keeps them and reports a conflict instead, emptied here by lift
-  restart, which `lift sync push --force` settles), and the job regenerates that cell
+  checkpoint push after it then replaces the runs repo's copies (if another machine pushed only
+  files the restart emptied since this machine's last sync, the push keeps the runs repo's copies
+  and reports a conflict instead, which `lift sync push --force` settles by completing the
+  restart; if it pushed any other file of the cell, such as more generations after a `--judge`
+  restart, the summary names its own remedy: for those, `lift sync pull`, then `lift sync push`),
+  and the job regenerates that cell
   and reuses the others. A restart without `--judge` also empties the other judges' judgements,
   which `lift run-dev` does not refill: its log names the line that does, such as
   `lift judge ... --judge second` with P04's `--keys` list (`--sample 0.10` when P04 has drawn
@@ -361,6 +364,15 @@ secrets getter, and the `lift_env` path in cell 2.
     judgements over with the `lift restart ... --judge` line it prints, as for a stale cell. A file
     that differs only in its rules tag (the labelling rules changed since it was judged) can only be
     judged again: its message names only the restart line, and the old judge never finishes it.
+  - A cell short of its frozen split (most often translation failures that await a reader's
+    verdict): nothing was generated for it. Do what its listing says on the laptop first (the
+    language's failures sheet filled in, `lift data apply-spotchecks`, then `lift sync push`); a
+    later job's `lift sync pull` brings the completed prompt file, and the same line makes the cell.
+  - A cell whose decoding went non-finite (a NaN or +inf score, as an fp16 overflow gives; nothing
+    of that batch was written): a non-finite fp16 run is not reported (decisions item 27), so the
+    cell is made in bf16 on Colab, by a job with its `lift restart ... --dtype fp16` line right
+    after `lift sync pull` when its file holds fp16 records, then the line that failed without
+    `--dtype`. In bf16 it is a fault to report (CLAUDE.md rule 9).
   - A refused AuditKIT record: its error, above the list, says why; on a T4 it is most often the
     fp16 licence, which does not cover the cell (step 3 of the first jobs above). The judgements
     are written, so once that is fixed, the next run of the line writes the record.

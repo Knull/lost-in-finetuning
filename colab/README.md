@@ -231,12 +231,26 @@ exits 1. Any other failing line still ends the job. A cell is skipped when:
   that judge, or the printed `lift restart ... --judge ROLE` line. A file that differs only in its
   rules tag (the labelling rules changed since it was judged) can only be judged again: its message
   names only the restart line, and running with the old judge never finishes it.
+- **It is short of its frozen split** (`lift generate`, `lift run-dev`): its prompt file lacks some
+  of the split's frozen pids, most often translation failures that await a reader's verdict, and
+  nothing is generated for it. Its remedy comes first, on the laptop, as its listing says: most
+  often the language's failures sheet filled in, `lift data apply-spotchecks`, then
+  `lift sync push`. The line exits 3 and the job goes on; a later job's `lift sync pull` brings the
+  completed prompt file, and the same line makes the cell.
+- **Its decoding went non-finite** (`lift generate`, `lift run-dev`): a NaN or +inf score, as an
+  fp16 overflow gives, so nothing of that batch was written. A T4's fp16 cell is made in bf16 here
+  instead: its `lift restart ... --dtype fp16` line first, right after `lift sync pull`, when its
+  file holds fp16 records, then the line that failed without `--dtype`. In bf16 it is a fault to
+  report (CLAUDE.md rule 9), never one to tune around.
 
 `lift restart` moves the cell's files to `outputs/.aside/<UTC stamp>/` on the VM, which is never
 synced, and leaves each one empty; it empties the cell's AuditKIT records too (an empty record is a
 retired one). The checkpoint push after it replaces the runs repo's copies with the empty files (if
-another machine pushed the cell since this machine's last sync, it keeps the runs repo's copies and
-reports a conflict instead, emptied here by lift restart, which `lift sync push --force` settles), and
+another machine pushed only files the restart emptied since this machine's last sync, the push keeps
+the runs repo's copies and reports a conflict instead, which `lift sync push --force` settles by
+completing the restart; if it pushed any other file of the cell, such as more generations after a
+`--judge` restart, the summary names its own remedy: for those, `lift sync pull`, then
+`lift sync push`), and
 the line after it refills them. With `--judge ROLE` it does this only for that judge's file and
 records. Its log names the `lift judge ... --judge ROLE` line (with P04's `--keys` for the second
 judge) that refills another judge's file it set aside: `lift run-dev` refills only the primary's. It

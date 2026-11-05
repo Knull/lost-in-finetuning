@@ -46,11 +46,14 @@ LABELS_VERSION = 1
 """The version of the labelling rules. Bump it on any change to code that decides a stored label or flag:
 ``map_qwen3guard``, ``map_frontier``, ``final_label``, ``unclear_flags``, the language-mass rule
 (``language_mass``), ``repetition_ratio``, the Qwen3Guard output parser (lift.judge.qwen3guard), the
-frontier reply parser (``lift.judge.frontier.parse_safety_reply``) and the pipeline's label glue
+frontier reply parser (``lift.judge.frontier.parse_safety_reply``), the pipeline's label glue
 (lift.judge.pipeline: ``_flags``, ``EMPTY_OUTPUT_LID``, ``_judgement``, and the judge_label that
-``Qwen3GuardAdapter._outcome`` and ``FrontierAdapter.judge`` make of a reply). It moves ``rules_tag``, and
+``Qwen3GuardAdapter._outcome`` and ``FrontierAdapter.judge`` make of a reply) and the input handling of
+``lift.lang.LangID.top`` (``has_visible`` and its [``BLANK``], ``model_line``, ``space_han``), which decides
+the stored ``flags.lid_top`` and with it garbled, wrong_lang and code_mixed. It moves ``rules_tag``, and
 with it every judge id. Nothing else does for a code change: a frontier judge id names its rubric file,
-not its parser, and a Qwen3Guard id names the model, not lift's code."""
+not its parser, a Qwen3Guard id names the model, not lift's code, and ``rules_tag`` hashes the GlotLID
+entry ``langid`` (the model, its revision and ``min_prob``), not lift.lang's code."""
 
 
 def rules_tag() -> str:
