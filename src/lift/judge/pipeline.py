@@ -69,7 +69,8 @@ Reading:
   version and the sampling settings of the role's entry too: an edited rubric is another judge).
   A variant that names an adapter (the adapter method, every repair) is read only when its entry pins
   ``artifacts.adapter`` (an adapter's own entry: lift register-adapter writes it; a repair's: its
-  adapter's hash) and every other entry of method adapter that names that adapter pins the same hash (an
+  adapter's hash), an entry of method adapter names that adapter (none is left once the adapter is
+  un-registered), and every other entry of method adapter that names that adapter pins the same hash (an
   adapter trained and registered again changes only its own entry, which leaves its repairs' pins stale),
   else its cell is refused naming the registry.
   ``dtype`` defaults to ``generation.dtype`` (one precision for every reported number); any other needs Gate
@@ -1219,7 +1220,10 @@ def _adapter_pin_problems(variant: str) -> list[str]:
     adapter's hash), and every other entry of method adapter that names the same adapter (the adapter's
     own entry) must pin that hash too: an adapter trained and registered again changes only its own entry,
     so a repair entry still pinning the old hash is stale, and its cells, made from the old weights, would
-    read and pair with the new adapter arm (``PAIR_MUST_MATCH`` has no adapter field)."""
+    read and pair with the new adapter arm (``PAIR_MUST_MATCH`` has no adapter field). At least one entry
+    of method adapter must name that adapter (a variant of method adapter is one): a repair of an adapter
+    the registry no longer lists (P03 un-registers one whose fp32 merge parity failed, which nothing may
+    evaluate) has no pin to be held to, so its cells, whatever weights made them, are never read."""
     from lift.models.variants import load_registry
 
     registry = load_registry()
@@ -1249,6 +1253,14 @@ def _adapter_pin_problems(variant: str) -> list[str]:
                         f"Re-register {variant} with {other.name}'s current pin (its artifacts.adapter in "
                         "configs/variants.yaml), then make its cells again: their read then names each "
                         "cell's lift restart line")
+    if not any(other.method == "adapter" and other.adapter == spec.adapter for other in registry.values()):
+        problems.append(f"{variant}'s entry in configs/variants.yaml names adapter {spec.adapter}, but no "
+                        "entry of method adapter names it: a cell of a variant that names an adapter is read "
+                        "only while an entry of method adapter names that adapter with the same pin (the "
+                        "adapter's own entry, which `lift register-adapter` writes, and removes when the "
+                        "adapter's fp32 merge parity fails: nothing may evaluate it then). Register the "
+                        f"adapter again (`lift register-adapter {spec.adapter}`) before {variant}'s cells "
+                        f"are read, and re-register {variant} if its pin is not the one that entry pins")
     return problems
 
 
@@ -1256,9 +1268,9 @@ def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRec
                 cell: tuple[str, str, str, str], *, role: str, complete: bool, dtype: str) -> None:
     """Raise unless ``records`` can be reported (the rules are in the module docstring). A variant whose
     spec names an adapter (the adapter method, every P05 repair) is read only under the adapter hash its
-    configs/variants.yaml entry pins (artifacts.adapter), and only while every entry of method adapter that
-    names that adapter pins the same hash (``_adapter_pin_problems``), so the per-cell adapter_hash check
-    holds a repair arm and its adapter arm to one set of weights."""
+    configs/variants.yaml entry pins (artifacts.adapter), and only while an entry of method adapter names
+    that adapter and every such entry pins the same hash (``_adapter_pin_problems``), so the per-cell
+    adapter_hash check holds a repair arm and its adapter arm to one set of weights."""
     variant, set_name, lang, split = cell
     texts = {p.pid: p.text for p in prompts.load(set_name, lang, split)}
     gen_of = {g.key: g for g in gens}
