@@ -132,6 +132,58 @@ def test_indicalign_rows_apply_the_dolly_context_rule():
         sft.indicalign_rows(bad, dolly_rows())
 
 
+# R1-21: Dolly_T rows whose Hindi pair is answer first while the English pair is in Dolly's order, and
+# in-order controls. Placeholder text; each long part is about 10x its short one.
+SHORT_EN, LONG_EN = "Placeholder request about kites", "Placeholder answer about kites. " * 10
+SHORT_HI, LONG_HI = "पतंग के बारे में नमूना अनुरोध", "पतंग के बारे में नमूना उत्तर। " * 10
+REVERSED_PAIRS = {       # Dolly_T row: (English pair, Hindi pair)
+    635: ((SHORT_EN + "?", LONG_EN), (LONG_HI, SHORT_HI + "?")),          # both signs, like row 635
+    636: (("Placeholder question about tea?", "Placeholder answer about tea."),
+          ("चाय के बारे में नमूना उत्तर।", "चाय के बारे में नमूना प्रश्न?")),   # the "?" endings only
+    637: ((SHORT_EN, LONG_EN), (LONG_HI, SHORT_HI)),                       # the lengths only
+}
+IN_ORDER_PAIRS = {
+    640: ((SHORT_EN + "?", LONG_EN), (SHORT_HI + "?", LONG_HI)),
+    641: ((SHORT_EN + "?", LONG_EN), (SHORT_HI, LONG_HI)),                 # the Hindi lost its "?"
+    642: ((SHORT_EN, LONG_EN), ("पतंग के बारे में नमूना उत्तर। " * 2, SHORT_HI)),  # 2x the other way, under 3x
+}
+
+
+def dolly_t(row, en, hi):
+    """A Dolly_T hub row (English pair ``en``, Hindi pair ``hi``) and the context-free
+    databricks-dolly-15k record its English instruction matches."""
+    return ({"doc_id": f"doc-{row:04d}", "eng_Latn": [list(en)], "hin_Deva": [list(hi)], "_row": row},
+            {"instruction": en[0], "context": "", "response": en[1], "category": "open_qa", "_row": row})
+
+
+def test_indicalign_rows_drop_a_hindi_pair_reversed_against_its_english():
+    """R1-21: in 5 rows of the pinned Dolly_T hin_Deva[0] is answer first; such a row is dropped and
+    counted, never kept with the answer as its instruction (nor swapped: both signs are heuristics)."""
+    made = [dolly_t(row, en, hi) for row, (en, hi) in {**REVERSED_PAIRS, **IN_ORDER_PAIRS}.items()]
+    rows, counts = sft.indicalign_rows([r for r, _ in made], [d for _, d in made])
+    assert {r.hf_row: [r.instruction, r.response] for r in rows} == {
+        row: list(hi) for row, (_, hi) in IN_ORDER_PAIRS.items()}
+    assert counts == Counter(kept=3, hindi_reversed=3, had_context=0, no_match=0)
+
+
+def test_reversed_rows_are_counted_in_the_report_and_reach_no_export(data_dir):
+    """R1-21: loaded stays every hub row (kept plus every drop reason), the report lists
+    hindi_reversed, and no training export holds a reversed pair."""
+    made = [dolly_t(row, en, hi) for row, (en, hi) in REVERSED_PAIRS.items()]
+    hub_rows = indicalign_rows() + [r for r, _ in made]
+    hub = SftHub({"aya_dataset": aya_dataset_rows(), "indicalign": hub_rows,
+                  "dolly": dolly_rows() + [d for _, d in made]})
+    pools = sft.load_pools(cfg=CFG, hub=hub, lid=FakeLID())
+    counts = pools["indicalign"][1]
+    assert (counts["loaded"], counts["hindi_reversed"], counts["kept"]) == (len(hub_rows), 3, 14)
+    assert counts["loaded"] == sum(v for k, v in counts.items() if k != "loaded")
+    report, _, _ = build(pools, rows=1000)
+    assert report["sources"]["indicalign"]["loaded"] == len(hub_rows)
+    assert report["sources"]["indicalign"]["dropped"]["hindi_reversed"] == 3
+    exported = {r["id"] for p in (data_dir / "sft").rglob("sft_messages.jsonl") for r in read_jsonl(p)}
+    assert exported and exported.isdisjoint(f"ind-{row:05d}" for row in REVERSED_PAIRS)
+
+
 def test_clean_pool_counts_every_drop_reason():
     extra = [SftRow("aya", 90, 900, " \u200b ", "यह उत्तर है पर प्रश्न खाली है।"),
              SftRow("aya", 91, 901, "  \u200bटमाटर कब लगाएँ?  ",

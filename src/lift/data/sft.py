@@ -12,10 +12,17 @@ verified on Nov 3 at the revisions pinned in configs/project.yaml (``sources.sft
   context passage from every closed_qa, information_extraction and summarization row, which then
   asks about a text the model never sees. A row is kept only if its English instruction (NFC,
   whitespace collapsed; 19 rows match only after that) equals a databricks-dolly-15k instruction
-  and no record with that instruction has a context: 10,526 kept, 4,482 had a context, 3 match none.
+  and no record with that instruction has a context (10,526 rows; 4,482 had a context, 3 match
+  none), and its Hindi pair is in its English pair's order. hin_Deva[0] is answer first in 5 rows,
+  635, 2496, 5630, 7510 and 13137 (checked Nov 5, all 15,011 rows being 1 turn of 2 parts): their
+  "?" endings mirror the English pair's and, in all but 13137, so do their lengths (both ratios
+  over 3, in opposite directions). ``_hindi_reversed`` flags exactly these; 7510 and 13137 had a
+  context, the other 3 are dropped as hindi_reversed: 10,523 kept.
 
 Pipeline (build.py drives it; ``build_candidate`` does one candidate end to end), with the Nov 3
-counts as aya / indicalign:
+counts as aya / indicalign. Two Nov 5 fixes take 3 more rows out of each pool before CuratorKIT
+(indicalign's reversed pairs in step 1, aya rows in step 3), so later builds count fewer;
+sft/report.json holds each build's counts:
 1. ``load_pools``: ``clean_pool`` applies clean_text to both fields and drops, counting the reason,
    empty fields, an instruction or response GlotLID does not read as Hindi, and a response whose
    character 10-gram repetition exceeds unclear.max_repetition_ratio (the judge's "repetitive"
@@ -34,10 +41,9 @@ counts as aya / indicalign:
    of EITHER source, from BOTH training pools: 1,000 -> 790 / 10,322 -> 10,144. Near-duplicate
    (``heldout.near_dup``): exact character 3-gram Jaccard (the quantity MinHash estimates) of the
    instructions >= 0.7, or of the responses >= 0.85, at any length (decisions item 24; a text
-   under 3 characters is its own single gram); empty texts never match. The counts here and in
-   step 4 predate the Nov 5 removal of a 20-character answer minimum item 24 never had: without it
-   3 more aya rows match (two copy the 11- and 13-character answers of final utility items), so
-   aya keeps 787.
+   under 3 characters is its own single gram); empty texts never match. Until Nov 5 answers under
+   20 characters were skipped, a minimum item 24 never had: without it 3 more aya rows match (two
+   copy the 11- and 13-character answers of final utility items), leaving 787.
 4. ``build_candidates``: CuratorKIT's no-API path on each training pool (``run_curatorkit``): schema
    gate, exact then MinHash dedup (0.85 on character 3-grams; the first copy in row-id order stays;
    the ``raw`` stress pool skips dedup), cleaning with strip_html and collapse_whitespace off:
@@ -146,17 +152,36 @@ def _dolly_key(text: str) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text or "")).strip()
 
 
+def _hindi_reversed(eng: Sequence[str | None], hin: Sequence[str | None]) -> bool:
+    """Is a Dolly_T row's Hindi pair in the reverse order of its English (instruction, response)
+    pair? Either sign is enough: the "?" endings are mirrored (the English instruction ends in "?"
+    and its response does not, while Hindi part 0 does not and part 1 does), or log(len0 / len1) of
+    the English pair and of the Hindi pair both exceed log 3, with opposite signs. Texts are
+    compared after clean_text; a pair without exactly 2 parts is never called reversed."""
+    if len(eng) != 2 or len(hin) != 2:
+        return False
+    e0, e1, h0, h1 = (clean_text(t or "") for t in (*eng, *hin))
+    if e0.endswith("?") and not e1.endswith("?") and not h0.endswith("?") and h1.endswith("?"):
+        return True
+    if not (e0 and e1 and h0 and h1):
+        return False
+    en, hi = math.log(len(e0) / len(e1)), math.log(len(h0) / len(h1))
+    return min(abs(en), abs(hi)) > math.log(3) and (en > 0) != (hi > 0)
+
+
 def indicalign_rows(rows: Iterable[Mapping[str, Any]],
                     dolly_rows: Iterable[Mapping[str, Any]]) -> tuple[list[SftRow], Counter[str]]:
     """Hub "indicalign" rows (Dolly_T: doc_id, eng_Latn, hin_Deva, _row) -> SftRow, applying the
     Dolly context rule. Counts: kept, had_context (some matching Dolly record has a context),
-    no_match (the English instruction matches no Dolly record)."""
+    no_match (the English instruction matches no Dolly record), hindi_reversed (hin_Deva[0] is in
+    the reverse order of eng_Latn[0], ``_hindi_reversed``: dropped rather than swapped, as both of
+    its signs are heuristics)."""
     has_context: dict[str, bool] = {}
     for d in dolly_rows:
         key = _dolly_key(d["instruction"])
         has_context[key] = has_context.get(key, False) or bool((d.get("context") or "").strip())
     out: list[SftRow] = []
-    counts: Counter[str] = Counter(dict.fromkeys(("kept", "had_context", "no_match"), 0))
+    counts: Counter[str] = Counter(dict.fromkeys(("kept", "had_context", "no_match", "hindi_reversed"), 0))
     for r in sorted(rows, key=lambda r: int(r["_row"])):
         key = _dolly_key(r["eng_Latn"][0][0])
         if key not in has_context:
@@ -168,6 +193,9 @@ def indicalign_rows(rows: Iterable[Mapping[str, Any]],
         turn = r["hin_Deva"][0]
         if len(turn) != 2:
             raise ValueError(f"Dolly_T row {r['_row']}: hin_Deva turn has {len(turn)} parts, expected 2")
+        if _hindi_reversed(r["eng_Latn"][0], turn):
+            counts["hindi_reversed"] += 1
+            continue
         out.append(SftRow("indicalign", int(r["_row"]), int(r["_row"]), turn[0] or "", turn[1] or "",
                           {"doc_id": r["doc_id"]}))
         counts["kept"] += 1
@@ -204,7 +232,8 @@ def clean_pool(rows: Iterable[SftRow], lid: Any, *,
 def load_pools(*, cfg: Mapping[str, Any] | None = None, hub: Any = None,
                lid: Any = None) -> dict[str, tuple[list[SftRow], Counter[str]]]:
     """The two cleaned pools with their counts: loaded, every drop reason (indicalign also
-    had_context and no_match), kept. hub None -> sources.HFHub(cfg); lid None -> LangID(cfg=cfg)."""
+    had_context, no_match and hindi_reversed), kept. hub None -> sources.HFHub(cfg); lid None ->
+    LangID(cfg=cfg)."""
     cfg = cfg if cfg is not None else config.load("project")
     if hub is None:
         from lift.data.sources import HFHub
@@ -220,7 +249,8 @@ def load_pools(*, cfg: Mapping[str, Any] | None = None, hub: Any = None,
     pools: dict[str, tuple[list[SftRow], Counter[str]]] = {}
     for name, rows, before in (("aya", aya, Counter()),
                                ("indicalign", ind, Counter(had_context=ctx["had_context"],
-                                                           no_match=ctx["no_match"]))):
+                                                           no_match=ctx["no_match"],
+                                                           hindi_reversed=ctx["hindi_reversed"]))):
         pool, counts = clean_pool(rows, lid, cfg=cfg)
         loaded = len(rows) + sum(before.values())
         pools[name] = (pool, Counter({"loaded": loaded, **before, **counts}))
