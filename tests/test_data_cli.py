@@ -246,6 +246,33 @@ def test_stats_sheets_and_apply_on_a_built_fixture(dirs, monkeypatch, capsys, ca
     assert "verdict must be ok, fixed or bad" in caplog.text and rows[1]["translation"] not in caplog.text
 
 
+def test_stats_marks_the_sft_exports_a_trainer_refuses_as_stale(dirs, monkeypatch, capsys):
+    # R2-01: lift data stats checks the exports under the context's configs (a fresh build is not stale),
+    # and prints each reason a trainer refuses them, here a report.json with no rules stamp (the Nov 4 build)
+    use_fixtures(monkeypatch)
+    assert main(["data", "build", "--only", "utility", "sft", "--langs", "hi"]) == 0
+    capsys.readouterr()
+    assert main(["data", "stats"]) == 0
+    assert "stale" not in capsys.readouterr().out
+    root = dirs.data / "sft"
+    for path in [root / "report.json", *root.rglob("selection.json")]:         # as the Nov 4 build wrote them
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        del doc["rules"]
+        path.write_text(json.dumps(doc), encoding="utf-8")
+    assert main(["data", "stats"]) == 0
+    lines = [line for line in capsys.readouterr().out.splitlines() if "stale" in line]
+    assert len(lines) == 1 and lines[0].startswith("  stale: data/sft/report.json carries no rules stamp")
+    assert lines[0].endswith("rebuild with `lift data build --only sft`, then `lift sync push`")
+    assert main(["data", "stats", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["sft"]["status"] == "stale"
+    (root / "report.json").unlink()                                   # exports that no report lists
+    assert main(["data", "stats"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "sft: exports on disk, but no data/sft/report.json" in lines
+    assert ("  stale: data/sft/report.json is missing: rebuild with `lift data build --only sft`, then "
+            "`lift sync push`") in lines
+
+
 def test_spotcheck_sheets_are_written_and_read_under_the_validation_dir(dirs, monkeypatch, capsys, tmp_path):
     # R1 post-merge item 2: a remote runtime moves validation/ with LIFT_VALIDATION_DIR, and P04's sheets
     # and lift sync follow it. So do P01's: written there, and a filled sheet found there by the name a

@@ -18,19 +18,20 @@ from fake_build import (
     fixture_cfg,
     fixture_ctx,
     fixture_hub,
+    fixture_train_cfg,
     isolate,
     read_sheet,
     repo_state,
     snapshot,
     write_sheet,
 )
-from fake_sft import QUIRK_DRAW, aya_dataset_rows, near
+from fake_sft import QUIRK_DRAW, aya_dataset_rows, dolly_rows, indicalign_rows, near
 from fake_sources import belebele_rows_by_config, orbench_rows, redteam_rows
 
 from lift import config, manifest, prompts, splits
-from lift.data import build, polyrefuse, sources, translate
+from lift.data import build, polyrefuse, sft, sources, translate
 from lift.data.build import SheetError
-from lift.data.text import clean_text
+from lift.data.text import char_ngrams, clean_text, dup_key, jaccard
 from lift.io import read_jsonl, sha256_file, sha256_text, write_jsonl
 from lift.schemas import PromptRecord
 
@@ -276,6 +277,135 @@ def test_training_rows_never_near_duplicate_a_utility_record(dirs):
         for row in rows:
             user, assistant = (m["content"] for m in row["messages"])
             assert not [r.pid for r in util if near(user, assistant, r.text, r.extra["reference"])], row["id"]
+
+
+# R2-01: an Aya row the held-out draw takes (fixture idx 7, one of the two the project seed draws), its text
+# replaced by a question with a short answer, and a later row that rewords the question and copies the answer,
+# as aya-00017 copies utl-aya-00922's 11-character answer; and a Dolly_T row whose Hindi pair is answer first
+# (the shape of rows 635, 2496, 5630). Benign placeholder text.
+HELD_IDX, COPY_IDX, REV_ROW = 7, 18, 19
+HELD_Q = "भारत की राजधानी किस शहर में स्थित है, कृपया केवल शहर का नाम बताइए।"
+COPY_Q = "हमारे देश की सरकार कहाँ से चलती है, उस जगह का नाम क्या है?"
+ANSWER = "नई दिल्ली।"
+EN_Q = "Why do leaves change colour in autumn?"
+EN_A = ("As the days grow shorter and cooler, trees stop making chlorophyll, the green pigment; once it "
+        "breaks down, the yellow and orange pigments that were there all along show through.")
+HI_Q = "पतझड़ में पत्तों का रंग क्यों बदल जाता है?"
+HI_A = ("जैसे-जैसे दिन छोटे और ठंडे होते जाते हैं, पेड़ हरा रंग देने वाला क्लोरोफ़िल बनाना बंद कर देते हैं; उसके टूटने "
+        "पर पहले से मौजूद पीले और नारंगी रंग दिखने लगते हैं।")
+HELD_PID, COPY_ID, REV_ID = f"utl-aya-{HELD_IDX:05d}", f"aya-{COPY_IDX:05d}", f"ind-{REV_ROW:05d}"
+# what the Nov 4 build wrote (keys and file names read off the real data/sft)
+NOV4_REPORT = {"decision", "seed", "sources", "variants"}
+NOV4_DECISION = {"equal_size", "limited_by", "rows", "rows_by_variant", "rows_target"}
+NOV4_SOURCE = {"dropped", "held_out", "loaded", "near_dup_excluded", "near_dup_of", "pool", "train_pool"}
+NOV4_SELECTION = {"candidate", "counts", "curatorkit", "dedup", "ids", "rows", "rows_target", "seed",
+                  "sha256", "tag", "variant"}
+NOV4_FILES = {"report.json", "selection.json", "sft_messages.jsonl", "curatorkit_summary.json",
+              "lexsi_provenance.json", "manifest.json", "rejected.jsonl"}
+
+
+def nov4_sources():
+    aya = aya_dataset_rows()
+    aya[HELD_IDX] = {**aya[HELD_IDX], "inputs": HELD_Q, "targets": ANSWER}
+    aya.append({**aya[0], "inputs": COPY_Q, "targets": ANSWER, "_row": max(r["_row"] for r in aya) + 10})
+    ind, dolly = indicalign_rows(), dolly_rows()
+    ind.append({"doc_id": "doc-rev", "eng_Latn": [[EN_Q, EN_A]], "hin_Deva": [[HI_A, HI_Q]], "_row": REV_ROW})
+    dolly.append({"instruction": EN_Q, "context": "", "response": EN_A, "category": "open_qa",
+                  "_row": len(dolly)})
+    return {"aya_dataset": aya, "indicalign": ind, "dolly": dolly}
+
+
+def pre_r1_grams(instruction, response, nd):
+    """sft._grams before R1-20: an answer under 20 characters had no grams, so the answer rule never fired."""
+    kept = response if len(dup_key(response)) >= 20 else ""
+    return sft._Grams(char_ngrams(instruction, nd.ngram), char_ngrams(kept, nd.ngram))
+
+
+def as_of_nov4(data):
+    """Cut data/sft back to the keys and files the Nov 4 build wrote (no rules stamp, no hindi_reversed)."""
+    root = data / "sft"
+    for path in [p for p in root.rglob("*") if p.is_file() and p.name not in NOV4_FILES]:
+        path.unlink()
+
+    def cut(path, keys):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        return {k: v for k, v in doc.items() if k in keys}
+
+    report = cut(root / "report.json", NOV4_REPORT)
+    report["decision"] = {k: v for k, v in report["decision"].items() if k in NOV4_DECISION}
+    for name, src in report["sources"].items():
+        src = {k: v for k, v in src.items() if k in NOV4_SOURCE}
+        src["dropped"] = {k: v for k, v in src["dropped"].items() if k != "hindi_reversed"}
+        report["sources"][name] = src
+    report["variants"] = {k: {f: v[f] for f in v if f in NOV4_SELECTION - {"ids"}}
+                          for k, v in report["variants"].items()}
+    for path, doc in [(root / "report.json", report),
+                      *((p, cut(p, NOV4_SELECTION)) for p in root.rglob("selection.json"))]:
+        path.write_text(json.dumps(doc, indent=1, ensure_ascii=False, sort_keys=True) + "\n",
+                        encoding="utf-8", newline="\n")
+
+
+def sft_view(cfg, **train):
+    """What `lift data stats` says about the SFT build: its JSON entry and its lines of text (``train``:
+    a train_cfg; by default stats reads configs/train.yaml, as the command does)."""
+    st = build.stats(cfg=cfg, **train)
+    lines = build.format_stats(st).splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("sft"))
+    end = next((i for i, line in enumerate(lines) if line.startswith("last build")), len(lines))
+    return json.dumps(st["sft"], sort_keys=True, ensure_ascii=False) + "\n" + "\n".join(lines[start:end])
+
+
+def test_an_sft_export_built_under_the_pre_r1_rules_is_marked_stale(dirs, monkeypatch):
+    """R2-01: the Nov 4 exports (the pre-R1 rules: a copy of a final utility answer and a reversed Dolly_T
+    pair kept) carry no rules stamp, and their selection.json still matches each export. They must not pass
+    for a current build: lift data stats marks them stale and the trainer's check refuses them, until a
+    rebuild under the current rules, which drops both rows."""
+    committed = fixture_train_cfg(rows=3000)                           # configs/train.yaml as it stands
+    assert committed == config.load("train")
+    ctx = fixture_ctx(hub=fixture_hub(nov4_sources()), train_cfg=committed)
+    assert jaccard(char_ngrams(HELD_Q), char_ngrams(COPY_Q)) < 0.7 and len(dup_key(ANSWER)) < 20
+    with monkeypatch.context() as m:                                   # the Nov 4 build
+        m.setattr(sft, "_grams", pre_r1_grams)
+        m.setattr(sft, "_hindi_reversed", lambda eng, hin: False)
+        build.build_all(ctx=ctx, only=["utility", "sft"], langs=["hi"])
+    as_of_nov4(dirs.data)
+
+    def export_ids():
+        return {p.parent.relative_to(dirs.data / "sft").as_posix(): [r["id"] for r in read_jsonl(p)]
+                for p in sorted((dirs.data / "sft").rglob("sft_messages.jsonl"))}
+
+    # the held-out row is a FINAL utility item, the Aya export trains on a copy of its answer, the IndicAlign
+    # exports on the reversed pair, and every selection.json matches its export
+    utility = {r.pid: r for r in build.load_prompts("utility", "hi")}
+    stale = export_ids()
+    assert splits.load_split("utility")[HELD_PID] == "final"
+    assert utility[HELD_PID].extra["reference"] == ANSWER and COPY_ID in stale["aya/dedup"]
+    assert REV_ID in stale["indicalign/dedup"] and REV_ID in stale["indicalign/raw"]
+    for key in stale:
+        sel = json.loads((dirs.data / "sft" / key / "selection.json").read_text(encoding="utf-8"))
+        assert sel["sha256"] == sha256_file(dirs.data / "sft" / key / "sft_messages.jsonl")
+    assert sft.near_duplicates([sft.SftRow("aya", COPY_IDX, 0, COPY_Q, ANSWER)], utility.values(),
+                               cfg=ctx.cfg) == {COPY_ID: HELD_PID}
+    assert sft._hindi_reversed([EN_Q, EN_A], [HI_A, HI_Q])
+
+    shown = sft_view(ctx.cfg)
+    assert re.search(r"\bstale\b", shown), (
+        f"data/sft was built under the pre-R1 rules: aya/dedup trains on {COPY_ID}, a copy of the answer of "
+        f"the FINAL utility item {HELD_PID}, and both IndicAlign exports on the reversed pair {REV_ID}; yet "
+        f"lift data stats shows it as built, with no stale mark:\n{shown}")
+    [problem] = sft.export_problems(cfg=ctx.cfg, train_cfg=ctx.train_cfg)
+    assert problem.startswith("data/sft/report.json carries no rules stamp")
+    assert '"status": "stale"' in shown and f"\n  stale: {problem}" in shown
+
+    # a rebuild under the current rules drops both rows and is not marked stale
+    build.build_all(ctx=ctx, only=["utility", "sft"], langs=["hi"])
+    fresh = export_ids()
+    assert COPY_ID not in fresh["aya/dedup"]
+    assert REV_ID not in fresh["indicalign/dedup"] and REV_ID not in fresh["indicalign/raw"]
+    assert sft.export_problems(cfg=ctx.cfg, train_cfg=ctx.train_cfg) == []
+    assert not re.search(r"\bstale\b", sft_view(ctx.cfg), re.I)
+    # under another train config (a target of 1,000 rows) the same exports are stale
+    assert "train.rows 3000, now 1000" in sft_view(ctx.cfg, train_cfg=fixture_train_cfg(rows=1000))
 
 
 def test_sft_checks_the_frozen_utility_split_before_writing(dirs, caplog):

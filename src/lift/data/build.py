@@ -2063,13 +2063,19 @@ def _lost(before: Mapping[tuple[str, str], set[str]]) -> dict[str, list[str]]:
 # ---------------------------------------------------------------------------- stats
 
 
-def stats(*, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def stats(*, cfg: Mapping[str, Any] | None = None,
+          train_cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Counts from the prompt files (records per set, language and split) and their reports (GlotLID
     rejections, translation failures by rule, exclusions by reason type: duplicate_of,
     near_duplicate_of, same_text_as, spotcheck; cross-split duplicates and the frozen pids awaiting a
     reader's verdict of PromptRecord files; spot-check counts), the SFT row decision (sft/report.json)
     and the last build's state (build.json: complete, rerun_needed, blocked and blocked_kind, skipped,
     incomplete, short_cells). Counts and pids only.
+
+    ``sft`` also says whether the exports may be trained on: ``status`` "ok", or "stale" with
+    ``problems``, lift.data.sft.export_problems' reasons under ``cfg`` and ``train_cfg`` (default
+    configs/train.yaml), which a trainer refuses on. With no sft/report.json it is None ("not built")
+    unless an export is on disk anyway (``decision`` None, stale).
 
     ``short_cells`` (file -> split -> pids) is the cells short of their frozen split now: derived from the
     current prompt files' reports (their ``awaiting_review``), not from build.json, which only lift data
@@ -2115,10 +2121,15 @@ def stats(*, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
     sft_report = sft_dir() / "report.json"
     if sft_report.exists():
         report = json.loads(sft_report.read_text(encoding="utf-8"))
+        problems = sft.export_problems(cfg=cfg, train_cfg=train_cfg)
         out["sft"] = {"decision": report["decision"],
                       "variants": {k: {"rows": v["rows"], "curated": v["counts"]["curated"],
                                        "train_pool": v["counts"]["train_pool"]}
-                                   for k, v in sorted(report["variants"].items())}}
+                                   for k, v in sorted(report["variants"].items())},
+                      "status": "stale" if problems else "ok", "problems": problems}
+    elif any(sft_dir().glob("*/*/sft_messages.jsonl")):       # exports without the report that lists them
+        out["sft"] = {"decision": None, "variants": {}, "status": "stale",
+                      "problems": sft.export_problems(cfg=cfg, train_cfg=train_cfg)}
     build_json = prompts_dir() / "reports" / "build.json"
     if build_json.exists():
         last = json.loads(build_json.read_text(encoding="utf-8"))
@@ -2166,7 +2177,9 @@ def format_stats(st: Mapping[str, Any]) -> str:
         lines.append("missing files: " + ", ".join(st["missing"]))
     if st.get("sft"):
         d = st["sft"]["decision"]
-        if d.get("rows") is not None:
+        if d is None:
+            lines.append("sft: exports on disk, but no data/sft/report.json")
+        elif d.get("rows") is not None:
             lines.append(f"sft: N = {d['rows']} rows per candidate (target {d['rows_target']}"
                          + (f", limited by {d['limited_by']})" if d.get("limited_by") else ")"))
         else:
@@ -2174,6 +2187,8 @@ def format_stats(st: Mapping[str, Any]) -> str:
                          + ", ".join(f"{k} {v}" for k, v in sorted(d["rows_by_variant"].items())))
         for k, v in st["sft"]["variants"].items():
             lines.append(f"  {k}: {v['rows']} of {v['curated']} curated (training pool {v['train_pool']})")
+        for problem in st["sft"].get("problems", []):         # a trainer refuses the exports until fixed
+            lines.append(f"  stale: {problem}")
     else:
         lines.append("sft: not built")
     if st.get("build"):

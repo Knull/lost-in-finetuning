@@ -58,10 +58,10 @@ Files under the data dir (training rows use the messages format TRL's SFTTrainer
     interim/sft/{cand}/{variant}/curatorkit/             CuratorKIT's own output folder (CRLF on Windows)
     interim/sft/{cand}/{variant}/curatorkit_summary.json stage counts, rejected and deduplicated ids
     sft/{cand}/{variant}/sft_messages.jsonl              the N rows {"id", "messages"}, by id (LF)
-    sft/{cand}/{variant}/selection.json                  ids, counts, seed, sha256 of the export
+    sft/{cand}/{variant}/selection.json                  ids, counts, seed, sha256 of the export, rules
     sft/{cand}/{variant}/curatorkit/                     LF copies of CuratorKIT's manifest.json,
                                                          rejected.jsonl, lexsi_provenance.json + summary
-    sft/report.json                                      every stage count and the N decision
+    sft/report.json                                      every stage count, the N decision, the rules
 variant is ``dedup`` (both candidates, the standard recipe: train.yaml ``standard.dedup: true``)
 or ``raw`` (the stress candidate, ``stress.candidate``: ``stress.dedup: false``). The plan is
 fixed, so ``build_candidates`` refuses any other dedup setting (ValueError naming the keys), and a
@@ -75,6 +75,16 @@ run_timestamp, wall_clock_seconds and its provenance's created_at; lexsi_provena
 created_at; rejected.jsonl: each row's provenance_chain timestamps), so interim/sft/ and the
 sft/{cand}/{variant}/curatorkit/ copies of those three files change on every run; everything else
 this module writes is byte-identical on a rebuild (checked Nov 4 on the pinned data).
+
+The rules a build applied travel with the exports: report.json and every selection.json hold its
+``rules_stamp`` ("rules": RULES_VERSION, the project and train settings that shape the rows, the
+sha256 of data/splits/utility.json). ``export_problems`` lists every reason the exports on disk must
+not be trained on: a report.json that is missing, has no stamp (the Nov 4 build, RULES_VERSION 1,
+whose aya/dedup holds two copies of final utility answers) or another stamp than the current code
+and configs give; a variant folder it does not list (the Nov 3 aya/raw); an export that does not
+match its selection.json. A trainer (P03's) must call it before it reads an export and refuse while
+it is not empty; ``lift data stats`` prints each problem as stale. Each names its remedy, most often
+``lift data build --only sft`` then ``lift sync push``.
 """
 
 from __future__ import annotations
@@ -115,6 +125,12 @@ SCHEMA_MAX_TOKENS = 2048
 # flattens code indentation. NFC, encoding fixes, control-character removal and strip stay on.
 CLEAN_TRANSFORMS = {"strip_html": False, "collapse_whitespace": False}
 CURATORKIT_FILES = ("manifest.json", "rejected.jsonl", "lexsi_provenance.json")
+# The rules this code applies to decide which rows an export holds (``rules_stamp``): bump it with any
+# change here that changes them. 1: the Nov 4 build (the held-out near-duplicate rule skipped answers
+# under 20 characters; Dolly_T rows whose Hindi pair is answer first were kept). 2: R1-20 (answers of
+# any length are compared) and R1-21 (those Dolly_T rows are dropped).
+RULES_VERSION = 2
+_REBUILD = "rebuild with `lift data build --only sft`, then `lift sync push`"
 
 
 @dataclass(frozen=True)
@@ -605,9 +621,10 @@ def _remove_other_variants(plan: Iterable[tuple[str, str]]) -> None:
 
 
 def _write_variant(name: str, variant: str, curated: Sequence[dict], n: int, *, rows_target: int,
-                   seed: int, train_pool: int, summary: dict | None) -> dict:
+                   seed: int, train_pool: int, summary: dict | None, rules: Mapping[str, Any]) -> dict:
     """Sample ``n`` curated rows by sha256 rank, write the export, the CuratorKIT copies and
-    selection.json into sft_dir()/name/variant (rebuilt from scratch). Returns selection.json."""
+    selection.json (with ``rules``, the build's ``rules_stamp``) into sft_dir()/name/variant (rebuilt
+    from scratch). Returns selection.json."""
     tag = f"sft:{name}:{variant}"
     ranked = sorted(curated, key=lambda r: sha256_text(f"{seed}:{tag}:{r['id']}"))
     chosen = sorted(ranked[:n], key=lambda r: r["id"])
@@ -629,6 +646,7 @@ def _write_variant(name: str, variant: str, curated: Sequence[dict], n: int, *, 
         "counts": {"train_pool": train_pool, "curated": len(curated), "sampled": n},
         "curatorkit": ck,
         "sha256": sha256_file(out / "sft_messages.jsonl"),
+        "rules": dict(rules),
     }
     _write_json(out / "selection.json", selection)
     log.info("sft %s/%s: train pool %d, curated %d, sampled %d", name, variant, train_pool, len(curated), n)
@@ -672,9 +690,10 @@ def build_candidates(train_pools: Mapping[str, Any], *,
     {"decision": {"rows_target", "equal_size", "rows": N | None (None unless equal_size),
                   "rows_by_variant": {"aya/dedup": n, ...},
                   "limited_by": candidate | None (equal_size) or [variants under the target] | None},
+     "rules": ``rules_stamp`` (also in every selection.json; ``export_problems`` compares it),
      "seed",
      "sources": {name: {loaded, dropped, pool, held_out, near_dup_excluded, near_dup_of, train_pool}},
-     "variants": {"aya/dedup": selection.json without ids, ...}}.
+     "variants": {"aya/dedup": selection.json without ids and rules, ...}}.
     """
     cfg = cfg if cfg is not None else config.load("project")
     train_cfg = train_cfg if train_cfg is not None else config.load("train")
@@ -682,6 +701,7 @@ def build_candidates(train_pools: Mapping[str, Any], *,
     target, seed = int(train_cfg["rows"]), int(cfg["split_seed"])
     equal = bool(train_cfg["equal_size"])           # required: no fallback to the replaced Nov 3 rule
     plan = _variants(train_cfg)
+    stamp = rules_stamp(cfg=cfg, train_cfg=train_cfg)
     curated = {(name, variant): _curate(name, variant, _rows(train_pools[name]), curate)
                for name, variant in plan}
     if equal:
@@ -714,12 +734,14 @@ def build_candidates(train_pools: Mapping[str, Any], *,
     for name, variant in plan:
         rows, summary = curated[(name, variant)]
         selection = _write_variant(name, variant, rows, counts[(name, variant)], rows_target=target,
-                                   seed=seed, train_pool=len(_rows(train_pools[name])), summary=summary)
-        variants[f"{name}/{variant}"] = {k: v for k, v in selection.items() if k != "ids"}
+                                   seed=seed, train_pool=len(_rows(train_pools[name])), summary=summary,
+                                   rules=stamp)
+        variants[f"{name}/{variant}"] = {k: v for k, v in selection.items() if k not in ("ids", "rules")}
     report = {
         "decision": {"rows_target": target, "equal_size": equal, "rows": n,
                      "rows_by_variant": {f"{name}/{variant}": c for (name, variant), c in counts.items()},
                      "limited_by": limited_by},
+        "rules": stamp,
         "seed": seed,
         "sources": {name: _source_report(_rows(pool), pool[1] if isinstance(pool, tuple) else [],
                                          (pool_counts or {}).get(name))
@@ -753,10 +775,10 @@ def build_candidate(name: str, *, dedup: bool = True, rows: int = 3000, cfg: Map
                     train_cfg: Mapping[str, Any] | None = None, curate: Curate | None = None,
                     pools: Mapping[str, Any] | None = None) -> Path:
     """One candidate end to end (held-out set and exclusion included) with min(rows, curated) rows,
-    no equal-size rule and no report.json; build.py uses build_candidates. pools None ->
-    load_pools(cfg=cfg). A frozen utility split must hold exactly the held-out pids
-    (``check_frozen_heldout``, before anything is written). Returns the directory holding
-    sft_messages.jsonl and the CuratorKIT copies."""
+    no equal-size rule and no report.json (so ``export_problems`` lists its folder: it is no training
+    export); build.py uses build_candidates. pools None -> load_pools(cfg=cfg). A frozen utility split
+    must hold exactly the held-out pids (``check_frozen_heldout``, before anything is written). Returns
+    the directory holding sft_messages.jsonl and the CuratorKIT copies."""
     cfg = cfg if cfg is not None else config.load("project")
     train_cfg = train_cfg if train_cfg is not None else config.load("train")
     if name not in train_cfg["candidates"]:
@@ -769,5 +791,153 @@ def build_candidate(name: str, *, dedup: bool = True, rows: int = 3000, cfg: Map
     pool = train[name][0]
     curated, summary = _curate(name, variant, pool, curate if curate is not None else run_curatorkit)
     _write_variant(name, variant, curated, min(rows, len(curated)), rows_target=rows,
-                   seed=int(cfg["split_seed"]), train_pool=len(pool), summary=summary)
+                   seed=int(cfg["split_seed"]), train_pool=len(pool), summary=summary,
+                   rules=rules_stamp(cfg=cfg, train_cfg=train_cfg))
     return sft_dir() / name / variant
+
+
+# ---------------------------------------------------------------- the rules stamp and the trainer's check
+
+
+def rules_stamp(*, cfg: Mapping[str, Any] | None = None,
+                train_cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The rules a build of the exports applies besides the pinned data: RULES_VERSION (this code's),
+    the settings that shape the rows (configs/project.yaml: sources.sft, its pins and heldout;
+    unclear.max_repetition_ratio; languages.accept_labels.hi; langid; split_seed, which ranks the
+    held-out draw and the samples; configs/train.yaml: rows, equal_size, candidates and
+    stress.candidate) and the sha256 of the frozen data/splits/utility.json (lift.splits.SPLITS_DIR;
+    None while it does not exist). JSON values, so a stamp read back from a file compares equal.
+    build_candidates writes it into sft/report.json and every selection.json ("rules");
+    ``export_problems`` compares them with the stamp the current code and configs give. KeyError for
+    a config that lacks one of these settings."""
+    cfg = cfg if cfg is not None else config.load("project")
+    train_cfg = train_cfg if train_cfg is not None else config.load("train")
+    utility = splits.SPLITS_DIR / "utility.json"
+    stamp = {
+        "version": RULES_VERSION,
+        "sources_sft": cfg["sources"]["sft"],
+        "max_repetition_ratio": cfg["unclear"]["max_repetition_ratio"],
+        "accept_labels_hi": cfg["languages"]["accept_labels"][LANG],
+        "langid": cfg["langid"],
+        "split_seed": int(cfg["split_seed"]),
+        "train": {"rows": int(train_cfg["rows"]), "equal_size": bool(train_cfg["equal_size"]),
+                  "candidates": list(train_cfg["candidates"]),
+                  "stress_candidate": train_cfg["stress"]["candidate"]},
+        "utility_split_sha256": sha256_file(utility) if utility.exists() else None,
+    }
+    return json.loads(json.dumps(stamp))
+
+
+def export_problems(*, cfg: Mapping[str, Any] | None = None,
+                    train_cfg: Mapping[str, Any] | None = None) -> list[str]:
+    """Every reason the exports under sft_dir() must not be trained on, each with its remedy; empty
+    when they may be. A trainer calls it before it reads an export and refuses unless it is empty. No
+    torch and no network: it reads the configs, data/splits/utility.json and the files under sft_dir().
+    The reasons:
+    - sft/report.json is missing or cannot be read (then nothing else is checked);
+    - it carries no rules stamp (a build from before the stamp, such as the Nov 4 one, which applied
+      RULES_VERSION 1), or another stamp than ``rules_stamp`` gives now (the settings that differ are
+      named), or the configs give none (a missing key; a dedup setting the plan refuses);
+    - it does not list a variant train.yaml's plan makes;
+    - a {cand}/{variant} folder on disk that it does not list (a variant the plan no longer makes, such
+      as the Nov 3 aya/raw: lift sync deletes nothing, so a pull brings it back until it is deleted from
+      the runs repo by hand);
+    - a variant it lists whose sft_messages.jsonl or selection.json is missing, whose selection.json is
+      not the one it lists (another sha256 or stamp: a build cut short, a folder from another build), or
+      whose export does not match its selection.json's sha256 (edited, or synced in part)."""
+    cfg = cfg if cfg is not None else config.load("project")
+    train_cfg = train_cfg if train_cfg is not None else config.load("train")
+    root = sft_dir()
+    path = root / "report.json"
+    if not path.exists():
+        return [f"data/sft/report.json is missing: {_REBUILD}"]
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        listed = dict(report["variants"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return [f"data/sft/report.json cannot be read ({type(e).__name__}): {_REBUILD}"]
+    problems: list[str] = []
+    stamp = report.get("rules")
+    try:
+        now, plan = rules_stamp(cfg=cfg, train_cfg=train_cfg), _variants(train_cfg)
+    except (KeyError, ValueError) as e:
+        now, plan = None, []
+        problems.append(f"the configs give no rules stamp or plan to check the exports against "
+                        f"({type(e).__name__}: {e})")
+    if stamp is None:
+        problems.append("data/sft/report.json carries no rules stamp: it was built before lift.data.sft "
+                        "recorded the rules a build applies (the Nov 4 build applied RULES_VERSION 1: "
+                        "answers under 20 characters were never compared with the held-out set, and reversed "
+                        f"Dolly_T pairs were kept), so its exports may hold rows the current rules drop: "
+                        f"{_REBUILD}")
+    elif now is not None and stamp != now:
+        problems.append("data/sft/report.json was built under other rules than the current code and configs "
+                        f"give ({_stamp_diff(stamp, now)}): {_REBUILD}")
+    problems += [f"data/sft/report.json does not list {name}/{variant}, which train.yaml's plan makes: "
+                 f"{_REBUILD}" for name, variant in plan if f"{name}/{variant}" not in listed]
+    for key in sorted(f"{c.name}/{v.name}" for c in root.iterdir() if c.is_dir()
+                      for v in c.iterdir() if v.is_dir()):
+        if key not in listed:
+            problems.append(f"data/sft/{key} is on disk, but data/sft/report.json does not list it (a "
+                            "variant the plan no longer makes, such as the Nov 3 aya/raw, or a folder from "
+                            f"another build): delete data/sft/{key} from the runs repo by hand (lift sync "
+                            "deletes nothing), and here (a rebuild removes it too)")
+    for key, entry in sorted(listed.items()):
+        problems += _variant_problems(key, entry, stamp)
+    return problems
+
+
+def _variant_problems(key: str, entry: Any, stamp: Any) -> list[str]:
+    """What keeps the variant ``key`` that report.json lists (as ``entry``, under the report's rules
+    ``stamp``) from being trained on: a missing file, a selection.json that is not the listed one, an
+    export whose sha256 is not its selection.json's."""
+    folder = sft_dir() / key
+    export, sel_path = folder / "sft_messages.jsonl", folder / "selection.json"
+    missing = [p.name for p in (export, sel_path) if not p.is_file()]
+    if missing:
+        return [f"data/sft/{key}: data/sft/report.json lists it, but its {' and '.join(missing)} is missing "
+                f"(synced in part, or a build cut short): `lift sync pull` again, or {_REBUILD}"]
+    try:
+        selection = json.loads(sel_path.read_text(encoding="utf-8"))
+        recorded = selection["sha256"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return [f"data/sft/{key}/selection.json cannot be read ({type(e).__name__}): {_REBUILD}"]
+    out = []
+    listed_sha = entry.get("sha256") if isinstance(entry, dict) else None
+    if recorded != listed_sha or selection.get("rules") != stamp:
+        out.append(f"data/sft/{key}/selection.json is not the one data/sft/report.json lists (another "
+                   f"sha256 or rules stamp: a build cut short, or a folder from another build): {_REBUILD}")
+    actual = sha256_file(export)
+    if actual != recorded:
+        out.append(f"data/sft/{key}/sft_messages.jsonl does not match its selection.json (sha256 "
+                   f"{actual[:12]}, recorded {str(recorded)[:12]}): edited by hand, or synced in part: "
+                   f"{_REBUILD}")
+    return out
+
+
+def _stamp_diff(old: Any, new: Mapping[str, Any], n: int = 6) -> str:
+    """The settings two rules stamps disagree on, "key old, now new" with dotted keys (at most ``n``)."""
+    a, b = _flat(old if isinstance(old, dict) else {}), _flat(new)
+    keys = sorted(k for k in a.keys() | b.keys() if k not in a or k not in b or a[k] != b[k])
+
+    def shown(d: Mapping[str, Any], k: str) -> str:
+        if k not in d:
+            return "missing"
+        text = json.dumps(d[k], ensure_ascii=False)
+        return text if len(text) <= 40 else text[:37] + "..."
+
+    if not keys:
+        return "they differ"
+    parts = [f"{k} {shown(a, k)}, now {shown(b, k)}" for k in keys[:n]]
+    return "; ".join(parts) + (f"; and {len(keys) - n} more" if len(keys) > n else "")
+
+
+def _flat(d: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
+    """A nested dict as {dotted key: leaf value}."""
+    out: dict[str, Any] = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out.update(_flat(v, f"{prefix}{k}."))
+        else:
+            out[f"{prefix}{k}"] = v
+    return out
