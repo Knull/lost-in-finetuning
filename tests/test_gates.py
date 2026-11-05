@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pydantic
@@ -21,6 +22,7 @@ from lift import config, gates, utility
 from lift.cli import main
 from lift.io import read_jsonl, sha256_file, sha256_obj, sha256_text, write_jsonl
 from lift.judge import pipeline
+from lift.models import variants
 from lift.models.generate import generations_path
 from lift.paths import REPO_ROOT, data_dir, judgements_dir, metrics_dir, output_dir, prompts_dir
 from lift.schemas import GenerationRecord, JudgementRecord, UnclearFlags, UtilityVerdict
@@ -135,16 +137,29 @@ def write_verdicts(adapter: str, *, dtype: str = "bf16", judge: str = UTILITY_JU
     return path
 
 
+def write_checked(variant: str, *, dtype: str = "bf16") -> None:
+    """The check a GPU line records once generate has validated ``variant``'s answer file
+    (lift.utility.record_checked), built from the test registry's entry as lift utility builds it."""
+    spec = variants.get_spec(variant)
+    built = SimpleNamespace(spec=spec, dtype=dtype, model_rev=REV,
+                            adapter_hash=None if variant == "stock" else ADAPTER_HASH[variant])
+    utility.record_checked(built, "dev")
+
+
 def write_utility(adapter: str, win_rate: float, *, n: int = 100, failed: int = 0,
                   as_losses: float | None = None, as_wins: float | None = None, dtype: str = "bf16",
                   meta: dict | None = None, judge: str = UTILITY_JUDGE, judge_dir: str = "frontier",
                   **over: Any) -> None:
     """One adapter's dev utility metrics in the contract ``lift utility`` writes (version 2), over the real
     files they describe: the utility prompts, stock's and the adapter's answers (``meta`` over an A100's)
-    and the verdicts. The metrics name those files' sha256 and the adapter hash the registry pins. Only
-    Gate 1's fields matter here: the gate does not recompute the numbers from the files."""
+    with the checks a GPU line records of them, and the verdicts. The metrics name those files' sha256 and
+    the adapter hash the registry pins. Only Gate 1's fields matter here: the gate does not recompute the
+    numbers from the files."""
     write_utility_prompts()
     stock, answers = write_answers("stock", meta=meta), write_answers(adapter, meta=meta)
+    answer_dtype = str({**META, **(meta or {})}["dtype"])
+    write_checked("stock", dtype=answer_dtype)
+    write_checked(adapter, dtype=answer_dtype)
     verdicts = write_verdicts(adapter, dtype=dtype, judge=judge, judge_dir=judge_dir)
     doc = {"kind": "utility", "version": 2, "variant": adapter, "reference": "stock", "split": "dev",
            "lang": "hi", "judge": judge, "judge_dir": judge_dir, "dtype": dtype, "n": n, "win_rate": win_rate,
@@ -427,11 +442,24 @@ def test_metrics_of_a_retrained_adapter_are_stale(registry):
     assert result["adapters"][IND]["status"] == "fail" and result["verdict"] == "INCOMPLETE"
 
 
-def test_an_adapter_the_registry_does_not_pin_is_checked_on_its_files_and_noted(registry):
+def test_metrics_whose_answers_predate_a_new_model_pin_are_not_counted():
+    # A re-pin of models.global changes neither answer file nor the adapter hash; the check records lift
+    # utility keeps (utility.check_answers) still tell the answers came from another revision.
     write_validation("pass")
     write_utility(AYA, 0.62)
     write_utility(IND, 0.40)
-    entry(registry, AYA)["artifacts"] = {}
+    assert gates.gate1()["adapters"][AYA]["status"] == "pass"
+    config.load("project")["models"]["global"]["revision"] = "f" * 40
+    aya = gates.gate1()["adapters"][AYA]
+    assert aya["status"] == "missing"
+    assert f"models.global is pinned to {'f' * 40} here" in aya["error"]
+
+
+def test_an_adapter_the_registry_does_not_pin_is_checked_on_its_files_and_noted(registry):
+    entry(registry, AYA)["artifacts"] = {}        # unpinned when its answers were made and checked
+    write_validation("pass")
+    write_utility(AYA, 0.62)
+    write_utility(IND, 0.40)
     result = gates.gate1()
     assert result["adapters"][AYA]["status"] == "pass" and result["adapters"][AYA]["adapter_pinned"] is False
     assert any(f"{AYA}: configs/variants.yaml pins no adapter hash" in note for note in result["notes"])
