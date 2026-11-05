@@ -19,6 +19,8 @@ seed, params, artifacts) plus the documentation-only keys in ``REGISTRY_ONLY_KEY
 files live in outputs/adapters/{adapter}/ (synced through the runs repo); when the entry pins
 ``artifacts.adapter``, the value is ``lift.train.merge.adapter_hash(dir)`` (weights plus the
 behaviour fields of adapter_config.json, not the bare file sha256) and the loaded adapter must match.
+A cell of a variant that names an adapter (the adapter method, every repair) is reported only when its
+entry pins that hash (lift register-adapter writes it; lift.judge.pipeline refuses the cell otherwise).
 
 A wrapper variant (CAST) sets ``LoadedVariant.base`` to the HF model it wraps; the harness reads
 config, generation_config and the stop set from ``hf_model`` and calls ``model.generate``. That must pass

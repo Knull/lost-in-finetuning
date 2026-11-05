@@ -60,8 +60,10 @@ Reading:
   prompt text; every generation of the cell made with this code and configuration (this code's
   ``HARNESS_VERSION``, the revision of Global configs/project.yaml pins when it pins a sha, and the
   variant's current entry in configs/variants.yaml: ``meta.intervention``, and ``meta.adapter_hash``
-  when the entry pins ``artifacts.adapter``; a record that names no intervention is never trusted, and
-  a variant the registry does not list is refused), else the cell is stale and the refusal names its
+  when the entry pins ``artifacts.adapter``, which an entry that names an adapter (the adapter method,
+  every repair) must, else the cell is refused naming the registry; a record that names no intervention
+  is never trusted, and a variant the registry does not list is refused), else the cell is stale and the
+  refusal names its
   restart line; every generation of the cell in ``dtype`` under one run configuration and one stack;
   every judgement on one judge stack; and the judge must be the role's configured judge (model,
   revision when pinned to a sha, the labelling rules now in force; for Qwen3Guard the precision and
@@ -1209,7 +1211,12 @@ def _made_otherwise(variant: str, gens: Sequence[GenerationRecord]) -> tuple[lis
 
 def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRecord], gpath: Path,
                 cell: tuple[str, str, str, str], *, role: str, complete: bool, dtype: str) -> None:
-    """Raise unless ``records`` can be reported (the rules are in the module docstring)."""
+    """Raise unless ``records`` can be reported (the rules are in the module docstring). A variant whose
+    spec names an adapter (the adapter method, every P05 repair) is read only under the adapter hash its
+    configs/variants.yaml entry pins (artifacts.adapter, which lift register-adapter writes), so the
+    per-cell adapter_hash check holds a repair arm and its adapter arm to one set of weights."""
+    from lift.models.variants import get_spec
+
     variant, set_name, lang, split = cell
     texts = {p.pid: p.text for p in prompts.load(set_name, lang, split)}
     gen_of = {g.key: g for g in gens}
@@ -1240,6 +1247,11 @@ def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRec
     problems = [f"{len(pids)} {what}, e.g. {sorted(pids)[:5]}" for pids, what in checks if pids]
     if unregistered:
         problems.append(unregistered)
+    elif (spec := get_spec(variant)).adapter and not spec.artifacts.get("adapter"):
+        problems.append(f"{variant}'s entry in configs/variants.yaml names adapter {spec.adapter} but pins "
+                        "no artifacts.adapter: a cell of a variant that names an adapter is read only under "
+                        "the hash its entry pins (`lift register-adapter` writes it), so that every arm made "
+                        "from that adapter comes from the same weights")
     problems += _one_configuration(gens, records, dtype)
     if dtype != str(config.get("generation.dtype")):
         problems += _licence_problems(dtype, gens, records, cell, role)

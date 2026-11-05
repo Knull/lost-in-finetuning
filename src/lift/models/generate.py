@@ -28,12 +28,15 @@ Behaviour:
 - One file is one configuration and one stack. ``meta.run_config`` digests the inputs (everything in
   the cache key but the prompt) and never differs within a file. ``meta.stack`` digests torch,
   transformers and the GPU class: a finished file is reused under any stack (a session may resolve a
-  newer patch release), but records are never appended under another stack than the file's.
+  newer patch release), but records are never appended under another stack than the file's. A file
+  whose records name no ``meta.intervention`` (made before generations recorded it) is neither extended
+  nor reused: every read refuses such a cell.
 - Every such refusal is a StaleOutputError naming the ``lift restart`` line that starts the cell over
   (``restart_cell``): a job line right after ``lift sync pull``. Moving the file aside by hand does not
   work: sync never deletes, so the job's pull brings the runs repo's copy back. ``keys_changed`` says
-  whether the cell made again may have other generation keys (not when only the stack moved), so a key
-  list drawn from the cell (P04's) is drawn again. A file made in another precision than the run's is
+  whether the cell made again may have other generation keys (not when only the stack moved, nor when
+  the records only predate ``meta.intervention``), so a key list drawn from the cell (P04's) is drawn
+  again. A file made in another precision than the run's is
   not stale and is never started over (that would discard it): it raises OtherPrecisionError, whose
   remedy is the file's ``--dtype`` or leaving the cell out.
 - ``meta`` carries dtype, GPU name, device, batch size, the provenance (model revision, harness,
@@ -41,7 +44,8 @@ Behaviour:
   ``lift.cachekey.intervention_digest`` of the variant's spec, ``adapter_hash``: None for stock,
   ``run_config``) and, for CAST wrappers, ``gate_fired``. The run manifest records the same
   provenance. The judge pipeline reads a cell only if its provenance is this code's harness, the pinned
-  revision of Global and the variant's current entry in configs/variants.yaml.
+  revision of Global and the variant's current entry in configs/variants.yaml (which, for a variant that
+  names an adapter, must pin its hash: ``artifacts.adapter``).
 - Every run writes a manifest (lift.manifest) with prompts/sec and tokens/sec.
 """
 
@@ -627,6 +631,13 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
                 f"adapter, decoding settings or harness version), e.g. {other[:5]}; one file is one "
                 "configuration and outputs are never mixed. Run with the file's configuration, or start the "
                 f"cell over: {_start_over(restart, out_path)}.", command=restart)
+        unnamed = sorted({r.pid for r in existing if not r.meta.get("intervention")})
+        if unnamed:                         # made before generations recorded it (R1-03)
+            raise StaleOutputError(
+                f"{out_path}: {len(unnamed)} records name no intervention (meta.intervention), e.g. "
+                f"{unnamed[:5]}: they were made before generations recorded it, and every read refuses such "
+                "a cell (lift.judge.pipeline), so it is neither extended nor reused. Start the cell over: "
+                f"{_start_over(restart, out_path)}.", command=restart, keys_changed=False)
     done = {prompt_id(r.set, r.lang, r.pid): r.key for r in existing}
 
     def ident(row: _Row) -> tuple[str, str, str]:
