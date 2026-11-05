@@ -8,6 +8,9 @@ the `recipe-frozen-*` tag and before any final-split run
 Confirm that the repairs, the sweep and the selection did what the pre-registration says, and
 that the final split hasn't been touched. Fix anything wrong, with a failing test first. Stop
 when two rounds in a row find nothing new.
+At most three review rounds in total, even if the third still finds something: then fix
+what has a failing test, list the rest in the PR body as "suspected", and open the PR. (R1
+ran without this cap on Nov 4-5 and was still looping after 13 hours.)
 
 ## Check
 
