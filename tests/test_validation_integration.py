@@ -708,14 +708,82 @@ def test_a_prompt_file_stamped_from_another_split_assignment_is_refused(tmp_path
     with pytest.raises(ValidateError, match=dev) as refused:
         Prompts().get("harmful", "hi")
     assert final in str(refused.value) and "lift data build --only harmful" in str(refused.value)
+    assert isinstance(refused.value, outputs.PromptFileError)       # W3-05: never "missing here"
     with pytest.raises(ValidateError, match="harmful_hi"):           # the draw stops on it, writing nothing
         make_sheets(1)
     assert not round_keys_path(1).exists() and not draw_path(1).exists()
     # A missing committed split file: the stamps cannot be checked, so nothing is read either.
     write_jsonl(path, [r.model_dump() for r in records])
     (world.splits_dir / "harmful.json").unlink()
-    with pytest.raises(ValidateError, match=r"harmful\.json is missing"):
+    with pytest.raises(outputs.PromptFileError, match=r"harmful\.json is missing"):
         Prompts().get("harmful", "hi")
+    (world.data / "prompts" / "harmful_en.jsonl").unlink()
+    with pytest.raises(ValidateError, match="is missing") as missing:        # a prompt file missing here
+        Prompts().get("harmful", "en")
+    assert not isinstance(missing.value, outputs.PromptFileError)
+
+
+def swap_stamps(path):
+    """Rewrite the prompt file at ``path`` stamped from another assignment: a dev and a final pid swap
+    splits (every split keeps its size). Returns the records as they were."""
+    records = [PromptRecord.model_validate(r) for r in read_jsonl(path)]
+    dev = next(r.pid for r in records if r.split == "dev")
+    final = next(r.pid for r in records if r.split == "final")
+    swapped = {dev: "final", final: "dev"}
+    write_jsonl(path, [r.model_copy(update={"split": swapped.get(r.pid, r.split)}).model_dump()
+                       for r in records])
+    return records
+
+
+def test_the_scores_stop_on_a_refused_prompt_file_and_count_only_a_missing_one(tmp_path, monkeypatch):
+    # W3-05 (W2-06 follow-up): a prompt file stamped from another split assignment, or one whose committed
+    # split file is missing, is a stale or foreign copy (lift.data.build.SplitStampError). The scores stop
+    # on it instead of taking it for a prompt file that is missing here, as the draw does. Only a missing
+    # prompt file keeps the lenient path: its items are scored and counted (checks.prompt_file_missing).
+    world = world_for(tmp_path, monkeypatch, utility=True)
+    make_sheets(1)
+    import_truth(world)
+    sheet = make_utility_sheet("adapter-aya-std-s1", n=10)
+    doc = read_json(world.validation / "keys" / "utility.json")
+    prefs = {it["item_id"]: it["candidate_is"] for it in doc["items"]}
+    import_preferences(fill_sheet(sheet, world.root / "u.csv", prefs, column="preference"))
+    write_verdicts(world, "adapter-aya-std-s1", {it["pid"]: 1.0 for it in doc["items"]})
+    assert scoring.score(1)["checks"]["prompt_file_missing"] == 0
+    assert score_utility()["n_judged"] == 10
+    metrics = world.outputs / "metrics" / "validation"
+    written = {p.name: p.read_bytes() for p in metrics.iterdir()}
+    prompts = world.data / "prompts"
+
+    records = swap_stamps(prompts / "harmful_hi.jsonl")
+    stamped = r"harmful_hi: 2 records of harmful_hi\.jsonl carry another split than the committed split"
+    with pytest.raises(ValidateError, match=stamped):
+        scoring.score(1)
+    with pytest.raises(ValidateError, match=stamped):
+        scoring.decide_primary_judge(dry_run=True)
+    write_jsonl(prompts / "harmful_hi.jsonl", [r.model_dump() for r in records])
+    utility = swap_stamps(prompts / "utility_hi.jsonl")
+    with pytest.raises(ValidateError, match=r"utility_hi: 2 records of utility_hi\.jsonl carry another"):
+        score_utility()
+    write_jsonl(prompts / "utility_hi.jsonl", [r.model_dump() for r in utility])
+    split_file = world.splits_dir / "harmful.json"
+    frozen = split_file.read_bytes()
+    split_file.unlink()                                           # the stamps cannot be checked
+    with pytest.raises(ValidateError, match=r"harmful\.json is missing"):
+        scoring.score(1)
+    split_file.write_bytes(frozen)
+    write_jsonl(prompts / "harmful_hi.jsonl", [{**r.model_dump(), "text": None} for r in records])
+    with pytest.raises(ValidateError, match=r"harmful_hi\.jsonl: a record is not a PromptRecord \(text\)"):
+        scoring.score(1)                                          # nor is a file that does not parse
+    assert {p.name: p.read_bytes() for p in metrics.iterdir()} == written
+
+    (prompts / "harmful_hi.jsonl").unlink()                       # missing here: scored, and counted
+    labelled = sum(1 for it in load_round(1)["items"] if (it["set"], it["lang"]) == ("harmful", "hi")
+                   and it["slot"] == "a")
+    out = scoring.score(1)
+    assert out["checks"]["prompt_file_missing"] == labelled > 0
+    assert out["judges"]["qwen3guard_strict"]["langs"]["hi"]["status"] == "ok"
+    (prompts / "utility_hi.jsonl").unlink()
+    assert score_utility()["n_judged"] == 10
 
 
 def test_a_cell_short_of_its_frozen_split_is_still_read_for_the_sheets(tmp_path, monkeypatch):

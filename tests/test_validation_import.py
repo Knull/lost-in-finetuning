@@ -194,7 +194,7 @@ def test_a_filled_sheet_becomes_human_labels_and_a_meta_file(world, tmp_path):
     assert labels[noted].note == "the reply is in another language"
     assert out["warnings"] == []
     meta = meta_of(world)
-    assert meta["skipped"] == meta["unlabelled"] == meta["missing"] == []
+    assert meta["skipped"] == meta["unlabelled"] == meta["missing"] == meta["warnings"] == []
     assert meta["label_counts"] == {c: list(want.values()).count(c) for c in LABELS}
     assert sample_digest(load_round(1)) in meta.values()     # the draw these labels belong to
 
@@ -482,6 +482,8 @@ def test_a_label_column_sorted_on_its_own_after_an_id_sort_is_a_warning(world, t
         out = import_labels(1, "zh", write(tmp_path / "sorted.csv", alone))
         assert [w for w in out["warnings"] if "alphabetical order" in w]
         assert labels_of(world) == expected(alone)            # a warning, not an error
+        # W3-07: recorded with the labels, so every score reports it (checks.import_warnings)
+        assert meta_of(world)["warnings"] == out["warnings"]
 
 
 # Re-imports and the overlap sheet --------------------------------------------------------------
