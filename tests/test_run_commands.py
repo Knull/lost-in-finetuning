@@ -143,8 +143,56 @@ def test_help_works_without_a_gpu_stack(command, capsys):
 def test_names_accept_commas_and_spaces_and_reject_unknowns():
     assert run_cmd._names(["hi,en", "zh"], ["en", "hi", "zh"], ["en"]) == ["hi", "en", "zh"]
     assert run_cmd._names(None, ["en", "hi"], ["en", "hi"]) == ["en", "hi"]
+    assert run_cmd._names(["hi,"], ["en", "hi"], ["en"]) == ["hi"]
     with pytest.raises(SystemExit):
         run_cmd._names(["xx"], ["en"], ["en"])
+    for nothing in ([""], [","], ["", ","]):          # R2-15: a flag given that names nothing ran no cell
+        with pytest.raises(SystemExit, match="names nothing"):
+            run_cmd._names(nothing, ["en", "hi"], ["en", "hi"])
+
+
+LISTS = {"generate": ["generate", "--variant", "stock", "--split", "dev", "--device", "cpu"],
+         "judge": ["judge", "--variant", "stock", "--split", "dev", "--device", "cpu"],
+         "run-dev": ["run-dev", "--variant", "stock", "--device", "cpu", "--judge-device", "cpu"],
+         "restart": ["restart", "--variant", "stock", "--split", "dev"]}
+
+
+@pytest.mark.parametrize("command", list(LISTS))
+def test_a_repeated_sets_or_langs_flag_adds_its_values(command):
+    # R2-15: --sets and --langs kept only the last of repeated flags (argparse's store action), so
+    # `--sets harmful --sets easy_benign` ran easy_benign alone and exited 0, listing nothing as left out
+    args = build_parser().parse_args([*LISTS[command], "--sets", "harmful", "--sets", "easy_benign",
+                                      "--langs", "hi", "en", "--langs", "zh"])
+    assert args.sets == ["harmful", "easy_benign"] and args.langs == ["hi", "en", "zh"]
+
+
+@pytest.mark.parametrize("command", list(LISTS))
+@pytest.mark.parametrize("names", [["--sets", "", "--langs", "hi"], ["--sets", "harmful", "--langs", ""],
+                                   ["--sets", ",", "--langs", "hi"]],
+                         ids=["sets-empty", "langs-empty", "comma"])
+def test_a_sets_or_langs_value_that_names_nothing_is_refused(command, names, monkeypatch):
+    # R2-15: `--sets ''` (or `--sets ,`) resolved to no cell, so the line ran nothing and exited 0 ("done")
+    pin(judge=True)
+    write_generation("harmful", "hi", "dev")                 # what lift judge checks before its judge loads
+    for target in ("lift.models.variants.build_variant", "lift.judge.pipeline.make_judge",
+                   "lift.models.generate.restart_cell"):
+        monkeypatch.setattr(target, lambda *a, **kw: pytest.fail("the line went on"))
+    with pytest.raises(SystemExit, match="names nothing"):
+        main([*LISTS[command], *names])
+    assert not (output_dir() / ".aside").exists()
+
+
+@pytest.mark.parametrize("keys", ["", "  "])
+def test_an_empty_keys_value_is_refused_at_parse(keys, monkeypatch, capsys):
+    # R2-15: `lift judge --judge second --keys ''` read the empty path as no key list, so the second
+    # (frontier) judge judged every generation of the cells instead of P04's sample, and the line exited 0
+    write_generation("harmful", "hi", "dev")
+    monkeypatch.setattr("lift.judge.pipeline.make_judge", lambda *a, **kw: pytest.fail("a judge loaded"))
+    with pytest.raises(SystemExit) as exc:
+        main(["judge", "--variant", "stock", "--split", "dev", "--judge", "second", "--sets", "harmful",
+              "--langs", "hi", "--keys", keys])
+    assert exc.value.code == 2
+    assert "argument --keys: needs the path of P04's key list" in capsys.readouterr().err
 
 
 def test_primary_judge_refuses_subsets():
