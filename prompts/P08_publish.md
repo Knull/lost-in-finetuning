@@ -38,9 +38,12 @@ Every command does a dry run by default, printing what it would upload, and uplo
      saying they are research artifacts that drifted on safety). docs/decisions.md item 14.
 2. **`lift publish datasets`.**
    - The logs dataset (public): prompt ids, labels, flags, generation keys, output hashes (the
-     redacted AuditKIT records), metadata and aggregate tables; no output text. Upload files by
-     name, never a folder: a `*.full.json` AuditKIT record, which holds every completion, can sit
-     beside the public one in `outputs/metrics/auditkit/`.
+     redacted AuditKIT records), metadata and aggregate tables; no output text, and no judge text.
+     A judgement goes in without `JudgementRecord.raw` and `native.reason` (the judges' replies, a
+     frontier judge's reason included): they stay out with every output text, as CLAUDE.md rule 6
+     gates judge logs, so a judgements file never goes up as it is. Upload files by name, never a
+     folder: a `*.full.json` AuditKIT record, which holds every completion, can sit beside the
+     public one in `outputs/metrics/auditkit/`.
    - The raw completions (gated, manual approval): every judged output, refusals and benign
      answers included. Most outputs carry only Qwen3Guard's label, so no output is made public
      because of its label.

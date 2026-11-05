@@ -131,7 +131,8 @@ def _close_cut_line(path: Path) -> None:
 def existing_keys(path: str | Path, field: str = "key") -> set[str]:
     """Keys already written to a JSONL file. A line that is not a JSON object holding ``field`` is
     ignored, not fatal: a truncated last line (also one cut inside a multi-byte character), a blank
-    line, a list, string, number or null, or an object without ``field``."""
+    line, a list, string, number or null, an object without ``field``, or one whose ``field`` holds a
+    list or an object (no key is unhashable)."""
     path = Path(path)
     if not path.exists():
         return set()
@@ -142,6 +143,6 @@ def existing_keys(path: str | Path, field: str = "key") -> set[str]:
                 row = json.loads(line.decode("utf-8"))
             except ValueError:                           # JSONDecodeError and UnicodeDecodeError
                 continue
-            if isinstance(row, dict) and field in row:
+            if isinstance(row, dict) and field in row and not isinstance(row[field], (list, dict)):
                 keys.add(row[field])
     return keys

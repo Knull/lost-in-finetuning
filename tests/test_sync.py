@@ -1635,9 +1635,10 @@ def test_a_restart_is_never_undone_by_its_own_next_push(tmp_path, monkeypatch, j
 @RESTARTS
 def test_a_restart_is_never_undone_by_its_own_next_pull(tmp_path, monkeypatch, judge_dir):
     """R1-08, with a pull after the restart: it keeps the empty files and records no sync state for them, so
-    the next push conflicts too instead of sending the Hub's records back here. `pull --force` takes the
-    Hub's copies instead, keeping the empty ones under outputs/.sync-backup."""
+    the next push conflicts too and the Hub keeps its copies. `pull --force` takes the Hub's copies
+    instead, keeping the empty ones under outputs/.sync-backup."""
     hub, emptied = restarted_meanwhile(tmp_path, monkeypatch, judge_dir)
+    on_hub = {p: hub.files[p] for p in emptied}
     synced = json.loads(state_file().read_text())["files"]
     pulled = sync.pull(api=hub)
     assert {p: keys_of(local(p)) for p in emptied} == {p: [] for p in emptied}, pulled.files
@@ -1648,6 +1649,11 @@ def test_a_restart_is_never_undone_by_its_own_next_pull(tmp_path, monkeypatch, j
     assert f"  CONFLICT {first} (not merged: emptied here by lift restart)" in pulled.summary()
     assert says(pulled, "1 file(s) emptied here by lift restart",
                 "lift sync push --force completes the restart", "lift sync pull --force takes the Hub's copy")
+    pushed = sync.push(api=hub)
+    assert not pushed.ok and pushed.emptied == {first: "here"}
+    assert {p: pushed.files[p] for p in emptied} == {p: "conflict" for p in emptied}
+    assert {p: hub.files[p] for p in emptied} == on_hub
+    assert {p: keys_of(local(p)) for p in emptied} == {p: [] for p in emptied}
     forced = sync.pull(api=hub, force=True)
     assert forced.ok and {p: forced.files[p] for p in emptied} == {p: "force" for p in emptied}
     assert all(local(p).read_bytes() == hub.files[p] != b"" for p in emptied)
@@ -1696,6 +1702,41 @@ def test_records_from_before_a_restart_never_go_back_over_the_hubs_empty_copy(tm
     assert forced.ok and {p: local(p).read_bytes() for p in emptied} == {p: b"" for p in emptied}
     assert {p: Path(forced.backups[p]).read_bytes() for p in emptied} == mine
     assert sync.push(api=hub).ok and {p: hub.files[p] for p in emptied} == {p: b"" for p in emptied}
+
+
+@RESTARTS
+@pytest.mark.parametrize("side", ["here", "hub"])
+def test_status_plans_the_conflict_of_a_file_lift_restart_emptied(tmp_path, monkeypatch, judge_dir, side):
+    """R1-08 follow-up. B restarts the cell while A judges two more keys; then A's records go up (B's status
+    meets a file emptied here) or B's restart does (A's status meets one emptied on the Hub). status planned
+    that file as a merge (ok, exit 0) while push and pull refuse it. It downloads nothing, but an empty side
+    shows in the local file and in the Hub's tree entry, so it plans the conflict they report."""
+    cell = [gen_row(f"k{i}", f"p{i}") for i in range(1, 5)]
+    hub = FakeHub({GEN: lines(*(cell if judge_dir else cell[:2])), JUD: judged(cell[:2], "benign")})
+    emptied = [JUD] if judge_dir else [GEN, JUD]
+    a, b = tmp_path / "A", tmp_path / "B"
+    for where in (a, b):
+        machine(where, monkeypatch)
+        assert sync.pull(api=hub).ok
+    restart(judge_dir=judge_dir)                              # on B
+    machine(a, monkeypatch)
+    if not judge_dir:
+        append(local(GEN), lines(*cell[2:]))
+    append(local(JUD), judged(cell[2:], "benign"))
+    machine(a if side == "here" else b, monkeypatch)
+    assert sync.push(api=hub).ok
+    machine(b if side == "here" else a, monkeypatch)
+    calls, first = len(hub.calls), emptied[0]
+    planned = sync.status(api=hub)
+    assert [name for name, _ in hub.calls[calls:]] == ["dataset_info", "list_repo_tree"]
+    for report in planned.values():
+        assert not report.ok and report.emptied == {first: side}, report.direction
+        assert {p: report.files[p] for p in emptied} == {p: "conflict" for p in emptied}, report.direction
+        assert says(report, f"1 file(s) emptied {'here' if side == 'here' else 'on the Hub'} by lift restart",
+                    "would be kept")
+    for report in (sync.pull(api=hub), sync.push(api=hub)):     # what the real ones do
+        dry = planned[report.direction]
+        assert (dry.files, dry.emptied, dry.held) == (report.files, report.emptied, report.held)
 
 
 def test_an_auditkit_record_goes_up_only_if_it_counts_the_judgements_beside_it():
@@ -2760,6 +2801,9 @@ def test_cli_help(argv, capsys):
         assert all(word in out for word in ("push", "pull", "status", "check"))
     else:
         assert "--only" in out and ("--force" in out) == (argv[1] != "status")
+    if argv[1] in ("push", "pull"):                 # every merge refusal, R1-08's emptied file included
+        refusals = ("two records of one key", "readers enforce", "lift restart emptied")
+        assert all(words in out for words in refusals), argv
     assert "exit codes: 0 done; 3 done, but some files conflicted" in out
     assert "a lift sync push that sends the copies here" in out and "a pull could not check them" in out
     assert "1 a transient or unknown error" in out and "2 a problem no rerun fixes" in out
