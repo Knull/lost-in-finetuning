@@ -22,9 +22,11 @@ answer and the candidate adapter's answer to the same instruction.
   bootstrap interval; and the confusion matrix.
 
 Verdicts are found by scanning outputs/ for UtilityVerdict records of the candidate (P03 decides
-where they live), or read from the files given. A UtilityVerdict carries no generation key, so the
-sha256 of every verdict file read is recorded with the score. HumanPreference is defined here
-because schemas.HumanLabel only takes the four safety classes.
+where they live), except generations and what lift sync never syncs (outputs/.aside,
+outputs/.sync-backup, caches: superseded or local-only copies), or read from the files given. A
+UtilityVerdict carries no generation key, so the sha256 of every verdict file read is recorded with
+the score. HumanPreference is defined here because schemas.HumanLabel only takes the four safety
+classes.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from datetime import UTC, date, datetime
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Literal
 
@@ -263,14 +266,23 @@ def _first_record_safe(path: Path) -> dict | None:
 
 
 def find_verdict_files() -> list[Path]:
-    """Every JSONL file under outputs/ (except generations) whose records are UtilityVerdicts."""
+    """Every JSONL file under outputs/ whose records are UtilityVerdicts, except under generations and
+    what lift sync never syncs: outputs/.aside (the files lift restart set aside), outputs/.sync-backup
+    (the local copies a forced pull replaced) and the rest of lift.sync.IGNORE_PATTERNS (caches, Gate 0's
+    staging). Those hold superseded or local-only copies, and a UtilityVerdict names no generation key
+    that could tell them apart. A file given to ``load_verdicts`` is read wherever it is."""
+    from lift.models.generate import ASIDE_DIR  # noqa: PLC0415 (outside the core of lift.validation)
+    from lift.sync import BACKUP_DIR, IGNORE_PATTERNS  # noqa: PLC0415
+
     root = paths.output_dir()
     if not root.is_dir():
         return []
     gens = paths.generations_dir()
     out = []
     for path in sorted(root.rglob("*.jsonl")):
-        if gens in path.parents:
+        rel = path.relative_to(root).as_posix()        # as lift.sync matches IGNORE_PATTERNS in outputs/
+        if gens in path.parents or rel.split("/", 1)[0] in (ASIDE_DIR, BACKUP_DIR) or any(
+                fnmatchcase(rel, pattern) for pattern in IGNORE_PATTERNS):
             continue
         first = _first_record_safe(path)
         if first is not None and _VERDICT_FIELDS <= set(first):
