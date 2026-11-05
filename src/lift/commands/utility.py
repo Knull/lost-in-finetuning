@@ -7,9 +7,13 @@ prompt: generate appends nothing to a current file and refuses one made under an
 the variant as registered now (another adapter, registry entry, model revision, template, decoding or
 harness), so a replaced adapter's answers are never judged as the new one's (rule 4). A side it refuses (a
 StaleOutputError: stale, or made in another precision) is listed with its remedy, and the pair is not
-judged; a side it accepts gets its check recorded (``lift.utility.record_checked``). Only ``--judge-only``,
-which loads no model, works on a laptop with no GPU stack (and needs no pin): it judges answers only as a
-GPU line checked them, and refuses a side whose registry entry, harness or pinned revision has moved since
+judged. A side refused as stale also has its recorded check withdrawn, and the pair's verdicts, metrics and
+AuditKIT record set aside (``lift.utility.withdraw``), so the job's push carries the refusal: --judge-only
+and Gate 1 then refuse those answers too, where the check alone could not tell (decoding settings, the
+template, the cache-key version). One made in another precision is not stale, and withdraws nothing. A
+side it accepts gets its check recorded (``lift.utility.record_checked``). Only ``--judge-only``, which
+loads no model, works on a laptop with no GPU stack (and needs no pin): it judges answers only as a GPU
+line checked them, and refuses a side whose registry entry, harness or pinned revision has moved since
 (``lift.utility.check_answers``); such a refusal keeps the checks, so a git pull settles one this checkout
 is behind on, with no GPU line. Exit codes: 0 done; 3 done, but something was listed with its remedy (a
 side skipped, the pair or the verdict file refused, Message Batches still running, the AuditKIT record
@@ -43,10 +47,13 @@ first, then the candidate, one model loaded at a time). A side whose file alread
 still loaded and its file checked against the variant as registered now, and nothing is generated again:
 a file made under another adapter, registry entry, model revision, template, decoding or harness is
 listed with its lift restart line, and the pair is not judged. Each check is recorded in
-outputs/utility/checked/. Each pair is then judged in both orders, the candidate shown as A and then as B,
-scored 1 / 0.5 / 0 per order for a win / tie / loss and averaged: the win rate is the mean pair score,
-with a bootstrap interval. A failed order counts as a tie; the failures, and the win rate with them
-counted as losses and as wins, are reported beside it.
+outputs/utility/checked/. A side refused as stale also has its check withdrawn and the pair's verdicts,
+metrics and AuditKIT record set aside, so the job's push makes --judge-only and Gate 1 refuse those
+answers too (a file made in another precision is not stale, and withdraws nothing). Each pair is then
+judged in both orders, the candidate shown as A and then as B, scored 1 / 0.5 / 0 per order for a win /
+tie / loss and averaged: the win rate is the mean pair score, with a bootstrap interval. A failed order
+counts as a tie; the failures, and the win rate with them counted as losses and as wins, are reported
+beside it.
 
 --judge-only loads no model (the laptop, after lift sync pull): it judges the answers only as a GPU line
 checked them, and refuses a side with no check, one that changed since, or one whose registry entry,
@@ -59,7 +66,7 @@ with no judge call; one another judge wrote is refused until --rejudge sets it a
 refused, its verdicts, metrics and AuditKIT record are set aside (outputs/.aside/, never synced) and left
 empty, so nothing reads them as current. The answer checks are kept, and checked again on every run: a
 refusal this checkout settles (a git pull, when it is behind the ref the GPU job ran) needs no GPU line.
-Only lift restart of the cell retires a check.
+Only lift restart of the cell retires a check, or a GPU line that refuses its answers as stale.
 
 The frontier judge (judges.utility) first sends its uncached requests as Message Batches when
 judges.utility.bulk is batch, waits for them and then judges from its call cache. --no-wait submits the
@@ -99,13 +106,16 @@ def _answer(args: argparse.Namespace, prompts: Sequence[Any], dtype: str,
     of the pids alone would reuse the answers of an adapter replaced since (rule 4), while ``generate``
     compares every record with the variant as built now, appends only what is missing and refuses a file of
     another configuration or stack. A side ``generate`` refuses is listed in ``skipped`` under "{variant}
-    {cell}"; a side it accepts gets its check recorded (``utility.record_checked``), which --judge-only
-    reads."""
+    {cell}"; one refused as stale also has its check withdrawn and the pair's derived files set aside
+    (``utility.withdraw``), as generate compares more than a check names, so the job's push carries the
+    refusal to --judge-only and Gate 1. A file made in another precision (OtherPrecisionError) is not stale
+    and withdraws nothing: that precision's check and files stand. A side it accepts gets its check recorded
+    (``utility.record_checked``), which --judge-only reads."""
     from lift import utility
 
     require_pinned("models.global")
     _refuse_other_dtype(dtype, args.device)
-    from lift.models.generate import StaleOutputError, generate, generations_path
+    from lift.models.generate import OtherPrecisionError, StaleOutputError, generate, generations_path
     from lift.models.variants import build_variant, get_spec
 
     names = (utility.REFERENCE, args.variant)
@@ -129,6 +139,8 @@ def _answer(args: argparse.Namespace, prompts: Sequence[Any], dtype: str,
             _skip(mine, name, utility.SET, utility.LANG, args.split, exc, judged=None, dtype=dtype)
             for kind, cells in mine.items():   # both sides share the cell name: key them by variant too
                 skipped.setdefault(kind, {}).update({f"{name} {cell}": why for cell, why in cells.items()})
+            if not isinstance(exc, OtherPrecisionError):
+                utility.withdraw(name, args.variant, args.split, dtype)
         finally:
             holder.clear()
             _release_memory()

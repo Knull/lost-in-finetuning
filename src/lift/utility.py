@@ -30,7 +30,12 @@ Rules, and why:
   ``evaluate`` reads it without loading a model (``--judge-only``, on the laptop) and refuses a side whose
   check is missing or names another file, or whose registry entry (its intervention digest, a pinned
   adapter hash), harness version or pinned model revision has moved since: the GPU line checks it again
-  (``--generate-only``), or the cell's ``lift restart`` line starts it over.
+  (``--generate-only``), or the cell's ``lift restart`` line starts it over. A side generate refuses as
+  stale has its check withdrawn, and the pair's verdicts, metrics and AuditKIT records retired
+  (``withdraw``): generate compares a file with more than a check names (decoding settings, the chat
+  template, the cache-key version), so a check it contradicts must go, or the laptop would still judge, and
+  Gate 1 count, the answers the GPU line refused. The job's push carries the emptied files. A file made in
+  another precision is not stale, and withdraws nothing.
 - Both orders. Every pair is judged twice in one ``pairwise`` call: order AB shows the candidate as A and
   stock as B, order BA the reverse. In each order the candidate scores 1 for a win, 0.5 for a tie and 0 for
   a loss (so "B" in order BA is a win), and the pair's score is the mean of its two orders: 1, 0.75, 0.5,
@@ -79,16 +84,17 @@ Rules, and why:
   intervention, model revision and harness it names).
 - Retired, never left behind (``retire``). What lift utility derived from a pair (both judge dirs' verdict
   files, the metrics, the AuditKIT utility records) must not outlive the answers it describes: P04 reads
-  verdicts by pid and Gate 1 reads the metrics. When ``evaluate`` refuses a pair, and when ``lift restart``
-  starts a utility cell over (for stock's cell, every candidate's: each was paired with stock's answers),
-  they are copied to outputs/.aside/ (never synced; verdict copies are named ``*.jsonl.aside``) and left
-  empty, never removed: sync never deletes, so the next push replaces the runs repo's copies, and every
-  reader takes an empty file for none. A refused pair keeps its answer checks. ``check_answers`` reads
-  each one again on every run, against its file, the registry, the harness and the pin, so a kept check
-  never lets stale answers through, while only a GPU line can make one again; and a refusal may be this
-  checkout's own (a registry entry, harness or pin it is behind the GPU job's ref on), which a git pull
-  settles: ``--judge-only`` then judges the pair again (the frontier judge from its call cache), with no
-  GPU line. A check goes only with the answers it names (``lift restart`` of the cell).
+  verdicts by pid and Gate 1 reads the metrics. When ``evaluate`` refuses a pair, when a GPU line refuses
+  a side as stale (``withdraw``), and when ``lift restart`` starts a utility cell over (for stock's cell,
+  every candidate's: each was paired with stock's answers), they are copied to outputs/.aside/ (never
+  synced; verdict copies are named ``*.jsonl.aside``) and left empty, never removed: sync never deletes, so
+  the next push replaces the runs repo's copies, and every reader takes an empty file for none. A refused
+  pair keeps its answer checks. ``check_answers`` reads each one again on every run, against its file, the
+  registry, the harness and the pin, so a kept check never lets stale answers through, while only a GPU
+  line can make one again; and a refusal may be this checkout's own (a registry entry, harness or pin it
+  is behind the GPU job's ref on), which a git pull settles: ``--judge-only`` then judges the pair again
+  (the frontier judge from its call cache), with no GPU line. A check goes only with the answers it names
+  (``lift restart`` of the cell) or when a GPU line refuses them (``withdraw``).
 - No instruction, answer or judge reason is ever logged: counts, ids, paths and hashes only.
 """
 
@@ -485,7 +491,9 @@ def _check_side(name: str, candidate: str, split: str, dtype: str, records: Sequ
     absent = [k for k in CHECK_FIELDS if not isinstance(doc, dict) or k not in doc]
     if not data.strip():
         problems.append(f"no GPU line has checked its answers against {name} as registered now "
-                        f"({logical(check)} is missing or empty): run {gpu}")
+                        f"({logical(check)} is missing or empty): run {gpu}. If a GPU line refused them as "
+                        f"stale (it withdraws their check), start the cell over first: `{restart}` as a job "
+                        "line right after `lift sync pull`")
     elif absent:
         problems.append(f"{logical(check)} is not a check lift utility wrote (it names no {absent}): "
                         f"run {gpu}")
@@ -731,15 +739,16 @@ def retire(variant: str, split: str, dtype: str | None = None, *, aside: Path | 
     full) and, with ``check``, the variant's recorded answer check; ``dtype``'s files, or every precision's
     when ``dtype`` is None (a restart: the answers it sets aside are one file, whatever their precision).
     ``check`` is for ``lift restart`` of the cell, which sets aside the answers the check names. A refused
-    pair passes False (``_retire_refused``): ``check_answers`` reads a kept check again on every run, so it
-    never lets stale answers through, while only a GPU line could make it again, and a refusal this
-    checkout settles with a git pull must not need one. Each file is copied under ``aside`` (default a new
-    outputs/.aside/<UTC stamp>, never synced; a verdict file's copy named ``*.jsonl.aside``, so P04's scan
-    of every .jsonl under outputs/ never reads it as current verdicts) and left empty, never removed: sync
-    never deletes, so a removed file would come back at the next pull, while an emptied one is a local edit
-    the next push sends. An empty file is none to every reader (Gate 1, P04, ``reusable``,
-    ``check_answers``). Returns what happened to each file (``SetAside``; records None for a file that is
-    not here, no copy for an empty one)."""
+    pair passes False (``_retire_refused``; ``withdraw`` empties only the check of the side a GPU line
+    refused): ``check_answers`` reads a kept check again on every run, so it never lets stale answers
+    through, while only a GPU line could make it again, and a refusal this checkout settles with a git pull
+    must not need one. Each file is copied under ``aside`` (default a new outputs/.aside/<UTC stamp>, never
+    synced; a verdict file's copy named ``*.jsonl.aside``, so P04's scan of every .jsonl under outputs/
+    never reads it as current verdicts) and left empty, never removed: sync never deletes, so a removed
+    file would come back at the next pull, while an emptied one is a local edit the next push sends. An
+    empty file is none to every reader (Gate 1, P04, ``reusable``, ``check_answers``). Returns what
+    happened to each file (``SetAside``; records None for a file that is not here, no copy for an empty
+    one)."""
     from lift.audit import TEXT_POLICIES, utility_record_path
 
     aside = aside or aside_root()
@@ -754,6 +763,31 @@ def retire(variant: str, split: str, dtype: str | None = None, *, aside: Path | 
         if check:
             files[checked_path(variant, split, dtype=d)] = ""
     return [_set_aside(path, aside, suffix=suffix) for path, suffix in files.items()]
+
+
+def withdraw(side: str, candidate: str, split: str, dtype: str) -> list[SetAside]:
+    """What a GPU line does when ``lift.models.generate.generate`` refuses ``side``'s answer file (stock's or
+    ``candidate``'s) as stale: a StaleOutputError that is not an OtherPrecisionError, which the caller
+    tells apart (a file made in another precision is not stale, and its own precision's check and files
+    stand). ``side``'s recorded check in ``dtype`` is set aside and left empty, and so is what lift utility
+    derived from ``candidate``'s pair with stock (``retire``, keeping ``candidate``'s check unless it is the
+    side refused: a stock refusal says nothing of the candidate's answers). generate compares a file with
+    more than a check names (decoding settings, the chat template, the cache-key version), so a check it
+    contradicts must go, or ``--judge-only`` would still judge, and Gate 1 count, the answers it refused.
+    The job's push carries the emptied files: every machine then reads ``side``'s answers as unchecked
+    (stock's for every candidate) until the cell's ``lift restart`` line and a GPU line make them again.
+    Logged by path and count; returns what happened to each file (``SetAside``)."""
+    aside = aside_root()
+    done = [_set_aside(checked_path(side, split, dtype=dtype), aside),
+            *retire(candidate, split, dtype, aside=aside, check=False)]
+    gone = [s for s in done if s.copy is not None]
+    if gone:
+        log.warning("%s vs %s, %s_%s_%s: %s's answers are refused as stale here, so its answer check and "
+                    "what was derived from the pair, %d files, are set aside in %s and left empty: "
+                    "--judge-only and Gate 1 refuse those answers until the cell is started over: %s",
+                    candidate, REFERENCE, SET, LANG, split, side, len(gone), aside,
+                    ", ".join(logical(s.path) for s in gone))
+    return done
 
 
 def _dirs(top: Path) -> list[Path]:
@@ -1088,10 +1122,10 @@ def evaluate(variant: str, split: str, *, judge_dir: str = "frontier", dtype: st
     ``make_judge`` and ``make_lid`` (tests pass fakes). ``prefill`` applies to the frontier judge only. A pair
     refused at pairing or checking has its derived files in ``dtype`` (verdicts, metrics, AuditKIT records)
     retired before the UtilityRefused propagates, so nothing reads them as current, and both answer checks
-    kept (``_retire_refused``): only ``lift restart`` of the cell retires a check. A refused verdict file
-    (another judge's, or unreadable) retires nothing, its remedy being --rejudge. A refused AuditKIT record
-    (ValueError) is returned in ``record_error``, the metrics being written; the frontier judge's stops and
-    FrontierBatchPending propagate."""
+    kept (``_retire_refused``): only ``lift restart`` of the cell retires a check, or a GPU line that refuses
+    its answers (``withdraw``). A refused verdict file (another judge's, or unreadable) retires nothing, its
+    remedy being --rejudge. A refused AuditKIT record (ValueError) is returned in ``record_error``, the
+    metrics being written; the frontier judge's stops and FrontierBatchPending propagate."""
     from lift import audit
 
     _judge_dir(judge_dir)
