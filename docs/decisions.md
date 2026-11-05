@@ -77,8 +77,11 @@ branch.
       refuses a cell whose generations carry another harness version, another Global revision than
       the pin, no intervention digest or another one than the variant's current
       configs/variants.yaml entry, or another adapter hash than that entry's pin. A variant that
-      names an adapter is read only when its entry pins `artifacts.adapter`. Cache keys and
-      HARNESS_VERSION are unchanged.
+      names an adapter is read only when its entry pins `artifacts.adapter`, and only while every
+      entry with method `adapter` that names the same adapter (the adapter's own entry, which
+      `lift register-adapter` writes) pins the same hash. A repair's entry copies its adapter's
+      pin, so after an adapter is registered again, each of its repairs is registered again with
+      the new pin and its cells are made again. Cache keys and HARNESS_VERSION are unchanged.
     - So retraining or re-registering an adapter, re-pinning Global or bumping the harness means
       making the affected cells again. `lift generate` refuses to extend a cell begun before this
       change, which could never be read.
@@ -94,8 +97,12 @@ branch.
       Nothing of that batch is written, and `lift generate` and `lift run-dev` skip the cell and
       list it (exit 3). In fp16 that is "fp16 failed: T4 runs are never reported", and the cell is
       made in bf16, after its `lift restart ... --dtype fp16` line if its file holds fp16 records.
-      In bf16 it is a fault to report (rule 9). A wrapper (P05's CAST) must pass the logits
-      processor on to every inner decode. A non-finite Qwen3Guard decode is a judge failure.
+      In bf16 it is a fault to report (rule 9). A non-finite Qwen3Guard decode is a judge failure.
+    - A wrapper (P05's CAST) may decode a batch in pieces, but then each row is decoded once, the
+      pieces' sizes add up to the batch, and each piece passes through the logits processor.
+      `greedy_batch` refuses anything else, and a NaN or +inf in any piece refuses the whole
+      batch. An inner decode that never calls the processor is invisible to this check, so the
+      wrapper must pass it on to every inner decode (R2 checks this).
     - The Nov 4 Gate 0 predates these rules and the rules tag, so Gate 0 runs again on the frozen
       harness before the stock dev eval.
 
@@ -107,15 +114,22 @@ branch.
 62. **Publication, clarifying item 14** (R1-14). The public logs dataset holds no output text and
     no judge text: prompt ids, labels, flags, generation keys, output hashes (the redacted AuditKIT
     records), metadata and aggregate tables. Every judged output, refusals and benign answers
-    included, and the judges' raw replies, reasons and failure messages go only to a gated repo.
-    The Space shows at most a cut of about 10 words, then [redacted]. P08 guards public files by
+    included, and the judges' raw replies, reasons and failure messages go only to a gated repo:
+    a failed judgement keeps only that its judge failed and the failure's kind. The Space shows
+    at most a cut of about 10 words, then [redacted]. P08 guards public files by
     their content, not by label: for about 90% of outputs a refusal label is Qwen3Guard's alone,
     and the judge bar tolerates 15% disagreement with humans.
 
-63. **Restarts and sync, clarifying item 32** (R1-08). When the runs repo's copy of a file that
-    `lift restart` emptied has changed since this machine's last sync, sync never merges it (a
-    merge would refill it). Push and pull report a conflict, and `lift sync push --force`
-    completes the restart.
+63. **Restarts and sync, clarifying item 32** (R1-08). After `lift restart`, the next push
+    replaces the runs repo's copies with the empty files. Sync never merges into a file the
+    restart emptied, because a merge would refill it.
+    - When another machine pushed only files the restart emptied since this machine's last sync,
+      push and pull report a conflict. `lift sync push --force` settles it by completing the
+      restart; `lift sync pull --force` takes the Hub's copy instead.
+    - When it pushed any other file of the cell (more generations after a `--judge` restart,
+      say), the emptied file waits for that file, as the summary says: `lift sync pull`, then
+      `lift sync push`. If the emptied file also changed there, that pull reports the conflict
+      above, which `lift sync push --force` settles.
 
 64. **Qwen3Guard's output head** (R1-11). Qwen3GuardJudge refuses a checkpoint whose config ties
     the head to the embeddings while the head loads untied. The pinned 6ec42827 loads tied (the
