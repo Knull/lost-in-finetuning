@@ -33,9 +33,9 @@ Checks (each PASS, FAIL or NOT RUN; numbers go to outputs/metrics/gate0.json and
 
 Decision rule (README, Gate 0): any failure means fix first. If the fp16 check fails, T4 runs are
 never reported and everything reported runs in bf16 on an A100/L4. The fp16 check fails only on a
-real result: a non-finite fp16 run (a decode generate refused as non-finite, or a non-finite value in
-the generator's or the local judge's teacher-forced scan), or a valid comparison under the agreement
-bar.
+real result: a non-finite fp16 run (a decode generate refused as non-finite, or a non-finite value
+in the generator's or the local judge's teacher-forced scan) or a valid comparison under the
+agreement bar.
 
 Verdicts. A check that raises is a FAIL with its error, and so is a model whose revision cannot be
 resolved or that cannot load (the "load" check), so a report is always written. A check that cannot
@@ -389,11 +389,11 @@ def compare_runs(reference_root: Path, candidate_root: Path, tokenizer: Any) -> 
 
     The pairs are only valid if both runs saw the same prompt text, model revision, chat template,
     harness, decoding settings (``meta.decoding``: cap, stop tokens) and judge (model, revision, labelling
-    rules (the id's rules tag) and Controversial mode: only the precision may differ, ``_judge_identity``),
-    so every mismatch is counted and listed in
-    ``invalid``: a stale reference run (a fixed translation, a harness fix, another cap) must be re-run
-    first. ``harness`` and ``decoding`` are the pairs' one setting (None when they hold several): the
-    fp16 licence covers only cells made with them."""
+    rules, which its id's rules tag names, and Controversial mode: only the precision may differ,
+    ``_judge_identity``), so every mismatch is counted and listed in ``invalid``: a stale reference run (a
+    fixed translation, a harness fix, another cap, other labelling rules) must be re-run first. ``harness``
+    and ``decoding`` are the pairs' one setting (None when they hold several): the fp16 licence covers only
+    cells made with them."""
     from lift.models.generate import read_generations
     from lift.schemas import JudgementRecord
     from lift.stats import cohens_kappa, mcnemar_exact

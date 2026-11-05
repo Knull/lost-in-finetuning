@@ -741,11 +741,11 @@ generations file, every judgements file and every AuditKIT record of the cell (w
 judge's judgements file and records) is copied to outputs/.aside/<UTC stamp>/, which is never synced,
 and left EMPTY: the next lift sync push replaces the runs repo's copies (an empty record is retired;
 a copy there that changed since this machine's last sync is reported as an emptied-file conflict
-instead, which lift sync push --force settles: R1-08),
-and run-dev (or generate, then judge) fills the cell again. The log names the line that refills any
-other judge's judgements it set aside, a judge run-dev never runs: the second judge's, over P04's key
-list (drawn again first when the cell's generation keys changed: a fixed prompt text or another
-configuration), or with --sample 0.10 while P04 has drawn none.
+instead, which lift sync push --force settles: R1-08), and run-dev (or generate, then judge) fills the
+cell again. The log names the line that refills any other judge's judgements it set aside, a judge
+run-dev never runs: the second judge's, over P04's key list (drawn again first when the cell's
+generation keys changed: a fixed prompt text or another configuration), or with --sample 0.10 while
+P04 has drawn none.
 
 --dtype is the precision this job makes the cells in (default: generation.dtype; the T4 passes
 --dtype fp16, as its restart lines say). A cell made in another precision is refused, and nothing is
