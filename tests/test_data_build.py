@@ -1547,8 +1547,10 @@ def test_the_apply_rebuild_keeps_failures_the_cache_cannot_hold(dirs, monkeypatc
         return {x["pid"]: (x["rule"], x["detail"]) for x in failed}
 
     assert rules() == {ORB[1].pid: ("empty", "blank"), ORB[2].pid: ("wrong_lang", "top=eng_Latn 0.95")}
-    build.build_all(ctx=fixture_ctx(cache_only=True), **hard)          # a cache-only build says what it saw
+    summary = build.build_all(ctx=fixture_ctx(cache_only=True), **hard)    # says what it saw in the cache
     assert rules() == {ORB[1].pid: ("error", "not cached"), ORB[2].pid: ("wrong_lang", "top=eng_Latn 0.95")}
+    # so the cache-only line a stopped apply names exits 3 on such a file, as its message says (W3)
+    assert summary["rerun_needed"] and summary["incomplete"] == ["hard_benign_hi"]
 
 
 def test_apply_refuses_to_run_without_the_translation_cache(dirs, spot, tmp_path):

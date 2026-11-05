@@ -25,7 +25,8 @@ package (GlotLID's fasttext) is, all before a verdict is stored, or the rebuild 
 after the verdicts are stored (each logged in one line, no traceback; that line says the verdicts are
 stored, that applying the sheet again once the cause is fixed finishes the rebuild, and names the
 ``lift data build --only <sets> --langs <lang> --cache-only`` line that also rebuilds their files from
-them); 3 when the rebuild lost records (listed; the verdicts are stored, and the files' reports say
+them, which exits 3 when a file holds an error or empty translation failure: the cache never holds
+one); 3 when the rebuild lost records (listed; the verdicts are stored, and the files' reports say
 why).
 ``spotcheck-sheets``: 1 when a sheet exists (no --overwrite), a file is missing, a prompt file is
 refused (as above) or the translation cache lacks a failure's engine output.
