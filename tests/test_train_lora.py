@@ -41,6 +41,9 @@ from lift.train import lora, merge  # noqa: E402
 
 NAME = "adapter-aya-std-s1"
 PARITY = ["hi", "नमस्ते, आप कैसे हैं?"]
+# What registration.json's parity.<dtype>.prompts.source says of the default parity prompts.
+PARITY_RULE = ("drawn by Gate 0's merge-parity rule over the current dev prompts: "
+               f"lift.prompts.mixed_sample(20, split='dev', seed={gate0.SEED + 3})")
 COMMIT = "b" * 40
 SHA = "c" * 40
 # The user turn alone (byte-level tokens) fills max_seq_len 1024 after the tiny preamble.
@@ -659,7 +662,8 @@ def safety_prompts(fake_prompt_files):
 
 def test_the_adapter_parity_runs_on_gate0s_parity_prompts(tiny_model_dir, safety_prompts, utility,
                                                           monkeypatch):
-    # The prompts Gate 0's own random-LoRA parity used, as run_gate0 hands them to check_parity.
+    # With the dev pools as Gate 0 found them, the draw is the prompts Gate 0's own random-LoRA parity used,
+    # as run_gate0 hands them to check_parity.
     from lift.prompts import mixed_sample
 
     handed = []
@@ -675,8 +679,7 @@ def test_the_adapter_parity_runs_on_gate0s_parity_prompts(tiny_model_dir, safety
     texts, info = lora._parity_texts(None)
     assert len(drawn) == gate0.N_PARITY == 20 and texts == [p.text for p in drawn]
     assert info["n"] == 20 and info["pids"] == [f"{p.set}_{p.lang}:{p.pid}" for p in drawn]
-    assert info["source"] == ("Gate 0's merge-parity sample: lift.prompts.mixed_sample(20, split='dev', "
-                              f"seed={gate0.SEED + 3})")
+    assert info["source"] == PARITY_RULE
     assert texts != [p.text for p in mixed_sample(20, split="dev", seed=0)]    # parity_check's own default
     assert lora._parity_texts(PARITY) == (PARITY, {"source": "given", "n": 2,
                                                    "sha256": [sha256_text(t) for t in PARITY]})
@@ -696,6 +699,27 @@ def test_the_adapter_parity_runs_on_gate0s_parity_prompts(tiny_model_dir, safety
     assert checked == [texts]
     recorded = read(path / "registration.json")["parity"]["fp32"]["prompts"]
     assert recorded == {"source": info["source"], "n": 20, "pids": info["pids"]}
+
+
+def test_the_parity_sample_is_gate0s_rule_over_the_dev_prompts_as_they_are_now(safety_prompts):
+    # Gate 0 records no pids: the draw is Gate 0's own sample only while the 18 dev pools are unchanged since
+    # it ran. A spot-check exclusion of a prompt Gate 0 drew changes the draw, so the record and the
+    # docstrings state the rule and the pids drawn, never that these are Gate 0's prompts.
+    _texts, info = lora._parity_texts(None)
+    assert info["source"] == PARITY_RULE
+    excluded = info["pids"][0]
+    cell, pid = excluded.split(":")
+    key = tuple(cell.rsplit("_", 1))
+    safety_prompts[key] = [p for p in safety_prompts[key] if p.pid != pid]       # excluded after Gate 0 ran
+    _texts, now = lora._parity_texts(None)
+    assert now["source"] == PARITY_RULE and now["n"] == 20
+    assert excluded not in now["pids"] and now["pids"] != info["pids"]
+    module, sample, run = (" ".join(f.__doc__.split())
+                           for f in (lora, lora.gate0_parity_sample, lora.train_lora))
+    assert "drawn by Gate 0's parity rule" in module and "while those dev pools are unchanged" in module
+    assert "drawn by Gate 0's parity rule" in sample
+    assert "only while those 18 dev pools are unchanged" in sample
+    assert "drawn by Gate 0's parity rule from the dev prompts as they are now" in run
 
 
 def test_a_failed_push_never_fails_training(tiny_model_dir, utility, hub):
