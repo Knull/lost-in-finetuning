@@ -222,8 +222,11 @@ exits 1. Any other failing line still ends the job. A cell is skipped when:
   (fp16 on a T4, say). Run with `--dtype <that dtype>` on the kind of GPU that made them, or leave
   the cell out with `--sets`/`--langs`. This is never a restart, which would discard them.
 - **Its judge differs**: its judgements file was made by another judge (another judge id, which
-  shows the judge's dtype and mode). Run with that judge, or the printed
-  `lift restart ... --judge ROLE` line.
+  names the labelling rules and, for Qwen3Guard, the dtype and mode:
+  `{model}@{sha}#rules-<tag>#{dtype}#{mode}`; a frontier judge's id ends in `#rules-<tag>`). Run with
+  that judge, or the printed `lift restart ... --judge ROLE` line. A file that differs only in its
+  rules tag (the labelling rules changed since it was judged) can only be judged again: its message
+  names only the restart line, and running with the old judge never finishes it.
 
 `lift restart` moves the cell's files to `outputs/.aside/<UTC stamp>/` on the VM, which is never
 synced, and leaves each one empty; it empties the cell's AuditKIT records too (an empty record is a
