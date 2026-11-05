@@ -98,6 +98,39 @@ def test_pinned_hash_and_template_are_enforced(tiny_lora_adapter, tiny_model_dir
                                   model_id=str(tiny_model_dir)).adapter_hash
 
 
+def test_an_adapter_whose_fp32_merge_parity_failed_is_never_built(tiny_lora_adapter, tiny_model_dir):
+    # CLAUDE.md rule 9 at the one code path: the adapter's registration.json (lift train's record, synced with
+    # it) records a failed fp32 merge parity for this very hash, so it is refused whatever the registry pins.
+    target = install_adapter(tiny_lora_adapter)
+    digest = merge.adapter_hash(target)
+    record = target / "registration.json"
+
+    def write(parity, adapter_hash=digest):
+        record.write_text(json.dumps({"name": "adapter-aya-std-s1", "adapter_hash": adapter_hash,
+                                      "parity": parity}), encoding="utf-8")
+
+    failed = {"fp32": {"n": 20, "n_match": 19, "all_match": False},
+              "fp16": {"n": 20, "n_match": 20, "all_match": True}}         # the fp32 result decides
+    write(failed)
+    refused = r"failed fp32 merge parity: it must not be evaluated \(CLAUDE.md rule 9\)"
+    for spec in (adapter_spec(), adapter_spec(adapter=digest)):
+        with pytest.raises(ValueError, match=refused):
+            variants.build_variant(spec, device="cpu", dtype="fp32", model_id=str(tiny_model_dir))
+    write(failed, adapter_hash="0" * 64)              # written for another adapter (set aside): not this one
+    assert variants.checked_adapter(adapter_spec()) == (target, digest)
+    for parity in ({"fp32": {"n": 20, "n_match": 20, "all_match": True}},
+                   {"fp16": {"n": 20, "n_match": 3, "all_match": False}},     # a T4's: recorded, not required
+                   {}):                                                       # not checked: not a failure
+        write(parity)
+        assert variants.checked_adapter(adapter_spec()) == (target, digest)
+    record.write_text("{", encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot be read"):
+        variants.checked_adapter(adapter_spec())
+    record.unlink()                                   # no registration.json (the tests' adapter): as before
+    assert variants.build_variant(adapter_spec(), device="cpu", dtype="fp32",
+                                  model_id=str(tiny_model_dir)).adapter_hash == digest
+
+
 def test_named_templates_saved_with_the_adapter_pass(tmp_path):
     """Global ships named templates (default plus tool_use, as Cohere's chat models do); TRL saves the
     same tokenizer beside the adapter as chat_template.jinja plus additional_chat_templates/."""

@@ -81,11 +81,16 @@ After training
   push is logged and recorded and never fails the run: the runners' own pushes send the folder again
   (sync compares content).
 - Parity: the training model is freed, then lift.train.merge.parity_check compares the merged and the
-  unmerged adapter's greedy outputs, on the base it was trained on, on Gate 0's parity prompts
-  (``gate0_parity_sample``: the 20 dev prompts mixed over sets and languages that lift.gate0 draws for
-  its random-LoRA parity, ``mixed_sample(gate0.N_PARITY, split="dev", seed=gate0.SEED + 3)``).
+  unmerged adapter's greedy outputs, on the base it was trained on, on 20 dev prompts drawn by Gate 0's
+  parity rule (``gate0_parity_sample``: ``mixed_sample(gate0.N_PARITY, split="dev",
+  seed=gate0.SEED + 3)``, mixed over sets and languages) from the dev prompt files as they are now.
+  They are the prompts Gate 0's random-LoRA parity ran only while those dev pools are unchanged since
+  Gate 0, which records no pids: a spot-check exclusion or a fixed translation changes the draw.
+  registration.json records the rule and the pids drawn.
   In fp32 they must match token for token, or the adapter is not registered and the run fails: it is
   saved and pushed, but nothing may evaluate it until the cause is understood (CLAUDE.md rule 9).
+  lift.models.variants.checked_adapter, the one path every adapter variant is built through, refuses an
+  adapter whose registration.json records a failed fp32 parity for its hash, whatever a registry holds.
 - The one exception is a GPU without native bf16 (a T4, where the fp32 base, about 13.4 GB, may not
   fit): there ``--parity-dtype fp16`` checks parity in fp16, records the share of prompts that match
   (registration.json, and the registry note "fp16 n/20 prompts token-identical (T4; fp32 not
@@ -93,7 +98,11 @@ After training
   weights differently, so an exact match is not expected. fp16 parity is refused on a GPU with native
   bf16 (an A100, an L4) and allowed on the CPU (the tests). An fp32 parity recorded later for the same
   adapter hash (a resume where the fp32 base fits) decides instead, and ``lift register-adapter``
-  applies the same rule on the laptop.
+  applies the same rule on the laptop. When that fp32 parity fails, the adapter is un-registered:
+  registration.json drops its entry and its registered block (kept as ``unregistered``, with the reason
+  and the time), the run removes the entry from the registry it writes when that entry pins this hash
+  (``unregister_adapter``) and fails (ParityFailed), and on the laptop ``lift register-adapter NAME``
+  removes the committed entry the same way ("removed"; commit configs/variants.yaml).
 - Registration: an entry appended to configs/variants.yaml as text, so its comments stay: name, method
   adapter, the adapter, the seed, artifacts.adapter = the hash, location (the runs-repo path and push
   commit, never the repo id: LIFT_RUNS_REPO is a secret) and a note (candidate, recipe, date, GPU,
@@ -103,8 +112,8 @@ After training
   the parity results, the pushes made before it and the entry, and is pushed too. configs/ travels by
   git, not by lift sync, so a GPU runtime's registration dies with the session: the laptop runs ``lift
   sync pull``, then ``lift register-adapter NAME`` (``register_pulled``: it recomputes the hash from the
-  pulled files, checks it against registration.json and that parity passed, writes the same entry), and
-  commits configs/variants.yaml.
+  pulled files, checks it against registration.json and that parity passed, writes the same entry, or
+  removes the entry when the fp32 parity failed), and commits configs/variants.yaml.
 - Resume: an adapter folder that holds the weights is never trained again. The run does what is
   missing (the push; parity, unless registration.json holds one for this hash in that precision; the
   registration) and exits 0. ``--retrain`` first sets the folder aside under
@@ -182,8 +191,10 @@ class TrainRefused(ValueError):
 
 class ParityFailed(RuntimeError):
     """The merged adapter's greedy outputs differ from the unmerged adapter's in fp32. The adapter is
-    saved and pushed and registration.json records the parity, but it is not registered and must not be
-    evaluated until the cause is understood (CLAUDE.md rule 9). ``lift train`` exits 1."""
+    saved and pushed and registration.json records the parity, but it is not registered (a registration
+    an earlier fp16 parity made is withdrawn, and the registry this run writes loses an entry pinning
+    this hash) and must not be evaluated until the cause is understood (CLAUDE.md rule 9: build_variant
+    refuses it). ``lift train`` exits 1."""
 
 
 class RegistryConflict(ValueError):
@@ -1014,16 +1025,19 @@ def _push(name: str) -> dict[str, Any]:
 
 
 def gate0_parity_seed() -> int:
-    """The seed of Gate 0's merge-parity sample: lift.gate0.run_gate0 draws it with SEED + 3."""
+    """The seed of Gate 0's merge-parity rule: lift.gate0.run_gate0 draws its sample with SEED + 3."""
     from lift import gate0
 
     return gate0.SEED + GATE0_PARITY_SEED_OFFSET
 
 
 def gate0_parity_sample() -> list[Any]:
-    """Gate 0's merge-parity prompts, drawn as lift.gate0.run_gate0 draws them for its random-LoRA
-    parity (``mixed_sample(N_PARITY, split="dev", seed=SEED + 3)``: 20 dev prompts mixed over the safety
-    sets and languages), so an adapter's parity runs on the very prompts Gate 0's did."""
+    """The merge-parity prompts drawn by Gate 0's parity rule (``mixed_sample(N_PARITY, split="dev",
+    seed=SEED + 3)``, as lift.gate0.run_gate0 draws them for its random-LoRA parity: 20 dev prompts mixed
+    over the safety sets and languages) from the dev prompt files as they are now. They are the prompts
+    Gate 0's parity ran only while those 18 dev pools are unchanged since Gate 0, which records no pids:
+    a spot-check exclusion changes its cell's pick, and a fixed translation changes the text.
+    registration.json lists the pids drawn (``_parity_texts``)."""
     from lift import gate0
     from lift.prompts import mixed_sample
 
@@ -1031,8 +1045,8 @@ def gate0_parity_sample() -> list[Any]:
 
 
 def _parity_texts(given: Sequence[str] | None) -> tuple[list[str], dict[str, Any]]:
-    """The parity prompts (``gate0_parity_sample``, unless given) and how to find them again (pids, or
-    the given texts' hashes; never the texts)."""
+    """The parity prompts (``gate0_parity_sample``, unless given) and how to find them again (the rule
+    and the pids drawn, or the given texts' hashes; never the texts)."""
     if given is not None:
         texts = [str(t) for t in given]
         if not texts:
@@ -1041,8 +1055,8 @@ def _parity_texts(given: Sequence[str] | None) -> tuple[list[str], dict[str, Any
     from lift import gate0
 
     records = gate0_parity_sample()
-    source = (f"Gate 0's merge-parity sample: lift.prompts.mixed_sample({gate0.N_PARITY}, split='dev', "
-              f"seed={gate0_parity_seed()})")
+    source = ("drawn by Gate 0's merge-parity rule over the current dev prompts: "
+              f"lift.prompts.mixed_sample({gate0.N_PARITY}, split='dev', seed={gate0_parity_seed()})")
     return [r.text for r in records], {"source": source, "n": len(records),
                                        "pids": [f"{r.set}_{r.lang}:{r.pid}" for r in records]}
 
@@ -1057,6 +1071,30 @@ def parity_verdict(parity: Mapping[str, Mapping[str, Any]]) -> tuple[bool, str]:
     if fp16 is not None:
         return True, f"fp16 {fp16['n_match']}/{fp16['n']} prompts token-identical (T4; fp32 not checked)"
     return False, "not checked"
+
+
+def recorded_parity_failure(directory: Path, digest: str) -> str | None:
+    """The failed fp32 merge parity the adapter folder's registration.json records for adapter hash
+    ``digest`` (parity_verdict's summary, "FAILED: fp32 n/20 prompts token-identical"), or None: no
+    registration.json (an adapter lift train did not make, such as the tests' tiny one), one written for
+    another hash (a set-aside or replaced adapter), or a parity that did not fail in fp32 (it passed, a
+    T4's fp16 alone, or none was checked). lift.models.variants.checked_adapter refuses an adapter with
+    such a record (CLAUDE.md rule 9). A registration.json that cannot be read raises ValueError: whether
+    it records a failure cannot be told."""
+    path = Path(directory) / REGISTRATION
+    if not path.is_file():
+        return None
+    try:
+        reg = _read_json(path)
+        parity = reg.get("parity") or {}
+        if reg.get("adapter_hash") != digest or parity.get("fp32") is None:
+            return None
+        ok, summary = parity_verdict(parity)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f"{path} cannot be read ({type(exc).__name__}: {exc}), so whether it records a "
+                         "failed merge parity for this adapter cannot be told: pull it again (`lift sync "
+                         "pull`) or look at it") from exc
+    return None if ok else summary
 
 
 def _parity(plan: Plan, final: Path, digest: str, prompts: Sequence[str],
@@ -1119,7 +1157,7 @@ def _registration_doc(final: Path, digest: str, plan: Plan) -> dict[str, Any]:
                     "one is started for %s", path, str(doc.get("adapter_hash"))[:12], digest[:12])
     return {"version": RECORD_VERSION, "name": plan.name, "adapter_hash": digest, "candidate": plan.candidate,
             "recipe": plan.recipe, "seed": plan.seed, "parity": {}, "entry": None, "registered": None,
-            "registry_error": None, "pushes": [], "created": _now()}
+            "unregistered": None, "registry_error": None, "pushes": [], "created": _now()}
 
 
 @dataclass
@@ -1153,8 +1191,8 @@ def _post_steps(plan: Plan, final: Path, digest: str, trained: Mapping[str, Any]
     ok, summary = parity_verdict(reg["parity"])
     if not ok and reg["parity"].get("fp32") is not None:
         post.status = "parity_failed"
-        post.message = _parity_failed(plan.name, final, reg["parity"]["fp32"])
-        reg["entry"] = None
+        withdrawn = _unregister_failed(plan.name, digest, reg, registry=registry, registrable=registrable)
+        post.message = _parity_failed(plan.name, final, reg["parity"]["fp32"], withdrawn)
         log.error("%s", post.message)
     elif not ok:
         log.warning("%s: not registered: no merge parity was checked (parity=False). Run the same lift train "
@@ -1189,13 +1227,48 @@ def _post_steps(plan: Plan, final: Path, digest: str, trained: Mapping[str, Any]
     return post
 
 
-def _parity_failed(name: str, final: Path, result: Mapping[str, Any]) -> str:
+def _unregister_failed(name: str, digest: str, reg: dict[str, Any], *, registry: Path | None,
+                       registrable: bool) -> str | None:
+    """A failed fp32 parity un-registers the adapter (CLAUDE.md rule 9). registration.json loses its entry
+    and its registered block, which an earlier fp16 parity (a T4) may have written; that block is kept
+    as ``unregistered`` (what it was, the reason, the time). The registry this run writes loses the
+    adapter's entry when that entry pins this hash (``unregister_adapter``): the entry the laptop
+    committed on the fp16 registration, at the ref the job runs, or one this machine wrote. Returns the
+    sentences ParityFailed adds about it, or None when no registration is known (a first parity that
+    failed)."""
+    old = reg.get("registered")
+    reg["entry"], reg["registered"], reg["registry_error"] = None, None, None
+    if old:
+        reg["unregistered"] = {"was": old, "reason": "fp32 merge parity failed", "when": _now()}
+    kept = "registration.json keeps the fp16 parity's registration as unregistered" if old else None
+    if not registrable:                 # an adapter elsewhere: the registry describes outputs/adapters/{name}
+        return f"An fp16 parity had registered it: {kept}" if kept else None
+    path = Path(registry) if registry is not None else default_registry()
+    laptop = (f"On the laptop, run `lift sync pull`, then `lift register-adapter {name}`, which removes an "
+              "entry configs/variants.yaml holds for this adapter hash, and commit configs/variants.yaml "
+              "before any job runs")
+    try:
+        removed = unregister_adapter(name, digest, registry=path)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        reg["registry_error"] = str(exc)
+        return f"Checking {_shown(path)} here for its entry failed: {exc}. {laptop}"
+    if not (removed or kept):
+        return None
+    what = (f"This run removed its entry (adapter hash {digest[:12]}) from {_shown(path)}" if removed
+            else f"{_shown(path)} here holds no entry for it")
+    return f"{what}{f', and {kept}' if kept else ''}. {laptop}"
+
+
+def _parity_failed(name: str, final: Path, result: Mapping[str, Any], withdrawn: str | None = None) -> str:
+    """ParityFailed's message: what diverged, where the adapter is, and (``withdrawn``) what became of a
+    registration an earlier fp16 parity made."""
     firsts = [d for d in result.get("first_divergence") or [] if d is not None]
     where = f" (first divergence at token {min(firsts)})" if firsts else ""
-    return (f"merge parity failed for {name}: in fp32 the merged adapter's greedy outputs differ from the "
+    text = (f"merge parity failed for {name}: in fp32 the merged adapter's greedy outputs differ from the "
             f"unmerged adapter's on {result['n'] - result['n_match']} of {result['n']} prompts{where}. The "
             f"adapter is saved in {final} and pushed, and registration.json records the parity, but it is "
             "NOT registered and must not be evaluated until the cause is understood (CLAUDE.md rule 9)")
+    return f"{text}. {withdrawn}" if withdrawn else text
 
 
 def _laptop_lines(name: str) -> list[str]:
@@ -1256,6 +1329,37 @@ def register_adapter(name: str, digest: str, *, candidate: str, recipe: str, see
     return outcome
 
 
+def unregister_adapter(name: str, digest: str, *, registry: Path | None = None) -> bool:
+    """Remove ``name``'s entry from the registry (configs/variants.yaml unless ``registry``) when it pins
+    adapter hash ``digest``: that adapter failed its fp32 merge parity after an fp16 parity registered it,
+    and must not be evaluated (CLAUDE.md rule 9). True when the entry was removed; False when the registry
+    holds no entry under ``name`` pinning ``digest`` (an entry pinning another hash is another adapter's,
+    and stays). A text edit, so the file's comments stay: the edited text must parse to exactly the
+    other entries and the rest of the document, or nothing is written and ValueError names the entry to
+    delete by hand."""
+    path = Path(registry) if registry is not None else default_registry()
+    text = path.read_text(encoding="utf-8")
+    doc = yaml.safe_load(text)
+    old = _registry_specs(doc, path).get(name)
+    if old is None or old.artifacts.get("adapter") != digest:
+        return False
+    expected = {**doc, "variants": [e for e in doc.get("variants") or [] if e.get("name") != name]}
+    try:
+        new_text = _removed_entry(text, name)
+        after = yaml.safe_load(new_text)
+    except (yaml.YAMLError, ValueError):
+        after = None
+    if not isinstance(after, dict) or {**after, "variants": after.get("variants") or []} != expected:
+        raise ValueError(f"{_shown(path)} still registers {name} (adapter hash {digest[:12]}), and editing "
+                         "it as text would not leave exactly its other entries (its layout is not the one "
+                         "this writer expects): delete that entry by hand and commit configs/variants.yaml")
+    _write_text(path, new_text)
+    _check_loaded(path, name, None)
+    log.warning("%s: removed from %s (adapter hash %s): its fp32 merge parity failed, and nothing may "
+                "evaluate it (CLAUDE.md rule 9)", name, _shown(path), digest[:12])
+    return True
+
+
 def _differs(old: Any, new: Any) -> str:
     a, b = old.model_dump(), new.model_dump()
     return "; ".join(f"{k} {a[k]!r} there, {b[k]!r} here" for k in a if a[k] != b[k])
@@ -1294,19 +1398,44 @@ def _appended_entry(text: str, entry: Mapping[str, Any]) -> str:
     return body + "\n".join(_entry_lines(entry, indent)) + "\n"
 
 
+def _entry_span(lines: Sequence[str], name: str) -> tuple[int, int] | None:
+    """(first line, last line + 1) of ``name``'s entry in a registry's lines: its one '- name:' line,
+    then the lines more indented than its '- ', up to a blank line. None unless exactly one '- name:'
+    line names it."""
+    starts = [i for i, line in enumerate(lines)
+              if (m := _ITEM.match(line)) and m.group("name").strip("\"'") == name]
+    if len(starts) != 1:
+        return None
+    start = starts[0]
+    indent = len(_ITEM.match(lines[start]).group("indent"))
+    end = start + 1
+    while end < len(lines) and lines[end].strip() and _indent(lines[end]) > indent:
+        end += 1
+    return start, end
+
+
 def _replaced_entry(text: str, entry: Mapping[str, Any], path: Path) -> str:
     lines = text.splitlines()
-    starts = [i for i, line in enumerate(lines)
-              if (m := _ITEM.match(line)) and m.group("name").strip("\"'") == entry["name"]]
-    if len(starts) != 1:
+    span = _entry_span(lines, entry["name"])
+    if span is None:
         raise ValueError(f"{path}: cannot find {entry['name']}'s entry as one '- name: {entry['name']}' "
                          f"line; replace it by hand: {json.dumps(dict(entry))}")
-    start = starts[0]
+    start, end = span
     indent = _ITEM.match(lines[start]).group("indent")
-    end = start + 1                     # the entry's lines: more indented than its "- ", up to a blank line
-    while end < len(lines) and lines[end].strip() and _indent(lines[end]) > len(indent):
-        end += 1
     return "\n".join(lines[:start] + _entry_lines(entry, indent) + lines[end:]) + "\n"
+
+
+def _removed_entry(text: str, name: str) -> str:
+    """``text`` without ``name``'s entry (``_entry_span``), and without the blank line before it when a
+    blank line or the end of the file follows it, so no gap is left doubled."""
+    lines = text.splitlines()
+    span = _entry_span(lines, name)
+    if span is None:
+        raise ValueError(f"cannot find {name}'s entry as one '- name: {name}' line")
+    start, end = span
+    if start and not lines[start - 1].strip() and (end == len(lines) or not lines[end].strip()):
+        start -= 1
+    return "\n".join(lines[:start] + lines[end:]) + "\n"
 
 
 def _indent(line: str) -> int:
@@ -1326,7 +1455,8 @@ def _write_text(path: Path, text: str) -> None:
 
 def _check_loaded(path: Path, name: str, spec: Any) -> None:
     """When ``path`` is the registry lift.models.variants reads, clear the config cache and check that
-    load_registry() parses it and returns the new entry: this process reads the new registry from now."""
+    load_registry() parses it and returns ``spec`` under ``name`` (None: no entry, after a removal): this
+    process reads the new registry from now."""
     from lift.models import variants
 
     if path.resolve() != (config.CONFIG_DIR / "variants.yaml").resolve():
@@ -1335,14 +1465,20 @@ def _check_loaded(path: Path, name: str, spec: Any) -> None:
     if clear is not None:
         clear()
     if variants.load_registry().get(name) != spec:
-        raise RuntimeError(f"{path} was written, but lift.models.variants.load_registry() does not return "
+        raise RuntimeError(f"{path} was written, but lift.models.variants.load_registry() does not read "
                            f"{name} as written; look at the file")
 
 
 def register_pulled(name: str, *, registry: Path | None = None, replace: bool = False) -> str:
     """The laptop's registration (``lift register-adapter``), after ``lift sync pull``: recompute the
     hash of outputs/adapters/{name}/, check it against registration.json and that parity passed, and
-    write the entry registration.json holds (the one the training job wrote)."""
+    write the entry registration.json holds (the one the training job wrote): register_adapter's
+    "added", "unchanged" or "replaced".
+
+    When the fp32 parity failed, the adapter must not be evaluated (CLAUDE.md rule 9): an entry the
+    registry holds for this hash (one an earlier fp16 parity registered, committed) is removed the way
+    ``unregister_adapter`` removes it, and "removed" returned, for the caller to have that commit made;
+    otherwise this raises, as for any parity that did not pass."""
     from lift.models.variants import adapter_path
     from lift.train.merge import ADAPTER_WEIGHTS, adapter_hash
 
@@ -1363,6 +1499,13 @@ def register_pulled(name: str, *, registry: Path | None = None, replace: bool = 
                          "the lift train line")
     ok, summary = parity_verdict(reg.get("parity") or {})
     if not ok:
+        if (reg.get("parity") or {}).get("fp32") is not None:          # failed in fp32
+            try:
+                if unregister_adapter(name, digest, registry=registry):
+                    return "removed"
+            except ValueError as exc:
+                raise ValueError(f"{name}: merge parity {summary}, so it must not be evaluated (CLAUDE.md "
+                                 f"rule 9); {exc}") from exc
         raise ValueError(f"{name}: merge parity {summary}; it is not registered (CLAUDE.md rule 9)")
     entry = reg.get("entry")
     if not isinstance(entry, dict):
@@ -1441,10 +1584,11 @@ def train_lora(candidate: str, recipe: str, seed: int, *, out_dir: Path | None =
 
     ``out_dir`` puts the adapter elsewhere: such an adapter is never pushed (``push`` must be False) or
     registered, since the push and the registry describe outputs/adapters/{name}. ``parity_prompts``
-    default to Gate 0's 20 dev prompts (``gate0_parity_sample``). ``registry`` (tests: a file in tmp)
-    defaults to configs/variants.yaml. Raises TrainRefused (a refused request, before any GPU time, or a
-    Trainer off the recipe's batch, before its first step), ParityFailed (fp32 merge parity failed: saved
-    and pushed, not registered) or RegistryConflict (another entry under the name)."""
+    default to the 20 dev prompts drawn by Gate 0's parity rule from the dev prompts as they are now
+    (``gate0_parity_sample``). ``registry`` (tests: a file in tmp) defaults to configs/variants.yaml.
+    Raises TrainRefused (a refused request, before any GPU time, or a Trainer off the recipe's batch,
+    before its first step), ParityFailed (fp32 merge parity failed: saved and pushed, not registered,
+    and an fp16 parity's registration withdrawn) or RegistryConflict (another entry under the name)."""
     from lift.models.variants import adapter_path
     from lift.train.merge import ADAPTER_WEIGHTS
 
@@ -1576,7 +1720,7 @@ def _so_far(fit: Mapping[str, Any] | None, progress: dict[str, Any]) -> dict[str
 
 def _registration_summary(reg: Mapping[str, Any]) -> dict[str, Any]:
     return {"entry": reg.get("entry"), "registered": reg.get("registered"),
-            "error": reg.get("registry_error")}
+            "unregistered": reg.get("unregistered"), "error": reg.get("registry_error")}
 
 
 def _conclude(plan: Plan, final: Path, post: _Post) -> Path:
@@ -1591,17 +1735,24 @@ def _conclude(plan: Plan, final: Path, post: _Post) -> Path:
 
 
 def summary(directory: Path) -> list[str]:
-    """What lift train prints at the end (hashes, counts and paths): the adapter, parity, registration."""
+    """What lift train prints at the end (hashes, counts and paths): the adapter, parity, registration.
+    "registered" only while registration.json holds both the entry and where it was written; a
+    registration a failed fp32 parity withdrew is named as such."""
     reg = _read_json(Path(directory) / REGISTRATION)
     _ok, parity = parity_verdict(reg.get("parity") or {})
     lines = [f"{reg['name']}: {directory}", f"  adapter hash {reg['adapter_hash']}",
              f"  merge parity: {parity}"]
     registered = reg.get("registered")
-    if registered:
+    if registered and reg.get("entry"):
         lines.append(f"  registered in {registered['registry']} ({registered['outcome']})")
         lines += [f"  {line}" for line in _laptop_lines(str(reg["name"]))]
     else:
         lines.append("  not registered" + (f": {reg['registry_error']}" if reg.get("registry_error") else ""))
+        withdrawn = reg.get("unregistered")
+        if withdrawn:
+            was = withdrawn.get("was") or {}
+            lines.append(f"  unregistered {withdrawn.get('when')}: {withdrawn.get('reason')} (an fp16 parity "
+                         f"had registered it in {was.get('registry')}, {was.get('outcome')})")
     return lines
 
 
