@@ -5,10 +5,16 @@ prompts must match token for token in fp32; in fp16 report the share that match 
 divergence position.
 
 The adapter hash goes into every cache key for variants built on it. It covers the sha256 of
-adapter_model.safetensors and the adapter_config.json fields that change what the weights do
-(rank, alpha, target modules, ...): the same weights with another lora_alpha are another model.
-Paths and version strings in adapter_config.json are left out, so a copy on another machine
-hashes the same.
+adapter_model.safetensors and the adapter_config.json fields that change what the weights do:
+the same weights with another lora_alpha are another model. ``BEHAVIOUR_KEYS`` (rank, alpha,
+target modules, ...) are always hashed. The fields of ``BEHAVIOUR_DEFAULTS`` are hashed only when
+they hold a value other than PEFT 0.21.2's default: init_lora_weights "pissa" or "olora" make PEFT
+re-initialise the base weights when it loads the adapter, kasa_config truncates them, and the
+others pick initialisations, LoRA variants or layer changes that can alter (or make PEFT refuse)
+the model it builds. Leaving them out at their defaults keeps the hash of every adapter saved
+with the defaults (the locked recipe) as it was before they were added.
+Paths, version strings and settings that do not change the loaded model (lora_dropout,
+inference_mode, task_type) are left out, so a copy on another machine hashes the same.
 """
 
 from __future__ import annotations
@@ -19,13 +25,22 @@ from pathlib import Path
 from typing import Any
 
 from lift import config
-from lift.io import sha256_file, sha256_obj
+from lift.io import sha256_file, sha256_obj, stable_json
 
 ADAPTER_WEIGHTS = "adapter_model.safetensors"
 ADAPTER_CONFIG = "adapter_config.json"
 BEHAVIOUR_KEYS = ("peft_type", "r", "lora_alpha", "target_modules", "use_rslora", "use_dora",
                   "fan_in_fan_out", "bias", "lora_bias", "modules_to_save", "layers_to_transform",
                   "layers_pattern", "rank_pattern", "alpha_pattern", "exclude_modules")
+# More fields that can change the model PEFT loads (or make it refuse to), with their defaults in
+# PEFT 0.21.2's LoraConfig. Each is hashed only when adapter_config.json holds another value (R1-27).
+BEHAVIOUR_DEFAULTS = {
+    "init_lora_weights": True, "kasa_config": None, "corda_config": None, "eva_config": None,
+    "loftq_config": {}, "layer_replication": None, "trainable_token_indices": None,
+    "target_parameters": None, "alora_invocation_tokens": None, "use_qalora": False,
+    "qalora_group_size": 16, "use_bdlora": None, "arrow_config": None, "velora_config": None,
+    "monteclora_config": None, "ensure_weight_tying": False,
+}
 
 
 def adapter_hash(adapter_dir: Path) -> str:
@@ -39,6 +54,9 @@ def adapter_hash(adapter_dir: Path) -> str:
     behaviour = {k: cfg.get(k) for k in BEHAVIOUR_KEYS}
     if isinstance(behaviour["target_modules"], list):
         behaviour["target_modules"] = sorted(behaviour["target_modules"])
+    # Compared as canonical JSON, so 0 or 1 does not pass for a default of False or True.
+    behaviour.update({k: cfg[k] for k, default in BEHAVIOUR_DEFAULTS.items()
+                      if k in cfg and stable_json(cfg[k]) != stable_json(default)})
     return sha256_obj({"weights_sha256": sha256_file(path), "config": behaviour})
 
 
