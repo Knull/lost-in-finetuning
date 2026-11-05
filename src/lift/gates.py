@@ -161,6 +161,11 @@ class StaleMetrics(ValueError):
     utility`` makes them again."""
 
 
+class ParityFailed(ValueError):
+    """An adapter whose recorded fp32 merge parity failed (``parity_failure``): never counted, whatever its
+    metrics say (CLAUDE.md rule 9)."""
+
+
 class Unregistered(ValueError):
     """An adapter configs/variants.yaml does not list: its metrics cannot be checked against the adapter
     the registry pins."""
@@ -501,6 +506,9 @@ def _current(doc: Mapping[str, Any], name: str, dtype: str) -> dict[str, Any]:
         if now[what] != recorded[what]:
             changed.append(f"{_shown(path)} is not the file they were made from (sha256 {now[what][:12]}, "
                            f"they name {_digest12(recorded[what])})")
+    failed = parity_failure(name)
+    if failed:
+        raise ParityFailed(failed)
     pinned = spec.artifacts.get("adapter")
     if pinned and doc["candidate_adapter_hash"] != pinned:
         changed.append(f"they were made from adapter {_digest12(doc['candidate_adapter_hash'])}, and "
@@ -523,6 +531,8 @@ def _unusable(exc: BaseException, source: str, name: str, rerun: str) -> str:
     if isinstance(exc, Unregistered):
         return (f"{source} cannot be checked against the adapter it was made from: register {name} "
                 f"(`lift register-adapter {name}` after `lift sync pull`) and commit configs/variants.yaml")
+    if isinstance(exc, ParityFailed):
+        return f"{source} is not counted: {exc}"
     if isinstance(exc, StaleMetrics):
         return (f"stale: {source} is not counted for the answers, verdicts and adapter as they now stand; "
                 f"{again}")
@@ -707,11 +717,38 @@ def _provenance(variant: str) -> dict[str, Any]:
             if k not in ("variant", "set", "lang", "split", "judge", "judge_dir")}
 
 
+def parity_failure(name: str) -> str | None:
+    """Why ``name`` must not be counted under CLAUDE.md rule 9, or None: the failed fp32 merge parity its
+    adapter folder's registration.json records for the hash configs/variants.yaml pins (the record
+    lift.models.variants.checked_adapter refuses to build from). None when the registry pins no hash, or
+    the folder holds no such record (not pulled, another hash, a parity that passed). A record that cannot
+    be read raises ValueError, as it does for checked_adapter."""
+    from lift.models.variants import adapter_path, get_spec
+    from lift.train.lora import recorded_parity_failure
+
+    spec = get_spec(name)
+    pinned = spec.artifacts.get("adapter")
+    if not pinned or not spec.adapter:
+        return None
+    failed = recorded_parity_failure(adapter_path(spec.adapter), pinned)
+    if failed is None:
+        return None
+    return (f"{name} failed fp32 merge parity ({failed}): it must not be evaluated (CLAUDE.md rule 9); "
+            f"`lift register-adapter {name}` on the laptop removes its entry")
+
+
 def drift(adapter: str, *, n_expected: int, dtype: str | None = None) -> dict[str, Any]:
     """``adapter``'s Hindi dev harmful drift against stock under the primary judge, both cells in ``dtype``
     (default ``generation.dtype``), read through ``pipeline.paired_labels``, which enforces Gate 0's
-    licence for another precision; "missing", with the reader's message, when the pair cannot be read."""
+    licence for another precision; "missing", with the reader's message, when the pair cannot be read or
+    the adapter's recorded fp32 merge parity failed (rule 9)."""
     dtype = gate_dtype(dtype)
+    try:
+        failed = parity_failure(adapter)
+    except (KeyError, ValueError) as exc:
+        failed = None if isinstance(exc, KeyError) else _error(exc)
+    if failed:
+        return {"status": "missing", "error": failed, "reason": failed}
     try:
         stock_labels, adapter_labels = pipeline.paired_labels("stock", adapter, *CELL, judge="primary",
                                                               dtype=dtype)
