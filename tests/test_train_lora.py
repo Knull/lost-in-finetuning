@@ -357,12 +357,13 @@ def test_the_counter_books_micro_batches_to_their_optimizer_step():
 
     counter = lora.SupervisedTokenCounter(DataCollatorForLanguageModeling(pad_token_id=0))
     for n in (2, 1, 3):                     # collated ahead of use, as accelerate's lookahead does
-        counter([{"input_ids": [5] + [6] * n, "labels": [-100] + [6] * n}])
+        counter([{"input_ids": [5] + [6] * n, "labels": [-100] + [6] * n}] * (4 - n))
     counter.consumed()
     assert counter.in_step == 1
     counter.step_end()                      # step 1: two micro-batches
     counter.step_end()                      # step 2: one
-    assert counter.per_batch == [2, 1, 3] and counter.per_step == [3, 3] and counter.in_step == 0
+    assert counter.per_batch == [4, 3, 3] and counter.per_step == [7, 3] and counter.in_step == 0
+    assert counter.rows_per_batch == [2, 3, 1] and counter.rows_per_step == [5, 1]
     with pytest.raises(RuntimeError, match="never built"):
         counter.consumed()
 
@@ -417,6 +418,75 @@ def test_lora_wraps_every_projection_of_every_layer_in_fp32(tiny_model_dir):
         lora.lora_model(twice)
 
 
+# --- one device, the recipe's batch ------------------------------------------------------------------
+
+
+@pytest.mark.filterwarnings("ignore:'pin_memory' argument is set as true:UserWarning")
+def test_two_visible_gpus_train_on_one_at_the_recipe_batch(tiny_model_dir, tiny_tokenizer, tmp_path,
+                                                           monkeypatch):
+    # A plain process that sees two GPUs (a Kaggle T4 x2): TrainingArguments counts both (n_gpu 2), and the
+    # Trainer would wrap the model in nn.DataParallel and take 2 x 16 = 32 rows an optimizer step. Faked
+    # without a GPU: torch.cuda.device_count() says 2 while a cuda:0 plan's config and Trainer are built;
+    # torch.cuda.is_available() stays False, so the model (loaded by a CPU plan) and every batch stay on the
+    # CPU, where nn.DataParallel would pass the whole batch through.
+    from transformers.training_args import ParallelMode
+
+    cpu = plan(tiny_model_dir)
+    cuda = dataclasses.replace(cpu, device="cuda:0")
+    real_model, real_trainer, built = lora.lora_model, lora.make_trainer, {}
+
+    def kept(*a, **kw):
+        built["trainer"], counter = real_trainer(*a, **kw)
+        return built["trainer"], counter
+
+    monkeypatch.setattr(lora, "lora_model", lambda p: real_model(cpu))
+    monkeypatch.setattr(lora, "make_trainer", kept)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    for stat in ("reset_peak_memory_stats", "max_memory_allocated", "max_memory_reserved"):
+        monkeypatch.setattr(torch.cuda, stat, lambda *a, **k: 0)
+    examples = [lora.build_example(tiny_tokenizer, row, 1024) for row in rows(20)]
+    fit = lora._fit(cuda, tiny_tokenizer, examples, tmp_path, {})
+    trainer = built["trainer"]
+    assert trainer.args.n_gpu == 1 and trainer.args.parallel_mode == ParallelMode.NOT_PARALLEL
+    assert trainer._train_batch_size == 1 and trainer.get_total_train_batch_size(trainer.args) == 16
+    assert not isinstance(trainer.model_wrapped, torch.nn.DataParallel)
+    assert fit["batch"] == {"per_device": 1, "grad_accum": 16, "effective": 16, "n_gpu": 1, "visible_gpus": 2,
+                            "processes": 1, "micro_batch": 1, "per_step": 16}
+    # 2 epochs of 20 rows, 16 a step: each epoch a full step and one of the 4 rows left (n_gpu 2: one of 20)
+    assert fit["global_step"] == 4 and fit["rows_per_step"] == [16, 4, 16, 4]
+    assert len(fit["supervised_tokens_per_batch"]) == 40
+
+
+def test_a_trainer_off_the_recipe_batch_is_refused_before_its_first_step(tiny_model_dir, tiny_tokenizer,
+                                                                        tmp_path, monkeypatch):
+    from trl.trainer.sft_trainer import DataCollatorForLanguageModeling
+
+    p = plan(tiny_model_dir)
+    real_config = lora.sft_config
+
+    def two_gpus(plan, output_dir):        # what a launcher or another transformers could leave: n_gpu 2
+        args = real_config(plan, output_dir)
+        args._n_gpu = 2
+        return args
+
+    monkeypatch.setattr(lora, "sft_config", two_gpus)
+    model, _info = lora.lora_model(p)
+    examples = [lora.build_example(tiny_tokenizer, row, 1024) for row in rows(4)]
+    with pytest.raises(lora.TrainRefused, match=r"take 32 rows per optimizer step \(2 per micro-batch, 1 "
+                                                r"process\(es\), n_gpu 2\), not the recipe's 16 .*torchrun.*"
+                                                r"CUDA_VISIBLE_DEVICES=0"):
+        lora.make_trainer(model, tiny_tokenizer, examples, p, output_dir=tmp_path / "refused")
+    # Past that check, the collator still stops the first micro-batch of more rows than the recipe's.
+    monkeypatch.setattr(lora, "check_batch", lambda plan, batch: None)
+    trainer, counter = lora.make_trainer(model, tiny_tokenizer, examples, p, output_dir=tmp_path / "t")
+    with pytest.raises(RuntimeError, match="put 2 rows in one micro-batch, but the recipe takes 1"):
+        trainer.train()
+    assert trainer.state.global_step == 0 and counter.per_batch == []
+    counter = lora.SupervisedTokenCounter(DataCollatorForLanguageModeling(pad_token_id=0), max_rows=2)
+    assert counter([{"input_ids": [5, 6], "labels": [-100, 6]}] * 2)["input_ids"].shape[0] == 2
+
+
 # --- a whole run -------------------------------------------------------------------------------------
 
 
@@ -435,12 +505,18 @@ def test_a_five_step_run_trains_pushes_checks_parity_registers_and_resumes(
     assert trained["data"]["sha256"] == sha256_file(sft_dir() / "aya" / "dedup" / "sft_messages.jsonl")
     assert (trained["data"]["rows_trained"], trained["data_seed"], trained["dtype"]) == (4, 1000, "fp32")
     assert trained["lora"]["wrapped_modules"] == 28 and trained["train"]["global_step"] == 5
-    assert trained["batch"] == {"per_device": 1, "grad_accum": 16, "effective": 16}
+    # The plan's batch beside the Trainer's (on the CPU n_gpu is 0), and the rows each step took: one
+    # epoch of the 4 rows a step (max_steps 5 runs 5 epochs).
+    assert trained["batch"] == {"per_device": 1, "grad_accum": 16, "effective": 16, "n_gpu": 0,
+                                "visible_gpus": torch.cuda.device_count(), "processes": 1, "micro_batch": 1,
+                                "per_step": 16}
+    assert trained["rows_per_step"] == [4] * 5
     log = read(path / "trainer_log.json")
     assert log["training_args"]["loss_type"] == "nll" and log["training_args"]["data_seed"] == 1000
 
     [run] = manifests(name=NAME)
     assert run["status"] == "ok" and run["devices"] == 1 and run["adapter_hash"] == digest
+    assert run["batch"] == trained["batch"] and run["rows_per_step"] == [4] * 5
     assert [e["step"] for e in run["loss_curve"]] == [1, 2, 3, 4, 5]
     assert all("loss" in e for e in run["loss_curve"])
     # 4 rows, 1 per micro-batch: each step (one epoch with max_steps 5) sums every row's supervised tokens
