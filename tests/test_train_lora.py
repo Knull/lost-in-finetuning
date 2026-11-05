@@ -612,6 +612,38 @@ def test_a_failed_fp32_parity_is_never_registered(tiny_model_dir, utility, regis
         lora.register_pulled(NAME)
 
 
+def test_an_fp16_parity_registers_with_a_warning_whatever_its_share(tiny_model_dir, utility, registry,
+                                                                    monkeypatch, caplog):
+    # The T4 exception as the code applies it: the fp16 share is recorded, not required.
+    write_sft(rows(4))
+
+    def fp16_parity(adapter_dir, *, prompts, dtype, **kw):
+        assert dtype == "fp16"
+        return {"adapter_hash": merge.adapter_hash(adapter_dir), "dtype": dtype, "n": len(prompts),
+                "n_match": 0, "match_share": 0.0, "all_match": False, "first_divergence": [1] * len(prompts)}
+
+    monkeypatch.setattr(merge, "parity_check", fp16_parity)
+    with caplog.at_level(logging.WARNING, logger="lift.train"):
+        path = train(tiny_model_dir, parity_dtype="fp16")
+    reg = read(path / "registration.json")
+    assert set(reg["parity"]) == {"fp16"} and reg["parity"]["fp16"]["n_match"] == 0
+    assert reg["registered"]["outcome"] == "added"
+    assert "merge parity fp16 0/2 prompts token-identical (T4; fp32 not checked)" in reg["entry"]["note"]
+    assert any("registered on an fp16 parity" in r.getMessage() for r in caplog.records)
+    assert lora.register_pulled(NAME) == "unchanged"                     # the laptop applies the same rule
+
+
+def test_the_t4_parity_exception_is_stated_as_the_code_applies_it(capsys):
+    # lift.train.lora's docstring and lift train --help state the exception exactly: fp16 parity only on a
+    # GPU without native bf16, its share recorded, the adapter registered with a warning whatever it is.
+    with pytest.raises(SystemExit):
+        main(["train", "--help"])
+    for text in (" ".join(capsys.readouterr().out.split()), " ".join(lora.__doc__.split())):
+        assert "The one exception is a GPU without native bf16 (a T4" in text
+        assert "--parity-dtype fp16" in text and "records the share of prompts that match" in text
+        assert "registers the adapter with a warning, whatever that share" in text
+
+
 @pytest.fixture
 def safety_prompts(fake_prompt_files):
     """Six dev prompts in every safety set and language: the pool Gate 0's parity sample is drawn from."""
