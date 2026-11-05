@@ -17,16 +17,21 @@ fasttext), on a TranslationSetupError (the Cloud Translation API key unset, or t
 one line, no traceback; the items before it are cached), and on any other error, which stops the
 build with a traceback (a split file that no longer matches the sources, a PolyRefuse clone at another
 commit, an NLLB failure).
-``lift data apply-spotchecks``: 0 when applied (or nothing new), 1 when the sheet or the
+``lift data apply-spotchecks``: 0 when applied (or nothing new; the files whose rebuild an earlier
+apply did not finish are rebuilt too, listed as resumed), 1 when the sheet or the
 translation cache is refused (SheetError), a file is missing, a prompt file is refused (load_prompts'
 SplitStampError: a missing committed split file, a split stamp the committed split does not give) or a
 package (GlotLID's fasttext) is, all before a verdict is stored, or the rebuild stops on a ValueError
 after the verdicts are stored (each logged in one line, no traceback; that line says the verdicts are
-stored and names the ``lift data build --only <sets> --langs <lang> --cache-only`` line that rebuilds
-their files from them, since applying the sheet again finds them stored and rebuilds nothing); 3 when
-the rebuild lost records (listed; the verdicts are stored, and the files' reports say why).
+stored, that applying the sheet again once the cause is fixed finishes the rebuild, and names the
+``lift data build --only <sets> --langs <lang> --cache-only`` line that also rebuilds their files from
+them, which exits 3 when a file holds an error or empty translation failure: the cache never holds
+one); 3 when the rebuild lost records (listed; the verdicts are stored, and the files' reports say
+why).
 ``spotcheck-sheets``: 1 when a sheet exists (no --overwrite), a file is missing, a prompt file is
 refused (as above) or the translation cache lacks a failure's engine output.
+``lift data stats``: 0; it prints each reason the SFT exports must not be trained on as a "stale:" line
+(lift.data.sft.export_problems, under the project and train configs).
 """
 
 from __future__ import annotations
@@ -115,7 +120,8 @@ def _stats(args: argparse.Namespace) -> int:
     _setup()
     from lift.data.build import BuildContext, format_stats, stats
 
-    st = stats(cfg=BuildContext.default().cfg)
+    ctx = BuildContext.default()
+    st = stats(cfg=ctx.cfg, train_cfg=ctx.train_cfg)
     print(json.dumps(st, indent=1, ensure_ascii=False, sort_keys=True) if args.json else format_stats(st))
     return 0
 
@@ -143,8 +149,8 @@ def _apply(args: argparse.Namespace) -> int:
         result = apply_spotchecks(args.file, ctx=BuildContext.default(), dry_run=args.dry_run)
     except (ValueError, FileNotFoundError, ImportError) as e:
         # ValueError: a SheetError or a prompt file load_prompts refused (nothing stored), or the rebuild
-        # stopped after the verdicts were stored (the message says so and names the rebuild line);
-        # ImportError: before any verdict
+        # stopped after the verdicts were stored (the message says so and names the remedies: the sheet
+        # applied again, or the rebuild line); ImportError: before any verdict
         log.error("%s", e)
         return 1
     for name, t in result["files"].items():
@@ -152,7 +158,12 @@ def _apply(args: argparse.Namespace) -> int:
               f"unchanged {t['unchanged']}, unreviewed {t['unreviewed']}")
     for x in result["not_applied"]:
         print(f"not applied: {x['lang']}-{x['pid']} {x['verdict']} ({x['why']})")
+    owed = ", ".join(result["resumed"])
+    reports, them = ("its report", "it") if len(result["resumed"]) == 1 else ("their reports", "them")
     if result["dry_run"]:
+        if owed:
+            print(f"would also rebuild {owed} (resumed): {reports} did not hold the verdicts stored on "
+                  f"{them} yet (a rebuild cut short)")
         print(f"dry run: {result['reviewed']} verdicts checked ({result['new']} new, {result['unchanged']} "
               "unchanged), nothing written")
         return 0
@@ -160,6 +171,9 @@ def _apply(args: argparse.Namespace) -> int:
         print(f"rebuilt {name}: " + ("not written" if entry is None else
                                      f"{entry['records']} records, {entry['open_failures']} open failures, "
                                      f"{entry['errors']} errors"))
+    if owed:
+        print(f"resumed the rebuild of {owed}: {reports} did not hold the verdicts stored on {them} yet (a "
+              "rebuild cut short)")
     for name, pids in result["lost"].items():
         print(f"LOST from {name}: {len(pids)} records {pids}")
     print(f"{result['new']} verdicts applied, {result['unchanged']} unchanged; rebuilt "
@@ -206,7 +220,8 @@ def register(sub: argparse._SubParsersAction) -> None:
                         "transformers)")
     b.set_defaults(func=_build)
 
-    s = data.add_parser("stats", help="counts per set, language and split; failures and exclusions")
+    s = data.add_parser("stats", help="counts per set, language and split; failures and exclusions; "
+                                      "SFT exports a trainer refuses (stale)")
     s.add_argument("--json", action="store_true", help="print the counts as JSON")
     s.set_defaults(func=_stats)
 
@@ -221,12 +236,13 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     a = data.add_parser("apply-spotchecks", help="apply a filled spot-check sheet (splits untouched)",
                         description="Check a filled sheet against the build and the stored verdicts, store "
-                                    "the new verdicts and rebuild their files from the translation cache. "
-                                    "Exit 0 when applied, 1 when the sheet, the cache or a prompt file is "
-                                    "refused (nothing applied) or the rebuild stops (the verdicts are "
-                                    "stored: applying the sheet again rebuilds nothing, so rebuild their "
-                                    "files with the `lift data build ... --cache-only` line it names), 3 "
-                                    "when the rebuild lost records.")
+                                    "the new verdicts and rebuild their files from the translation cache, "
+                                    "with every file an earlier apply stored verdicts for and did not "
+                                    "rebuild (resumed). Exit 0 when applied, 1 when the sheet, the cache or "
+                                    "a prompt file is refused (nothing applied) or the rebuild stops (the "
+                                    "verdicts are stored: once the cause is fixed, applying the sheet again "
+                                    "finishes the rebuild, as does the `lift data build ... --cache-only` "
+                                    "line it names), 3 when the rebuild lost records.")
     a.add_argument("--file", required=True, type=Path,
                    help="the filled sheet, saved as CSV UTF-8 (commas, semicolons or tabs); a relative path "
                         "that does not exist here is looked up in the validation tree (validation/... "
