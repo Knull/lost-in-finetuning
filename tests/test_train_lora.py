@@ -406,16 +406,32 @@ def test_seeds_change_the_data_order(tiny_model_dir, tiny_tokenizer, tmp_path):
     assert one[1] != two[0]         # data_seed = 1000 x seed: seed 1's 2nd epoch is not seed 2's 1st
 
 
-def test_lora_wraps_every_projection_of_every_layer_in_fp32(tiny_model_dir):
-    p = plan(tiny_model_dir)
+@pytest.mark.parametrize("dtype, base", [("fp32", torch.float32), ("bf16", torch.bfloat16),
+                                         ("fp16", torch.float16)])
+def test_lora_wraps_every_projection_of_every_layer_in_fp32(tiny_model_dir, dtype, base):
+    # On a bf16 (A100) or fp16 (T4) base the LoRA weights must still be fp32: the frozen base's own dtype
+    # is checked too, so no case can fall back to an fp32 base, where fp32 LoRA weights prove nothing.
+    p = plan(tiny_model_dir, dtype=dtype)
     model, info = lora.lora_model(p)
     assert info["layers"] == 4 and info["wrapped_modules"] == 4 * 7
     assert info["trainable_dtypes"] == ["float32"] and 0 < info["trainable_params"] < info["total_params"]
+    assert {q.dtype for q in model.parameters() if not q.requires_grad} == {base}
     assert model.get_base_model().config.use_cache is False
-    doubled = {**p.cfg["lora"], "target_modules": ["q_proj", "q_proj"]}
-    twice = dataclasses.replace(p, cfg={**p.cfg, "lora": doubled})
-    with pytest.raises(RuntimeError, match="exactly once"):
-        lora.lora_model(twice)
+    if dtype == "fp32":                         # the target_modules refusal does not depend on the dtype
+        doubled = {**p.cfg["lora"], "target_modules": ["q_proj", "q_proj"]}
+        twice = dataclasses.replace(p, cfg={**p.cfg, "lora": doubled})
+        with pytest.raises(RuntimeError, match="exactly once"):
+            lora.lora_model(twice)
+
+
+def test_lora_weights_left_in_the_base_precision_stop_the_run(tiny_model_dir, monkeypatch):
+    import peft
+
+    real = peft.get_peft_model
+    monkeypatch.setattr(peft, "get_peft_model",          # PEFT without its fp32 cast (TRL's ZeRO-3 path)
+                        lambda model, cfg, **kw: real(model, cfg, **{**kw, "autocast_adapter_dtype": False}))
+    with pytest.raises(RuntimeError, match=r"LoRA weights are \['bfloat16'\], not float32, on a bf16 base"):
+        lora.lora_model(plan(tiny_model_dir, dtype="bf16"))
 
 
 # --- one device, the recipe's batch ------------------------------------------------------------------

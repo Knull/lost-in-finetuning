@@ -54,7 +54,9 @@ Seeds and precision
   seed 2's first).
 - bf16 weights and bf16 autocast on a GPU with native bf16 (A100, L4), where configs/train.yaml's
   precision is the only one allowed, as for generation (decisions.md 27); fp16 weights and fp16
-  autocast on a T4, which has no bf16; fp32 on CPU (the tests). PEFT keeps the LoRA weights in fp32.
+  autocast on a T4, which has no bf16; fp32 on CPU (the tests). PEFT keeps the LoRA weights in fp32 (its
+  autocast_adapter_dtype), and the run stops before training if they are not: fp16 autocast cannot
+  unscale fp16 gradients, and Adam's updates lose precision in bf16.
 - All seeds of a recipe train on one GPU class and precision (the P03 plan): a seed is refused when
   another seed's adapter here was trained on another (its lift_train.json says so).
 
@@ -685,7 +687,10 @@ def sft_config(plan: Plan, output_dir: Path) -> Any:
 
 def lora_model(plan: Plan) -> tuple[Any, dict[str, Any]]:
     """Global loaded through lift.models.load (neutral generation config, frozen, eval) with trainable
-    LoRA on every target projection of every layer, initialised after ``set_seed(seed)``."""
+    LoRA on every target projection of every layer, initialised after ``set_seed(seed)``. The LoRA
+    weights must be fp32 on any base (PEFT's autocast_adapter_dtype casts them up from a bf16 or fp16
+    base), or this raises before training: fp16 autocast cannot unscale fp16 gradients, and Adam's
+    updates lose precision in bf16."""
     from peft import LoraConfig, get_peft_model
     from peft.tuners.lora import LoraLayer
     from transformers import set_seed
@@ -709,6 +714,11 @@ def lora_model(plan: Plan) -> tuple[Any, dict[str, Any]]:
                            "down_proj)")
     trainable, total = model.get_nb_trainable_parameters()
     dtypes = sorted({str(p.dtype).removeprefix("torch.") for p in model.parameters() if p.requires_grad})
+    if dtypes != ["float32"]:
+        raise RuntimeError(f"the trainable LoRA weights are {dtypes}, not float32, on a {plan.dtype} base: "
+                           "PEFT must keep them in fp32 (get_peft_model's autocast_adapter_dtype), since "
+                           "fp16 autocast cannot unscale fp16 gradients and Adam's updates lose precision "
+                           "in bf16")
     info = {"r": lora["r"], "alpha": lora["alpha"], "dropout": float(lora["dropout"]),
             "target_modules": targets, "bias": "none", "layers": layers, "wrapped_modules": wrapped,
             "trainable_params": int(trainable), "total_params": int(total), "trainable_dtypes": dtypes}
