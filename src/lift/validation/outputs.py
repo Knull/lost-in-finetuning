@@ -24,18 +24,24 @@ Codes against lift.schemas and the CLAUDE.md file layout, not against the harnes
   only if its ``output_sha`` (P02 records the sha256 of the output it judged; keys name inputs only)
   is that of the output the caller holds for the key. A judgement of another output (the harness
   regenerated the file after judging it) or one that does not say is skipped and counted (``stale``),
-  as P02's pipeline and sync refuse to pair it. The judge
-  is told apart by the ``judge`` id in each record, not by the directory name or its config role:
-  Qwen3Guard is the id (before any "@revision") of whichever judges block names Qwen3Guard, and
-  any other judge is the frontier judge. This keeps working after the Nov 6 decision swaps the
-  primary and second blocks. Either can be pinned by id when more than one is found.
+  as P02's pipeline and sync refuse to pair it. The judge is told apart by the ``judge`` id in each
+  record, not by the directory name or its config role, and only the judges the config names count
+  (``judge_rules``): the id must fullmatch the rule lift.judge.pipeline.load_records reports by, for the
+  judges block that makes a Qwen3Guard judge (its model, the revision when the config pins a sha, the
+  tag of the labelling rules now in force, the precision the outputs were drawn in and the
+  Controversial mode) or for the one that makes the frontier judge (its provider, model, rubric version
+  and sampling settings, and the rules tag; any API version). Any other judgement (a loose-mode run,
+  another revision, labels made under other labelling rules, another rubric or model) is skipped and
+  counted by judge id (``other``), so its item waits for its judge. This keeps working after the Nov 6
+  decision swaps the primary and second blocks. When several ids fit a kind's rule (two revisions
+  while none is pinned, two API versions), one is pinned by id.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,7 +54,6 @@ from lift.validation.store import ValidateError
 
 SAFETY_SETS = ("harmful", "easy_benign", "hard_benign")
 REPAIR_METHODS = ("wiseft", "resta", "cast", "cast_always")
-QWEN3GUARD = "Qwen/Qwen3Guard-Gen-4B"
 
 _ADAPTER = r"adapter-[A-Za-z0-9]+-(?P<recipe>[A-Za-z0-9]+)-s(?P<seed>\d+)"
 _NAME_SCHEME = (   # configs/variants.yaml documents these names
@@ -357,7 +362,9 @@ def load_pool(variant: str, set_name: str, lang: str, split: str, prompts: Promp
 class Target:
     """A generation the validation needs a judgement for. ``output_sha`` is sha256_text of the output
     the judgement must be of: the generation now under ``key`` (or, when its file cannot be read, the
-    output the reader was shown). None when neither is known: no judgement can then be tied to it."""
+    output the reader was shown). None when neither is known: no judgement can then be tied to it.
+    ``dtype`` is the precision its outputs were drawn in (the round's draw; None for
+    ``generation.dtype``), which a Qwen3Guard judge id names (``judge_rules``)."""
 
     key: str
     variant: str
@@ -366,6 +373,7 @@ class Target:
     split: str
     pid: str
     output_sha: str | None = None
+    dtype: str | None = None
 
 
 @dataclass
@@ -379,43 +387,78 @@ class Judged:
     # Judgements skipped because they are not of the target's output (``Target.output_sha``), by kind,
     # counted for the chosen judge of each kind (every judge of the kind when none was found usable).
     stale: dict[str, int] = field(default_factory=lambda: {"qwen3guard": 0, "frontier": 0})
+    # Judgements skipped because no judge the config names made them (``judge_rules``), by judge id: the
+    # number of targets each judged.
+    other: dict[str, int] = field(default_factory=dict)
 
 
-def qwen3guard_id() -> str:
-    """The Qwen3Guard model id, from whichever judges block names it."""
-    for role in ("safety_primary", "safety_second"):
-        block = config.get(f"judges.{role}", {})
-        if isinstance(block, dict) and "qwen3guard" in str(block.get("id", "")).lower():
-            return str(block["id"])
-    return QWEN3GUARD
+Rules = Mapping[str, tuple[re.Pattern[str], str]]
+
+
+def judge_rules(dtype: str | None = None) -> dict[str, tuple[re.Pattern[str], str]]:
+    """{"qwen3guard" | "frontier": (rule, how to name it)}: the ids the judgements of each kind may carry
+    to be read for outputs in ``dtype`` (default ``generation.dtype``). Each is the rule
+    lift.judge.pipeline.load_records applies to every reported number (``_expected_judge``), for the
+    judges role whose config block makes that kind of judge (``judge_dir``, so a swap of the blocks
+    changes nothing): the configured model, the revision when the config pins a sha, and the tag of the
+    labelling rules now in force (lift.judge.labels.rules_tag); for Qwen3Guard also the precision and the
+    Controversial mode, for the frontier judge its rubric version and sampling settings (any API
+    version). A config that does not make one judge of each kind is a ValidateError."""
+    from lift.judge.pipeline import ROLES, _expected_judge, judge_dir  # noqa: PLC0415 (the harness's rule)
+
+    want = dtype or str(config.get("generation.dtype"))
+    rules: dict[str, tuple[re.Pattern[str], str]] = {}
+    try:
+        for role in ROLES:
+            kind = judge_dir(role)
+            if kind in rules:
+                raise ValueError(f"both judges roles make a {kind} judge")
+            rules[kind] = _expected_judge(role, want)
+    except (KeyError, OSError, TypeError, ValueError) as e:
+        raise ValidateError("configs/project.yaml judges: the validation reads the judgements of the "
+                            "configured Qwen3Guard and frontier judges, and cannot tell their ids "
+                            f"({e})") from None
+    return rules
+
+
+def _kind(judge_id: str, rules: Rules) -> str | None:
+    """The kind whose configured judge made ``judge_id`` (``judge_rules``), None for any other judge."""
+    return next((kind for kind, (rule, _) in rules.items() if rule.fullmatch(judge_id)), None)
 
 
 def _matches(judge_id: str, wanted: str) -> bool:
-    """A pin names a judge by its whole id, by id@revision without the "#dtype" the harness may
-    append, or by the model id alone."""
+    """A pin names a judge by its whole id, by the id up to its first "#" (Qwen3Guard: model@revision,
+    without the rules tag, precision and mode; a frontier judge: FrontierJudge.judge_id, which ends in its
+    API version, without the rules tag), or by the model alone (before the "@": provider/model for a
+    frontier judge), which names every revision or API version of it."""
     return wanted in (judge_id, judge_id.split("#", 1)[0], judge_id.split("@", 1)[0])
 
 
-def judge_kind(judge_id: str, *, qwen3guard_judge: str | None = None,
+def judge_kind(judge_id: str, *, dtype: str | None = None, qwen3guard_judge: str | None = None,
                frontier_judge: str | None = None) -> str | None:
-    """"qwen3guard", "frontier", or None for a judge left out by the pins."""
-    is_qwen = judge_id.split("@", 1)[0].lower() == qwen3guard_id().lower()
-    if qwen3guard_judge and _matches(judge_id, qwen3guard_judge):
-        return "qwen3guard"
-    if is_qwen:
-        # Another Qwen3Guard revision: out when one is pinned, never a frontier judge.
-        return None if qwen3guard_judge else "qwen3guard"
-    if frontier_judge:
-        return "frontier" if _matches(judge_id, frontier_judge) else None
-    return "frontier"
+    """"qwen3guard" or "frontier" for an id of that kind's configured judge (``judge_rules``, for outputs
+    in ``dtype``); None for any other judge, and for one its kind's pin leaves out (never relabelled as
+    the other kind)."""
+    kind = _kind(judge_id, judge_rules(dtype))
+    pin = {"qwen3guard": qwen3guard_judge, "frontier": frontier_judge}.get(kind or "")
+    return None if kind is None or (pin and not _matches(judge_id, pin)) else kind
 
 
 def load_judgements(targets: Iterable[Target], *, qwen3guard_judge: str | None = None,
                     frontier_judge: str | None = None) -> Judged:
+    """The judgements of ``targets`` by the Qwen3Guard and frontier judges the config names
+    (``judge_rules``, for each target's ``dtype``), of the output each target holds. A judgement of any
+    other judge is skipped and counted by its id (``Judged.other``), one of another output by kind
+    (``Judged.stale``). A pin chooses among the ids that fit its kind's rule (``_matches``); several ids
+    of one kind without a pin, or a pin that matches none, is a ValidateError."""
     wanted = {t.key: t for t in targets}
     files = sorted({(t.variant, t.set, t.lang, t.split) for t in wanted.values()})
+    gen_dtype = str(config.get("generation.dtype"))
+    rules = {d: judge_rules(d) for d in sorted({t.dtype or gen_dtype for t in wanted.values()})}
+    pins = {"qwen3guard": qwen3guard_judge, "frontier": frontier_judge}
     found: dict[str, dict[str, dict[str, JudgementRecord]]] = {"qwen3guard": {}, "frontier": {}}
     stale: dict[str, dict[str, set[str]]] = {"qwen3guard": {}, "frontier": {}}
+    other: dict[str, set[str]] = {}
     root = paths.judgements_dir()
     judge_dirs = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
     for judge_dir in judge_dirs:
@@ -436,9 +479,14 @@ def load_judgements(targets: Iterable[Target], *, qwen3guard_judge: str | None =
                         t.variant, t.set, t.lang, t.split, t.pid):
                     raise ValidateError(f"{path}:{i}: key {rec.key[:12]}... does not "
                                         "match that generation's variant, set, language, split or pid")
-                kind = judge_kind(rec.judge, qwen3guard_judge=qwen3guard_judge,
-                                  frontier_judge=frontier_judge)
+                kind = _kind(rec.judge, rules[t.dtype or gen_dtype])
                 if kind is None:
+                    # No configured judge made it (another mode, revision, labelling rules, rubric or
+                    # model): never scored, so its item waits for its judge.
+                    other.setdefault(rec.judge, set()).add(rec.key)
+                    continue
+                pin = pins[kind]
+                if pin and not _matches(rec.judge, pin):
                     continue
                 if t.output_sha is None or rec.output_sha != t.output_sha:
                     # Of another output than the one under the key now, or unsaid: never paired.
@@ -451,9 +499,11 @@ def load_judgements(targets: Iterable[Target], *, qwen3guard_judge: str | None =
                                         f"{rec.key[:12]}... ({path})")
                 by_key.setdefault(rec.key, rec)
     chosen: dict[str, tuple[str | None, dict[str, JudgementRecord]]] = {}
-    for pin, kind in ((qwen3guard_judge, "qwen3guard"), (frontier_judge, "frontier")):
+    for kind, pin in pins.items():
         if pin and wanted and not found[kind] and not stale[kind]:
-            raise ValidateError(f"no {kind} judgement matches {pin!r} for these items")
+            shown = ", ".join(sorted({r[kind][1] for r in rules.values()}))
+            raise ValidateError(f"no {kind} judgement matches {pin!r} for these items: a pin chooses among "
+                                f"the judgements of the configured {kind} judge ({shown})")
     for kind, flag in (("qwen3guard", "--qwen3guard-judge"), ("frontier", "--frontier-judge")):
         ids = sorted(found[kind])
         if len(ids) > 1:
@@ -465,7 +515,8 @@ def load_judgements(targets: Iterable[Target], *, qwen3guard_judge: str | None =
         skipped = [stale[kind].get(judge_id, set())] if judge_id else list(stale[kind].values())
         counts[kind] = len(set().union(*skipped)) if skipped else 0
     return Judged(qwen3guard_id=chosen["qwen3guard"][0], frontier_id=chosen["frontier"][0],
-                  qwen3guard=chosen["qwen3guard"][1], frontier=chosen["frontier"][1], stale=counts)
+                  qwen3guard=chosen["qwen3guard"][1], frontier=chosen["frontier"][1], stale=counts,
+                  other={judge_id: len(keys) for judge_id, keys in sorted(other.items())})
 
 
 def final_judgements_exist() -> bool:
