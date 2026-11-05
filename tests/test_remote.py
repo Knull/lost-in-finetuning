@@ -7,7 +7,6 @@ Every "secret" below is a made-up string.
 
 from __future__ import annotations
 
-import argparse
 import ast
 import base64
 import errno
@@ -822,6 +821,46 @@ def test_the_runners_agree_on_which_commands_exit_3_and_go_on(job):
     assert named in row.lower()
 
 
+# The lines a T4 runs with --dtype fp16, as kaggle/README.md's "fp16 everywhere" bullet names them.
+T4_FP16 = ("generate", "judge", "run-dev", "train", "utility --generate-only", "belebele", "heldout-loss")
+# A command in backticks, with or without "lift" ("`lift utility --generate-only`", "`run-dev`"); not a flag.
+LIFT_COMMAND = re.compile(r"`(?:lift )?([a-z][a-z-]*(?: --[a-z-]+)*)`")
+
+
+def sentences(text: str) -> list[str]:
+    return re.split(r"(?<=[.!?])\s+", " ".join(text.split()))
+
+
+def kaggle_about() -> str:
+    """The first (markdown) cell of kaggle/runner.ipynb, which a Kaggle user reads while filling JOB."""
+    cells = json.loads((REPO_ROOT / "kaggle" / "runner.ipynb").read_text(encoding="utf-8"))["cells"]
+    (source,) = ["".join(c["source"]) for c in cells if c.get("id") == "about"]
+    return source
+
+
+# Review C14: after P03, CLAUDE.md (the brief every session reads) still named only generate, judge and
+# run-dev as the commands whose exit 3 the runners go past, and the Kaggle runner's T4 rule gave
+# --dtype fp16 to their lines alone, while kaggle/README.md gives it to train, utility --generate-only,
+# belebele and heldout-loss lines too: a T4 user following the notebook lost the job to a refused line.
+def test_the_docs_name_every_command_that_exits_3_and_every_t4_model_line(job):
+    brief = sentences((REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
+    (threes,) = [s for s in brief if re.search(r"\bexit 3\b", s) and "runners go on" in s]
+    for cmd in job.PARTIAL_COMMANDS:
+        assert re.search(rf"`(lift )?{cmd}`", threes), cmd
+    assert "`lift train` and `lift gate` never exit 3" in threes
+    (t4,) = [s for s in brief if "T4" in s and "`--dtype fp16`" in s]
+    for cmd in T4_FP16:
+        assert re.search(rf"`(lift )?{cmd}`", t4), cmd
+    readme = (REPO_ROOT / "kaggle" / "README.md").read_text(encoding="utf-8")
+    bullet = " ".join(readme.split("**fp16 everywhere.**", 1)[1].split("\n- **", 1)[0].split())
+    rule = " ".join(kaggle_about().split("**The T4 rule.**", 1)[1].split("\n\n", 1)[0].split())
+    assert set(T4_FP16) <= set(LIFT_COMMAND.findall(bullet)) <= set(LIFT_COMMAND.findall(rule))
+    assert "`--dtype fp16`" in rule
+    (train,) = re.findall(r"`lift train` \(([^)]*)\)", bullet)
+    for flags in re.findall(r"`(--[^`]+)`", train):  # the T4's own training flags
+        assert flags in rule, flags
+
+
 @pytest.mark.parametrize("line", P03_PARTIAL)
 def test_a_p03_line_that_exits_3_is_reported_and_the_next_lines_run(job, tmp_path, line):
     root = tmp_path / "content"
@@ -1597,51 +1636,55 @@ def test_the_pin_warning_checks_what_each_lines_command_refuses():
     assert warn(["lift generate --variant stock --split dev"]) is None
 
 
-def p03_parser():
-    """lift's parser with stand-ins for the P03 commands (their flags as the P03 brief gives them), so the
-    pin warning can be checked whichever of the P03 command modules this checkout has."""
-    from lift.commands import run
-
-    parser = argparse.ArgumentParser(prog="lift")
-    sub = parser.add_subparsers(dest="command", required=True)
-    run.register(sub)
-    train = sub.add_parser("train")
-    train.add_argument("--candidate", required=True, choices=["aya", "indicalign"])
-    train.add_argument("--recipe", required=True, choices=["standard", "stress"])
-    train.add_argument("--seed", type=int, required=True)
-    utility = sub.add_parser("utility")
-    utility.add_argument("--variant", required=True)
-    utility.add_argument("--split", required=True, choices=["dev", "final"])
-    utility.add_argument("--judge-only", action="store_true")
-    for name in ("belebele", "heldout-loss"):
-        scores = sub.add_parser(name)
-        scores.add_argument("--variant", required=True)
-        scores.add_argument("--split", choices=["dev", "final"], default="dev")
-        scores.add_argument("--langs", nargs="+")
-    sub.add_parser("gate").add_argument("number", choices=["1", "2"])
-    return parser
-
-
-# P03: the pin warning also covers the commands that load Global (lift train, utility, belebele and
-# heldout-loss), read with lift's own CLI parser; lift utility --judge-only judges generations made before,
-# so it needs no pin, and lift gate runs on the laptop and loads no model.
-def test_the_pin_warning_covers_the_p03_commands_that_load_global(monkeypatch):
+# P03: the pin warning also covers the commands that load Global: lift train, utility (not --judge-only,
+# which only judges generations made before, with either judge), belebele and heldout-loss. lift gate runs
+# on the laptop and loads no model. Review C13: this was checked against hand-written stand-ins for their
+# parsers, so a renamed flag, a new required option or another dest for --judge-only (pinned_entries
+# reads args.judge_only) kept it green while lift remote warned about the wrong lines. Every line here
+# goes through lift's own parser (lift.cli.build_parser, as parse_line reads it), the real P03 command
+# modules included.
+def test_the_pin_warning_covers_the_p03_commands_that_load_global():
     from lift import config
 
-    monkeypatch.setattr("lift.cli.build_parser", p03_parser)
     warn = remote.unpinned_warning
-    lines = ["lift train --candidate aya --recipe standard --seed 1",
+    lines = ["lift train --candidate aya --recipe standard --seed 1 --per-device-batch 4",
+             "lift train --candidate aya --recipe standard --seed 2 --dtype fp16 --per-device-batch 1 "
+             "--parity-dtype fp16",
              "lift utility --variant adapter-aya-std-s1 --split dev",
-             "lift belebele --variant stock --split dev --langs hi,en", "lift heldout-loss --variant stock"]
-    found = warn(["lift sync pull", *lines])
+             "lift utility --variant adapter-aya-std-s1 --split dev --judge fallback",
+             "lift utility --variant adapter-aya-std-s1 --split dev --generate-only --dtype fp16",
+             "lift belebele --variant stock --split dev --langs hi,en",
+             "lift belebele --variant adapter-aya-std-s1 --split dev --langs hi en --dtype fp16",
+             "lift heldout-loss --variant stock",
+             "lift heldout-loss --variant adapter-aya-std-s1 --split dev --restart"]
+    modules = {"train": "train", "utility": "utility", "belebele": "loglik", "heldout-loss": "loglik"}
+    for line in lines:  # read by the command modules themselves, not by a stand-in
+        args = remote.parse_line(line)
+        assert args is not None and args.func.__module__ == f"lift.commands.{modules[args.command]}", line
+    found = warn(["lift sync pull", *lines])  # unpinned: the autouse fixture serves every revision "main"
     for i, line in enumerate(lines, 2):
         assert f"line {i} (lift {shlex.split(line)[1]}): models.global.revision = 'main'" in found
     assert "judges." not in found and "models.base" not in found
-    assert warn(["lift utility --variant adapter-aya-std-s1 --split dev --judge-only"]) is None
-    assert warn(["lift train --candidate aya --seed 1"]) is None      # refused by argparse, before any pin
-    assert warn(["lift gate 1"]) is None
+    judging = ["lift utility --variant adapter-aya-std-s1 --split dev --judge-only",
+               "lift utility --variant adapter-aya-std-s1 --split dev --judge fallback --judge-only",
+               "lift utility --variant adapter-aya-std-s1 --split dev --judge-only --judge=frontier "
+               "--no-wait"]
+    for line in judging:  # parsed, so a renamed --judge-only fails here rather than reading as refused
+        args = remote.parse_line(line)
+        assert args is not None and getattr(args, "judge_only", None) is True, line
+        assert warn([line]) is None, line
+    refused = ["lift train --candidate aya --seed 1",                       # --recipe is required
+               "lift utility --variant adapter-aya-std-s1 --split dev --generate-only --judge-only",
+               "lift belebele --variant stock",                             # --split and --langs too
+               "lift heldout-loss --variant stock --langs hi"]              # Hindi only: no --langs
+    for line in refused:  # lift refuses them before any pin check: nothing to warn about
+        assert remote.parse_line(line) is None and warn([line]) is None, line
+    for line in ("lift gate 1", "lift gate 2 --candidate adapter-aya-std-s1",
+                 "lift register-adapter adapter-aya-std-s1"):
+        assert warn([line]) is None, line
+    # Pinned to a sha: no warning, though the safety judges stay "main" (no P03 line runs one).
     config.load("project")["models"]["global"]["revision"] = SHA
-    assert warn(lines) is None
+    assert warn(["lift sync pull", *lines, *judging]) is None
 
 
 # Contract 1: a final push that exited 2 (a problem no retry can fix) is never retried from here either.
