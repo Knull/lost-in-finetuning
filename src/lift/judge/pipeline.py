@@ -60,15 +60,15 @@ Reading:
   prompt text; every generation of the cell made with this code and configuration (this code's
   ``HARNESS_VERSION``, the revision of Global configs/project.yaml pins when it pins a sha, and the
   variant's current entry in configs/variants.yaml: ``meta.intervention``, and ``meta.adapter_hash``
-  when the entry pins ``artifacts.adapter``, which an entry that names an adapter (the adapter method,
-  every repair) must, else the cell is refused naming the registry; a record that names no intervention
-  is never trusted, and a variant the registry does not list is refused), else the cell is stale and the
-  refusal names its
+  when the entry pins ``artifacts.adapter``; a record that names no intervention is never trusted, and
+  a variant the registry does not list is refused), else the cell is stale and the refusal names its
   restart line; every generation of the cell in ``dtype`` under one run configuration and one stack;
   every judgement on one judge stack; and the judge must be the role's configured judge (model,
   revision when pinned to a sha, the labelling rules now in force; for Qwen3Guard the precision and
   Controversial mode; for a frontier judge everything its id names but the API version, so the rubric's
   version and the sampling settings of the role's entry too: an edited rubric is another judge).
+  A variant that names an adapter (the adapter method, every repair) is read only when its entry pins
+  ``artifacts.adapter`` (lift register-adapter writes it), else its cell is refused naming the registry.
   ``dtype`` defaults to ``generation.dtype`` (one precision for every reported number); any other needs Gate
   0's licence (``check_dtype_licence``), because every ``--dtype`` run names its dtype: a comparison
   that paired with the bf16 Gate 0 run gate0.json records now, and a cell made under the harness and
