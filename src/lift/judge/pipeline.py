@@ -1,9 +1,10 @@
 """Judge a generations file into a judgements file, and read judgements back for reporting.
 Implemented in P02.
 
-For each selected GenerationRecord: GlotLID top-3 on the output (an empty or whitespace-only output
-gets ``[("und", 0.0)]`` without a LID call) -> unclear flags -> judge, in chunks -> final label
-(lift.judge.labels) -> one JudgementRecord appended per item to
+For each selected GenerationRecord: GlotLID's top 5 on the output (``lift.lang.LID_TOP_K``, the labels
+``LangID.is_lang`` sums: decisions item 43; an empty or whitespace-only output gets ``[("und", 0.0)]``
+without a LID call) -> unclear flags -> judge, in chunks -> final label (lift.judge.labels) -> one
+JudgementRecord appended per item to
 outputs/judgements/{judge_dir}/{variant}/{set}_{lang}_{split}.jsonl after each chunk.
 
 - Exactly one judgement per selected generation, naming the output it judged (``output_sha``: the
@@ -15,9 +16,10 @@ outputs/judgements/{judge_dir}/{variant}/{set}_{lang}_{split}.jsonl after each c
   lift.models.generate) before any other check of the cell; its remedy is the file's ``--dtype`` or
   leaving the cell out, never a restart, also for a cell that is stale as well (a restart line run where
   the other precision runs would make that cell again in its precision).
-- Judges are never mixed in one file: a file another judge began (another model, revision, precision or
-  Controversial mode) raises ``MixedJudgesError``, whose remedies are that judge or the role's ``lift
-  restart --judge ROLE`` line (``command``).
+- Judges are never mixed in one file: a file another judge began (another model, revision, labelling
+  rules, precision or Controversial mode) raises ``MixedJudgesError``, whose remedies are that judge or
+  the role's ``lift restart --judge ROLE`` line (``command``); only the restart line for judgements made
+  under other labelling rules, which no current judge applies.
 - A stale cell raises ``StaleJudgementsError``. It and both refusals above are
   ``lift.models.generate.StaleOutputError``s, so ``lift run-dev`` and ``lift judge`` set the cell aside
   and go on with the others. A message (and ``command``) names the ``lift restart`` line to run right
@@ -36,9 +38,15 @@ outputs/judgements/{judge_dir}/{variant}/{set}_{lang}_{split}.jsonl after each c
   reproduces their random part on a complete generations file: the same prompts in every variant
   and language, so the second judge's view stays paired by pid.
 - The judgements directory comes from the kind of the role's config entry: an entry with a
-  ``provider`` is the frontier LLM judge ("frontier"), a Qwen3Guard id is "qwen3guard". A Qwen3Guard
-  judge id ends in ``#{dtype}#{strict|loose}``, so two precisions or two Controversial mappings
-  never share a file.
+  ``provider`` is the frontier LLM judge ("frontier"), a Qwen3Guard id is "qwen3guard".
+- Every judge id carries the tag of the labelling rules its labels were made under
+  (``lift.judge.labels.rules_tag``: the labels code's ``LABELS_VERSION``, configs/project.yaml
+  ``unclear`` and ``languages.accept_labels``, the GlotLID entry ``langid`` and ``LID_TOP_K``): a
+  frontier judge's id is ``{FrontierJudge.judge_id}#rules-<8 hex>``, a Qwen3Guard id
+  ``{model}@{sha}#rules-<8 hex>#{dtype}#{strict|loose}``. So two sets of labelling rules, two precisions
+  or two Controversial mappings never share a file, a read or a pair: after a change to any rule, each
+  judged cell is judged again (its role's ``lift restart --judge ROLE`` line, which keeps the
+  generations).
 - A judge on local hardware (Qwen3Guard) exposes ``stack`` (``lift.models.generate.stack`` of its
   device: torch and transformers versions, GPU class) and writes it into every judgement's
   ``native["stack"]``: greedy guard outputs can flip borderline calls between stacks, so a
@@ -49,10 +57,17 @@ Reading:
 - ``load_records`` (whole JudgementRecords) and ``load_labels`` ({pid: label}) are the door to every
   reported number, the loose label, flags and judge failures included. Each returned judgement must
   be of a generation now in the generations file, of its current output, made from the current
-  prompt text; every generation of the cell in ``dtype`` under one run configuration and one stack;
+  prompt text; every generation of the cell made with this code and configuration (this code's
+  ``HARNESS_VERSION``, the revision of Global configs/project.yaml pins when it pins a sha, and the
+  variant's current entry in configs/variants.yaml: ``meta.intervention``, and ``meta.adapter_hash``
+  when the entry pins ``artifacts.adapter``; a record that names no intervention is never trusted, and
+  a variant the registry does not list is refused), else the cell is stale and the refusal names its
+  restart line; every generation of the cell in ``dtype`` under one run configuration and one stack;
   every judgement on one judge stack; and the judge must be the role's configured judge (model,
-  revision when pinned to a sha, and for Qwen3Guard the precision and Controversial mode). ``dtype``
-  defaults to ``generation.dtype`` (one precision for every reported number); any other needs Gate
+  revision when pinned to a sha, the labelling rules now in force; for Qwen3Guard the precision and
+  Controversial mode; for a frontier judge everything its id names but the API version, so the rubric's
+  version and the sampling settings of the role's entry too: an edited rubric is another judge).
+  ``dtype`` defaults to ``generation.dtype`` (one precision for every reported number); any other needs Gate
   0's licence (``check_dtype_licence``), because every ``--dtype`` run names its dtype: a comparison
   that paired with the bf16 Gate 0 run gate0.json records now, and a cell made under the harness and
   decoding settings of that comparison, generated and judged (Qwen3Guard) on its GPU class. A refusal
@@ -63,10 +78,10 @@ Reading:
   and a judgement of every generation; ``complete=False`` is for the second judge's sample and runs
   in progress.
 - ``provenance`` describes a cell (judge id and stack; generation dtype, run configuration, model
-  revision, harness, chat template, decoding settings, library versions and GPU). ``paired_labels``
-  reads two variants' cells and refuses a pair whose judge, precision, model revision, harness, chat
-  template or decoding settings differ. Every paired comparison downstream (Gate 2, P07) must use
-  ``paired_labels``, never two ``load_labels`` calls.
+  revision, harness, chat template, decoding settings, library versions, GPU, intervention digest and
+  adapter hash). ``paired_labels`` reads two variants' cells and refuses a pair whose judge (labelling
+  rules included), precision, model revision, harness, chat template or decoding settings differ. Every
+  paired comparison downstream (Gate 2, P07) must use ``paired_labels``, never two ``load_labels`` calls.
 - ``load_judgements`` reads one file with only its own checks: never report from it.
 """
 
@@ -86,6 +101,7 @@ from typing import Any, Protocol
 from lift import config, prompts
 from lift.io import append_jsonl, read_jsonl, sha256_obj, sha256_text, stable_json
 from lift.judge import labels
+from lift.lang import LID_TOP_K
 from lift.models.generate import OtherPrecisionError, StaleOutputError, restart_command
 from lift.paths import REPO_ROOT, judgements_dir, metrics_dir, validation_dir
 from lift.schemas import GenerationRecord, JudgementRecord, UnclearFlags
@@ -103,7 +119,7 @@ CONTROVERSIAL_MODES = ("strict", "loose")
 EMPTY_OUTPUT_LID: tuple[tuple[str, float], ...] = (("und", 0.0),)
 QWEN3GUARD_SAFETY = ("Safe", "Unsafe", "Controversial")
 PROVENANCE_META = ("dtype", "run_config", "model_rev", "harness", "template", "decoding", "torch",
-                   "transformers", "gpu")
+                   "transformers", "gpu", "intervention", "adapter_hash")
 PAIR_MUST_MATCH = ("judge_id", "dtype", "model_rev", "harness", "template", "decoding")
 PAIR_MAY_DIFFER = ("gpu", "torch", "transformers", "judge_stack")
 _STACK_FIELDS = ("torch", "transformers", "gpu_capability")     # a generation without meta["stack"]
@@ -111,6 +127,7 @@ _KEY = re.compile(r"[0-9a-f]{64}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIR_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _JUDGE_PRECISION = re.compile(r"#([^#@]+)#(?:strict|loose)$")       # a Qwen3Guard judge id's #{dtype}#{mode}
+_RULES_TAG = re.compile(r"#rules-[0-9a-f]{8}(?=#|$)")              # a judge id's labels.rules_tag segment
 
 
 @dataclass(frozen=True)
@@ -143,10 +160,12 @@ class StaleJudgementsError(StaleOutputError):
 
 
 class MixedJudgesError(StaleOutputError):
-    """``judge_file`` refuses a judgements file another judge began (another model, revision, precision or
-    Controversial mode): judges are never mixed in one file. A StaleOutputError, so a run lists the cell and
-    goes on. ``command`` is the role's ``lift restart ... --judge ROLE`` line (None for a file no role owns);
-    the message also names the other remedy, finishing the file with its own judge."""
+    """``judge_file`` refuses a judgements file another judge began (another model, revision, labelling
+    rules, precision or Controversial mode): judges are never mixed in one file. A StaleOutputError, so a
+    run lists the cell and goes on. ``command`` is the role's ``lift restart ... --judge ROLE`` line (None
+    for a file no role owns); the message also names the other remedy, finishing the file with its own
+    judge, unless that judge can never be reported (another precision than the generations', or only
+    other labelling rules)."""
 
 
 class Judge(Protocol):
@@ -228,8 +247,9 @@ class Qwen3GuardAdapter:
     Safety, Categories and Refusal, the guard's ``consistent`` (False for Unsafe with no category or
     Safe with one) and ``judge_label_loose``, so the loose sensitivity analysis needs no re-judging,
     and on every judgement, failures included, the judge's ``stack``. The judge id ends in
-    ``#{dtype}#{mode}``: labels from two precisions or two Controversial modes never share a judgements
-    file, and resume and load refuse a mix; ``judge_file`` and ``load_records`` do the same for stacks.
+    ``#{rules tag}#{dtype}#{mode}`` (``labels.rules_tag``): labels from two sets of labelling rules, two
+    precisions or two Controversial modes never share a judgements file, and resume and load refuse a mix;
+    ``judge_file`` and ``load_records`` do the same for stacks.
     """
 
     short = "qwen3guard"
@@ -240,7 +260,7 @@ class Qwen3GuardAdapter:
         self.mode = "strict" if strict else "loose"
         self.device = device
         self.dtype = dtype
-        self.judge_id = f"{guard.judge_id}#{dtype}#{self.mode}"
+        self.judge_id = f"{guard.judge_id}#{labels.rules_tag()}#{dtype}#{self.mode}"
         self._stack: Any = None
 
     @property
@@ -301,7 +321,9 @@ class FrontierAdapter:
     """The frontier LLM judge (``lift.judge.frontier.FrontierJudge``) as a Judge. ``native`` keeps the
     judge's label and reason, and ``model_echo`` (the model id that answered) when the result has
     one. ``stats`` passes through its call, token and cost counters for the run manifest. An API
-    judge runs on no hardware of ours, so it has no ``stack``."""
+    judge runs on no hardware of ours, so it has no ``stack``. The judge id is the frontier judge's own
+    id and ``#{rules tag}`` (``labels.rules_tag``); the frontier judge's id is left as it is, so its call
+    cache is reused when a cell is judged again under new labelling rules."""
 
     short = "frontier"
     device = None
@@ -310,7 +332,7 @@ class FrontierAdapter:
 
     def __init__(self, frontier: Any) -> None:
         self.frontier = frontier
-        self.judge_id = frontier.judge_id
+        self.judge_id = f"{frontier.judge_id}#{labels.rules_tag()}"
 
     @property
     def stats(self) -> dict[str, Any]:
@@ -615,7 +637,8 @@ def _mixed_judges(out_path: Path, others: Sequence[str], judge_id: str, made: st
     """The refusal of a file another judge began. Its remedies: finish it with that judge, or ``restart``
     (the role's ``--judge`` line) to judge the cell again with this one. Only the second when the file's
     judge worked in another precision than the generations (``made``: a file from before judge_file refused
-    that), as those judgements can never be reported."""
+    that), or differs from this one only in its labelling rules (its rules tag, or none: a file from before
+    judge ids carried one), as those judgements can never be reported."""
     if restart:
         again = (f"set its judgements aside and judge the cell again with this judge: run `{restart}` as a "
                  "job line right after `lift sync pull`, followed by the line that failed (the generations "
@@ -627,6 +650,11 @@ def _mixed_judges(out_path: Path, others: Sequence[str], judge_id: str, made: st
     precisions = sorted({m.group(1) for judge in others if (m := _JUDGE_PRECISION.search(judge))})
     if made and set(precisions) - {made}:
         why = f"They were judged in {precisions} of generations made in {made}, so they can never be reported"
+        return MixedJudgesError(f"{head}{why}: {again}.", command=restart)
+    if all(_RULES_TAG.sub("", judge) == _RULES_TAG.sub("", judge_id) for judge in others):
+        why = ("They differ from this judge only in their labelling rules (the rules tag: lift.judge.labels, "
+               "configs/project.yaml unclear.* and languages.accept_labels, the GlotLID entry langid), which "
+               "changed since they were made, so they can never be reported")
         return MixedJudgesError(f"{head}{why}: {again}.", command=restart)
     own = ("Either finish the file with its own judge (its id names its revision, and for Qwen3Guard its "
            "precision and Controversial mode), or")
@@ -712,7 +740,7 @@ def _check_judge_stack(out_path: Path, existing: Collection[JudgementRecord], st
 
 def _flags(g: GenerationRecord, lid: Any, accept: Mapping[str, Sequence[str]],
            unclear: Mapping[str, Any]) -> UnclearFlags:
-    lid_top = lid.top(g.output, k=5) if g.output.strip() else list(EMPTY_OUTPUT_LID)
+    lid_top = lid.top(g.output, k=LID_TOP_K) if g.output.strip() else list(EMPTY_OUTPUT_LID)
     return labels.unclear_flags(
         text=g.output, n_new_tokens=g.n_new_tokens, lid_top=lid_top, prompt_lang=g.lang,
         accept_labels=accept, min_new_tokens=int(unclear["min_new_tokens"]),
@@ -893,15 +921,27 @@ def load_judgements(variant: str, set_name: str, lang: str, split: str, *,
 
 
 def _expected_judge(role: str, dtype: str) -> tuple[re.Pattern[str], str]:
-    """The judge ids a reported file of ``role`` may hold, and how to name them: the configured model
-    (and revision, when the config pins a sha); for Qwen3Guard also ``#{dtype}#{mode}``."""
+    """The judge ids a reported file of ``role`` may hold, and how to name them. A frontier judge's id is
+    the configured judge's exactly but for the API version its SDK speaks: the provider, model, rubric
+    version (file stem and sha) and sampling settings of the role's entry, as ``FrontierJudge.judge_id``
+    names them, then the tag of the labelling rules now in force (``#{labels.rules_tag()}``). A Qwen3Guard
+    id names the configured model (and revision, when the config pins a sha), then the rules tag and
+    ``#{dtype}#{mode}``."""
     entry = _judge_entry(role)
+    rules = f"#{labels.rules_tag()}"
     if _entry_kind(role, entry) == "frontier":
-        prefix = f"{entry.get('provider')}/{entry.get('model')}@"
-        return re.compile(re.escape(prefix) + ".+"), prefix + "..."
+        from lift.judge.frontier import _check_choice, _settings, _settings_tag, load_rubric
+
+        provider, model, where = entry.get("provider"), entry.get("model"), _ROLE_ENTRIES[role]
+        _check_choice(provider, model, where)
+        settings = _settings(provider, where, {})
+        tag = _settings_tag(settings["temperature"], settings["effort"], settings["thinking"],
+                            settings["max_tokens"])
+        head = f"{provider}/{model}@{load_rubric(entry['rubric']).version}+{tag}+api"
+        return re.compile(re.escape(head) + "[^#]+" + re.escape(rules)), f"{head}<version>{rules}"
     revision = str(entry.get("revision", ""))
     pinned = bool(_SHA.fullmatch(revision))
-    tail = f"#{dtype}#{_controversial_mode(role, entry)}"
+    tail = f"{rules}#{dtype}#{_controversial_mode(role, entry)}"
     pattern = re.escape(f"{entry['id']}@") + (re.escape(revision) if pinned else "[^@#]+") + re.escape(tail)
     return re.compile(pattern), f"{entry['id']}@{revision if pinned else '<sha>'}{tail}"
 
@@ -1123,6 +1163,48 @@ def _one_configuration(gens: Sequence[GenerationRecord], records: Sequence[Judge
     return problems
 
 
+def _made_otherwise(variant: str, gens: Sequence[GenerationRecord]) -> tuple[list[tuple[list[str], str]],
+                                                                            str | None]:
+    """The generations of ``variant``'s cell that were not made with this code and configuration, as
+    (pids, what) checks of a stale cell, and why the variant has no configuration to compare with (None when
+    it is registered). Every generation must carry this code's ``HARNESS_VERSION``, the revision of Global
+    configs/project.yaml pins (when it pins a sha), and the intervention of the variant's entry in
+    configs/variants.yaml (``meta.intervention``; a record without one was made before generations recorded
+    it, and is never trusted), with the pinned adapter's hash (``meta.adapter_hash``) when the entry pins
+    ``artifacts.adapter``."""
+    from lift.cachekey import intervention_digest
+    from lift.models.generate import HARNESS_VERSION
+    from lift.models.variants import get_spec
+
+    checks = [([g.pid for g in gens if g.meta.get("harness") != HARNESS_VERSION],
+               f"generations were made by another harness version than this code's ({HARNESS_VERSION})")]
+    revision = str(config.get("models.global.revision", ""))
+    if _SHA.fullmatch(revision):
+        checks.append(([g.pid for g in gens if g.meta.get("model_rev") != revision],
+                       f"generations were made by another revision of Global than the {revision[:12]} "
+                       "configs/project.yaml pins"))
+    try:
+        spec = get_spec(variant)
+    except KeyError as exc:
+        return checks, (f"{exc.args[0]}: a cell is read only for a registered variant, under its current "
+                        "entry")
+    intervention = intervention_digest(spec)
+    checks += [
+        ([g.pid for g in gens if not g.meta.get("intervention")],
+         "generations name no intervention (meta.intervention: made before generations recorded it, so never "
+         "trusted)"),
+        ([g.pid for g in gens if g.meta.get("intervention") and g.meta["intervention"] != intervention],
+         f"generations were made under another intervention than {variant}'s entry in configs/variants.yaml "
+         "(another adapter, params or artifacts registered under its name since)"),
+    ]
+    pinned = spec.artifacts.get("adapter")
+    if pinned:
+        checks.append(([g.pid for g in gens if g.meta.get("adapter_hash") != pinned],
+                       f"generations were made by another adapter than the {pinned[:12]} {variant}'s entry "
+                       "pins (artifacts.adapter)"))
+    return checks, None
+
+
 def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRecord], gpath: Path,
                 cell: tuple[str, str, str, str], *, role: str, complete: bool, dtype: str) -> None:
     """Raise unless ``records`` can be reported (the rules are in the module docstring)."""
@@ -1132,6 +1214,7 @@ def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRec
     current = [r for r in records if r.key in gen_of and gen_of[r.key].pid == r.pid]
     current_keys = {r.key for r in current}
     prompted = gens if complete else [gen_of[r.key] for r in current]   # whose prompt must be current
+    made_otherwise, unregistered = _made_otherwise(variant, gens)
     stale = [       # the cell's files no longer belong together: it is made again
         ([r.pid for r in records if r.key not in current_keys],
          f"judgements are of generations no longer in {gpath.name}"),
@@ -1142,6 +1225,7 @@ def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRec
          f"generations are of pids that are not {split} prompts"),
         ([g.pid for g in prompted if g.pid in texts and g.prompt_sha != sha256_text(texts[g.pid])],
          "generations were made from another prompt text"),
+        *made_otherwise,
     ]
     checks = [([g.pid for g in gens if (g.variant, g.set, g.lang, g.split) != cell],
                "generations belong to another variant/set/lang/split"), *stale]
@@ -1152,6 +1236,8 @@ def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRec
             (list(set(texts) - {g.pid for g in gens}), f"of {len(texts)} prompts have no generation"),
         ]
     problems = [f"{len(pids)} {what}, e.g. {sorted(pids)[:5]}" for pids, what in checks if pids]
+    if unregistered:
+        problems.append(unregistered)
     problems += _one_configuration(gens, records, dtype)
     if dtype != str(config.get("generation.dtype")):
         problems += _licence_problems(dtype, gens, records, cell, role)
@@ -1215,9 +1301,10 @@ def provenance(variant: str, set_name: str, lang: str, split: str, *,
                judge: str = "primary") -> dict[str, Any]:
     """What one cell was made with: the judge id, the counts, for each GenerationRecord.meta field of
     ``PROVENANCE_META`` (dtype, run_config, model_rev, harness, template, decoding, torch, transformers,
-    gpu) the sorted distinct values present, as strings (older records lack some fields), and the
-    judge's ``judge_stack`` (canonical JSON; none for an API judge). It describes and checks nothing
-    (``load_records`` does), so it can also say why a cell is refused."""
+    gpu, intervention, adapter_hash) the sorted distinct values present, as strings (older records lack
+    some fields; stock has no adapter hash), and the judge's ``judge_stack`` (canonical JSON; none for an
+    API judge). It describes and checks nothing (``load_records`` does), so it can also say why a cell is
+    refused."""
     from lift.models import generate
 
     records = load_judgements(variant, set_name, lang, split, judge=judge)
@@ -1232,9 +1319,10 @@ def paired_labels(variant_a: str, variant_b: str, set_name: str, lang: str, spli
     (McNemar, the paired bootstrap): the only way to read a pair (Gate 2, P07).
 
     Both cells are read with ``load_records(complete=True, dtype=dtype)``, and the pair is refused
-    unless both have the same judge id (model, revision, precision and Controversial mode), generation
-    dtype, model revision, harness version, chat template and decoding settings (``PAIR_MUST_MATCH``):
-    two arms fed other token ids would confound drift with formatting. Another GPU, torch/transformers
+    unless both have the same judge id (model, revision, labelling rules, precision and Controversial
+    mode), generation dtype, model revision, harness version, chat template and decoding settings
+    (``PAIR_MUST_MATCH``): two arms fed other token ids would confound drift with formatting, and two arms
+    labelled under other rules would confound it with the rules. Another GPU, torch/transformers
     version or judge stack (``PAIR_MAY_DIFFER``) is allowed and logged as a warning, not returned;
     ``provenance`` gives both cells' values for a report.
     """

@@ -102,7 +102,7 @@ class JudgementRecord(_Record):
     lang: Lang
     set: PromptSet
     split: Split
-    judge: str                       # judge id with revision, e.g. "Qwen/Qwen3Guard-Gen-4B@<sha>#bf16#strict"
+    judge: str                       # judge id: "Qwen/Qwen3Guard-Gen-4B@<sha>#rules-<8 hex>#bf16#strict"
     judge_label: Label               # the judge's own call, mapped to our four classes
     label: Label                     # final class after the unclear rules (lift.judge.labels)
     flags: UnclearFlags

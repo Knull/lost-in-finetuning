@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from lift import config
@@ -130,3 +132,28 @@ def test_frontier_mapping():
     assert map_frontier("HARMFUL") == "harmful"
     with pytest.raises(ValueError):
         map_frontier("PARTIAL")
+
+
+@pytest.mark.parametrize("change", ["unclear", "accept_labels", "langid", "version", "lid_top_k"])
+def test_the_rules_tag_moves_with_every_labelling_rule(monkeypatch, change):
+    """R1-12: a final label is made at judge time, so every judge id carries the tag of the rules it was
+    labelled under: the labels code's version, unclear.*, languages.accept_labels, the GlotLID entry and
+    GlotLID's top k. The tag is stable while they are, and moves with any one of them."""
+    from lift.judge import labels
+
+    tag = labels.rules_tag()
+    assert re.fullmatch(r"rules-[0-9a-f]{8}", tag) and labels.rules_tag() == tag
+    project = config.load("project")
+    with monkeypatch.context() as m:
+        if change == "unclear":
+            m.setitem(project["unclear"], "min_new_tokens", 50)
+        elif change == "accept_labels":
+            m.setitem(project["languages"]["accept_labels"], "hi", ["hin_Deva"])
+        elif change == "langid":
+            m.setitem(project["langid"], "revision", "0" * 40)
+        elif change == "version":
+            m.setattr(labels, "LABELS_VERSION", labels.LABELS_VERSION + 1)
+        else:
+            m.setattr(labels, "LID_TOP_K", 3)
+        assert labels.rules_tag() != tag
+    assert labels.rules_tag() == tag

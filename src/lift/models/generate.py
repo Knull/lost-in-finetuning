@@ -31,8 +31,11 @@ Behaviour:
   not stale and is never started over (that would discard it): it raises OtherPrecisionError, whose
   remedy is the file's ``--dtype`` or leaving the cell out.
 - ``meta`` carries dtype, GPU name, device, batch size, the provenance (model revision, harness,
-  template, the stack, ``decoding``: the decoding settings without the dtype, ``run_config``) and, for
-  CAST wrappers, ``gate_fired``.
+  template, the stack, ``decoding``: the decoding settings without the dtype, ``intervention``:
+  ``lift.cachekey.intervention_digest`` of the variant's spec, ``adapter_hash``: None for stock,
+  ``run_config``) and, for CAST wrappers, ``gate_fired``. The run manifest records the same
+  provenance. The judge pipeline reads a cell only if its provenance is this code's harness, the pinned
+  revision of Global and the variant's current entry in configs/variants.yaml.
 - Every run writes a manifest (lift.manifest) with prompts/sec and tokens/sec.
 """
 
@@ -48,7 +51,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from lift import config
-from lift.cachekey import generation_key
+from lift.cachekey import generation_key, intervention_digest
 from lift.io import append_jsonl, read_jsonl, sha256_obj, sha256_text
 from lift.models.load import DTYPES
 from lift.models.variants import LoadedVariant
@@ -549,10 +552,11 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
     gpu = _device_name(variant.device)
     provenance = {"model_rev": variant.model_rev, "harness": HARNESS_VERSION,
                   "template": variant.template_hash[:16], **env, "stack": stack_digest(env),
-                  "decoding": decoding_digest(gen_cfg)}
+                  "decoding": decoding_digest(gen_cfg), "intervention": intervention_digest(variant.spec),
+                  "adapter_hash": variant.adapter_hash}
     run = start_run("generate", variant=variant.spec.name, out_path=str(out_path), dtype=variant.dtype,
                     device=variant.device, gpu=gpu, gen_cfg=gen_cfg, n_prompts=len(rows),
-                    n_resumed=len(rows) - len(todo), run_config=run_config, adapter_hash=variant.adapter_hash,
+                    n_resumed=len(rows) - len(todo), run_config=run_config,
                     template_hash=variant.template_hash, **provenance) if manifest else None
     if not todo:
         if moved:
