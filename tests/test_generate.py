@@ -445,15 +445,22 @@ def test_appending_under_another_stack_is_refused(stock, monkeypatch, change):
 
 def test_a_restart_line_says_when_the_next_push_replaces_the_runs_repo_copies(stock, monkeypatch):
     # W2-04 (R1-08): the next lift sync push replaces the runs repo's copies of the files a restart emptied
-    # only when the Hub's copy has not changed since this machine's last sync; otherwise it reports an
-    # emptied-file conflict, which lift sync push --force settles
+    # unless the cell's files there changed since this machine's last sync. W3 (docs, VERIFY-5): the refusal
+    # and restart_cell then said such a copy is an emptied-file conflict, which lift sync push --force
+    # settles, and that the push replaces the Hub's copy when that copy has not changed. Both overstate
+    # (decisions item 63): --force settles it only when nothing but the emptied files changed there, else
+    # lift sync pull, then lift sync push; and an unchanged copy is held back with the cell's other files.
     path = cell_path()
     run(stock, path, ps=prompts()[:2])
     moved_stack(monkeypatch, torch="2.99.0+cu130")
     with pytest.raises(gen.StaleOutputError) as exc:
         run(stock, path)
+    settles = (r"lift sync names what settles it[^`]*`+lift sync push --force`+ when only the files the "
+               r"restart emptied changed there, else `+lift sync pull`+, then `+lift sync push`+")
     for text in (str(exc.value), " ".join(gen.restart_cell.__doc__.split())):
-        assert "changed since this machine's last sync" in text and "lift sync push --force" in text, text
+        assert "unless the cell's files there changed since this machine's last sync" in text, text
+        assert re.search(settles, text), text
+        assert "emptied-file conflict" not in text and "has not changed" not in text, text
 
 
 def test_changed_inputs_name_the_restart_line(stock, tmp_path):
