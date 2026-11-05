@@ -415,8 +415,8 @@ def test_decide_judge_prints_the_change_and_edits_nothing(qwen3guard_wrong, swit
     decided = read_json(decision)
     assert decided["n"] == 180 and decided["switch_primary"] is switch
 
-    project = paths.REPO_ROOT / "configs" / "project.yaml"
-    judges = yaml.safe_load(project.read_text(encoding="utf-8"))["judges"]
+    # The judges as the command read them: conftest serves revisions as "main" whatever the file pins
+    judges = config.load("project")["judges"]
     blocks = judges_blocks(out)
     if switch:
         # The exact config change: the primary and second judge blocks swap.
