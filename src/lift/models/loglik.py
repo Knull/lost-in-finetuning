@@ -2,9 +2,10 @@
 the utility set's reference answers. Both are forward passes only, through one batched, resumable,
 cache-keyed scorer that treats every variant alike.
 
-Belebele (decisions.md item 10). The prompt is frozen and the same for every variant, with no chat
-template (lm-eval style). Fields go in exactly as stored, Belebele's texts as published: nothing is
-stripped, so the few trailing spaces stay.
+Belebele (decisions.md items 10 and 52). The prompt is frozen and the same for every variant, with no
+chat template: lm-evaluation-harness's Belebele template (lm_eval/tasks/belebele/_default_template_yaml),
+which strips the question (``{{question.strip()}}``) and inserts the passage and the four options as
+published, so their few trailing spaces stay.
 
     P: {flores_passage}
     Q: {question}
@@ -189,11 +190,14 @@ def _start_over(restart: str | None, out_path: Path) -> str:
 
 
 def belebele_prompt(row: Mapping[str, Any]) -> str:
-    """The frozen Belebele prompt of one item (module docstring): every field exactly as stored."""
+    """The frozen Belebele prompt of one item (module docstring): the question stripped, as lm-eval's
+    template does, every other field exactly as stored."""
     missing = [name for name in BELEBELE_FIELDS if not isinstance(row.get(name), str)]
     if missing:
         raise ValueError(f"belebele {row.get('pid')}: {missing} missing or not text")
-    return BELEBELE_FORMAT.format(**{name: row[name] for name in BELEBELE_FIELDS})
+    fields = {name: row[name] for name in BELEBELE_FIELDS}
+    fields["question"] = fields["question"].strip()
+    return BELEBELE_FORMAT.format(**fields)
 
 
 def gold_letter(row: Mapping[str, Any]) -> str:
