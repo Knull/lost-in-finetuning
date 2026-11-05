@@ -1294,6 +1294,95 @@ def test_reapplying_a_sheet_changes_nothing_and_revised_verdicts_on_fixed_items_
     assert snapshot(dirs.data) == before
 
 
+CORRECTED = "पाठक का नकली सुधार"                    # a reader's (fake) corrected Hindi translation
+
+
+def unapplied(dirs, verdicts):
+    """The verdicts ({item_id: (set, cells)}) the hi prompt files do not hold, as 'file: verdict pid'."""
+    out = []
+    for item_id, (set_name, cells) in verdicts.items():
+        pid, name = item_id[3:], f"{set_name}_hi"
+        records = by_pid(set_name, "hi")
+        path = dirs.data / "prompts" / "excluded" / f"{name}.jsonl"
+        excluded = {row["pid"] for row in read_jsonl(path)} if path.exists() else set()
+        if cells["verdict"] == "bad" and (pid in records or pid not in excluded):
+            out.append(f"{name}: bad {pid} (still in the prompt file, not in prompts/excluded)")
+        elif cells["verdict"] == "fixed" and (pid not in records or records[pid].text != CORRECTED
+                                              or not records[pid].translation.checked):
+            out.append(f"{name}: fixed {pid} (the record still holds the engine output, unchecked)")
+        elif cells["verdict"] == "ok" and (pid not in records or not records[pid].translation.checked):
+            out.append(f"{name}: ok {pid} (unchecked)")
+    return out
+
+
+@pytest.mark.parametrize("cut", [KeyboardInterrupt, PermissionError], ids=["ctrl_c", "oserror"])
+def test_applying_a_sheet_again_finishes_a_rebuild_that_was_cut_short(dirs, monkeypatch, cut):
+    """R2-02: apply_spotchecks stores a sheet's verdicts, then rebuilds their files; a rebuild cut short in
+    the second file (Ctrl+C, an OSError) left easy_benign_hi and hard_benign_hi without them, and the same
+    sheet applied again found every row unchanged and rebuilt nothing. Each report now records the digest
+    of the stored verdicts its build applied, so the retry rebuilds every file that does not hold them yet
+    (resumed, listed on a dry run too), and a report from before the digest is rebuilt once."""
+    sets = ("harmful", "easy_benign", "hard_benign")
+    assert build.build_all(ctx=fixture_ctx(), only=list(sets), langs=["en", "hi"])["complete"]
+    build.write_spotcheck_sheets(ctx=fixture_ctx(), langs=["hi"])
+    sheet = dirs.sheets / "spotcheck_hi.csv"
+    ids = {s: [r["item_id"] for r in read_sheet(sheet) if r["set"] == s] for s in sets}
+    verdicts = {ids["harmful"][0]: ("harmful", {"verdict": "bad"}),
+                ids["easy_benign"][0]: ("easy_benign", {"verdict": "bad"}),
+                ids["easy_benign"][1]: ("easy_benign", {"verdict": "fixed", "corrected": CORRECTED}),
+                ids["hard_benign"][0]: ("hard_benign", {"verdict": "bad"})}
+    fill(sheet, {item_id: cells for item_id, (_, cells) in verdicts.items()})
+    real, calls = build._build_file, []
+
+    def cut_short(at):
+        def rebuild(run, src, set_name, lang):
+            calls.append(f"{set_name}_{lang}")
+            if len(calls) == at:
+                raise cut("simulated: the rebuild is cut short")
+            return real(run, src, set_name, lang)
+        return rebuild
+
+    monkeypatch.setattr(build, "_build_file", cut_short(2))
+    with pytest.raises(cut):
+        build.apply_spotchecks(sheet, ctx=fixture_ctx())
+    assert calls == ["harmful_hi", "easy_benign_hi"], "setup: the cut must hit the second file's rebuild"
+    monkeypatch.setattr(build, "_build_file", real)
+    again = build.apply_spotchecks(sheet, ctx=fixture_ctx())     # the operator's retry: the very same sheet
+    missing = unapplied(dirs, verdicts)
+    assert not missing, (f"re-applying the sheet returned new={again['new']} unchanged={again['unchanged']} "
+                         f"rebuilt={again['rebuilt']}, yet {len(missing)} of its {len(verdicts)} stored "
+                         "verdicts never reached their files: " + "; ".join(missing))
+    owed = ["easy_benign_hi", "hard_benign_hi"]
+    assert (again["new"], again["unchanged"], again["rebuilt"], again["resumed"]) == (0, 4, owed, owed)
+    assert all(report(dirs, f"{s}_hi")["spotchecks"]["verdicts_sha"] for s in sets)
+    assert build.apply_spotchecks(sheet, ctx=fixture_ctx())["rebuilt"] == []          # nothing owed now
+
+    # a new verdict whose own rebuild is cut short: a dry run lists its file as resumed, the apply resumes it
+    verdicts[ids["hard_benign"][1]] = ("hard_benign", {"verdict": "ok"})
+    fill(sheet, {ids["hard_benign"][1]: {"verdict": "ok"}})
+    calls.clear()
+    monkeypatch.setattr(build, "_build_file", cut_short(1))
+    with pytest.raises(cut):
+        build.apply_spotchecks(sheet, ctx=fixture_ctx())
+    monkeypatch.setattr(build, "_build_file", real)
+    before = snapshot(dirs.data)
+    dry = build.apply_spotchecks(sheet, ctx=fixture_ctx(), dry_run=True)
+    assert (dry["new"], dry["unchanged"], dry["rebuilt"], dry["resumed"]) == (0, 5, [], ["hard_benign_hi"])
+    assert snapshot(dirs.data) == before
+    resumed = build.apply_spotchecks(sheet, ctx=fixture_ctx())
+    assert (resumed["new"], resumed["rebuilt"], resumed["resumed"]) == (0, ["hard_benign_hi"],
+                                                                        ["hard_benign_hi"])
+    assert unapplied(dirs, verdicts) == []
+
+    # a report from before the digest, on a file with stored verdicts, is rebuilt once
+    path = dirs.data / "prompts" / "reports" / "harmful_hi.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    del doc["spotchecks"]["verdicts_sha"]
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    assert build.apply_spotchecks(sheet, ctx=fixture_ctx())["resumed"] == ["harmful_hi"]
+    assert build.apply_spotchecks(sheet, ctx=fixture_ctx())["resumed"] == []
+
+
 def test_a_fixed_verdict_whose_english_changed_is_stored_again(dirs):
     """The English changes in a way dup_key does not see (a doubled inner space): the stored fixed verdict no
     longer applies (another source_sha), so the same sheet applied again is a new verdict, not unchanged, and
@@ -1515,8 +1604,8 @@ def no_fasttext(cfg=None):
 
 
 def test_apply_loads_what_the_rebuild_needs_before_storing_a_verdict(dirs, spot, monkeypatch):
-    """GlotLID cannot load on this machine: the apply stops before a verdict is stored, so the same sheet
-    applies in full once it can (a stored verdict would count as unchanged and never be rebuilt)."""
+    """GlotLID cannot load on this machine: the apply stops before a verdict is stored, so it writes nothing
+    and the same sheet applies in full once it can."""
     build.write_spotcheck_sheets(ctx=spot)
     sheet = dirs.sheets / "spotcheck_hi.csv"
     hard = [r["item_id"] for r in read_sheet(sheet) if r["set"] == "hard_benign"]

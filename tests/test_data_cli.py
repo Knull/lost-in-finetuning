@@ -356,9 +356,10 @@ def test_apply_exits_3_when_the_rebuild_loses_records_and_1_without_the_cache(di
 
 def test_apply_exits_1_and_names_the_rebuild_when_it_stops_after_the_verdicts_are_stored(dirs, monkeypatch,
                                                                                          capsys, caplog):
-    # W3-04: a ValueError from the rebuild comes after the verdicts are stored, and applying the sheet again
-    # finds them unchanged and rebuilds nothing. So the line says they are stored and the rebuild stopped,
-    # and names the line that rebuilds their files from them (from the cache, as apply-spotchecks does).
+    # W3-04: a ValueError from the rebuild comes after the verdicts are stored, so the line says they are
+    # stored and the rebuild stopped. R2-02: applying the sheet again, once the cause is fixed, finishes that
+    # rebuild (the file's report does not hold the stored verdicts yet), and so does the named line that
+    # rebuilds their files from them (from the cache, as apply-spotchecks does).
     use_fixtures(monkeypatch)
     assert main(["data", "build", "--only", "harmful", "--langs", "en", "hi"]) == 0
     sheet = dirs.sheets / "sheet.csv"
@@ -378,13 +379,24 @@ def test_apply_exits_1_and_names_the_rebuild_when_it_stops_after_the_verdicts_ar
     logged = " ".join(caplog.text.split())
     rebuild = "`lift data build --only harmful --langs hi --cache-only`"
     assert "2 new verdicts are stored" in logged and "fake: the rebuild stops" in logged
+    assert "Once the cause is fixed, apply the sheet again" in logged
     assert rebuild in logged and "Traceback" not in logged and capsys.readouterr().out == ""
-    stored = (dirs.data / "interim" / "translations" / "spotchecks.jsonl").read_text(encoding="utf-8")
-    assert len(stored.splitlines()) == 2
-    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 0      # as the line says: no rebuild
-    assert capsys.readouterr().out.splitlines()[-1] == "0 verdicts applied, 2 unchanged; rebuilt nothing"
+    stored = dirs.data / "interim" / "translations" / "spotchecks.jsonl"
+    assert len(stored.read_text(encoding="utf-8").splitlines()) == 2
+    caplog.clear()
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 1      # the cause is still there
+    assert "the resumed rebuild of the files that must hold the verdicts stored in" in caplog.text
+    assert capsys.readouterr().out == "" and len(stored.read_text(encoding="utf-8").splitlines()) == 2
+    assert main(["data", "apply-spotchecks", "--file", str(sheet), "--dry-run"]) == 0
+    assert capsys.readouterr().out.splitlines()[-2:] == [
+        "would also rebuild harmful_hi (resumed): its report did not hold the verdicts stored on it yet (a "
+        "rebuild cut short)", "dry run: 2 verdicts checked (0 new, 2 unchanged), nothing written"]
     monkeypatch.setattr(build, "_build_file", real)
-    assert main(["data", "build", "--only", "harmful", "--langs", "hi", "--cache-only"]) == 0
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 0      # fixed: the retry finishes it
+    out = capsys.readouterr().out.splitlines()
+    assert out[-2] == ("resumed the rebuild of harmful_hi: its report did not hold the verdicts stored on it "
+                       "yet (a rebuild cut short)")
+    assert out[-1] == "0 verdicts applied, 2 unchanged; rebuilt harmful_hi"
     assert {r.pid for r in build.load_prompts("harmful", "hi") if r.translation.checked} == {
         r.pid for r in records[:2]}
 
@@ -398,10 +410,14 @@ def test_apply_exits_1_and_names_the_rebuild_when_it_stops_after_the_verdicts_ar
         build.apply_spotchecks(sheet, ctx=build.BuildContext.default())
     logged = " ".join(caplog.text.split())
     assert "1 new verdicts are stored" in logged and rebuild in logged
+    monkeypatch.setattr(build, "_build_file", real)               # the named line rebuilds the file too
+    assert main(["data", "build", "--only", "harmful", "--langs", "hi", "--cache-only"]) == 0
+    assert {r.pid for r in build.load_prompts("harmful", "hi") if r.translation.checked} == {
+        r.pid for r in records[:3]}
     with pytest.raises(SystemExit):
         main(["data", "apply-spotchecks", "--help"])
     shown = " ".join(capsys.readouterr().out.split())
-    assert "or the rebuild stops (the verdicts are stored:" in shown
+    assert "or the rebuild stops (the verdicts are stored: once the cause is fixed, applying the" in shown
 
 
 def test_apply_exits_1_when_glotlid_cannot_load_and_stores_nothing(dirs, monkeypatch, capsys, caplog):
