@@ -233,6 +233,8 @@ six languages, so pairing, splitting and clustering all go by pid.
 - **P02 (harness).** models.load/generate/variants (stock, adapter), train.merge, prompts,
   judge.qwen3guard, judge.frontier (safety), judge.pipeline, audit.record_safety, sync, gate0, and
   `lift smoke|generate|judge|run-dev|restart|sync|remote`, with colab/job.py and kaggle/runner.ipynb.
+  - Gate 0 passed on Nov 4 (bf16, Colab A100) and the three revisions are pinned in
+    configs/project.yaml (decisions item 49).
 - **P03 (training and gain).** Implemented and tested offline:
   - `lift train` (train.lora: TRL SFTTrainer + PEFT LoRA on pre-tokenized rows, loss on
     `models.load.encode_chat_turn`'s answer tokens only, rows with no supervised token refused
