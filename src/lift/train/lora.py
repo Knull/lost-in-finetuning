@@ -77,7 +77,9 @@ After training
   push is logged and recorded and never fails the run: the runners' own pushes send the folder again
   (sync compares content).
 - Parity: the training model is freed, then lift.train.merge.parity_check compares the merged and the
-  unmerged adapter's greedy outputs on 20 dev prompts (Gate 0's sample) on the base it was trained on.
+  unmerged adapter's greedy outputs, on the base it was trained on, on Gate 0's parity prompts
+  (``gate0_parity_sample``: the 20 dev prompts mixed over sets and languages that lift.gate0 draws for
+  its random-LoRA parity, ``mixed_sample(gate0.N_PARITY, split="dev", seed=gate0.SEED + 3)``).
   In fp32 they must match token for token, or the adapter is not registered and the run fails: it is
   saved and pushed, but nothing may evaluate it until the cause is understood (CLAUDE.md rule 9).
   ``--parity-dtype fp16`` (a T4, where the fp32 base may not fit) records the share that match and
@@ -142,7 +144,7 @@ RECIPE_TAGS = {"standard": "std", "stress": "stress"}      # adapter names say s
 PARITY_DTYPES = ("fp32", "fp16")
 MIN_SEQ_LEN = 512
 DATA_SEED_FACTOR = 1000
-PARITY_PROMPTS = 20               # Gate 0's merge-parity sample (decisions.md 27)
+GATE0_PARITY_SEED_OFFSET = 3      # lift.gate0.run_gate0 draws its parity prompts with seed SEED + 3
 HEARTBEAT_SECONDS = 60.0
 IGNORE_INDEX = -100
 LIFT_TRAIN = "lift_train.json"
@@ -962,18 +964,36 @@ def _push(name: str) -> dict[str, Any]:
             "conflicts": list(report.conflicts)}
 
 
+def gate0_parity_seed() -> int:
+    """The seed of Gate 0's merge-parity sample: lift.gate0.run_gate0 draws it with SEED + 3."""
+    from lift import gate0
+
+    return gate0.SEED + GATE0_PARITY_SEED_OFFSET
+
+
+def gate0_parity_sample() -> list[Any]:
+    """Gate 0's merge-parity prompts, drawn as lift.gate0.run_gate0 draws them for its random-LoRA
+    parity (``mixed_sample(N_PARITY, split="dev", seed=SEED + 3)``: 20 dev prompts mixed over the safety
+    sets and languages), so an adapter's parity runs on the very prompts Gate 0's did."""
+    from lift import gate0
+    from lift.prompts import mixed_sample
+
+    return mixed_sample(gate0.N_PARITY, split="dev", seed=gate0_parity_seed())
+
+
 def _parity_texts(given: Sequence[str] | None) -> tuple[list[str], dict[str, Any]]:
-    """The parity prompts (Gate 0's: 20 dev prompts mixed over sets and languages, seed 0, unless
-    given) and how to find them again (pids, or the given texts' hashes; never the texts)."""
+    """The parity prompts (``gate0_parity_sample``, unless given) and how to find them again (pids, or
+    the given texts' hashes; never the texts)."""
     if given is not None:
         texts = [str(t) for t in given]
         if not texts:
             raise TrainRefused("parity_prompts is empty")
         return texts, {"source": "given", "n": len(texts), "sha256": [sha256_text(t) for t in texts]}
-    from lift.prompts import mixed_sample
+    from lift import gate0
 
-    records = mixed_sample(PARITY_PROMPTS, split="dev", seed=0)
-    source = f"lift.prompts.mixed_sample({PARITY_PROMPTS}, split='dev', seed=0)"
+    records = gate0_parity_sample()
+    source = (f"Gate 0's merge-parity sample: lift.prompts.mixed_sample({gate0.N_PARITY}, split='dev', "
+              f"seed={gate0_parity_seed()})")
     return [r.text for r in records], {"source": source, "n": len(records),
                                        "pids": [f"{r.set}_{r.lang}:{r.pid}" for r in records]}
 
@@ -1372,10 +1392,10 @@ def train_lora(candidate: str, recipe: str, seed: int, *, out_dir: Path | None =
 
     ``out_dir`` puts the adapter elsewhere: such an adapter is never pushed (``push`` must be False) or
     registered, since the push and the registry describe outputs/adapters/{name}. ``parity_prompts``
-    default to Gate 0's 20 dev prompts. ``registry`` (tests: a file in tmp) defaults to
-    configs/variants.yaml. Raises TrainRefused (a refused request, before any GPU time, or a Trainer off
-    the recipe's batch, before its first step), ParityFailed (fp32 merge parity failed: saved and pushed,
-    not registered) or RegistryConflict (another entry under the name)."""
+    default to Gate 0's 20 dev prompts (``gate0_parity_sample``). ``registry`` (tests: a file in tmp)
+    defaults to configs/variants.yaml. Raises TrainRefused (a refused request, before any GPU time, or a
+    Trainer off the recipe's batch, before its first step), ParityFailed (fp32 merge parity failed: saved
+    and pushed, not registered) or RegistryConflict (another entry under the name)."""
     from lift.models.variants import adapter_path
     from lift.train.merge import ADAPTER_WEIGHTS
 
