@@ -55,14 +55,18 @@ Each labelled item's output is looked up in its generations file. The harness re
 file when one of its prompts is fixed, and the other prompts come back under the same keys but
 maybe with other text. So an item whose text changed under its key, or whose key is gone and lacks a
 judgement, is left out as ``superseded`` and counted. A missing or half-regenerated file proves
-nothing: the item stays. A judgement counts only if its ``output_sha`` (the sha256 of the output it
-judged, which P02 records) is that of the output now under the item's key, or of the output the
-reader was shown when the generations file cannot be read (``output_sha`` in the round's keys); any
-other judgement is skipped and counted (``checks.stale_judgements``), and the item waits for its
-judge. A round drawn in another precision than ``generation.dtype`` (a T4 run) is scored, and
-decided on, only while Gate 0's licence covers each of its cells (lift.validation.outputs.
-check_licence: its generations and the judgements scored, also for a file not readable here):
-otherwise it is refused before anything is written.
+nothing: the item stays. So does a prompt file that is missing here (counted,
+``checks.prompt_file_missing``), but one that is here and refused (lift.validation.outputs.
+PromptFileError: split stamps the committed split does not give, a stale or foreign copy; a missing
+split file; records that do not parse) stops the score, as it stops the draw. A judgement counts
+only if its ``output_sha`` (the sha256 of the output it judged, which P02 records) is that of the
+output now under the item's key, or of the output the reader was shown when the generations file
+cannot be read (``output_sha`` in the round's keys); any other judgement is skipped and counted
+(``checks.stale_judgements``), and the item waits for its judge. A round drawn in another
+precision than ``generation.dtype`` (a T4 run) is scored, and decided on, only while Gate 0's
+licence covers each of its cells (lift.validation.outputs.check_licence: its generations and the
+judgements scored, also for a file not readable here): otherwise it is refused before anything is
+written.
 
 ``decide_primary_judge()`` applies ``judges.decision_rule`` to round 1, pooled over the four
 languages: the frontier judge becomes primary only if it agrees with the readers at least 5 points
@@ -99,6 +103,7 @@ from lift.stats.paired import mcnemar_exact, paired_bootstrap
 from lift.validation.labels import labels_path, read_labels, read_labels_meta
 from lift.validation.outputs import (
     LicenceError,
+    PromptFileError,
     Prompts,
     Target,
     check_licence,
@@ -346,6 +351,8 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
                                  dtype=draw.get("dtype"))
             except LicenceError as e:
                 raise _unlicensed(it["round"], e) from None
+            except PromptFileError:
+                raise                      # here but refused (a stale or foreign copy): never "unknown"
             except ValidateError:
                 pool = None
             cells[cell] = None if pool is None else ({r.pid: r for r in pool.records}, set(pool.missing))
@@ -421,11 +428,10 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
             if reason := _failure_reason(f):
                 checks["judge_failures"]["frontier"] += 1
                 checks["failure_reasons"]["frontier"][reason] += 1
-        try:
-            current = prompts.get(it["set"], it["lang"]).get(it["pid"])
-        except ValidateError:
-            checks["prompt_file_missing"] += 1
+        if not prompts.exists(it["set"], it["lang"]):
+            checks["prompt_file_missing"] += 1         # missing here proves nothing; refused stops the score
         else:
+            current = prompts.get(it["set"], it["lang"]).get(it["pid"])
             checks["prompt_changed_since_draw"] += (
                 current is None or sha256_text(current.text) != it.get("prompt_sha", ""))
         rows.append((it, label, views))

@@ -19,7 +19,7 @@ build with a traceback (a split file that no longer matches the sources, a PolyR
 commit, an NLLB failure).
 ``lift data apply-spotchecks``: 0 when applied (or nothing new), 1 when the sheet or the
 translation cache is refused (SheetError), a file is missing, a prompt file is refused (load_prompts'
-ValueError: a missing committed split file, a split stamp the committed split does not give) or a
+SplitStampError: a missing committed split file, a split stamp the committed split does not give) or a
 package (GlotLID's fasttext) is, all before a verdict is stored, or the rebuild stops on a ValueError
 after the verdicts are stored (each logged in one line, no traceback; that line says the verdicts are
 stored and names the ``lift data build --only <sets> --langs <lang> --cache-only`` line that rebuilds

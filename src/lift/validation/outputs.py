@@ -4,7 +4,9 @@ Codes against lift.schemas and the CLAUDE.md file layout, not against the harnes
 
 - Prompt files are read through lift.data.build.load_prompts, the reader of every stage, so a pid's
   split is the committed split file's (data/splits): a file stamped from another assignment, or a
-  missing split file, is refused (``Prompts``). A cell short of its frozen split is still read.
+  missing split file, is refused (``Prompts``: ``PromptFileError``, as is a file that does not parse,
+  which the scores never take for a prompt file that is missing here). A cell short of its frozen
+  split is still read.
 - A generation is *current* when its ``prompt_sha`` equals ``sha256_text`` of the prompt text now
   in data/prompts. A translation fixed after a run (the native spot checks) leaves a stale record
   behind until the harness regenerates the file, which it does for the whole file: the other
@@ -144,13 +146,21 @@ def fields_of(err: pydantic.ValidationError) -> str:
     return ", ".join(".".join(str(x) for x in e["loc"]) or "?" for e in err.errors())
 
 
+class PromptFileError(ValidateError):
+    """A prompt file that is here but refused (``Prompts``): a record whose split stamp is not the one the
+    committed split gives its pid, or a missing committed split file (lift.data.build.SplitStampError: a
+    stale or foreign copy), or a file that does not parse. Callers that go on without a prompt file that is
+    missing here (the scores) never take this for one: it stops them."""
+
+
 class Prompts:
     """PromptRecords by (set, lang) and pid, read on first use through lift.data.build.load_prompts, the
     reader of every stage: a record whose split stamp is not the one the committed split file
-    (data/splits) gives its pid, or a missing split file, is a ValidateError naming the remedy, so
-    dev/final membership here is the committed split's. A cell short of its frozen split (a translation
-    failure awaiting a reader's verdict, which every run refuses) is still read (``allow_short``): a sheet
-    may show its prompts meanwhile."""
+    (data/splits) gives its pid, or a missing split file, is a PromptFileError naming the remedy, so
+    dev/final membership here is the committed split's; so is a file that does not parse. A prompt file
+    that is missing is a plain ValidateError. A cell short of its frozen split (a translation failure
+    awaiting a reader's verdict, which every run refuses) is still read (``allow_short``): a sheet may
+    show its prompts meanwhile."""
 
     def __init__(self) -> None:
         self._cache: dict[tuple[str, str], dict[str, PromptRecord]] = {}
@@ -174,13 +184,13 @@ class Prompts:
             try:
                 found = build.load_prompts(set_name, lang, allow_short=True)
             except pydantic.ValidationError as e:     # its own message would quote the prompt text
-                raise ValidateError(f"{path}: a record is not a PromptRecord ({fields_of(e)})") from None
-            except (OSError, ValueError) as e:        # stamps, the split file, an unreadable line
-                raise ValidateError(str(e)) from None
+                raise PromptFileError(f"{path}: a record is not a PromptRecord ({fields_of(e)})") from None
+            except (OSError, ValueError) as e:        # stamps, the split file (SplitStampError), a bad line
+                raise PromptFileError(str(e)) from None
             records: dict[str, PromptRecord] = {}
             for rec in found:
                 if rec.pid in records:
-                    raise ValidateError(f"{path}: pid {rec.pid} appears twice")
+                    raise PromptFileError(f"{path}: pid {rec.pid} appears twice")
                 records[rec.pid] = rec
             self._cache[key] = records
         return self._cache[key]
