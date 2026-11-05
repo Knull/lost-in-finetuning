@@ -623,6 +623,80 @@ def test_one_gpu_without_room_for_the_judge_decides_nothing(prompt_store, tiny_m
     assert kept.exists()                              # a check that did not run discards nothing
 
 
+class OneGPU:
+    """torch.cuda's calls on one card (an L4 by default), with memory answered as the driver and PyTorch's
+    caching allocator answer it: mem_get_info counts the blocks the allocator keeps for freed tensors as
+    used, until empty_cache hands them back. Each decoded batch leaves CACHED_GB there: an ESTIMATE of what
+    throughput's batch-32 run leaves with Tiny Aya (about 120 MB per sequence), not a measurement."""
+
+    GB = 1e9
+    USED_GB = 6.7 + 0.5           # Global's bf16 weights and the CUDA context
+    CACHED_GB = 3.84
+
+    def __init__(self, total_gb: float = 23.65):         # an L4: torch reports 22.03 GiB
+        self.total, self.cached, self.peak_cached = total_gb * self.GB, 0.0, 0.0
+
+    def decode(self) -> None:
+        self.cached = max(self.cached, self.CACHED_GB * self.GB)
+        self.peak_cached = max(self.peak_cached, self.cached)
+
+    def free(self) -> int:
+        return int(self.total - self.USED_GB * self.GB - self.cached)
+
+    def install(self, monkeypatch, name: str = "NVIDIA L4", capability: tuple = (8, 9)) -> "OneGPU":
+        calls = {"is_available": lambda: True, "device_count": lambda: 1,
+                 "get_device_capability": lambda device=None: capability,
+                 "get_device_name": lambda device=None: name, "synchronize": lambda device=None: None,
+                 "reset_peak_memory_stats": lambda device=None: None,
+                 "max_memory_allocated": lambda device=None: int(self.USED_GB * self.GB + self.peak_cached),
+                 "mem_get_info": lambda device=None: (self.free(), int(self.total)),
+                 "empty_cache": lambda: setattr(self, "cached", 0.0)}
+        for attr, value in calls.items():
+            monkeypatch.setattr(torch.cuda, attr, value)
+        return self
+
+
+def test_one_gpu_measures_the_judge_room_with_the_throughput_cache_released(
+        prompt_store, stock, tiny_model_dir, fp32_configured, cpu_sized, monkeypatch):
+    """R1-47: `lift remote --gpu L4 --job "lift sync pull; lift smoke"`: one GPU, so the judge loads on
+    cuda:0 beside the generator, where it fits (16.45 GB free, 13 GB needed). The throughput check runs
+    first, and the blocks its batches leave in PyTorch's cache read as used to mem_get_info (12.6 GB), so
+    precision and dry_run were NOT RUN and the reference Gate 0 on an L4 INCOMPLETE. The judge's own
+    allocations would reuse those blocks, so the cache is released before the judge's room is measured.
+    Global is the tiny model: lift sees it on cuda:0 while it computes on the CPU."""
+    import dataclasses
+
+    from lift.models import generate
+
+    card = OneGPU().install(monkeypatch)
+    assert gate0._judge_memory_problem("cuda:0", "cuda:0") is None           # nothing cached: the judge fits
+    real_batch, real_scan = generate.greedy_batch, gate0.activation_scan
+
+    def greedy_batch(model, rows, **kw):
+        out = real_batch(model, rows, **{**kw, "device": "cpu"})
+        card.decode()
+        return out
+
+    monkeypatch.setattr("lift.models.variants.build_variant",
+                        lambda spec, *, device, dtype, **kw: dataclasses.replace(stock, device=device))
+    monkeypatch.setattr(generate, "greedy_batch", greedy_batch)
+    monkeypatch.setattr(gate0, "activation_scan",
+                        lambda model, tok, pairs, *, device: real_scan(model, tok, pairs, device="cpu"))
+    monkeypatch.setattr("lift.judge.pipeline.make_judge", lambda role, **kw: FakeJudge())
+    result = gate0.run_gate0(model_id=str(tiny_model_dir), judge_device="cuda:0", skip=["preamble", "parity"],
+                             **{**GATE, "device": "cuda:0"})
+    checks = result["checks"]
+    assert result["gpu"] == "NVIDIA L4" and checks["throughput"]["pass"], checks
+    assert card.peak_cached == OneGPU.CACHED_GB * OneGPU.GB             # its batches left their blocks cached
+    for name in ("precision", "dry_run"):
+        c = checks[name]
+        assert not c.get("not_run"), f"{name} is NOT RUN on one L4 the judge fits on: {c.get('reason')}"
+        assert c["pass"], (name, c.get("error"), c.get("problems"))
+    assert result["judge"]["id"] == FakeJudge.judge_id and result["failed"] == []
+    OneGPU(16.0).install(monkeypatch)                                    # a 16 GB card is still refused
+    assert gate0._judge_memory_problem("cuda:0", "cuda:0").startswith("only 8.8 GB free on cuda:0")
+
+
 # --- the reference Gate 0 never runs on a T4 (V1, V8, V9; contract F) -------------------------------------
 
 
