@@ -32,7 +32,7 @@ from lift import config, manifest, prompts, splits
 from lift.data import build, polyrefuse, sft, sources, translate
 from lift.data.build import SheetError
 from lift.data.text import char_ngrams, clean_text, dup_key, jaccard
-from lift.io import read_jsonl, sha256_file, sha256_text, write_jsonl
+from lift.io import read_jsonl, sha256_file, sha256_text, stable_json, write_jsonl
 from lift.schemas import PromptRecord
 
 FIX = runpy.run_path(str(POLYREFUSE_FIXTURE.parent / "make_fixture.py"))    # the texts the tree holds
@@ -1137,12 +1137,44 @@ def test_a_half_written_verdict_line_is_ignored_then_closed_off(dirs, caplog):
                     newline="\n")
     caplog.set_level(logging.WARNING)
     assert list(build._read_verdicts()) == [("hi", "orb-0004")] and "spotchecks.jsonl:2" in caplog.text
-    build._append_verdicts([{**row, "pid": "orb-0006"}])                # the cut line is closed off first
+    build._append_verdicts([{**row, "pid": "orb-0006"}])     # the cut line, which does not parse, is dropped
     assert list(build._read_verdicts()) == [("hi", "orb-0004"), ("hi", "orb-0006")]
-    assert len(path.read_text(encoding="utf-8").splitlines()) == 3
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
     path.write_text(json.dumps({**row, "verdict": "maybe"}) + "\n", encoding="utf-8", newline="\n")
     with pytest.raises(ValueError, match="spotchecks.jsonl:1: not a verdict row"):
         build._read_verdicts()
+
+
+def test_a_verdict_line_cut_inside_a_character_is_skipped_then_dropped(dirs, caplog):
+    """R2-27: a kill inside _append_verdicts can cut a row inside a multi-byte character of a reader's
+    corrected text. _read_verdicts decoded the whole file first, so every lift data build and apply-spotchecks
+    stopped on a UnicodeDecodeError instead of skipping the line with a warning; and _append_verdicts closed
+    the cut tail off with a bare newline, keeping the undecodable bytes in the (synced) file for good."""
+    path = dirs.data / "interim" / "translations" / "spotchecks.jsonl"
+    path.parent.mkdir(parents=True)
+    row = {"lang": "hi", "pid": "orb-0004", "set": "hard_benign", "verdict": "ok", "corrected": None,
+           "note": None, "source_sha": "0" * 64, "seen_sha": "1" * 64, "sheet": "s.csv",
+           "applied": "2026-11-03"}
+    fixed = {**row, "pid": "orb-0005", "verdict": "fixed", "corrected": "नकली सुधारा हुआ अनुरोध"}
+    line = (stable_json(fixed) + "\n").encode("utf-8")
+    at = line.index(fixed["corrected"].encode("utf-8")) + len(fixed["corrected"][0].encode("utf-8")) + 1
+    with pytest.raises(UnicodeDecodeError):                # the cut really ends inside a UTF-8 sequence
+        line[:at].decode("utf-8")
+    path.write_bytes((stable_json(row) + "\n").encode("utf-8") + line[:at])
+
+    def read_verdicts():                                   # the error by its message (its repr holds bytes)
+        try:
+            return build._read_verdicts()
+        except UnicodeDecodeError as e:
+            problem = str(e)
+        pytest.fail(f"_read_verdicts raised UnicodeDecodeError ({problem}) on a verdict line cut inside a "
+                    "multi-byte character, instead of skipping it with a warning")
+
+    caplog.set_level(logging.WARNING)
+    assert read_verdicts() == {("hi", "orb-0004"): row} and "spotchecks.jsonl:2" in caplog.text
+    build._append_verdicts([fixed])                        # applying the sheet again stores the verdict anew
+    assert read_verdicts() == {("hi", "orb-0004"): row, ("hi", "orb-0005"): fixed}
+    assert path.read_bytes().decode("utf-8").splitlines() == [stable_json(row), stable_json(fixed)]
 
 
 def test_apply_spotchecks_rejects_a_bad_sheet_before_writing_anything(dirs, spot):
