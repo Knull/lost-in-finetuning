@@ -54,7 +54,8 @@ def quick_manifests(monkeypatch):
 
 # The adapter variants the tests' cells name, as P03 registers them in configs/variants.yaml: with the
 # adapter's hash pinned (lift register-adapter writes artifacts.adapter), as a cell of an adapter variant is
-# read only then.
+# read only then. Both name one adapter, so both pin one hash (W3-03: a cell of a variant that names an
+# adapter is refused while another entry of method adapter naming it pins another hash).
 ADAPTER_HASH = "a" * 64
 TEST_VARIANTS = [{"name": name, "method": "adapter", "adapter": "adapter-aya-std-s1", "seed": 1,
                   "artifacts": {"adapter": ADAPTER_HASH}} for name in ("adapter", "adapter-aya-std-s1")]
@@ -1235,8 +1236,8 @@ def test_a_cell_of_an_adapter_variant_is_read_only_under_a_pinned_adapter_hash(f
     only when the entry pins one, so cells of two different weights registered under one name without a pin
     both read, and a repair arm and its adapter arm made from different weights pair. A cell of a variant
     whose spec names an adapter (the adapter method, every P05 repair) is reported only under a pinned hash
-    (lift register-adapter writes it), refused otherwise naming the registry; the per-cell hash check then
-    holds every arm to the pin."""
+    (lift register-adapter writes an adapter's own entry's; a repair's entry pins its adapter's), refused
+    otherwise naming the registry; the per-cell hash check then holds every arm to the pin."""
     fake_prompt_files[("harmful", "en")] = [make_prompt(p) for p in PAIR_PIDS]
     if repair is not None:
         registry["variants"].append({**repair, "artifacts": {"adapter": ADAPTER_HASH}})
@@ -1251,7 +1252,45 @@ def test_a_cell_of_an_adapter_variant_is_read_only_under_a_pinned_adapter_hash(f
     with pytest.raises(ValueError, match=f"{name}'s entry in configs/variants.yaml names adapter "
                                          "adapter-aya-std-s1 but pins no artifacts.adapter") as refused:
         pipeline.load_labels(*cell)
-    assert "lift register-adapter" in str(refused.value) and "lift restart" not in str(refused.value)
+    message = str(refused.value)
+    assert "lift restart" not in message
+    if repair is None:                     # an adapter's own entry: lift register-adapter writes its pin
+        assert "`lift register-adapter` writes it" in message
+    else:                                  # W3-03: a repair's entry pins its adapter's hash, not that command
+        assert "lift register-adapter" not in message and "adapter-aya-std-s1's own entry" in message
+
+
+def test_a_repair_cell_is_read_only_while_its_pin_is_its_adapters_current_one(fake_prompt_files, registry):
+    """W3-03 (W2-03 follow-up): each arm was held to its own entry's pin, but nothing held a repair entry's
+    pin to the one its adapter's own entry (method adapter, the same adapter) pins, and PAIR_MUST_MATCH has
+    no adapter field. An adapter trained and registered again changes only its own entry, so the repair's
+    cells, made from the old weights, still read and paired with the adapter arm made from the new ones.
+    Such a cell is refused now, naming both entries and the remedy, with no restart line yet: the repair is
+    registered again with the adapter's pin first, and its cells, stale then, are made again."""
+    adapter = "adapter-aya-std-s1"
+    repair = {"name": f"wiseft-l0.50-{adapter}", "method": "wiseft", "adapter": adapter,
+              "params": {"lam": 0.5}, "artifacts": {"adapter": ADAPTER_HASH}}
+    # The registry as P03 writes it, one entry per adapter (named after it), and the repair's
+    registry["variants"] = [*(e for e in registry["variants"] if e["name"] != "adapter"), repair]
+    arms = (repair["name"], adapter)
+    for name in arms:
+        pair_cell(fake_prompt_files, name)
+    assert pipeline.paired_labels(*arms, *CELL[1:]) == ({p: "benign" for p in PAIR_PIDS},) * 2
+    own = next(e for e in registry["variants"] if e["name"] == adapter)
+    own["artifacts"] = {"adapter": "c" * 64}        # trained again, registered again (--replace)
+    pair_cell(fake_prompt_files, adapter)           # and its cells made again from the new weights
+    assert set(pipeline.load_labels(adapter, *CELL[1:])) == set(PAIR_PIDS)
+    stale_pin = (f"{repair['name']}'s entry in configs/variants.yaml pins adapter hash {'a' * 12}, but "
+                 f"{adapter}'s entry .*pins {'c' * 12}")
+    with pytest.raises(ValueError, match=stale_pin) as refused:
+        pipeline.paired_labels(*arms, *CELL[1:])
+    message = str(refused.value)
+    assert f"Re-register {repair['name']} with {adapter}'s current pin" in message
+    assert "then make its cells again" in message and "lift restart --variant" not in message    # no line yet
+    repair["artifacts"] = {"adapter": "c" * 64}     # registered again with the adapter's pin
+    stale_read((repair["name"], *CELL[1:]), "generations were made under another intervention")
+    pair_cell(fake_prompt_files, repair["name"])    # and its cells made again
+    assert pipeline.paired_labels(*arms, *CELL[1:]) == ({p: "benign" for p in PAIR_PIDS},) * 2
 
 
 @pytest.mark.torch
