@@ -27,6 +27,8 @@ their files from them, since applying the sheet again finds them stored and rebu
 the rebuild lost records (listed; the verdicts are stored, and the files' reports say why).
 ``spotcheck-sheets``: 1 when a sheet exists (no --overwrite), a file is missing, a prompt file is
 refused (as above) or the translation cache lacks a failure's engine output.
+``lift data stats``: 0; it prints each reason the SFT exports must not be trained on as a "stale:" line
+(lift.data.sft.export_problems, under the project and train configs).
 """
 
 from __future__ import annotations
@@ -115,7 +117,8 @@ def _stats(args: argparse.Namespace) -> int:
     _setup()
     from lift.data.build import BuildContext, format_stats, stats
 
-    st = stats(cfg=BuildContext.default().cfg)
+    ctx = BuildContext.default()
+    st = stats(cfg=ctx.cfg, train_cfg=ctx.train_cfg)
     print(json.dumps(st, indent=1, ensure_ascii=False, sort_keys=True) if args.json else format_stats(st))
     return 0
 
@@ -206,7 +209,8 @@ def register(sub: argparse._SubParsersAction) -> None:
                         "transformers)")
     b.set_defaults(func=_build)
 
-    s = data.add_parser("stats", help="counts per set, language and split; failures and exclusions")
+    s = data.add_parser("stats", help="counts per set, language and split; failures and exclusions; "
+                                      "SFT exports a trainer refuses (stale)")
     s.add_argument("--json", action="store_true", help="print the counts as JSON")
     s.set_defaults(func=_stats)
 
