@@ -87,13 +87,15 @@ def test_round_keys_are_the_item_id_map_that_p02_reads(tmp_path, monkeypatch):
     assert keys == {it["key"] for it in load_round(1)["items"]}
 
 
-def spotcheck(path, rows):
+P01_HEADER = ["item_id", "set", "english", "translation", "verdict", "corrected", "note"]
+
+
+def spotcheck(path, rows, *, header=P01_HEADER, above=()):
     import csv
 
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, lineterminator="\n")
-        writer.writerow(["item_id", "set", "english", "translation", "verdict", "corrected", "note"])
-        writer.writerows(rows)
+        writer.writerows([*above, header, *rows])
 
 
 def test_prompts_on_spot_check_sheets_are_kept_off_their_readers_sheets(tmp_path, monkeypatch):
@@ -297,6 +299,36 @@ def test_p01s_own_spot_check_sheets_keep_their_prompts_off_the_sheets(tmp_path, 
     doc = load_round(1)
     seen = {it["pid"] for it in doc["items"] if it["lang"] in ("hi", "en")}
     assert not seen & set(hi) and not doc["warnings"]
+
+
+@pytest.mark.parametrize("how", ["translation header renamed", "line typed above the header",
+                                 "workbook saved as csv"])
+def test_a_spot_check_sheet_handed_back_unreadable_never_lets_its_prompts_through(tmp_path, monkeypatch, how):
+    # R1-45: P01's spot-check sheet, not applied yet, as its reader may hand it back. A renamed translation
+    # header is still read (the ids say which prompts it shows); a sheet that cannot be read at all stops
+    # the draw, naming the file, since its prompts could not be kept off its reader's sheets.
+    world_for(tmp_path, monkeypatch)
+    prompts = Prompts()
+    hi = sorted(p for p, r in prompts.get("harmful", "hi").items() if r.split == "dev")[:5]
+    sheets_dir().mkdir(parents=True, exist_ok=True)
+    path = sheets_dir() / "spotcheck_hi.csv"
+    rows = [[f"hi-{p}", "harmful", "x", prompts.get("harmful", "hi")[p].text, "ok", "", ""] for p in hi]
+    if how == "translation header renamed":
+        spotcheck(path, rows, header=["hindi translation" if c == "translation" else c for c in P01_HEADER])
+        make_sheets(1)
+        doc = load_round(1)
+        assert not {it["pid"] for it in doc["items"] if it["lang"] in ("hi", "en")} & set(hi)
+        assert doc["excluded_seen_pids"]["hi"] == doc["excluded_seen_pids"]["en"] == len(hi)
+        return
+    if how == "line typed above the header":
+        spotcheck(path, rows, above=[["checked by the hindi reader"]])
+    else:
+        path.write_bytes(b"PK\x03\x04" + bytes(64))              # how every .xlsx (a zip file) starts
+    with pytest.raises(ValidateError, match=r"spotcheck_hi\.csv") as refused:
+        make_sheets(1)
+    assert "apply-spotchecks" in str(refused.value)               # the remedy: fix it, or apply and move it
+    assert not round_keys_path(1).exists() and not draw_path(1).exists()
+    assert any("spotcheck_hi.csv" in p for p in check_round(1)["problems"])
 
 
 def test_an_output_that_changed_under_its_key_is_superseded_even_with_judgements(tmp_path, monkeypatch):
