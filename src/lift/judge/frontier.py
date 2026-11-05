@@ -55,7 +55,7 @@ Rules, and why:
   run would (parse, the one reminder turn, sent synchronously, refusals, failures, the probe rule). Batch
   and sync runs therefore give identical judgements, and bulk is in neither the judge id nor any cache
   key. safety() and pairwise() never send a batch themselves: `lift judge` calls them per 64-item chunk,
-  which would mean one batch, and up to a day's wait, per chunk. Prefill does nothing when bulk is not
+  which would mean one batch, and up to a day's wait, per chunk. Prefill submits nothing when bulk is not
   batch, when the provider has no batch API (OpenAI, a plain FakeProvider), or when fewer than
   ``batch_min_items`` (20) first turns are uncached.
   - Before any batch is looked at or submitted: the synchronous preflight with the exact settings (a batch
@@ -80,6 +80,12 @@ Rules, and why:
     lists as submitted and not collected instead of submitting its requests again; a batch recorded with
     another judge id or API version is never collected. Polling logs a heartbeat every ``batch_poll_s``
     (30 s) and gives up after ``batch_wait_s`` (24 h) with FrontierBatchPending: the batch keeps running.
+  - No request is paid for twice. A synchronous run (bulk not batch, a provider without the batch API, or
+    safety() / pairwise() called without a pre-fill, as `lift utility --sync` does) submits nothing and
+    waits for nothing, but never sends an uncached first turn that such an earlier batch holds: the batch
+    is collected first if it has ended, and the run stops if it still runs (FrontierBatchPending: rerun
+    once it has ended, or cancel it in the Console and rerun) or if the provider cannot look at it
+    (FrontierConfigError).
   - A batch belongs to the workspace of the key that created it: every key of that workspace sees it, and a
     key of another workspace gets a 404. So a 404 abandons a batch an earlier process submitted only when
     its state row says it was created more than 29 days ago, when the API no longer keeps its results. For
@@ -288,13 +294,16 @@ class FrontierUnavailable(RuntimeError):
 
 
 class FrontierBatchPending(RuntimeError):
-    """A Message Batch of a pre-fill is still running: ``prefill_*(wait=False)`` looked once, or
-    ``batch_wait_s`` passed. Nothing is lost: the batch keeps running server-side and is recorded in the
-    batch state file, so a rerun of the same command collects it and submits none of its requests again. Do
-    not judge those items synchronously in this process: their requests are paid for in the batch.
+    """A Message Batch is still running: ``prefill_*(wait=False)`` looked once, ``batch_wait_s`` passed, or
+    a synchronous run (a pre-fill with bulk not batch, or safety() / pairwise() called without one) met an
+    earlier batch, still running, that holds requests it would send. Nothing is lost: the batch keeps running
+    server-side and is recorded in the batch state file, so a rerun of the same command collects it and
+    sends none of its requests again. Do not judge those items synchronously in this process: their
+    requests are paid for in the batch.
 
-    ``batch_ids`` names the batches still running, ``n_pending`` counts their requests, and ``summary``
-    is the pre-fill's summary so far (prefill_safety's return value)."""
+    ``batch_ids`` names the batches still running, ``n_pending`` counts their requests (in a synchronous
+    run, the ones it would have sent), and ``summary`` is the pre-fill's summary so far (prefill_safety's
+    return value)."""
 
     def __init__(self, message: str, *, batch_ids: Sequence[str], n_pending: int,
                  summary: Mapping[str, Any]) -> None:
@@ -1315,6 +1324,12 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _empty_summary(n_requests: int, n_cached: int) -> dict[str, Any]:
+    """A pre-fill's summary before anything is submitted or collected (prefill_safety's return value)."""
+    return {"mode": "sync", "reason": None, "n_requests": n_requests, "n_cached": n_cached, "n_submitted": 0,
+            "n_collected": 0, "n_errored": 0, "n_expired": 0, "n_canceled": 0, "batch_ids": [], "usd": 0.0}
+
+
 def _closed_batches(rows: Sequence[Mapping[str, Any]]) -> set[Any]:
     """The ids of the batches a state file records as collected or abandoned: never looked at again."""
     return {row.get("batch_id") for row in rows if row.get("event") in ("collected", "abandoned")}
@@ -1338,6 +1353,13 @@ def _past_results_window(created: str | None) -> bool:
 def _hand_abandoned() -> list[str]:
     """The batch ids LIFT_ABANDON_BATCHES names (commas or whitespace between them), each once, in order."""
     return list(dict.fromkeys(i for i in re.split(r"[\s,]+", os.environ.get(ABANDON_ENV, "")) if i))
+
+
+def _batch_list(ids: Sequence[str]) -> tuple[str, str]:
+    """How a message names ``ids`` ("batch X" or "2 batches (X, Y)"), and the object pronoun for them."""
+    if len(ids) == 1:
+        return f"batch {ids[0]}", "it"
+    return f"{len(ids)} batches ({', '.join(ids)})", "them"
 
 
 def _chunks(items: Sequence[tuple[str, str]], size: Callable[[str], int]) -> list[list[tuple[str, str]]]:
@@ -1556,6 +1578,7 @@ class FrontierJudge:
         self._key_locks: dict[str, list[Any]] = {}       # key -> [lock, number of holders and waiters]
         self._state_lock = threading.Lock()
         self._state_repaired = False
+        self._settle_lock = threading.Lock()                  # one synchronous pass settles earlier batches
         self._hand_noted: set[str] = set()                    # LIFT_ABANDON_BATCHES ids already reported
         self._batch_holds: dict[str, dict[str, float]] = {}   # batch id -> key -> USD this process reserved
         self._submitted_here: set[str] = set()                # batches this instance created
@@ -1624,8 +1647,11 @@ class FrontierJudge:
         SpendCapExceeded and FrontierUnavailable stop the run and carry the finished results in
         ``partial``. An item-level API error is recorded only when the whole call finishes, after the
         API answered a request sent after it came in (a probe, if no item's request did): a stopped
-        call leaves its item unjudged (None in ``partial``), so a rerun asks the API again. A pairwise
-        judge refuses (ValueError)."""
+        call leaves its item unjudged (None in ``partial``), so a rerun asks the API again. An uncached
+        pair that an earlier batch holds (recorded as submitted, neither collected nor abandoned) is never
+        sent: before anything is, that batch is collected if it has ended, else the call raises
+        FrontierBatchPending (FrontierConfigError for a provider without the batch API), as a synchronous
+        pre-fill does. A pairwise judge refuses (ValueError)."""
         self._require_kind("safety", "safety")
         return self._judge_all(self._safety_users(prompts, responses, prompt_langs))
 
@@ -1635,7 +1661,8 @@ class FrontierJudge:
         both orders to cancel position bias). A judge failure (a refusal, a reply unparseable after the
         reminder, an item-level API error) has winner None and the cause in ``error``; it is returned,
         never dropped. Everything else as safety(): identical pairs are judged once, the stops carry
-        ``partial``. A safety judge refuses (ValueError)."""
+        ``partial``, a request an earlier batch holds is never sent again. A safety judge refuses
+        (ValueError)."""
         self._require_kind("pairwise", "pairwise")
         return self._judge_all(self._pairwise_users(instructions, a, b))
 
@@ -1648,8 +1675,12 @@ class FrontierJudge:
         cached now), "n_errored", "n_expired", "n_canceled" (results left to the synchronous pass),
         "batch_ids" (batches submitted or collected now), "usd" (what this call spent: the preflight and
         the collected results, at their own prices)}. ``wait=False`` looks at each batch once and raises
-        FrontierBatchPending if one still runs; so does a wait past ``batch_wait_s``. A stop of the
-        synchronous path (FrontierConfigError, SpendCapExceeded, FrontierUnavailable) stops it too."""
+        FrontierBatchPending if one still runs; so does a wait past ``batch_wait_s``. In a synchronous run
+        (bulk not batch, no batch API) nothing is submitted or waited for, but an earlier batch that holds
+        one of these uncached requests is collected if it has ended, and stops the run if it has not
+        (FrontierBatchPending; FrontierConfigError when the provider cannot look at it): no request is paid
+        for twice. A stop of the synchronous path (FrontierConfigError, SpendCapExceeded,
+        FrontierUnavailable) stops it too."""
         self._require_kind("safety", "prefill_safety")
         return self._prefill(self._safety_users(prompts, responses, prompt_langs), wait=wait)
 
@@ -1682,11 +1713,17 @@ class FrontierJudge:
         return [self.render_pair(i, x, y) for i, x, y in zip(instructions, a, b, strict=True)]
 
     def _judge_all(self, users: Sequence[str]) -> list[dict]:
-        """Judge rendered user turns (safety() and pairwise() share this): dedupe, judge each distinct
-        turn on the thread pool, probe before recording item-level API errors, share the results with
-        the duplicates, and stop as safety() describes."""
+        """Judge rendered user turns (safety() and pairwise() share this): settle the earlier batches that
+        hold an uncached one (_settle_before_sync), dedupe, judge each distinct turn on the thread pool,
+        probe before recording item-level API errors, share the results with the duplicates, and stop as
+        safety() describes."""
         if not users:
             return []
+        try:
+            self._settle_before_sync(users)
+        except _STOPS as stop:
+            stop.partial = [None] * len(users)               # stopped before any item was judged
+            raise
         first: dict[str, int] = {}
         for i, user in enumerate(users):
             first.setdefault(user, i)
@@ -2108,17 +2145,20 @@ class FrontierJudge:
 
     # --------------------------------------------------------------------- bulk pre-fill internals --
     def _prefill(self, users: Sequence[str], *, wait: bool) -> dict:
-        """prefill_safety() and prefill_pairwise() on rendered first turns: the preflight and one look at
-        each earlier batch that holds an uncached one, then the rest submitted (at least batch_min_items of
-        them), the wait, and the collection."""
+        """prefill_safety() and prefill_pairwise() on rendered first turns. A synchronous run (bulk not batch,
+        no batch API) only settles the earlier batches that hold an uncached one (_settle_earlier). Otherwise:
+        the preflight and one look at each such earlier batch, then the rest submitted (at least
+        batch_min_items of them), the wait, and the collection."""
         keyed = {self._key(user, ()): user for user in dict.fromkeys(users)}
         pending = {key: user for key, user in keyed.items() if self._cache.get(key) is None}
-        out: dict[str, Any] = {"mode": "sync", "reason": None, "n_requests": len(keyed),
-                               "n_cached": len(keyed) - len(pending), "n_submitted": 0, "n_collected": 0,
-                               "n_errored": 0, "n_expired": 0, "n_canceled": 0, "batch_ids": [], "usd": 0.0}
+        out = _empty_summary(len(keyed), len(keyed) - len(pending))
         spent = self.stats["usd"]
         reason = self._sync_reason(len(keyed), len(pending))
+        if not pending:                       # nothing is sent at all, so nothing can be paid twice
+            return self._prefilled(out, spent, reason)
         if reason is not None:
+            earlier = self._earlier_batches(self._state_rows(), pending)
+            self._settle_earlier(earlier, keyed, pending, out, spent=spent, reason=reason)
             return self._prefilled(out, spent, reason)
         with self._lock:
             if self._halt is not None:
@@ -2136,6 +2176,71 @@ class FrontierJudge:
         batches = earlier + (self._submit_all(todo, rows, out) if todo else [])
         self._await_batches(batches, keyed, wait=wait, out=out, spent=spent, seen=seen)
         return self._prefilled(out, spent, None)
+
+    def _settle_before_sync(self, users: Sequence[str]) -> None:
+        """safety() and pairwise()'s own guard against paying twice, for a caller that skipped the pre-fill
+        (`lift utility --sync`) or ran it in a synchronous mode: before anything is sent, the earlier batches
+        that hold an uncached first turn of ``users`` are settled as a synchronous pre-fill settles them
+        (_settle_earlier). A judge that never submitted a batch (no state file), or one whose uncached turns
+        no open batch holds, reads the file at most and sends nothing. A halted judge is left to the pass,
+        which raises its stop as before."""
+        if not self.batch_state_path.exists():
+            return
+        with self._lock:
+            if self._halt is not None:
+                return
+        keyed = {self._key(user, ()): user for user in dict.fromkeys(users)}
+        pending = {key: user for key, user in keyed.items() if self._cache.get(key) is None}
+        if not pending:
+            return
+        with self._settle_lock:                  # two concurrent passes never collect one batch twice
+            earlier = self._earlier_batches(self._state_rows(), pending)
+            if earlier:
+                out = _empty_summary(len(keyed), len(keyed) - len(pending))
+                self._settle_earlier(earlier, keyed, pending, out, spent=self.stats["usd"],
+                                     reason=f"{self.rubric.kind}() without a pre-fill")
+
+    def _settle_earlier(self, batches: Sequence[_Batch], keyed: Mapping[str, str], pending: Mapping[str, str],
+                        out: dict[str, Any], *, spent: float, reason: str) -> None:
+        """A synchronous run's rule for the earlier batches that hold requests it would send (``pending``;
+        ``keyed`` is every distinct first turn): it submits nothing and waits for nothing, and pays for no
+        request twice. After the preflight, each batch is looked at once: one that has ended is collected
+        (its replies are paid for, and go into the cache for the pass to find), one still running stops the
+        run (FrontierBatchPending), and so does a provider without the Message Batches API, which cannot look
+        at them (FrontierConfigError, before anything is sent). A 404 is handled as everywhere
+        (_batch_call)."""
+        if not batches:
+            return
+        if not _batch_capable(self._provider):
+            ids = [batch.id for batch in batches]
+            n = sum(len(batch.keys & pending.keys()) for batch in batches)
+            named, it = _batch_list(ids)
+            raise self._fatal(
+                f"{n} of this run's requests sit in {named}, submitted earlier and recorded in "
+                f"{self.batch_state_path}, and are paid for there, but {type(self._provider).__name__} has "
+                f"no Message Batches API to collect {it} with, so this run stops rather than pay for them "
+                "twice: rerun with a judge that has one (the Anthropic provider), or set "
+                f"{ABANDON_ENV}={','.join(ids)} to give {it} up and send the requests again (paid twice if "
+                "they ran)")
+        live, seen = self._look_at(batches)
+        running: list[_Batch] = []
+        for batch in live:
+            if seen[batch.id][0] == "ended":
+                self._collect(batch, keyed, out)
+            else:
+                running.append(batch)
+        if running:
+            ids = [batch.id for batch in running]
+            n = sum(len(batch.keys & pending.keys()) for batch in running)
+            named, it = _batch_list(ids)
+            raise FrontierBatchPending(
+                f"{self.judge_id}: {n} of this run's requests sit in {named}, still running, recorded in "
+                f"{self.batch_state_path} and paid for there, so this synchronous run ({reason}) stops "
+                f"rather than pay for them twice. A rerun collects {it} once ended (a pre-fill with bulk "
+                f"batch also waits for {it}); or cancel {it} in the Console and rerun: the requests finished "
+                f"by then are collected, the rest sent synchronously. {ABANDON_ENV}={','.join(ids)} gives "
+                f"{it} up instead, and those requests are paid for again",
+                batch_ids=ids, n_pending=n, summary=self._summary(out, spent, reason))
 
     def _look_at(self, batches: Sequence[_Batch]) -> tuple[
             list[_Batch], dict[str, tuple[str, dict[str, int]]]]:

@@ -1,8 +1,9 @@
 """The frontier judge's bulk pre-fill through the Message Batches API: prefill_pairwise / prefill_safety
 put a whole run's first turns into the call cache, so the synchronous pass that follows makes no call for
 them and returns what a synchronous run returns. Covers the capability gate, the batch state file and
-resume, what a 404 for an earlier batch means and LIFT_ABANDON_BATCHES, the spend reservation, costing
-from usage, failures, and the real anthropic SDK path.
+resume, what a 404 for an earlier batch means and LIFT_ABANDON_BATCHES, synchronous runs that never pay twice
+for a request an earlier batch holds, the spend reservation, costing from usage, failures, and the real
+anthropic SDK path.
 
 Offline only: FakeBatchProvider, or a real anthropic client on an in-process transport. Placeholder
 texts only.
@@ -504,6 +505,70 @@ def test_a_batch_recorded_by_another_judge_is_never_collected():
     with pytest.raises(FrontierConfigError, match="submitted by 'anthropic/another-judge'"):
         judge.prefill_pairwise(*pairs(3))
     assert fake.batches == {} and fake.calls == []
+
+
+# ---------------------------------------------------------- a synchronous run never pays twice --
+# `lift utility --sync` calls pairwise() with no pre-fill; judges.<entry>.bulk: sync makes the pre-fill a
+# synchronous one. Either way the requests an earlier batch holds are already paid for.
+SYNC_RUNS = ["pairwise without a pre-fill", "pre-fill with bulk sync"]
+
+
+@pytest.mark.parametrize("run", SYNC_RUNS)
+def test_a_synchronous_run_collects_an_ended_earlier_batch_instead_of_paying_again(run, utility_entry):
+    fake, batch_id = open_batch(5, polls=1)                             # ended by its next look
+    if run == "pre-fill with bulk sync":
+        utility_entry(bulk="sync")
+    judge = batch_judge(fake)
+    if run == "pre-fill with bulk sync":
+        summary = judge.prefill_pairwise(*pairs(5))
+        assert (summary["mode"], summary["reason"]) == ("sync", "the bulk mode is sync")
+        assert (summary["n_submitted"], summary["n_collected"], summary["batch_ids"]) == (0, 5, [batch_id])
+    out = judge.pairwise(*pairs(5))
+    assert item_calls(fake) == [] and len(fake.batches) == 1            # nothing paid twice or submitted
+    assert out == sync_reference(verdicts).pairwise(*pairs(5))
+    assert [r["event"] for r in state_rows(judge)] == ["submitted", "collected"]
+
+
+@pytest.mark.parametrize("run", SYNC_RUNS)
+def test_a_synchronous_run_stops_rather_than_pay_again_for_a_running_batch(run, utility_entry):
+    fake, batch_id = open_batch(3, polls=5)
+    if run == "pre-fill with bulk sync":
+        utility_entry(bulk="sync")
+    judge = batch_judge(fake)
+    before = judge.batch_state_path.read_bytes()
+    call = judge.prefill_pairwise if run == "pre-fill with bulk sync" else judge.pairwise
+    with pytest.raises(FrontierBatchPending,
+                       match=f"3 of this run's requests sit in batch {batch_id}, still running") as excinfo:
+        call(*pairs(5))                                                 # pairs 3 and 4 are in no batch
+    pending = excinfo.value
+    assert (pending.batch_ids, pending.n_pending, pending.summary["mode"]) == ([batch_id], 3, "sync")
+    assert "cancel it in the Console" in str(pending) and f"LIFT_ABANDON_BATCHES={batch_id}" in str(pending)
+    assert item_calls(fake) == [] and len(fake.batches) == 1            # nothing sent at all or submitted
+    assert judge.batch_state_path.read_bytes() == before
+
+    fake.polls = 0                                                      # ended now: the same line collects it
+    assert judge.pairwise(*pairs(5)) == sync_reference(verdicts).pairwise(*pairs(5))
+    assert sorted(index(c) for c in item_calls(fake)) == [3, 4]         # only the two it does not hold
+
+
+def test_a_judge_without_the_batch_api_stops_rather_than_pay_again(monkeypatch):
+    _, batch_id = open_batch()
+    held = f"3 of this run's requests sit in batch {batch_id}"
+    for method in ("prefill_pairwise", "pairwise"):
+        plain = FakeProvider(verdicts)                                  # the same judge, no batch API
+        judge = batch_judge(plain)
+        with pytest.raises(FrontierConfigError, match=held) as exc:
+            getattr(judge, method)(*pairs(3))
+        assert "FakeProvider has no Message Batches API" in str(exc.value)
+        assert f"LIFT_ABANDON_BATCHES={batch_id}" in str(exc.value) and plain.calls == []   # no preflight
+        if method == "pairwise":
+            assert exc.value.partial == [None] * 3
+    monkeypatch.setenv("LIFT_ABANDON_BATCHES", batch_id)                # the person gives it up, paying again
+    plain = FakeProvider(verdicts)
+    judge = batch_judge(plain)
+    assert judge.pairwise(*pairs(3)) == sync_reference(verdicts).pairwise(*pairs(3))
+    assert len(item_calls(plain)) == 3
+    assert [r["event"] for r in state_rows(judge)] == ["submitted", "abandoned"]
 
 
 # --------------------------------------------------------------------------------- the create call --
