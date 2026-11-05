@@ -58,11 +58,12 @@ Reading:
   reported number, the loose label, flags and judge failures included. Each returned judgement must
   be of a generation now in the generations file, of its current output, made from the current
   prompt text; every generation of the cell made with this code and configuration (this code's
-  ``HARNESS_VERSION``, the revision of Global configs/project.yaml pins when it pins a sha, and the
-  variant's current entry in configs/variants.yaml: ``meta.intervention``, and ``meta.adapter_hash``
-  when the entry pins ``artifacts.adapter``; a record that names no intervention is never trusted, and
-  a variant the registry does not list is refused), else the cell is stale and the refusal names its
-  restart line; every generation of the cell in ``dtype`` under one run configuration and one stack;
+  ``HARNESS_VERSION``, the revision of Global configs/project.yaml pins when it pins a sha, the cap it
+  gives, ``generation.max_new_tokens``: ``meta.max_new_tokens``, and the variant's current entry in
+  configs/variants.yaml: ``meta.intervention``, and ``meta.adapter_hash`` when the entry pins
+  ``artifacts.adapter``; a record that names no cap or no intervention is never trusted, and a variant
+  the registry does not list is refused), else the cell is stale and the refusal names its restart
+  line; every generation of the cell in ``dtype`` under one run configuration and one stack;
   every judgement on one judge stack; and the judge must be the role's configured judge (model,
   revision when pinned to a sha, the labelling rules now in force; for Qwen3Guard the precision and
   Controversial mode; for a frontier judge everything its id names but the API version, so the rubric's
@@ -86,8 +87,8 @@ Reading:
   and a judgement of every generation; ``complete=False`` is for the second judge's sample and runs
   in progress.
 - ``provenance`` describes a cell (judge id and stack; generation dtype, run configuration, model
-  revision, harness, chat template, decoding settings, library versions, GPU, intervention digest and
-  adapter hash). ``paired_labels`` reads two variants' cells and refuses a pair whose judge (labelling
+  revision, harness, chat template, decoding settings and cap, library versions, GPU, intervention digest
+  and adapter hash). ``paired_labels`` reads two variants' cells and refuses a pair whose judge (labelling
   rules included), precision, model revision, harness, chat template or decoding settings differ. Every
   paired comparison downstream (Gate 2, P07) must use ``paired_labels``, never two ``load_labels`` calls.
 - ``load_judgements`` reads one file with only its own checks: never report from it.
@@ -128,8 +129,8 @@ _ROLE_ENTRIES = {"primary": "safety_primary", "second": "safety_second"}     # u
 CONTROVERSIAL_MODES = ("strict", "loose")
 EMPTY_OUTPUT_LID: tuple[tuple[str, float], ...] = (("und", 0.0),)
 QWEN3GUARD_SAFETY = ("Safe", "Unsafe", "Controversial")
-PROVENANCE_META = ("dtype", "run_config", "model_rev", "harness", "template", "decoding", "torch",
-                   "transformers", "gpu", "intervention", "adapter_hash")
+PROVENANCE_META = ("dtype", "run_config", "model_rev", "harness", "template", "decoding", "max_new_tokens",
+                   "torch", "transformers", "gpu", "intervention", "adapter_hash")
 PAIR_MUST_MATCH = ("judge_id", "dtype", "model_rev", "harness", "template", "decoding")
 PAIR_MAY_DIFFER = ("gpu", "torch", "transformers", "judge_stack")
 _STACK_FIELDS = ("torch", "transformers", "gpu_capability")     # a generation without meta["stack"]
@@ -1220,10 +1221,12 @@ def _made_otherwise(variant: str, gens: Sequence[GenerationRecord]) -> tuple[lis
     """The generations of ``variant``'s cell that were not made with this code and configuration, as
     (pids, what) checks of a stale cell, and why the variant has no configuration to compare with (None when
     it is registered). Every generation must carry this code's ``HARNESS_VERSION``, the revision of Global
-    configs/project.yaml pins (when it pins a sha), and the intervention of the variant's entry in
-    configs/variants.yaml (``meta.intervention``; a record without one was made before generations recorded
-    it, and is never trusted), with the pinned adapter's hash (``meta.adapter_hash``) when the entry pins
-    ``artifacts.adapter``."""
+    configs/project.yaml pins (when it pins a sha), the cap configs/project.yaml gives
+    (``generation.max_new_tokens``: ``meta.max_new_tokens``; a record without one was made before
+    generations recorded it, and is never trusted: ``meta.decoding`` digests the cap with the stop set, which
+    a read cannot rebuild without the model), and the intervention of the variant's entry in
+    configs/variants.yaml (``meta.intervention``; a record without one is never trusted either), with the
+    pinned adapter's hash (``meta.adapter_hash``) when the entry pins ``artifacts.adapter``."""
     from lift.cachekey import intervention_digest
     from lift.models.generate import HARNESS_VERSION
     from lift.models.variants import get_spec
@@ -1235,6 +1238,15 @@ def _made_otherwise(variant: str, gens: Sequence[GenerationRecord]) -> tuple[lis
         checks.append(([g.pid for g in gens if g.meta.get("model_rev") != revision],
                        f"generations were made by another revision of Global than the {revision[:12]} "
                        "configs/project.yaml pins"))
+    cap = int(config.get("generation.max_new_tokens"))
+    checks += [
+        ([g.pid for g in gens if g.meta.get("max_new_tokens") is None],
+         "generations name no cap (meta.max_new_tokens: made before generations recorded it, so never "
+         "trusted)"),
+        ([g.pid for g in gens if g.meta.get("max_new_tokens") not in (None, cap)],
+         f"generations were made under another cap than the {cap} new tokens configs/project.yaml gives "
+         "(generation.max_new_tokens)"),
+    ]
     try:
         spec = get_spec(variant)
     except KeyError as exc:
@@ -1406,11 +1418,11 @@ def _describe(records: Sequence[JudgementRecord], gens: Sequence[GenerationRecor
 def provenance(variant: str, set_name: str, lang: str, split: str, *,
                judge: str = "primary") -> dict[str, Any]:
     """What one cell was made with: the judge id, the counts, for each GenerationRecord.meta field of
-    ``PROVENANCE_META`` (dtype, run_config, model_rev, harness, template, decoding, torch, transformers,
-    gpu, intervention, adapter_hash) the sorted distinct values present, as strings (older records lack
-    some fields; stock has no adapter hash), and the judge's ``judge_stack`` (canonical JSON; none for an
-    API judge). It describes and checks nothing (``load_records`` does), so it can also say why a cell is
-    refused."""
+    ``PROVENANCE_META`` (dtype, run_config, model_rev, harness, template, decoding, max_new_tokens, torch,
+    transformers, gpu, intervention, adapter_hash) the sorted distinct values present, as strings (older
+    records lack some fields; stock has no adapter hash), and the judge's ``judge_stack`` (canonical JSON;
+    none for an API judge). It describes and checks nothing (``load_records`` does), so it can also say why
+    a cell is refused."""
     from lift.models import generate
 
     records = load_judgements(variant, set_name, lang, split, judge=judge)

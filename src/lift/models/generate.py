@@ -29,23 +29,24 @@ Behaviour:
   the cache key but the prompt) and never differs within a file. ``meta.stack`` digests torch,
   transformers and the GPU class: a finished file is reused under any stack (a session may resolve a
   newer patch release), but records are never appended under another stack than the file's. A file
-  whose records name no ``meta.intervention`` (made before generations recorded it) is neither extended
-  nor reused: every read refuses such a cell.
+  whose records name no ``meta.intervention`` or no ``meta.max_new_tokens`` (made before generations
+  recorded them) is neither extended nor reused: every read refuses such a cell.
 - Every such refusal is a StaleOutputError naming the ``lift restart`` line that starts the cell over
   (``restart_cell``): a job line right after ``lift sync pull``. Moving the file aside by hand does not
   work: sync never deletes, so the job's pull brings the runs repo's copy back. ``keys_changed`` says
   whether the cell made again may have other generation keys (not when only the stack moved, nor when
-  the records only predate ``meta.intervention``), so a key list drawn from the cell (P04's) is drawn
-  again. A file made in another precision than the run's is
+  the records only predate ``meta.intervention`` or ``meta.max_new_tokens``), so a key list drawn from
+  the cell (P04's) is drawn again. A file made in another precision than the run's is
   not stale and is never started over (that would discard it): it raises OtherPrecisionError, whose
   remedy is the file's ``--dtype`` or leaving the cell out.
 - ``meta`` carries dtype, GPU name, device, batch size, the provenance (model revision, harness,
-  template, the stack, ``decoding``: the decoding settings without the dtype, ``intervention``:
-  ``lift.cachekey.intervention_digest`` of the variant's spec, ``adapter_hash``: None for stock,
-  ``run_config``) and, for CAST wrappers, ``gate_fired``. The run manifest records the same
-  provenance. The judge pipeline reads a cell only if its provenance is this code's harness, the pinned
-  revision of Global and the variant's current entry in configs/variants.yaml (which, for a variant that
-  names an adapter, must pin its hash: ``artifacts.adapter``).
+  template, the stack, ``decoding``: the decoding settings without the dtype, ``max_new_tokens``: the
+  cap, which ``decoding`` digests too, ``intervention``: ``lift.cachekey.intervention_digest`` of the
+  variant's spec, ``adapter_hash``: None for stock, ``run_config``) and, for CAST wrappers,
+  ``gate_fired``. The run manifest records the same provenance. The judge pipeline reads a cell only if
+  its provenance is this code's harness, the pinned revision of Global, the cap configs/project.yaml
+  gives (``generation.max_new_tokens``) and the variant's current entry in configs/variants.yaml (which,
+  for a variant that names an adapter, must pin its hash: ``artifacts.adapter``).
 - Every run writes a manifest (lift.manifest) with prompts/sec and tokens/sec.
 """
 
@@ -661,6 +662,13 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
                 f"{unnamed[:5]}: they were made before generations recorded it, and every read refuses such "
                 "a cell (lift.judge.pipeline), so it is neither extended nor reused. Start the cell over: "
                 f"{_start_over(restart, out_path)}.", command=restart, keys_changed=False)
+        uncapped = sorted({r.pid for r in existing if r.meta.get("max_new_tokens") is None})
+        if uncapped:                        # made before generations recorded it (R2-10)
+            raise StaleOutputError(
+                f"{out_path}: {len(uncapped)} records name no cap (meta.max_new_tokens), e.g. "
+                f"{uncapped[:5]}: they were made before generations recorded it, and every read refuses such "
+                "a cell (lift.judge.pipeline), so it is neither extended nor reused. Start the cell over: "
+                f"{_start_over(restart, out_path)}.", command=restart, keys_changed=False)
     done = {prompt_id(r.set, r.lang, r.pid): r.key for r in existing}
 
     def ident(row: _Row) -> tuple[str, str, str]:
@@ -685,8 +693,8 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
     gpu = _device_name(variant.device)
     provenance = {"model_rev": variant.model_rev, "harness": HARNESS_VERSION,
                   "template": variant.template_hash[:16], **env, "stack": stack_digest(env),
-                  "decoding": decoding_digest(gen_cfg), "intervention": intervention_digest(variant.spec),
-                  "adapter_hash": variant.adapter_hash}
+                  "decoding": decoding_digest(gen_cfg), "max_new_tokens": cap,
+                  "intervention": intervention_digest(variant.spec), "adapter_hash": variant.adapter_hash}
     run = start_run("generate", variant=variant.spec.name, out_path=str(out_path), dtype=variant.dtype,
                     device=variant.device, gpu=gpu, gen_cfg=gen_cfg, n_prompts=len(rows),
                     n_resumed=len(rows) - len(todo), run_config=run_config,

@@ -131,7 +131,7 @@ def test_records_carry_hashes_counts_and_meta(stock, tmp_path, isolated_dirs):
     assert all(not x.hit_cap or x.meta["n_generated"] == CAP for x in recs.values())
     assert all(x.meta["n_generated"] <= CAP for x in recs.values())
     provenance = ("model_rev", "harness", "template", "torch", "transformers", "gpu_capability", "stack",
-                  "decoding", "run_config")
+                  "decoding", "max_new_tokens", "run_config")
     for field in provenance:
         assert r.meta[field]
     assert r.meta["model_rev"] == stock.model_rev and r.meta["harness"] == gen.HARNESS_VERSION
@@ -493,6 +493,29 @@ def test_a_file_whose_records_name_no_intervention_is_never_extended(stock):
     before = path.read_bytes()
     for ps in (prompts(), prompts()[:2]):                  # to extend it, or to reuse it as it is
         with pytest.raises(gen.StaleOutputError, match="2 records name no intervention") as exc:
+            run(stock, path, ps=ps)
+        assert exc.value.command == RESTART and exc.value.keys_changed is False
+        assert f"run `{RESTART}` as a job line right after `lift sync pull`" in str(exc.value)
+        assert path.read_bytes() == before
+
+
+def test_every_record_names_its_cap_and_a_file_whose_records_name_none_is_never_extended(stock):
+    # R2-10: a read compares each generation's cap with configs/project.yaml's generation.max_new_tokens, so
+    # every record names the cap it was made under (meta.max_new_tokens, beside meta.decoding, which digests
+    # it with the stop set; cache keys unchanged). A file whose records name none (made before they did) is
+    # refused like one whose records name no intervention: every read refuses such a cell.
+    from lift.io import read_jsonl, write_jsonl
+
+    path = cell_path()
+    made = run(stock, path, ps=prompts()[:2])
+    assert {r.meta.get("max_new_tokens") for r in made.values()} == {CAP}
+    rows = list(read_jsonl(path))
+    for row in rows:
+        del row["meta"]["max_new_tokens"]
+    write_jsonl(path, rows)
+    before = path.read_bytes()
+    for ps in (prompts(), prompts()[:2]):                  # to extend it, or to reuse it as it is
+        with pytest.raises(gen.StaleOutputError, match=r"2 records name no cap \(meta.max_new_tokens") as exc:
             run(stock, path, ps=ps)
         assert exc.value.command == RESTART and exc.value.keys_changed is False
         assert f"run `{RESTART}` as a job line right after `lift sync pull`" in str(exc.value)

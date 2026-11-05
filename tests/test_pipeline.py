@@ -145,10 +145,12 @@ def primary_judge(judge_id=PRIMARY):
 def gen(pid, *, output=None, lang="en", set_name="harmful", split="dev", variant="stock", tag="v1",
         prompt=None, n_new=None, dtype="bf16", meta=None):
     """A GenerationRecord as lift.models.generate writes it: in ``dtype``, by this code's harness, under the
-    variant's entry in configs/variants.yaml when it has one, by the adapter it pins (``meta`` overrides)."""
+    cap configs/project.yaml gives, under the variant's entry in configs/variants.yaml when it has one, by the
+    adapter it pins (``meta`` overrides)."""
     prompt = prompt if prompt is not None else f"prompt {pid} {lang}"      # = make_prompt's default text
     output = output if output is not None else f"{LONG} {pid}"
-    made = {"dtype": dtype, "harness": generate.HARNESS_VERSION}
+    made = {"dtype": dtype, "harness": generate.HARNESS_VERSION,
+            "max_new_tokens": config.get("generation.max_new_tokens")}
     if variant in variants.load_registry():
         spec = variants.get_spec(variant)
         made["intervention"] = intervention_digest(spec)
@@ -1262,6 +1264,35 @@ def test_a_cell_is_read_only_if_made_by_this_harness_and_the_pinned_global(fake_
     assert set(pipeline.load_labels(*CELL)) == set(pids)
 
 
+def test_a_cell_is_read_only_if_made_under_the_configured_cap(fake_prompt_files, monkeypatch):
+    """R2-10: a read compared a cell with this code's harness, the pinned Global and the registry, never with
+    the decoding settings configs/project.yaml gives now. After a dated edit of generation.max_new_tokens
+    (to cut the cap-hit rate, say), a cell nobody made again was still reported under the old cap, and a pair
+    whose two arms both predate the edit still paired, though lift generate refuses those very cells as made
+    under another configuration. Every generation records its cap (meta.max_new_tokens), and a read refuses
+    a cell made under another cap than the configured one, or naming none, as stale with its restart line."""
+    pids, _, path = setup_cell(fake_prompt_files, n=4)
+    pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
+    assert set(pipeline.load_labels(*CELL)) == set(pids)
+    cap = config.get("generation.max_new_tokens")
+    assert {g.meta["max_new_tokens"] for g in generate.read_generations(path)} == {cap} == {256}
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", 512)       # the dated edit
+    stale_read(CELL, r"4 generations were made under another cap than the 512 new tokens "
+                     r"configs/project\.yaml gives \(generation\.max_new_tokens\)")
+    write_gens([gen(p) for p in pids])               # made again under it (here with the same keys)
+    assert set(pipeline.load_labels(*CELL)) == set(pids)
+    write_gens([gen(p, meta={"max_new_tokens": None}) for p in pids])     # made before records named it
+    stale_read(CELL, r"4 generations name no cap \(meta\.max_new_tokens")
+
+    for variant in ("stock", "adapter"):             # both arms of a pair made under the cap of 512
+        pair_cell(fake_prompt_files, variant)
+    assert pair()[0] == {p: "benign" for p in PAIR_PIDS}
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", cap)       # edited back
+    stale = f"stock/harmful_en_dev cannot be reported .*another cap than the {cap} new tokens"
+    with pytest.raises(ValueError, match=stale):
+        pair()
+
+
 def test_a_cell_is_read_only_under_its_variants_current_registry_entry(fake_prompt_files, registry):
     """R1-03: every GenerationRecord.meta names the intervention (lift.cachekey.intervention_digest of the
     variant's spec) and the adapter hash it was made with, and a read compares them with the variant's entry
@@ -1430,7 +1461,10 @@ def test_generate_records_the_intervention_and_adapter_a_read_checks(fake_prompt
                                                                      tiny_model_dir, tiny_lora_adapter):
     """R1-03, end to end on the tiny model: lift generate's records and run manifest name the intervention
     digest and the adapter hash a cell was made with, the read accepts them while the variant's registry
-    entry stands, and refuses the cell as stale once P03 pins another hash under the variant's name."""
+    entry stands, and refuses the cell as stale once P03 pins another hash under the variant's name. R2-10:
+    they name the cap too (lift generate takes it from configs/project.yaml, as every lift command runs it),
+    and after a dated edit of generation.max_new_tokens the read refuses the cell lift generate refuses as
+    made under another configuration; made again after its restart line, it reads."""
     import shutil
 
     from lift.train.merge import adapter_hash
@@ -1438,6 +1472,7 @@ def test_generate_records_the_intervention_and_adapter_a_read_checks(fake_prompt
     name, cell = "adapter-tiny-s1", ("adapter-tiny-s1", *CELL[1:])
     tiny_global = {"id": str(tiny_model_dir), "revision": "main"}            # Global is the tiny checkpoint
     monkeypatch.setitem(config.load("project")["models"], "global", tiny_global)
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", 4)    # short tiny outputs
     shutil.copytree(tiny_lora_adapter, variants.adapter_path(name))
     pinned = adapter_hash(variants.adapter_path(name))
     entry = {"name": name, "method": "adapter", "adapter": name, "seed": 1, "artifacts": {"adapter": pinned}}
@@ -1445,17 +1480,27 @@ def test_generate_records_the_intervention_and_adapter_a_read_checks(fake_prompt
     spec = variants.get_spec(name)
     ps = [make_prompt(p) for p in PAIR_PIDS]
     fake_prompt_files[("harmful", "en")] = ps
-    path = generate.generate(variants.build_variant(spec, device="cpu", dtype="bf16"), ps,
-                             out_path=generations_path(*cell), max_new_tokens=4)
-    made = {(g.meta["intervention"], g.meta["adapter_hash"]) for g in generate.read_generations(path)}
-    assert made == {(intervention_digest(spec), pinned)}
+    variant = variants.build_variant(spec, device="cpu", dtype="bf16")
+    path = generate.generate(variant, ps, out_path=generations_path(*cell))
+    made = {(g.meta["intervention"], g.meta["adapter_hash"], g.meta.get("max_new_tokens"))
+            for g in generate.read_generations(path)}
+    assert made == {(intervention_digest(spec), pinned, 4)}
     [run] = [json.loads(p.read_text(encoding="utf-8")) for p in manifests_dir().glob("generate-*.json")]
-    assert (run["intervention"], run["adapter_hash"]) == (intervention_digest(spec), pinned)
+    assert (run["intervention"], run["adapter_hash"], run.get("max_new_tokens")) == (
+        intervention_digest(spec), pinned, 4)
 
     pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
     assert set(pipeline.load_labels(*cell)) == set(PAIR_PIDS)
     prov = pipeline.provenance(*cell)
     assert (prov["intervention"], prov["adapter_hash"]) == ([intervention_digest(spec)], [pinned])
+    assert prov.get("max_new_tokens") == ["4"]
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", 6)    # a dated edit of it
+    with pytest.raises(StaleOutputError, match="another configuration"):
+        generate.generate(variant, ps, out_path=path)               # lift generate refuses the old cell
+    stale_read(cell, "4 generations were made under another cap than the 6 new tokens")   # and so does a read
+    generate.restart_cell(*cell, aside=generate.aside_root())       # its restart line, then made again
+    pipeline.judge_file(generate.generate(variant, ps, out_path=path), judge=primary_judge(), lid=FakeLID())
+    assert set(pipeline.load_labels(*cell)) == set(PAIR_PIDS)
     entry["artifacts"] = {"adapter": "0" * 64}                      # another adapter now under the name
     stale_read(cell, "4 generations were made under another intervention")
 
