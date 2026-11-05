@@ -455,6 +455,36 @@ def test_metrics_whose_answers_predate_a_new_model_pin_are_not_counted():
     assert f"models.global is pinned to {'f' * 40} here" in aya["error"]
 
 
+def write_parity_record(adapter: str, *, all_match: bool, adapter_hash: str | None = None) -> None:
+    """outputs/adapters/{adapter}/registration.json as lift train writes it, reduced to what the rule-9
+    check reads: the adapter hash and its fp32 merge parity."""
+    folder = output_dir() / "adapters" / adapter
+    folder.mkdir(parents=True, exist_ok=True)
+    parity = {"fp32": {"n": 20, "n_match": 20 if all_match else 17, "all_match": all_match}}
+    (folder / "registration.json").write_text(json.dumps(
+        {"name": adapter, "adapter_hash": adapter_hash or ADAPTER_HASH[adapter], "parity": parity}),
+        encoding="utf-8")
+
+
+def test_an_adapter_whose_fp32_merge_parity_failed_counts_in_neither_gate(monkeypatch):
+    # CLAUDE.md rule 9: an adapter whose recorded fp32 merge parity failed must not be evaluated, so its
+    # utility metrics and its drift count for nothing, however current they look.
+    write_validation("pass")
+    write_utility(AYA, 0.62)
+    write_utility(IND, 0.40)
+    write_parity_record(AYA, all_match=True)                  # a passing record changes nothing
+    assert gates.gate1()["adapters"][AYA]["status"] == "pass"
+    write_parity_record(AYA, all_match=False, adapter_hash="0" * 64)   # another hash's record: not this one
+    assert gates.gate1()["adapters"][AYA]["status"] == "pass"
+    write_parity_record(AYA, all_match=False)
+    aya = gates.gate1()["adapters"][AYA]
+    assert aya["status"] == "missing"
+    assert "failed fp32 merge parity (FAILED: fp32 17/20 prompts token-identical)" in aya["error"]
+    monkeypatch.setattr(pipeline, "paired_labels", lambda *a, **kw: pytest.fail("a failed adapter was read"))
+    fact = gates.drift(AYA, n_expected=172)
+    assert fact["status"] == "missing" and "CLAUDE.md rule 9" in fact["reason"]
+
+
 def test_an_adapter_the_registry_does_not_pin_is_checked_on_its_files_and_noted(registry):
     entry(registry, AYA)["artifacts"] = {}        # unpinned when its answers were made and checked
     write_validation("pass")
