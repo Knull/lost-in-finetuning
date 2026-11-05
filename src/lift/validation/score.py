@@ -39,10 +39,13 @@ outputs/metrics/validation/gate1.json, the Gate 1 check "validation round 1 meet
 for the judge that configs/project.yaml makes primary (``judges.safety_primary``; a recorded but
 not yet applied decision is reported, not acted on): {"status": "pass" | "fail" | "pending",
 "meets_bar", "judge_view", "judge_id", "items", "n", "agreement", "kappa", "not_labelled",
-"not_labelled_by_reason", "skipped", "superseded", "agreement_if_skipped", "robust_to_skips", ...}.
-It is pending while any Hindi round 1 row has no label and no 'skipped' note (``not_labelled``
-counts those rows). Deliberate skips are left out of the verdict and counted, with the agreement
-range had they been labelled and whether the agreement half of the bar holds across it.
+"not_labelled_by_reason", "skipped", "superseded", "agreement_if_skipped", "kappa_if_skipped",
+"robust_to_skips", "skips_unbounded", ...}. It is pending while any Hindi round 1 row has no label
+and no 'skipped' note (``not_labelled`` counts those rows). Deliberate skips are left out of the
+verdict and counted, with the agreement range had they been labelled and, for up to 8 skipped
+rows, kappa's range over every labelling they could have had and whether each labelling gives the
+verdict the judged rows give (the whole bar, both halves); beyond 8, or while a skipped row has no
+judgement, those two are null and ``skips_unbounded`` says why.
 
 Each labelled item's output is looked up in its generations file. The harness regenerates a whole
 file when one of its prompts is fixed, and the other prompts come back under the same keys but
@@ -78,6 +81,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from fractions import Fraction
+from itertools import combinations_with_replacement, product
 from pathlib import Path
 
 import yaml
@@ -510,6 +514,56 @@ def _gaps(col: Collected, lang: str | None = None, round_no: int | None = None) 
                and (lang is None or e["lang"] == lang) and (round_no is None or e["round"] == round_no))
 
 
+SKIPS_ENUMERATED = 8        # Gate 1 scores every labelling of at most this many skipped rows (4^8 of them)
+
+
+def _bar(human: Sequence[str], judge: Sequence[str], bar: dict) -> tuple[bool, float]:
+    """The bar's verdict and kappa, as lift.stats.agreement.meets_bar decides them."""
+    m = meets_bar(human, judge, agreement=bar["agreement"], kappa=bar["kappa"])
+    return bool(m["meets_bar"]), m["kappa"]
+
+
+def if_skipped(judged: Sequence[tuple[str, str]], skipped: Sequence[str | None], bar: dict) -> dict:
+    """What the s deliberately skipped rows could do to the bar over the ``judged`` (human, judge) pairs had
+    they been labelled; ``skipped`` holds the judge's label of each skipped row (None: not judged).
+
+    ``agreement_if_skipped`` is the agreement range, each skipped row agreeing with the judge or not:
+    n_agree/(n+s) to (n_agree+s)/(n+s). For s <= ``SKIPS_ENUMERATED`` with every skipped row judged, every
+    one of the 4^s labellings the rows could have had is scored (once per confusion matrix it gives, which is
+    all that kappa and the verdict depend on): ``kappa_if_skipped`` is kappa's range, and ``robust_to_skips``
+    whether every labelling gives the verdict of the judged rows alone, the bar decided as meets_bar decides
+    it. Otherwise those two are None and ``skips_unbounded`` says why (None when they are bounded)."""
+    out: dict = {"agreement_if_skipped": None, "kappa_if_skipped": None, "robust_to_skips": None,
+                 "skips_unbounded": None}
+    if not judged:
+        out["skips_unbounded"] = "no labelled item is judged yet"
+        return out
+    n, s = len(judged), len(skipped)
+    n_agree = sum(h == j for h, j in judged)
+    out["agreement_if_skipped"] = {"lo": float(Fraction(n_agree, n + s)),
+                                   "hi": float(Fraction(n_agree + s, n + s))}
+    unjudged = sum(j is None for j in skipped)
+    if s > SKIPS_ENUMERATED:
+        out["skips_unbounded"] = (f"{s} rows were skipped: kappa and the bar's verdict are bounded over "
+                                  f"every labelling (4^s of them) of at most {SKIPS_ENUMERATED} skipped rows")
+        return out
+    if unjudged:
+        out["skips_unbounded"] = (f"{unjudged} of the {s} skipped rows have no judgement yet, so no "
+                                  "labelling of them can be scored")
+        return out
+    human, judge = [h for h, _ in judged], [j for _, j in judged]
+    verdict = _bar(human, judge, bar)[0]
+    by_judge = Counter(skipped)                      # rows the judge gives one label are interchangeable
+    extra_judge = [j for j, m in by_judge.items() for _ in range(m)]
+    kappas, robust = [], True
+    for labelling in product(*(combinations_with_replacement(LABELS, m) for m in by_judge.values())):
+        met, kappa = _bar([*human, *(h for part in labelling for h in part)], [*judge, *extra_judge], bar)
+        kappas.append(kappa)
+        robust = robust and met == verdict
+    out.update(kappa_if_skipped={"lo": min(kappas), "hi": max(kappas)}, robust_to_skips=robust)
+    return out
+
+
 def gate1(col: Collected, bar: dict, created: str) -> dict:
     """Gate 1's validation check, "round 1 meets the bar in Hindi", for the judge that
     configs/project.yaml makes primary, from round 1's Hindi items alone.
@@ -517,10 +571,11 @@ def gate1(col: Collected, bar: dict, created: str) -> dict:
     Every item of the Hindi round 1 main sheet is accounted for: ``items`` (the sheet's size), ``n``
     (labelled and scored), ``superseded``, and ``not_labelled_by_reason`` (deliberate skips included,
     ``skipped`` their count). ``not_labelled`` counts only the rows that keep the gate pending (no label
-    and no 'skipped' note). Skips stay out of the verdict; ``agreement_if_skipped`` is the agreement range
-    had they been labelled, each agreeing with the judge or not, n_agree/(n+s) to (n_agree+s)/(n+s) over
-    the n judged items, and ``robust_to_skips`` whether the agreement half of the bar gives the same verdict
-    at both ends (kappa is not bounded)."""
+    and no 'skipped' note). Skips stay out of the verdict. Over the judged items, ``if_skipped`` bounds what
+    they could have done had they been labelled: ``agreement_if_skipped`` (the agreement range),
+    ``kappa_if_skipped`` (kappa's range over every labelling of up to ``SKIPS_ENUMERATED`` skipped rows)
+    and ``robust_to_skips`` (whether every such labelling gives the bar verdict the judged items give),
+    or None with ``skips_unbounded`` saying why."""
     view = primary_view()
     pairs = [(h, v[view]) for e, h, v in col.rows if e["round"] == 1 and e["lang"] == "hi"]
     sheets = [s for s in col.sheets.values() if s["round"] == 1 and s["slot"] == "a" and s["lang"] == "hi"]
@@ -528,14 +583,9 @@ def gate1(col: Collected, bar: dict, created: str) -> dict:
     b = _with_status(view, agreement_block(pairs, bar), sheets, col.checks, gaps)
     status = "pending" if b["meets_bar"] is None else ("pass" if b["meets_bar"] else "fail")
     why = Counter(reason for e, reason, _ in col.unlabelled if e["round"] == 1 and e["lang"] == "hi")
-    skips, judged = why.get("skipped", 0), b["n_judged"]
-    if b["n_agree"] is None:                                  # nothing judged yet
-        if_skipped, robust = None, None
-    else:
-        worst = Fraction(b["n_agree"], judged + skips)
-        best = Fraction(b["n_agree"] + skips, judged + skips)
-        need = Fraction(str(bar["agreement"]))
-        if_skipped, robust = {"lo": float(worst), "hi": float(best)}, (worst >= need) == (best >= need)
+    skipped = [v[view] for e, reason, v in col.unlabelled
+               if e["round"] == 1 and e["lang"] == "hi" and reason == "skipped"]
+    bound = if_skipped([(h, j) for h, j in pairs if j is not None], skipped, bar)
     recorded = recorded_decision()
     return {
         "gate": 1, "check": "validation round 1 meets the bar in Hindi", "round": 1, "lang": "hi",
@@ -546,10 +596,10 @@ def gate1(col: Collected, bar: dict, created: str) -> dict:
         "bar": bar, "status": status, "meets_bar": b["meets_bar"], "block_status": b["status"],
         "items": sum(s["n"] for s in sheets),
         "not_labelled": gaps,
-        "not_labelled_by_reason": dict(why), "skipped": skips,
+        "not_labelled_by_reason": dict(why), "skipped": len(skipped),
         "superseded": sum(1 for e, _, _ in col.superseded if e["round"] == 1 and e["lang"] == "hi"),
         **{k: b[k] for k in ("n", "n_judged", "agreement", "kappa")},
-        "agreement_if_skipped": if_skipped, "robust_to_skips": robust,
+        **bound,
         "created": created,
     }
 
