@@ -339,6 +339,20 @@ def test_docs_say_a_line_that_skipped_cells_exits_3_and_the_next_lines_run():
     assert not re.search(r"exits? 1 (and print|with no AuditKIT record)|A line exits 1 and lists", readme)
 
 
+def test_docs_name_the_p03_commands_whose_exit_3_lets_the_job_go_on():
+    """P03: lift utility, belebele and heldout-loss exit 3 as generate, judge and run-dev do (a stale scores
+    file skipped, a Message Batch left running), and cell 2 goes on past them (CELL_COMMANDS). Wherever the
+    docs say so for run-dev, they name them too."""
+    for name, text in _docs():
+        items = [item for item in _items(text) if re.search(r"\bexits? 3\b", item) and "run-dev" in item
+                 and "next lines" in item]
+        assert items, name
+        for item in items:
+            assert all(f"`lift {cmd}`" in item for cmd in ("utility", "belebele", "heldout-loss")), item
+    utility = [item for item in _items(_readme()) if item.startswith("`lift utility --no-wait`")]
+    assert len(utility) == 1 and "rerun the same line" in utility[0]
+
+
 def test_docs_say_a_job_sync_line_that_exits_3_lets_the_next_lines_run():
     """Review 5, X2: lift sync's exit 3 also means judgements or AuditKIT records that do not pair with
     their cell, which a committed version's pull meets on its empty disk. After a JOB sync line's 3 the
@@ -882,20 +896,31 @@ def test_an_exit_2_from_a_job_sync_line_but_a_plain_push_still_tries_the_final_p
      "lift judge --variant stock --split dev --dtype fp16 --device cuda:1"),
     ("lift judge --variant stock --split dev --dtype fp16 --device cuda:1",
      "lift run-dev --variant stock --dtype fp16"),
+    # P03: a stale scores file skipped, or a Message Batch left running for a rerun to collect.
+    ("lift belebele --variant stock --split dev --langs hi,en --dtype fp16",
+     "lift heldout-loss --variant stock --dtype fp16"),
+    ("lift heldout-loss --variant stock --dtype fp16",
+     "lift utility --variant adapter-aya-std-s1 --split dev --dtype fp16"),
+    ("lift utility --variant adapter-aya-std-s1 --split dev --judge-only --no-wait",
+     "lift belebele --variant adapter-aya-std-s1 --split dev --langs hi --dtype fp16"),
 ])
 def test_a_line_that_skipped_cells_is_reported_pushed_and_the_next_lines_run(job_cell, first, then):
-    with pytest.raises(RuntimeError, match=re.escape(f"job FAILED: {first!r} exited 3: done, but")):
+    with pytest.raises(RuntimeError, match=re.escape(f"job FAILED: {first!r} exited 3: done, but")) as err:
         job_cell.run(f"lift sync pull\n{first}\n{then}", {first: 3})
     assert job_cell.host.lines == [CHECK, "lift sync pull", first, PUSH, then, PUSH, PUSH]
+    assert "left for a rerun" in str(err.value)
 
 
 @pytest.mark.parametrize("line", [
     "nvidia-smi -L",
     "lift smoke --compare-dtype fp16",
     "lift restart --variant stock --split dev --sets harmful --langs hi --dtype fp16",
+    "lift train --candidate aya --recipe standard --seed 1 --dtype fp16",       # lift train never exits 3
+    "lift gate 1",
 ])
 def test_an_exit_3_of_any_other_line_still_stops_the_job(job_cell, line):
-    """Only lift generate, judge, run-dev and lift sync define an exit 3; another program's 3 is an error."""
+    """Only lift generate, judge, run-dev, utility, belebele, heldout-loss and lift sync define an exit 3;
+    another program's 3 is an error."""
     with pytest.raises(RuntimeError, match=re.escape(f"job FAILED: {line!r} exited 3")) as err:
         job_cell.run(f"{line}\nlift info", {line: 3})
     assert job_cell.host.lines == [CHECK, line, PUSH]

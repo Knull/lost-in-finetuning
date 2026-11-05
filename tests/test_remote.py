@@ -7,6 +7,7 @@ Every "secret" below is a made-up string.
 
 from __future__ import annotations
 
+import argparse
 import ast
 import base64
 import errno
@@ -784,6 +785,63 @@ def test_a_line_that_skipped_cells_is_reported_and_the_next_lines_run(job, tmp_p
     assert status["partial_lines"] == [] and status["failed_line"] == 0 and status["rc"] == 3
 
 
+# P03: lift utility, belebele and heldout-loss exit 3 as generate, judge and run-dev do: done, but some
+# cells were skipped (a stale scores file) or left for a rerun (lift utility --no-wait while its Message
+# Batch runs).
+P03_PARTIAL = ["lift utility --variant adapter-aya-std-s1 --split dev --no-wait",
+               "lift belebele --variant adapter-aya-std-s1 --split dev --langs hi,en",
+               "lift heldout-loss --variant adapter-aya-std-s1"]
+PARTIAL_COMMANDS = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss")
+
+
+def readme_partial() -> tuple[str, ...]:
+    """The PARTIAL tuple of colab/README.md's notebook fallback cell."""
+    tree = ast.parse(notebook_cell('JOB = """'))
+    (value,) = [node.value for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                and [getattr(t, "id", None) for t in node.targets] == ["PARTIAL"]]
+    return ast.literal_eval(value)
+
+
+def kaggle_cell_commands() -> tuple[str, ...]:
+    """CELL_COMMANDS of kaggle/runner.ipynb's job cell."""
+    cells = json.loads((REPO_ROOT / "kaggle" / "runner.ipynb").read_text(encoding="utf-8"))["cells"]
+    (source,) = ["".join(c["source"]) for c in cells if c.get("id") == "job"]
+    (value,) = [node.value for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Assign)
+                and [getattr(t, "id", None) for t in node.targets] == ["CELL_COMMANDS"]]
+    return ast.literal_eval(value)
+
+
+def test_the_runners_agree_on_which_commands_exit_3_and_go_on(job):
+    """The list lives in four places a job reads it from (job.py, the README's notebook fallback, the Kaggle
+    runner) or an operator does (lift remote's exit codes, the README's table): all name the same commands.
+    lift train and lift gate never exit 3, so they are in none."""
+    assert job.PARTIAL_COMMANDS == readme_partial() == kaggle_cell_commands() == PARTIAL_COMMANDS
+    named = "a generate, judge, run-dev, utility, belebele or heldout-loss line exited 3"
+    assert named in " ".join(remote.EXIT_CODES.split())
+    row = next(line for line in readme().splitlines() if line.startswith("| 1 |"))
+    assert named in row.lower()
+
+
+@pytest.mark.parametrize("line", P03_PARTIAL)
+def test_a_p03_line_that_exits_3_is_reported_and_the_next_lines_run(job, tmp_path, line):
+    root = tmp_path / "content"
+    lines = ["lift sync pull", line, "lift info"]
+    status, vm, out = run_job(job, root, lines, vm=FakeVM(root, rcs={line: 3}))
+    assert vm.keys("lift ") == [lines[0], line, "lift sync push", "lift info", "lift sync push"]
+    assert status["partial_lines"] == [1] and status["failed_line"] is None and status["rc"] == 3
+    log = log_bytes(root)
+    assert b"line 2/3 exited 3" in log and b"left for a rerun" in log and b"the job fails at the end" in log
+    assert remote.exit_code(status) == 1 and "skipped or left for a rerun" in remote.describe(status)
+
+
+@pytest.mark.parametrize("line", ["lift train --candidate aya --recipe standard --seed 1", "lift gate 1"])
+def test_an_exit_3_of_lift_train_or_gate_ends_the_job(job, tmp_path, line):
+    root = tmp_path / "content"
+    status, vm, _ = run_job(job, root, [line, "lift info"], vm=FakeVM(root, rcs={line: 3}))
+    assert vm.keys("lift ") == [line, "lift sync push"]
+    assert status["partial_lines"] == [] and status["failed_line"] == 0 and status["rc"] == 3
+
+
 # --- lift remote ----------------------------------------------------------------------------------
 
 
@@ -1537,6 +1595,53 @@ def test_the_pin_warning_checks_what_each_lines_command_refuses():
     # An entry without a revision key is skipped, never an error.
     del view["models"]["global"]["revision"]
     assert warn(["lift generate --variant stock --split dev"]) is None
+
+
+def p03_parser():
+    """lift's parser with stand-ins for the P03 commands (their flags as the P03 brief gives them), so the
+    pin warning can be checked whichever of the P03 command modules this checkout has."""
+    from lift.commands import run
+
+    parser = argparse.ArgumentParser(prog="lift")
+    sub = parser.add_subparsers(dest="command", required=True)
+    run.register(sub)
+    train = sub.add_parser("train")
+    train.add_argument("--candidate", required=True, choices=["aya", "indicalign"])
+    train.add_argument("--recipe", required=True, choices=["standard", "stress"])
+    train.add_argument("--seed", type=int, required=True)
+    utility = sub.add_parser("utility")
+    utility.add_argument("--variant", required=True)
+    utility.add_argument("--split", required=True, choices=["dev", "final"])
+    utility.add_argument("--judge-only", action="store_true")
+    for name in ("belebele", "heldout-loss"):
+        scores = sub.add_parser(name)
+        scores.add_argument("--variant", required=True)
+        scores.add_argument("--split", choices=["dev", "final"], default="dev")
+        scores.add_argument("--langs", nargs="+")
+    sub.add_parser("gate").add_argument("number", choices=["1", "2"])
+    return parser
+
+
+# P03: the pin warning also covers the commands that load Global (lift train, utility, belebele and
+# heldout-loss), read with lift's own CLI parser; lift utility --judge-only judges generations made before,
+# so it needs no pin, and lift gate runs on the laptop and loads no model.
+def test_the_pin_warning_covers_the_p03_commands_that_load_global(monkeypatch):
+    from lift import config
+
+    monkeypatch.setattr("lift.cli.build_parser", p03_parser)
+    warn = remote.unpinned_warning
+    lines = ["lift train --candidate aya --recipe standard --seed 1",
+             "lift utility --variant adapter-aya-std-s1 --split dev",
+             "lift belebele --variant stock --split dev --langs hi,en", "lift heldout-loss --variant stock"]
+    found = warn(["lift sync pull", *lines])
+    for i, line in enumerate(lines, 2):
+        assert f"line {i} (lift {shlex.split(line)[1]}): models.global.revision = 'main'" in found
+    assert "judges." not in found and "models.base" not in found
+    assert warn(["lift utility --variant adapter-aya-std-s1 --split dev --judge-only"]) is None
+    assert warn(["lift train --candidate aya --seed 1"]) is None      # refused by argparse, before any pin
+    assert warn(["lift gate 1"]) is None
+    config.load("project")["models"]["global"]["revision"] = SHA
+    assert warn(lines) is None
 
 
 # Contract 1: a final push that exited 2 (a problem no retry can fix) is never retried from here either.
@@ -2676,6 +2781,19 @@ def test_notebook_fallback_goes_on_past_a_line_that_skipped_cells(monkeypatch, t
     with pytest.raises(RuntimeError, match="rc 3"):
         run_notebook_job(monkeypatch, tmp_path, ["lift smoke", "lift info"], {"lift smoke": [3]}, ran=ran)
     assert ran == ["lift smoke", "lift sync push"]
+
+
+@pytest.mark.parametrize("line", P03_PARTIAL)
+def test_notebook_fallback_goes_on_past_a_p03_line_that_exits_3(monkeypatch, tmp_path, line):
+    ran = []
+    with pytest.raises(RuntimeError, match=r"rc 3: some cells were skipped or left for a rerun"):
+        run_notebook_job(monkeypatch, tmp_path, ["lift sync pull", line, "lift info"], {line: [3]}, ran=ran)
+    assert ran == ["lift sync pull", line, "lift sync push", "lift info", "lift sync push"]
+    ran = []  # lift train never exits 3: its 3 ends the job
+    train = "lift train --candidate aya --recipe standard --seed 1"
+    with pytest.raises(RuntimeError, match="rc 3"):
+        run_notebook_job(monkeypatch, tmp_path, [train, "lift info"], {train: [3]}, ran=ran)
+    assert ran == [train, "lift sync push"]
 
 
 # Contract 7: the notebook installs like the other GPU runtimes, with the ref's constraints.txt.

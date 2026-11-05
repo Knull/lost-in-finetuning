@@ -16,6 +16,14 @@ restart --judge`` line. Exit codes: 0 done; 3 done, but some cells were
 skipped or their AuditKIT record was refused (a GPU job goes on with its next lines and fails at the
 end); 1 an error. A precision other than ``generation.dtype`` is refused on a GPU with native bf16
 (compute capability 8 or more): other precisions exist only for the T4's licence (decisions.md 27).
+
+lift judge with a judge that has a bulk API (``prefill``: the frontier judge's Message Batches) first
+plans every cell (``lift.judge.pipeline.pending_items``, which writes nothing) and hands it all the
+items they will send in one prefill, which only fills the judge's call cache; then the cell loop runs
+as without it, finding the replies cached, so the judgements are the ones the one-at-a-time path gives.
+A cell its planning refuses is left to the cell loop, which skips and lists it, or stops on it, as it
+would anyway. The prefill writes its own run manifest (stage "judge_prefill", devices 0, its counts,
+batch ids and spend): the cell loop's judge manifests count only what they send themselves.
 """
 
 from __future__ import annotations
@@ -361,6 +369,8 @@ def _judge(args: argparse.Namespace) -> int:
     if local:                                  # an API judge has no precision and runs on no GPU of ours
         _refuse_other_dtype(dtype, device)
     judge = make_judge(args.judge, device=device, dtype=dtype if local else None)
+    if callable(getattr(judge, "prefill", None)):
+        _prefill(judge, paths, variant=args.variant, split=args.split, sample=args.sample, keys=keys)
     refused: dict[str, str] = {}
     skipped: dict[str, dict[str, str]] = {}
     for (set_name, lang), path in paths.items():
@@ -373,6 +383,65 @@ def _judge(args: argparse.Namespace) -> int:
         if args.judge == "primary":
             _record(args.variant, set_name, lang, args.split, dtype=dtype, refused=refused)
     return _refused_exit(refused, skipped)
+
+
+# What a bulk prefill's summary holds (FrontierJudge.prefill_safety): counts, batch ids and spend, no text.
+PREFILL_FIELDS = ("mode", "n_requests", "n_cached", "n_submitted", "n_collected", "n_errored", "n_expired",
+                  "n_canceled", "batch_ids", "usd")
+
+
+def _prefill(judge: Any, paths: Mapping[tuple[str, str], Path], *, variant: str, split: str,
+             sample: float | None, keys: Collection[str] | None) -> None:
+    """Hand ``judge.prefill`` every item the cells of ``paths`` will send (``pending_items``, under the cell
+    loop's selection) in one call, before the cell loop judges them: a judge with a bulk API fills its call
+    cache, and the loop's calls find the replies there. A cell whose planning raises what judge_file would
+    raise for it (a StaleOutputError, ValueError or FileNotFoundError) is left out, logged by name: the loop
+    meets the same error and skips and lists the cell, or stops on it, as it would without the prefill.
+    Nothing pending, no call. The call writes its own manifest (stage "judge_prefill", devices 0: an API
+    judge runs on no GPU of ours) with the summary and the judge's cost counters, also when it fails; the
+    summary is logged, counts, ids and spend only."""
+    from lift.judge.pipeline import pending_items, stats_delta
+    from lift.manifest import finish_run, start_run
+    from lift.models.generate import StaleOutputError
+
+    items: list[Any] = []
+    planned: dict[str, int] = {}
+    left_out: list[str] = []
+    for (set_name, lang), path in paths.items():
+        cell = f"{set_name}_{lang}_{split}"
+        try:
+            found = pending_items(path, judge, sample=sample, keys=keys)
+        except (StaleOutputError, ValueError, FileNotFoundError) as exc:
+            left_out.append(cell)
+            log.info("%s %s: left out of the bulk prefill (%s); the cell loop meets the same error", variant,
+                     cell, type(exc).__name__)
+            continue
+        planned[cell] = len(found)
+        items.extend(found)
+    if not items:
+        log.info("%s %s: nothing left to judge in the %d cells planned, so no bulk prefill", variant, split,
+                 len(planned))
+        return
+    counters = getattr(judge, "stats", None)
+    before = dict(counters) if counters is not None else None
+    run = start_run("judge_prefill", variant=variant, split=split, judge=judge.judge_id,
+                    judge_dir=judge.short, cells=planned, cells_left_out=left_out, n_items=len(items),
+                    devices=0)
+    log.info("%s %s: %d items pending in %d cells go to %s's bulk prefill first", variant, split, len(items),
+             sum(1 for n in planned.values() if n), judge.judge_id)
+    try:
+        result = judge.prefill(items)
+        if not isinstance(result, Mapping):
+            raise TypeError(f"{judge.judge_id}'s prefill returned a {type(result).__name__}, not its summary")
+    except BaseException as exc:
+        finish_run(run, status="failed", error=type(exc).__name__,
+                   judge_stats=stats_delta(before, getattr(judge, "stats", None)))
+        raise
+    summary = {field: result[field] for field in PREFILL_FIELDS if field in result}
+    finish_run(run, status="ok", prefill=summary,
+               judge_stats=stats_delta(before, getattr(judge, "stats", None)))
+    log.info("%s %s: bulk prefill %s; the cells are judged next, each request the cache does not hold sent "
+             "on its own", variant, split, summary)
 
 
 def _generated_first(paths: Iterable[Path]) -> None:
