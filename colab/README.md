@@ -211,7 +211,9 @@ included (`lift train` and `lift gate` never exit 3). A cell is skipped when:
 
 - **It was made in another precision**: its generations were made in another dtype than this run's
   (fp16 on a T4, say). Run with `--dtype <that dtype>` on the kind of GPU that made them, or leave
-  the cell out with `--sets`/`--langs`. This is never a restart, which would discard them.
+  the cell out with `--sets`/`--langs`. This is never a restart, which would discard them. The score
+  files of `lift belebele` and `lift heldout-loss` follow the same rule: their listing gives the
+  file's `--dtype` or leaving it out, never a `--restart` line, and `--restart` skips such a cell.
 - **Its judge differs**: its judgements file was made by another judge (another judge id, which
   shows the judge's dtype and mode). Run with that judge, or the printed
   `lift restart ... --judge ROLE` line.
@@ -224,11 +226,14 @@ records. Its log names the `lift judge ... --judge ROLE` line (with P04's `--key
 judge) that refills another judge's file it set aside: `lift run-dev` refills only the primary's. It
 refuses (exit 1, nothing moved) a cell whose generations were made in another precision than its
 `--dtype` (default: the config's `generation.dtype`, bf16), since a restart would discard them;
-`--force` restarts such a cell anyway.
+`--force` restarts such a cell anyway. A utility cell's restart (`--sets utility --langs hi`) also
+sets aside what `lift utility` derived from it: the verdicts, metrics, check records and AuditKIT
+records of that candidate (of every candidate, for stock's cell), and its log names
+`lift utility --variant <candidate> --split <split>` as the line that refills them.
 
-**fp16 runs.** `lift generate`, `lift judge` and `lift run-dev` refuse a `--dtype` other than the
-config's on a GPU with native bf16 (Colab's A100 or L4): fp16 runs exist only for the T4 licence
-(`gate0-fp16.json`, in the table above).
+**fp16 runs.** `lift generate`, `judge`, `run-dev`, `train`, `utility`, `belebele` and
+`heldout-loss` refuse a `--dtype` other than the config's on a GPU with native bf16 (Colab's A100 or
+L4): fp16 runs exist only for the T4 licence (`gate0-fp16.json`, in the table above).
 
 Notes:
 

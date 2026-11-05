@@ -167,28 +167,37 @@ long stage into several lines.
 
 - **fp16 everywhere.** Every `lift generate`, `lift judge` and `lift run-dev` line takes
   `--dtype fp16`, and so does a `lift restart` line, as lift prints it here. So do `lift train`
-  (with `--per-device-batch 1 --parity-dtype fp16`; all three seeds of a recipe on one GPU type and
-  precision), `lift utility --generate-only`, `lift belebele` and `lift heldout-loss`. The loader refuses
+  (with `--per-device-batch 1`, and `--parity-dtype fp16` only when the fp32 parity does not fit; all
+  three seeds of a recipe on one GPU type and precision), `lift utility --generate-only`, `lift
+  belebele` and `lift heldout-loss`. The loader refuses
   bf16 on a GPU without native bf16, so a missing flag fails loudly. The dtype is part of the cache
   key, so fp16 outputs never mix with bf16 ones. These lines are for the T4 alone: on a GPU with
-  native bf16 (compute capability 8 or more, such as Colab's A100 or L4), generate, judge and
-  run-dev refuse any `--dtype` but bf16, since fp16 runs exist only for the T4's licence.
+  native bf16 (compute capability 8 or more, such as Colab's A100 or L4), generate, judge, run-dev,
+  train, utility, belebele and heldout-loss refuse any `--dtype` but bf16, since fp16 runs exist only
+  for the T4's licence. On the laptop, a T4 pilot's answers are judged with `lift utility --variant
+  NAME --split dev --judge-only --dtype fp16` and gated with `lift gate 1 --dtype fp16` and `lift gate
+  2 --dtype fp16` (reports gate{1,2}-fp16.json and .md).
 - **Leave Colab's bf16 cells out.** Output paths hold no dtype, so an fp16 run over a variant
   Colab started meets its bf16 cells, which are the reported ones. Give the line `--sets` and
   `--langs` that leave them out, in several lines if need be: the variant's files under
   `outputs/generations/` in the runs repo show which cells exist. A bf16 cell left in is refused
   as made in another precision, listed, and the line exits 3. Never restart such a cell from here:
   a restart would discard its bf16 outputs, so `lift restart --dtype fp16` refuses it, with nothing
-  moved, unless `--force` is given, which is never right here.
+  moved, unless `--force` is given, which is never right here. The score files of `lift belebele`
+  and `lift heldout-loss` (outputs/scores/) follow the same rule: a bf16 score cell is listed as made
+  in another precision and the line exits 3, and `--restart` never starts it over. Leave it out with
+  `--langs` (or leave the heldout-loss line out).
 - **Two GPUs.** A T4 x2 is two separate 16 GB devices. The generator runs on `cuda:0` and the judge
   on `cuda:1`: `--judge-device auto` (run-dev and smoke) and `--device auto` (judge) pick `cuda:1`
-  when there are two GPUs. In `lift run-dev`, both work at the same time.
+  when there are two GPUs. In `lift run-dev`, both work at the same time. `lift train` runs one
+  process on `cuda:0` alone and leaves `cuda:1` idle: two visible GPUs never double its batch.
 
 The first jobs go in this order:
 
 1. **The bf16 Gate 0, on Colab** (colab/README.md). It prints the revision shas to pin, and its
    outputs, which the fp16 check compares against, go to the runs repo.
-2. **The pin step**, after Gate 0 and before any `generate`, `judge` or `run-dev` line. A person
+2. **The pin step**, after Gate 0 and before any `generate`, `judge`, `run-dev`, `train`, `utility`,
+   `belebele` or `heldout-loss` line. A person
    copies the shas Gate 0 printed into `configs/project.yaml` with a dated `docs/decisions.md`
    entry, commits, and pushes to `BRANCH`. Those commands refuse a revision that is not a sha, and
    a session reads the `configs/project.yaml` of its own clone, so rerun cell 1 after the push.
