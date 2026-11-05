@@ -120,3 +120,26 @@ def test_p08_space_shows_output_text_only_cut_to_about_10_words():
     step = " ".join(p08_items(6))  # the Space
     assert "refusals only" not in step  # a refusal is shown no fuller than any other output
     assert "about 10 words" in step and "[redacted]" in step and ANY_LABEL.search(step)
+
+
+# R2-11: a record outlives a change that makes its cell unreportable (a fixed prompt text, other labelling
+# rules, a re-registered variant, a re-pinned Global, a harness bump) until that cell's `lift restart`
+# retires it, and lift.audit.load_record serves any record that is not retired. So the logs dataset takes
+# a record only while the reporting door accepts its cell as it stands, and only the record of that read.
+def test_p08_publishes_an_auditkit_record_only_while_its_cell_reads_as_it_stands():
+    import inspect
+
+    from lift import audit
+    from lift.judge import pipeline
+
+    logs_item = next(item for item in p08_items(2) if "logs dataset" in item.split(" (", 1)[0].lower())
+    rule = [s for s in re.split(r"(?<=\.)\s+", logs_item) if "AuditKIT record" in s and "load_records" in s]
+    assert rule, "P08's logs dataset publishes every AuditKIT record it finds, those of stale cells included"
+    (sentence,) = rule
+    assert "`lift.judge.pipeline.load_records`" in sentence and "as it stands" in sentence, sentence
+    assert re.search(r"\bonly\b", sentence) and re.search(r"\bdropped\b", sentence), sentence
+    # The read must give the record's own hashes, the ones record_safety writes into metadata.lift.
+    source = inspect.getsource(audit.record_safety)
+    for field in ("labels_sha256", "keys_sha256", "judge_id"):
+        assert f"`{field}`" in sentence and f'"{field}"' in source, field
+    assert {"judge", "complete", "dtype"} <= set(inspect.signature(pipeline.load_records).parameters)
