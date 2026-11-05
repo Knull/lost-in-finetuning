@@ -24,8 +24,10 @@ an id sort: lift.validation.labels records them with its labels) is scored, but 
 its warnings are reported by sheet (``checks.import_warnings``, a line in the .md and in the
 command's output), and an import that recorded none (made before they were recorded) gets one that
 says so. A judge failure is a judgement (the pipeline records it as unclear) and counts like
-any other. A missing judgement (the judge has not run on the item yet) shows as incomplete
-coverage: the metrics then cover only the judged items, and the bar check is withheld, as it is
+any other; ``checks.failure_reasons`` (and judge_decision.json's ``failure_reasons``) count failures by
+kind (``failure_kind``: the text before its first ':' or quote), never by the judge's own words. A
+missing judgement (the judge has not run on the item yet) shows as incomplete coverage: the metrics
+then cover only the judged items, and the bar check is withheld, as it is
 while a language's sheets are not all imported (``meets_bar`` is given only with status "ok"). Results
 are also broken down by model group and by set (pooled and for Hindi), with the human and judge
 harmful rates on the same items, because the endpoints are differences between models.
@@ -209,12 +211,24 @@ def _frontier_mismatch(rec: JudgementRecord) -> bool:
         return True
 
 
+_QUOTING = re.compile(r"[:(\[\"'`]")     # where a failure's text goes on to a detail or a quote
+
+
+def failure_kind(text: str) -> str:
+    """A judge failure's kind, the public-safe key it is counted under: its text before the first ":" or
+    opening quote, bracket or parenthesis (at most 60 ASCII characters), "other" when nothing is left.
+    Never the judge's own text: a frontier refusal's reason and an API message follow their ":", and a
+    Qwen3Guard parse error quotes up to 40 characters of the guard's reply with no ":" before it."""
+    head = _QUOTING.split(text, 1)[0].strip(" \t\r\n;,.")[:60].rstrip()
+    return head.encode("ascii", "backslashreplace").decode("ascii") or "other"
+
+
 def _failure_reason(rec: JudgementRecord) -> str | None:
+    """The kind of the record's judge failure (``failure_kind``), None when it records none."""
     reason = _native(rec).get("judge_failure")
     if not reason:
         return None
-    text = reason if isinstance(reason, str) else type(reason).__name__
-    return ascii(text[:60])
+    return failure_kind(reason) if isinstance(reason, str) else type(reason).__name__
 
 
 def confusion(human: Sequence[str], judge: Sequence[str], labels: Sequence[str]) -> dict:
