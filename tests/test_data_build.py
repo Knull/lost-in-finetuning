@@ -501,6 +501,33 @@ def test_a_split_file_covering_other_pids_stops_the_build_and_is_kept(dirs):
     assert (dirs.splits / "harmful.json").read_bytes() == edited
 
 
+def test_a_split_file_with_other_counts_than_the_locked_sizes_stops_the_build_and_is_kept(dirs):
+    """R1-17: a committed split file whose per-split counts are not cfg sizes (a hand edit or a bad merge
+    that moved a pid between splits, or sizes changed after the freeze) stops the build before any file is
+    stamped from it; a count-preserving reassignment only warns (the test above)."""
+    build.build_all(ctx=fixture_ctx(), only=["hard_benign"], langs=["en"])
+    prompt_file = dirs.data / "prompts" / "hard_benign_en.jsonl"
+    stamped = prompt_file.read_bytes()
+    frozen = split_file(dirs, "hard_benign")["assignments"]
+    moved = min(p for p, s in frozen.items() if s == "final")             # same pids, same split names
+    edited = edit_split(dirs, "hard_benign", lambda a: a.update({moved: "dev"}))
+    message = (r"hard_benign.json holds \{'dev': 3, 'final': 1, 'fit': 2\} pids per split but "
+               r"sizes.hard_benign is \{'fit': 2, 'dev': 2, 'final': 2\}: split files are frozen and the "
+               r"sizes are locked; a change needs a docs/decisions.md entry and a new split file")
+    with pytest.raises(ValueError, match=message):
+        build.build_all(ctx=fixture_ctx(), only=["hard_benign"], langs=["en"])
+    assert (dirs.splits / "hard_benign.json").read_bytes() == edited           # never rewritten
+    assert prompt_file.read_bytes() == stamped                                 # nothing stamped from it
+
+    edit_split(dirs, "hard_benign", lambda a: a.update({moved: "final"}))    # the frozen file again
+    cfg = fixture_cfg()
+    cfg["sizes"]["hard_benign"] = {"fit": 2, "dev": 1, "final": 3}            # changed after the freeze
+    with pytest.raises(ValueError, match=r"holds \{'dev': 2, 'final': 2, 'fit': 2\} pids per split but "
+                                         r"sizes.hard_benign is \{'fit': 2, 'dev': 1, 'final': 3\}"):
+        build.freeze_split("hard_benign", frozen, cfg=cfg)
+    assert build.freeze_split("hard_benign", frozen, cfg=CFG) == frozen
+
+
 def test_a_split_file_with_other_assignments_is_kept_and_followed(dirs, caplog):
     build.build_all(ctx=fixture_ctx(), only=["hard_benign"], langs=["en"])
     frozen = split_file(dirs, "hard_benign")["assignments"]

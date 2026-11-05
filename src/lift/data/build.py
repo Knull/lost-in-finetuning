@@ -76,8 +76,9 @@ same-text check -> GlotLID -> the file, its excluded file and its report.
 
 Splits (``freeze_split``): data/splits/{harmful,easy_benign,hard_benign,utility,belebele}.json, over
 the test pids of harmful and easy_benign and every pid of the others. A committed file is loaded and
-must cover exactly the set's pids and only the configured split names (ValueError otherwise: the
-sources changed); it is never rewritten, and a fresh assignment that differs only logs a warning. A
+must cover exactly the set's pids, only the configured split names and exactly cfg sizes per split
+(ValueError otherwise: the sources changed, or the file or the locked sizes were edited); it is never
+rewritten, and a fresh assignment that differs with the same counts only logs a warning. A
 missing file is assigned once from the sorted pids, cfg sizes and split_seed and saved, with a
 WARNING to commit it. Groups share a split (assign_splits ``groups``): the connected components of
 the links among a set's split pids (a train prompt never joins two test prompts; hard_benign and
@@ -675,9 +676,10 @@ def freeze_split(name: str, pids: Iterable[str], *, cfg: Mapping[str, Any],
                  groups: Mapping[str, str] | None = None, create: bool = True) -> dict[str, str]:
     """The frozen split of one set: pid -> split name.
 
-    If data/splits/{name}.json exists it is the truth: it must cover exactly ``pids`` and use only the
-    split names of cfg sizes (ValueError naming counts and example pids otherwise: the sources
-    changed). It is never rewritten; a fresh assignment that differs only logs a warning, and so do
+    If data/splits/{name}.json exists it is the truth: it must cover exactly ``pids``, use only the
+    split names of cfg sizes and hold exactly cfg sizes per split (ValueError naming counts and example
+    pids otherwise: the sources changed, or the file or the locked sizes were edited). It is never
+    rewritten; a fresh assignment that differs with the same counts only logs a warning, and so do
     groups the file splits. If it is missing (and ``create``): assign_splits(sorted pids, cfg sizes,
     cfg split_seed, groups), saved with save_split, and a WARNING says to commit it. ``create=False``
     raises FileNotFoundError instead.
@@ -713,6 +715,10 @@ def _freeze(name: str, pids: Iterable[str], *, cfg: Mapping[str, Any], groups: M
     if unknown:
         raise ValueError(f"{path} assigns {len(unknown)} pids to splits not in sizes.{name} {list(sizes)}, "
                          f"e.g. {unknown[:5]}")
+    if Counter(mapping.values()) != Counter(sizes):
+        raise ValueError(f"{path} holds {_count(mapping.values())} pids per split but sizes.{name} is "
+                         f"{sizes}: split files are frozen and the sizes are locked; a change needs a "
+                         "docs/decisions.md entry and a new split file")
     status = "loaded"
     try:
         fresh: dict[str, str] | None = splits.assign_splits(pids, sizes, seed, groups)
