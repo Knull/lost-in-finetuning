@@ -550,6 +550,112 @@ def test_job_kills_a_hung_push_and_tries_again(job, tmp_path, monkeypatch):
     assert status["push_rc"] == 0 and status["rc"] == 0
 
 
+class LeaderGoneProc:
+    """A line whose lift process (the group leader) printed ``output`` and exited with ``rc``, while a
+    child it started (same process group, same stdout) stays alive and silent with the pipe open. poll()
+    and wait() give the leader's rc; read() gives the output, then blocks until the group is signalled
+    (which ends the child and closes the pipe). After 10 s it gives up (``timed_out``), so a missing fix
+    fails the test instead of hanging the suite."""
+
+    def __init__(self, output: bytes = b"generating\n", rc: int = 0):
+        self.chunks = [output]
+        self.rc = rc
+        self.signals: list = []
+        self.released = threading.Event()
+        self.timed_out = False
+        self.stdout = self
+
+    def read(self, size=-1):
+        if self.chunks:
+            return self.chunks.pop(0)
+        if not self.released.wait(10):
+            self.timed_out = True
+        return b""
+
+    def close(self):
+        pass
+
+    def poll(self):
+        return self.rc  # the leader is gone
+
+    def wait(self, timeout=None):
+        return self.rc
+
+    def send_signal(self, sig):  # job.py signals the group (os.killpg) on a VM, the fake here
+        self.signals.append(sig)
+        self.released.set()
+
+    def kill(self):
+        self.signals.append("kill")
+        self.released.set()
+
+
+class SigintSurvivorProc(LeaderGoneProc):
+    """A line still running and silent. SIGINT ends its leader (poll() then gives -SIGINT) but not its
+    child, which ignores SIGINT and holds the pipe open until SIGKILL (kill())."""
+
+    def __init__(self):
+        super().__init__()
+        self.leader_rc = None
+
+    def poll(self):
+        return self.leader_rc
+
+    def wait(self, timeout=None):
+        return 0 if self.leader_rc is None else self.leader_rc
+
+    def send_signal(self, sig):
+        self.signals.append(sig)
+        if sig == signal.SIGINT:
+            self.leader_rc = -int(signal.SIGINT)  # the leader dies of it; the child goes on, pipe open
+
+
+# R1-30: the monitor stopped policing a command once its leader exited (poll() not None), while _stream
+# went on reading the pipe a child still held: no silence limit, stop request or SIGKILL reached the group,
+# so the line, the next lines and the final push waited on the child (on a VM, until --max-hours).
+def test_job_kills_a_silent_child_holding_the_pipe_after_its_leader_exited(job, tmp_path):
+    root = tmp_path / "content"
+    root.mkdir()
+    proc = LeaderGoneProc()
+    vm = FakeVM(root, procs={"lift run-dev --variant stock": [proc]})
+    status, vm, _ = run_job(job, root, ["lift run-dev --variant stock", "lift info"], vm=vm, heartbeat=0.01,
+                            spec_extra={"max_silent_minutes": 0.005})  # silent 0.3 s: hung
+    assert proc.signals == [signal.SIGINT] and not proc.timed_out
+    assert status["failed_line"] == 0 and status["rc"] == 1 and status["killed"].startswith("no output for")
+    assert vm.keys("lift ") == ["lift run-dev --variant stock", "lift sync push"] and status["push_rc"] == 0
+
+
+def test_job_stops_a_line_whose_leader_exited_but_whose_child_holds_the_pipe(job, tmp_path):
+    root = tmp_path / "content"
+    root.mkdir()
+    proc = LeaderGoneProc()
+
+    def ask_to_stop(key):  # lift remote uploads the stop file while the line runs
+        if key == "lift run-dev --variant stock":  # whole: the monitor polls, and must never read it empty
+            (root / "lift_job.stop.tmp").write_text("ctrl-c\n", encoding="ascii")
+            os.replace(root / "lift_job.stop.tmp", root / "lift_job.stop")
+
+    vm = FakeVM(root, hook=ask_to_stop, procs={"lift run-dev --variant stock": [proc]})
+    status, vm, _ = run_job(job, root, ["lift run-dev --variant stock", "lift info"], vm=vm, heartbeat=0.01)
+    assert proc.signals == [signal.SIGINT] and not proc.timed_out
+    assert status["stopped"] == "stop file: ctrl-c" and status["failed_line"] == 0
+    assert vm.keys("lift ") == ["lift run-dev --variant stock", "lift sync push"] and status["push_rc"] == 0
+
+
+def test_job_sigkills_a_child_that_outlives_the_sigint_of_its_leader(job, tmp_path, monkeypatch):
+    monkeypatch.setattr(job, "KILL_GRACE_SECONDS", 0.2, raising=False)
+    root = tmp_path / "content"
+    root.mkdir()
+    proc = SigintSurvivorProc()
+    vm = FakeVM(root, procs={"lift run-dev --variant stock": [proc]})
+    status, vm, _ = run_job(job, root, ["lift run-dev --variant stock", "lift info"], vm=vm, heartbeat=0.01,
+                            spec_extra={"max_silent_minutes": 0.005})
+    # SIGINT while the leader ran, then SIGKILL after the grace, though the leader had died of the SIGINT.
+    assert proc.signals[0] == signal.SIGINT and set(proc.signals[1:]) == {"kill"} and not proc.timed_out
+    assert status["failed_line"] == 0 and status["rc"] == 130 and status["killed"].startswith("no output for")
+    assert vm.keys("lift ") == ["lift run-dev --variant stock", "lift sync push"] and status["push_rc"] == 0
+
+
 def test_job_heartbeat_reaches_the_kernel_and_the_log_but_the_log_stays_off_the_kernel(job, tmp_path):
     root = tmp_path / "content"
     root.mkdir()
