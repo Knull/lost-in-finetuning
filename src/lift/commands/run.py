@@ -53,8 +53,12 @@ def _logging() -> None:
 
 
 def _names(values: Sequence[str] | None, allowed: Sequence[str], default: Sequence[str]) -> list[str]:
-    """``--langs hi en`` or ``--langs hi,en``; checked against ``allowed``."""
+    """``--langs hi en``, ``--langs hi,en`` or ``--langs hi --langs en``; checked against ``allowed``
+    (``default`` when the flag is not given). A flag given that names nothing (``--sets ''``, ``--sets ,``)
+    is refused: the line would run no cell and exit 0, as if done."""
     out = [v for item in (values or default) for v in str(item).split(",") if v]
+    if values is not None and not out:
+        raise SystemExit(f"{list(values)} names nothing: choose one or more of {list(allowed)}")
     bad = sorted(set(out) - set(allowed))
     if bad:
         raise SystemExit(f"unknown {bad}; choose from {list(allowed)}")
@@ -885,6 +889,18 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def _key_list(value: str) -> str:
+    """The argparse type of lift judge --keys: a key list's path, never an empty one, which would read as no
+    key list: the second judge would judge every generation of the cells, not P04's sample."""
+    if not value.strip():
+        raise argparse.ArgumentTypeError("needs the path of P04's key list, not an empty value (which would "
+                                         "judge every generation of the cells with the second judge)")
+    return value
+
+
+ADDS_UP = "; a repeated flag adds its values"      # --sets and --langs (action="extend")
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("smoke", help="Gate 0: precision, throughput, dry run, preamble, merge parity (GPU)")
     p.add_argument("--device", default="cuda:0", help="generator device (default cuda:0)")
@@ -901,8 +917,9 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p = sub.add_parser("generate", help="generate one variant's outputs for prompt sets and languages")
     p.add_argument("--variant", required=True, help="a name from configs/variants.yaml")
-    p.add_argument("--sets", nargs="+", default=None, help=f"default: {' '.join(SAFETY_SETS)}")
-    p.add_argument("--langs", nargs="+", default=None, help="default: all six")
+    p.add_argument("--sets", nargs="+", action="extend", default=None,
+                   help=f"default: {' '.join(SAFETY_SETS)}{ADDS_UP}")
+    p.add_argument("--langs", nargs="+", action="extend", default=None, help=f"default: all six{ADDS_UP}")
     p.add_argument("--split", required=True, choices=["dev", "final"])
     p.add_argument("--limit", type=_positive_int, default=None,
                    help="first N prompts per set and language (by pid; N >= 1)")
@@ -915,13 +932,14 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p = sub.add_parser("judge", help="judge one variant's generations (every one, or a second-judge subset)")
     p.add_argument("--variant", required=True)
-    p.add_argument("--sets", nargs="+", default=None, help=f"default: {' '.join(SAFETY_SETS)}")
-    p.add_argument("--langs", nargs="+", default=None, help="default: all six")
+    p.add_argument("--sets", nargs="+", action="extend", default=None,
+                   help=f"default: {' '.join(SAFETY_SETS)}{ADDS_UP}")
+    p.add_argument("--langs", nargs="+", action="extend", default=None, help=f"default: all six{ADDS_UP}")
     p.add_argument("--split", required=True, choices=["dev", "final"])
     p.add_argument("--judge", choices=["primary", "second"], default="primary")
     p.add_argument("--sample", type=float, default=None,
                    help="second judge: a seeded random fraction (e.g. 0.10) plus every validated item")
-    p.add_argument("--keys", default=None,
+    p.add_argument("--keys", type=_key_list, default=None,
                    help="second judge: judge exactly the generation keys listed in this file, in every "
                         "generations file that holds one (within --sets/--langs when given)")
     p.add_argument("--allow-missing", action="store_true",
@@ -933,8 +951,9 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p = sub.add_parser("run-dev", help="generate, then judge, every dev safety set in all six languages")
     p.add_argument("--variant", required=True)
-    p.add_argument("--langs", nargs="+", default=None, help="default: all six")
-    p.add_argument("--sets", nargs="+", default=None, help=f"default: {' '.join(SAFETY_SETS)}")
+    p.add_argument("--langs", nargs="+", action="extend", default=None, help=f"default: all six{ADDS_UP}")
+    p.add_argument("--sets", nargs="+", action="extend", default=None,
+                   help=f"default: {' '.join(SAFETY_SETS)}{ADDS_UP}")
     p.add_argument("--limit", type=_positive_int, default=None,
                    help="first N prompts per set and language (N >= 1; no record)")
     p.add_argument("--device", default="cuda:0", help="generator device")
@@ -949,8 +968,10 @@ def register(sub: argparse._SubParsersAction) -> None:
                        description=RESTART_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--variant", required=True, help="a name from configs/variants.yaml")
     p.add_argument("--split", required=True, choices=["dev", "final"])
-    p.add_argument("--sets", nargs="+", required=True, help=f"one or more of: {' '.join(ALL_SETS)}")
-    p.add_argument("--langs", nargs="+", required=True, help=f"one or more of: {' '.join(LANGS)}")
+    p.add_argument("--sets", nargs="+", action="extend", required=True,
+                   help=f"one or more of: {' '.join(ALL_SETS)}{ADDS_UP}")
+    p.add_argument("--langs", nargs="+", action="extend", required=True,
+                   help=f"one or more of: {' '.join(LANGS)}{ADDS_UP}")
     p.add_argument("--judge", choices=["primary", "second"], default=None,
                    help="only this judge's judgements file and records (default: the generations file, "
                         "every judgements file and every AuditKIT record of each cell)")
