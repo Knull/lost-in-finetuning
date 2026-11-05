@@ -41,6 +41,9 @@ from lift.train import lora, merge  # noqa: E402
 
 NAME = "adapter-aya-std-s1"
 PARITY = ["hi", "नमस्ते, आप कैसे हैं?"]
+# What registration.json's parity.<dtype>.prompts.source says of the default parity prompts.
+PARITY_RULE = ("drawn by Gate 0's merge-parity rule over the current dev prompts: "
+               f"lift.prompts.mixed_sample(20, split='dev', seed={gate0.SEED + 3})")
 COMMIT = "b" * 40
 SHA = "c" * 40
 # The user turn alone (byte-level tokens) fills max_seq_len 1024 after the tiny preamble.
@@ -635,6 +638,70 @@ def test_an_fp16_parity_registers_with_a_warning_whatever_its_share(tiny_model_d
     assert lora.register_pulled(NAME) == "unchanged"                     # the laptop applies the same rule
 
 
+def test_a_later_failed_fp32_parity_unregisters_an_adapter_an_fp16_parity_registered(
+        tiny_model_dir, utility, registry, tmp_path, monkeypatch, capsys):
+    # A T4 registers the adapter on an fp16 parity, the laptop registers it from the pull and commits that,
+    # and an A100 then resumes the same line where the fp32 base fits: the fp32 parity decides, and it fails.
+    write_sft(rows(4))
+    real = merge.parity_check
+
+    def t4_parity(adapter_dir, *, prompts, dtype, **kw):
+        assert dtype == "fp16"
+        return {"adapter_hash": merge.adapter_hash(adapter_dir), "dtype": dtype, "n": len(prompts),
+                "n_match": 1, "match_share": 0.5, "all_match": False, "first_divergence": [None, 2]}
+
+    def a100_parity(*a, **kw):
+        assert kw["dtype"] == "fp32"
+        out = real(*a, **kw)
+        return {**out, "n_match": out["n"] - 1, "all_match": False,
+                "first_divergence": [3] + [None] * (out["n"] - 1)}
+
+    t4, a100 = tmp_path / "t4" / "variants.yaml", tmp_path / "a100" / "variants.yaml"   # each VM's registry
+    for vm in (t4, a100):
+        vm.parent.mkdir()
+    t4.write_text(REGISTRY_TEXT, encoding="utf-8", newline="\n")
+    monkeypatch.setattr(merge, "parity_check", t4_parity)
+    path = train(tiny_model_dir, parity_dtype="fp16", registry=t4)
+    digest = merge.adapter_hash(path)
+    was = read(path / "registration.json")["registered"]
+    assert was["outcome"] == "added"
+    assert lora.register_pulled(NAME) == "added"            # the laptop's configs/variants.yaml, committed
+    a100.write_text(registry.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")    # the job's ref
+
+    monkeypatch.setattr(merge, "parity_check", a100_parity)
+    with pytest.raises(lora.ParityFailed) as failed:
+        train(tiny_model_dir, registry=a100)
+    message = " ".join(str(failed.value).split())
+    assert "NOT registered" in message and "rule 9" in message and "removed its entry" in message
+    assert f"lift register-adapter {NAME}" in message
+    reg = read(path / "registration.json")
+    assert reg["entry"] is None and reg["registered"] is None and reg["parity"]["fp32"]["all_match"] is False
+    assert reg["unregistered"]["was"] == was and reg["unregistered"]["reason"] == "fp32 merge parity failed"
+    assert reg["unregistered"]["when"]
+    assert a100.read_text(encoding="utf-8") == REGISTRY_TEXT       # its entry is gone, the comments kept
+    [run] = manifests(name=NAME, resumed=True)
+    assert run["status"] == "parity_failed" and run["registration"]["registered"] is None
+    assert run["registration"]["unregistered"] == reg["unregistered"]
+    summary = "\n".join(lora.summary(path))
+    assert "registered in" not in summary and "not registered" in summary
+    assert "fp32 merge parity failed" in summary and "register-adapter" not in summary
+
+    # The laptop: lift register-adapter removes the committed entry and prints the commit line (exit 1: the
+    # adapter is not registered).
+    assert main(["register-adapter", NAME]) == 1
+    out, err = capsys.readouterr()
+    assert f"{NAME}: removed from configs/variants.yaml" in err and "rule 9" in err
+    assert "git add configs/variants.yaml" in out and f'git commit -m "Unregister {NAME}' in out
+    assert registry.read_text(encoding="utf-8") == REGISTRY_TEXT
+    with pytest.raises(ValueError, match="FAILED.*not registered.*rule 9"):      # nothing left to remove
+        lora.register_pulled(NAME)
+    # Nothing evaluates it, whatever a registry pins (lift.models.variants.checked_adapter).
+    spec = lora._spec(lora.adapter_entry(NAME, digest, seed=1, location="x", note="y"))
+    refused = r"failed fp32 merge parity: it must not be evaluated \(CLAUDE.md rule 9\)"
+    with pytest.raises(ValueError, match=refused):
+        variants.build_variant(spec, device="cpu", dtype="fp32", model_id=str(tiny_model_dir))
+
+
 def test_the_t4_parity_exception_is_stated_as_the_code_applies_it(capsys):
     # lift.train.lora's docstring and lift train --help state the exception exactly: fp16 parity only on a
     # GPU without native bf16, its share recorded, the adapter registered with a warning whatever it is.
@@ -659,7 +726,8 @@ def safety_prompts(fake_prompt_files):
 
 def test_the_adapter_parity_runs_on_gate0s_parity_prompts(tiny_model_dir, safety_prompts, utility,
                                                           monkeypatch):
-    # The prompts Gate 0's own random-LoRA parity used, as run_gate0 hands them to check_parity.
+    # With the dev pools as Gate 0 found them, the draw is the prompts Gate 0's own random-LoRA parity used,
+    # as run_gate0 hands them to check_parity.
     from lift.prompts import mixed_sample
 
     handed = []
@@ -675,8 +743,7 @@ def test_the_adapter_parity_runs_on_gate0s_parity_prompts(tiny_model_dir, safety
     texts, info = lora._parity_texts(None)
     assert len(drawn) == gate0.N_PARITY == 20 and texts == [p.text for p in drawn]
     assert info["n"] == 20 and info["pids"] == [f"{p.set}_{p.lang}:{p.pid}" for p in drawn]
-    assert info["source"] == ("Gate 0's merge-parity sample: lift.prompts.mixed_sample(20, split='dev', "
-                              f"seed={gate0.SEED + 3})")
+    assert info["source"] == PARITY_RULE
     assert texts != [p.text for p in mixed_sample(20, split="dev", seed=0)]    # parity_check's own default
     assert lora._parity_texts(PARITY) == (PARITY, {"source": "given", "n": 2,
                                                    "sha256": [sha256_text(t) for t in PARITY]})
@@ -696,6 +763,27 @@ def test_the_adapter_parity_runs_on_gate0s_parity_prompts(tiny_model_dir, safety
     assert checked == [texts]
     recorded = read(path / "registration.json")["parity"]["fp32"]["prompts"]
     assert recorded == {"source": info["source"], "n": 20, "pids": info["pids"]}
+
+
+def test_the_parity_sample_is_gate0s_rule_over_the_dev_prompts_as_they_are_now(safety_prompts):
+    # Gate 0 records no pids: the draw is Gate 0's own sample only while the 18 dev pools are unchanged since
+    # it ran. A spot-check exclusion of a prompt Gate 0 drew changes the draw, so the record and the
+    # docstrings state the rule and the pids drawn, never that these are Gate 0's prompts.
+    _texts, info = lora._parity_texts(None)
+    assert info["source"] == PARITY_RULE
+    excluded = info["pids"][0]
+    cell, pid = excluded.split(":")
+    key = tuple(cell.rsplit("_", 1))
+    safety_prompts[key] = [p for p in safety_prompts[key] if p.pid != pid]       # excluded after Gate 0 ran
+    _texts, now = lora._parity_texts(None)
+    assert now["source"] == PARITY_RULE and now["n"] == 20
+    assert excluded not in now["pids"] and now["pids"] != info["pids"]
+    module, sample, run = (" ".join(f.__doc__.split())
+                           for f in (lora, lora.gate0_parity_sample, lora.train_lora))
+    assert "drawn by Gate 0's parity rule" in module and "while those dev pools are unchanged" in module
+    assert "drawn by Gate 0's parity rule" in sample
+    assert "only while those 18 dev pools are unchanged" in sample
+    assert "drawn by Gate 0's parity rule from the dev prompts as they are now" in run
 
 
 def test_a_failed_push_never_fails_training(tiny_model_dir, utility, hub):
@@ -814,6 +902,34 @@ def test_register_adapter_refuses_a_layout_it_cannot_edit(registry):
     assert registry.read_text(encoding="utf-8") == "variants: [{name: stock, method: stock}]\n"
 
 
+def test_unregister_adapter_removes_only_the_entry_pinning_this_hash_as_text(registry):
+    digest, other, s2 = "a" * 64, "b" * 64, "adapter-aya-std-s2"
+
+    def block(name, seed):
+        entry = lora.adapter_entry(name, digest, seed=seed, location="x", note="y")
+        return "\n".join(lora._entry_lines(entry, "  "))
+
+    registry.write_text(f"{REGISTRY_TEXT}{block(NAME, 1)}\n{block(s2, 2)}\n", encoding="utf-8", newline="\n")
+    both = registry.read_text(encoding="utf-8")
+    assert lora.unregister_adapter(NAME, other) is False          # another hash's entry is another adapter's
+    assert lora.unregister_adapter("adapter-aya-std-s3", digest) is False                    # no entry at all
+    assert registry.read_text(encoding="utf-8") == both
+    assert lora.unregister_adapter(NAME, digest) is True
+    assert registry.read_text(encoding="utf-8") == f"{REGISTRY_TEXT}{block(s2, 2)}\n"     # comments, s2 kept
+    # Entries set apart by blank lines: the gap is not left doubled.
+    spaced = f"{REGISTRY_TEXT}\n{block(NAME, 1)}\n\n{block(s2, 2)}\n"
+    registry.write_text(spaced, encoding="utf-8", newline="\n")
+    assert lora.unregister_adapter(NAME, digest) is True
+    assert registry.read_text(encoding="utf-8") == f"{REGISTRY_TEXT}\n{block(s2, 2)}\n"
+    # A layout the text writer cannot edit: nothing is written, and the entry to delete by hand is named.
+    flow = (f"variants: [{{name: stock, method: stock}}, {{name: {NAME}, method: adapter, adapter: {NAME}, "
+            f"seed: 1, artifacts: {{adapter: '{digest}'}}}}]\n")
+    registry.write_text(flow, encoding="utf-8", newline="\n")
+    with pytest.raises(ValueError, match=rf"still registers {NAME} \(adapter hash a{{12}}\).*by hand"):
+        lora.unregister_adapter(NAME, digest)
+    assert registry.read_text(encoding="utf-8") == flow
+
+
 def write_registration(directory, **changes):
     digest = merge.adapter_hash(directory)
     entry = lora.adapter_entry(NAME, digest, seed=1, note="aya, standard recipe, seed 1",
@@ -840,7 +956,11 @@ def test_register_adapter_on_the_laptop_checks_the_pulled_files(tiny_lora_adapte
     assert main(["register-adapter", NAME]) == 1
     assert "not the files the job checked" in capsys.readouterr().err
     write_registration(directory, parity={"fp32": {"n": 20, "n_match": 19, "all_match": False}})
-    assert main(["register-adapter", NAME]) == 1 and "FAILED" in capsys.readouterr().err
+    assert main(["register-adapter", NAME]) == 1       # the entry registered above pins this hash: removed
+    out, err = capsys.readouterr()
+    assert "removed from configs/variants.yaml" in err and "FAILED" in err and "git commit" in out
+    assert NAME not in registry.read_text(encoding="utf-8")
+    assert main(["register-adapter", NAME]) == 1 and "FAILED" in capsys.readouterr().err   # none to remove
     write_registration(directory, parity={"fp16": {"n": 20, "n_match": 17, "all_match": False}})
     assert main(["register-adapter", NAME]) == 0                             # a T4's fp16 parity registers
 
