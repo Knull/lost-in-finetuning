@@ -37,8 +37,9 @@ ADAPTER = {"name": "adapter", "method": "adapter", "adapter": "adapter-aya-std-s
            "artifacts": {"adapter": "b" * 64}}
 INTERVENTION = intervention_digest(VariantSpec.model_validate(ADAPTER))
 META = {"run_config": "rc0", "model_rev": "c" * 40, "harness": 1, "template": "9" * 16, "decoding": "d" * 16,
-        "torch": "2.15.0", "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB",
-        "intervention": INTERVENTION, "adapter_hash": "b" * 64}
+        "max_new_tokens": config.get("generation.max_new_tokens"), "torch": "2.15.0",
+        "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB", "intervention": INTERVENTION,
+        "adapter_hash": "b" * 64}
 GPU_CLASS = {"bf16": "8.0", "fp16": "7.5"}       # meta.gpu_capability: bf16 on the A100, fp16 on the T4
 STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}     # the judge's
 DIGEST = "e" * 64                                 # the bf16 Gate 0 run the T4 comparison paired with
@@ -117,9 +118,25 @@ def test_lift_metadata_records_the_loose_rate_failures_and_provenance(cell):
     assert lift["n_judge_failures"] == 1
     assert lift["provenance"] == {"dtype": ["bf16"], "run_config": ["rc0"], "model_rev": ["c" * 40],
                                   "harness": ["1"], "template": ["9" * 16], "decoding": ["d" * 16],
-                                  "torch": ["2.15.0"], "transformers": ["5.22.1"],
+                                  "max_new_tokens": ["256"], "torch": ["2.15.0"], "transformers": ["5.22.1"],
                                   "gpu": ["NVIDIA A100-SXM4-40GB"], "intervention": [INTERVENTION],
                                   "adapter_hash": ["b" * 64], "judge_stack": [stable_json(STACK)]}
+
+
+def test_no_record_for_a_cell_made_under_another_cap_than_the_configured_one(cell, monkeypatch):
+    """R2-10: after a dated edit of generation.max_new_tokens, a cell nobody made again under the new cap is
+    refused, through record_safety or a command's record step, as stale with its restart line: no AuditKIT
+    record carries the old cap's rates."""
+    from lift.commands import run as run_cmd
+
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", 512)
+    with pytest.raises(ValueError, match="6 generations were made under another cap than the 512 new tokens"):
+        audit.record_safety(*CELL)
+    refused: dict[str, str] = {}
+    run_cmd._record(*CELL, dtype="bf16", refused=refused)
+    assert list(refused) == ["harmful_hi_dev"]
+    assert "lift restart --variant adapter --split dev --sets harmful --langs hi" in refused["harmful_hi_dev"]
+    assert not (metrics_dir() / "auditkit").exists()
 
 
 def test_a_judge_without_a_loose_reading_records_none(cell):
