@@ -327,7 +327,9 @@ PROVENANCE_FIELDS = ("model_rev", "harness", "template", "decoding")
 
 
 def _judge_identity(judge_id: str) -> str:
-    """A judge id without its precision segment ("...@sha#bf16#strict" -> "...@sha#strict")."""
+    """A judge id without its precision segment ("...@sha#rules-<tag>#bf16#strict" ->
+    "...@sha#rules-<tag>#strict"): the labelling rules stay in it, so runs labelled under other rules are
+    never compared."""
     return _DTYPE_SEGMENT.sub("", judge_id)
 
 

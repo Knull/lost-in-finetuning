@@ -12,6 +12,7 @@ pytest.importorskip("peft")
 from fakes import make_prompt  # noqa: E402
 
 from lift import gate0  # noqa: E402
+from lift.judge.labels import rules_tag  # noqa: E402
 from lift.prompts import SAFETY_SETS  # noqa: E402
 from lift.schemas import LANGS  # noqa: E402
 
@@ -894,6 +895,7 @@ def test_a_reduced_reference_run_is_incomplete_and_leaves_gate0_json(prompt_stor
 # --- judge identity in the fp16 comparison (R28) ----------------------------------------------------------
 
 GUARD = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
+RULES = rules_tag()                     # the labelling rules' tag every judge id carries (lift.judge.labels)
 
 
 def _write_run(root, judge_id, n=4, harness=1):
@@ -920,13 +922,15 @@ def _write_run(root, judge_id, n=4, harness=1):
 
 
 @pytest.mark.parametrize("candidate, same", [
-    (f"{GUARD}#fp16#strict", True),                       # only the precision differs: comparable
-    (f"{GUARD}#fp16#loose", False),                       # another Controversial mapping
-    ("Qwen/Qwen3Guard-Gen-4B@" + "c" * 40 + "#fp16#strict", False),   # another judge revision
-    ("Qwen/Qwen3Guard-Gen-8B@" + "a" * 40 + "#fp16#strict", False),   # another judge model
-], ids=["dtype-only", "mode", "revision", "model"])
+    (f"{GUARD}#{RULES}#fp16#strict", True),               # only the precision differs: comparable
+    (f"{GUARD}#{RULES}#fp16#loose", False),               # another Controversial mapping
+    (f"{GUARD}#rules-00000000#fp16#strict", False),       # R1-12: labelled under other labelling rules
+    ("Qwen/Qwen3Guard-Gen-4B@" + "c" * 40 + f"#{RULES}#fp16#strict", False),   # another judge revision
+    ("Qwen/Qwen3Guard-Gen-8B@" + "a" * 40 + f"#{RULES}#fp16#strict", False),   # another judge model
+], ids=["dtype-only", "mode", "rules", "revision", "model"])
 def test_compare_runs_lets_only_the_judge_precision_differ(tmp_path, tiny_tokenizer, candidate, same):
-    _write_run(tmp_path / "ref", f"{GUARD}#bf16#strict")
+    assert RULES != "rules-00000000"
+    _write_run(tmp_path / "ref", f"{GUARD}#{RULES}#bf16#strict")
     _write_run(tmp_path / "cand", candidate)
     cmp = gate0.compare_runs(tmp_path / "ref", tmp_path / "cand", tiny_tokenizer)
     assert cmp["n"] == 4 and cmp["label_agreement"] == 1.0
@@ -937,8 +941,8 @@ def test_compare_runs_lets_only_the_judge_precision_differ(tmp_path, tiny_tokeni
 def test_compare_runs_names_no_setting_its_pairs_do_not_share(tmp_path, tiny_tokenizer):
     """Contract J: the comparison records the one harness and decoding of its pairs (the licence pins them);
     pairs made under different ones are invalid and name none."""
-    _write_run(tmp_path / "ref", f"{GUARD}#bf16#strict", harness=0)
-    _write_run(tmp_path / "cand", f"{GUARD}#fp16#strict")
+    _write_run(tmp_path / "ref", f"{GUARD}#{RULES}#bf16#strict", harness=0)
+    _write_run(tmp_path / "cand", f"{GUARD}#{RULES}#fp16#strict")
     cmp = gate0.compare_runs(tmp_path / "ref", tmp_path / "cand", tiny_tokenizer)
     assert cmp["invalid"] == {"harness": 4} and cmp["harness"] is None and cmp["decoding"] == "d" * 16
 
@@ -950,7 +954,7 @@ def test_precision_digest_names_the_outputs_and_labels_of_a_run(tmp_path):
     from lift.io import read_jsonl, sha256_obj, sha256_text, write_jsonl
 
     root = tmp_path / "run"
-    _write_run(root, f"{GUARD}#bf16#strict")
+    _write_run(root, f"{GUARD}#{RULES}#bf16#strict")
     gpath, jpath = (root / sub / "harmful_en_dev.jsonl" for sub in ("generations", "judgements"))
     gens, juds = list(read_jsonl(gpath)), list(read_jsonl(jpath))
     digest = gate0.precision_digest(root)

@@ -25,8 +25,10 @@ import pytest
 
 from lift import paths, sync
 from lift.io import read_jsonl, sha256_obj, sha256_text, stable_json
+from lift.judge.labels import rules_tag
 
 REPO = "tester/lift-runs"
+RULES = rules_tag()                     # the labelling rules' tag every judge id carries (lift.judge.labels)
 GEN = "outputs/generations/stock/harmful_en_dev.jsonl"
 JUD = "outputs/judgements/qwen3guard/stock/harmful_en_dev.jsonl"
 CACHE = "outputs/judge_cache/frontier/openai__judge.jsonl"
@@ -359,7 +361,7 @@ def gen_row(key: str, pid: str, *, dtype: str = "bf16", **fields) -> dict:
 def jud_row(key: str, pid: str, label: str, **fields) -> dict:
     """A JudgementRecord as lift.judge.pipeline writes it."""
     return {"key": key, "variant": "stock", "pid": pid, "lang": "en", "set": "harmful", "split": "dev",
-            "judge": "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40 + "#bf16#strict", "judge_label": label,
+            "judge": f"Qwen/Qwen3Guard-Gen-4B@{'a' * 40}#{RULES}#bf16#strict", "judge_label": label,
             "label": label, "native": {}, "raw": "",
             "flags": {"too_short": False, "repetitive": False, "garbled": False, "wrong_lang": False,
                       "code_mixed": False, "lid_top": []}, **fields}
@@ -1124,7 +1126,7 @@ def test_real_client_preflight_reads_whoami(http_front):
 # ---------------------------------------------------------------------------- judgements follow generations
 
 
-FP16_JUDGE = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40 + "#fp16#strict"
+FP16_JUDGE = f"Qwen/Qwen3Guard-Gen-4B@{'a' * 40}#{RULES}#fp16#strict"
 
 
 def test_judgements_never_go_up_without_their_generations(tmp_path, monkeypatch):
