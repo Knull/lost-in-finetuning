@@ -2,6 +2,132 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 5, 2026: R1 review fixes, before the stock dev eval
+
+R1 (prompts/R1_review.md) reviewed the data pipeline and the harness after P01, P02 and P04 had
+merged. The items below change or pin a locked rule. Every other R1 fix enforces a rule that was
+already written; each fix's test names its finding (R1-NN). Items 50 to 55 belong to the P03
+branch.
+
+56. **A prompt cell holds its whole frozen split, and every split stamp is the committed one's**
+    (R1-01, R1-17, R1-19).
+    - A translation failure on a frozen fit, dev or final pid that a rerun cannot add (wrong_lang,
+      identical, empty, too_long) no longer leaves the build "complete". The file's report lists
+      the pid under `awaiting_review`, and build.json lists the cell under `short_cells` with
+      `complete` false. `rerun_needed` and the exit code stay as item 44 sets them, and
+      `lift data stats` lists the cells that are short now, from the current reports.
+    - `lift.data.build.load_prompts`, the one reader of the prompt files, refuses a read of one
+      split with `ShortCellError` while a frozen pid of that split is missing and the file's
+      report does not list it as excluded (a reader's bad verdict, or a hard_benign fit record the
+      same-text rule dropped). `lift generate` and `lift run-dev` skip such a cell and list it with
+      its remedy (exit 3): a reader's verdict on the failures sheet
+      (validation/sheets/spotcheck_<lang>_failures.csv, made with
+      `lift data spotcheck-sheets --langs <lang>` if it does not exist), then
+      `lift data apply-spotchecks`, then `lift sync push`. A read of every split checks the stamps
+      only, so a short final cell never holds back its set's dev cells, Gate 0 or the second
+      judge's draw.
+    - Every record must carry the split data/splits gives its pid (a PolyRefuse train or val pid
+      its own segment, a redteam pid final). A committed split file whose per-split counts are not
+      the locked sizes stops the build. The PolyRefuse pin check also needs a clean working tree.
+    - On the current data this holds back easy_benign zh final (prb-test-0240, 0484 and 0499:
+      short all-Han translations that GlotLID reads as Japanese) until the zh reader's verdicts are
+      applied. No dev cell is short.
+
+57. **SFT pools** (R1-20, R1-21, R1-02).
+    - The held-out near-duplicate rule is item 24's as written. The 20-character answer minimum
+      (`sources.sft.heldout.near_dup.response_min_chars`), which no decision allowed, is removed.
+      aya-00017 and aya-00368, whose answers are identical to the final utility items
+      utl-aya-00922 and utl-aya-00801, leave the Aya training pool, and so does aya-01110.
+    - Dolly_T rows whose Hindi pair is reversed against the English pair are dropped
+      (`hindi_reversed`): rows 635, 2496, 5630, 7510 and 13137 at the pinned revision. The context
+      rule already dropped 7510 and 13137, so item 22's kept count goes from 10,526 to 10,523.
+    - `build_candidates` leaves data/sft holding exactly the variants report.json lists. lift sync
+      never deletes, so the stale data/sft/aya/raw copy (Nov 3, 679 rows) is deleted once by hand,
+      from the runs repo first.
+    - Counts on the pinned sources, from a rebuild of the current inputs in a scratch directory
+      (whose pre-fix run reproduced today's report.json byte for byte). Aya: near_dup_excluded
+      60 -> 63, train pool 790 -> 787, raw pool 788 -> 785, aya/dedup 679 -> 677. IndicAlign:
+      pool 10,322 -> 10,319, train pool 10,144 -> 10,141, curated 9,958 -> 9,955. The two
+      3,000-row exports stay at 3,000. These replace the counts in items 22, 23 and 47.
+    - The held-out draw and data/splits/utility.json are unchanged. The training files are rebuilt
+      with `lift data build --only sft`, then `lift sync push`, before any adapter trains: an
+      adapter trained on the Nov 4 files has seen two final utility answers.
+
+58. **The labelling rules are part of a judge's identity** (R1-12, R1-09, R1-41).
+    - `lift.judge.labels.rules_tag()` digests LABELS_VERSION, `unclear.*`,
+      `languages.accept_labels`, `langid` and GlotLID's top-k (`lift.lang.LID_TOP_K`, 5). Every
+      judge id carries it: Qwen3Guard `{model}@{sha}#rules-<tag>#{dtype}#{mode}`, the frontier
+      judge its own id plus `#rules-<tag>`. Resume, the reporting door, pairing, sync's
+      one-judge-per-file rule, Gate 0's comparison and the validation scoring all refuse labels
+      made under other rules.
+    - LABELS_VERSION 1 is the labelling code as R1 leaves it. A change to the settings above, or
+      to that code (which bumps LABELS_VERSION; labels.py lists what it covers), means judging the
+      affected cells again with the role's `lift restart ... --judge ROLE` line. The frontier
+      judge's call cache is keyed by its own id, so its replies are reused.
+    - A frontier cell is read only under the configured rubric (file stem and sha), sampling
+      settings and labelling rules. The API version may differ: constraints.txt pins the SDK.
+    - Validation (Gate 1, the judge decision) scores only judgements whose id fits the configured
+      judges' rule. Any other, such as a loose-mode run, an old rubric or old rules, is counted in
+      `checks.other_judges` and its item stays pending.
+    - Judgements made before this change carry no tag and are never read again. That includes the
+      Nov 4 Gate 0's.
+
+59. **A cell is read only if this code and configuration made it** (R1-03).
+    - Every generation records `meta.intervention` and `meta.adapter_hash`. The reporting door
+      refuses a cell whose generations carry another harness version, another Global revision than
+      the pin, no intervention digest or another one than the variant's current
+      configs/variants.yaml entry, or another adapter hash than that entry's pin. A variant that
+      names an adapter is read only when its entry pins `artifacts.adapter`. Cache keys and
+      HARNESS_VERSION are unchanged.
+    - So retraining or re-registering an adapter, re-pinning Global or bumping the harness means
+      making the affected cells again. `lift generate` refuses to extend a cell begun before this
+      change, which could never be read.
+
+60. **Gate 0 pass rules and non-finite decoding, amending item 27** (R1-23, R1-46, R1-25).
+    - Preamble: the chat text rendered for one user message holds exactly one system block, that
+      block contains "contextual safety mode", and the text ends with the generation prompt
+      (`<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|><|START_RESPONSE|>`). This has not run on the real
+      tokenizer, which is not in the laptop's cache: the next Gate 0 checks it.
+    - fp16 comparison: it also scans the fp16 judge's activations on the pairs it judged, and any
+      judge failure in the compared run fails it.
+    - Every generation run refuses non-finite decoding (a NaN or +inf score before end-of-turn).
+      Nothing of that batch is written, and `lift generate` and `lift run-dev` skip the cell and
+      list it (exit 3). In fp16 that is "fp16 failed: T4 runs are never reported", and the cell is
+      made in bf16, after its `lift restart ... --dtype fp16` line if its file holds fp16 records.
+      In bf16 it is a fault to report (rule 9). A wrapper (P05's CAST) must pass the logits
+      processor on to every inner decode. A non-finite Qwen3Guard decode is a judge failure.
+    - The Nov 4 Gate 0 predates these rules and the rules tag, so Gate 0 runs again on the frozen
+      harness before the stock dev eval.
+
+61. **Adapter hash, amending item 30** (R1-27). It also covers the PEFT fields that change the
+    model PEFT loads (`lift.train.merge.BEHAVIOUR_DEFAULTS`: init_lora_weights, kasa_config and
+    the rest), each only when it holds a value other than PEFT 0.21.2's default. Every adapter of
+    the locked recipe keeps its hash.
+
+62. **Publication, clarifying item 14** (R1-14). The public logs dataset holds no output text and
+    no judge text: prompt ids, labels, flags, generation keys, output hashes (the redacted AuditKIT
+    records), metadata and aggregate tables. Every judged output, refusals and benign answers
+    included, and the judges' raw replies, reasons and failure messages go only to a gated repo.
+    The Space shows at most a cut of about 10 words, then [redacted]. P08 guards public files by
+    their content, not by label: for about 90% of outputs a refusal label is Qwen3Guard's alone,
+    and the judge bar tolerates 15% disagreement with humans.
+
+63. **Restarts and sync, clarifying item 32** (R1-08). When the runs repo's copy of a file that
+    `lift restart` emptied has changed since this machine's last sync, sync never merges it (a
+    merge would refill it). Push and pull report a conflict, and `lift sync push --force`
+    completes the restart.
+
+64. **Qwen3Guard's output head** (R1-11). Qwen3GuardJudge refuses a checkpoint whose config ties
+    the head to the embeddings while the head loads untied. The pinned 6ec42827 loads tied (the
+    Nov 4 Gate 0 log has no warning), so this guards a future revision only.
+
+65. **Validation details** (R1-15, R1-16, R1-40, R1-44). gate1.json counts every Hindi round-1
+    item, skips included, with the range the bar could take over up to 8 skipped rows; the verdict
+    rule is unchanged. The agreement bar is decided in exact arithmetic, so a kappa of exactly 0.6
+    meets it. Validation reads cells in another precision only under Gate 0's licence. A label
+    column sorted on its own stops the import while the ids keep the sheet's order, and is a
+    warning when they are in item_id order.
+
 ## Nov 4, 2026 (night): model and judge revisions pinned after Gate 0
 
 49. **The three revisions are pinned to the commit shas Gate 0 resolved.** `lift generate`,

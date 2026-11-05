@@ -22,8 +22,12 @@ record into the results tables, figures, verdicts and the cost section.
    - the primary judge on everything, plus the ar/th back-translation sample (20%);
    - the second-judge 10% sample, queued for the API.
 
-   It resumes after a crash and uses both GPUs. Each manifest records GPU-hours. It refuses to
-   run unless both of these hold (this protects the final split):
+   It resumes after a crash and uses both GPUs. Each manifest records GPU-hours. A cell short of
+   its frozen split (`lift.data.build.ShortCellError`: a translation failure still waiting for
+   a reader's verdict) is skipped and listed with its remedy, in judging as well as generation.
+   Since R1, `lift generate` and `lift run-dev` do this, but `lift judge` over every cell stops
+   on the missing generations file. It refuses to run unless both of these hold (this protects
+   the final split):
    - the variant is frozen: listed in `selection.json`, or it is stock or an adapter seed;
    - a `recipe-frozen-*` git tag exists.
 2. **`lift final --all`.** Runs the 13 core variants, in an order that completes the primary
