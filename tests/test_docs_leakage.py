@@ -12,11 +12,17 @@ HF_README = REPO_ROOT / "hf" / "README.md"
 P08 = REPO_ROOT / "prompts" / "P08_publish.md"
 
 # A phrase that puts per-output model text in an artifact: "refusal texts", "output text", "completions",
-# "raw ...", "model outputs", "responses". Labels, keys, hashes and aggregates (tables, rates) do not match.
+# "raw ...", "model outputs", "responses". Labels, keys, hashes and aggregates (tables, rates) do not match,
+# nor does a record field (JudgementRecord.raw): a name, which JUDGE_TEXT checks.
 OUTPUT_TEXT = re.compile(r"\b(?:refusal|output|response|completion|answer|generation|model)s?\s+texts?\b"
-                         r"|\bcompletions?\b|\braw\b|\b(?:model|judged)\s+outputs?\b|\bresponses\b", re.I)
+                         r"|\bcompletions?\b|(?<!\.)\braw\b|\b(?:model|judged)\s+outputs?\b"
+                         r"|\bresponses\b", re.I)
 NEGATED = re.compile(r"\bno\s+(?:other\s+)?$", re.I)  # "no output text", "no other output text"
 ANY_LABEL = re.compile(r"\bwhatever (?:its|their) label\b", re.I)
+# The judges' own text, judge logs that CLAUDE.md rule 6 gates like the outputs: a judgement's raw reply
+# (Qwen3Guard's, or a frontier judge's JSON) and a frontier judge's reason.
+JUDGE_TEXT = ("JudgementRecord.raw", "native.reason")
+KEPT_OUT = re.compile(r"\bstays?\s+out\b", re.I)
 
 
 def flat(text: str) -> str:
@@ -27,6 +33,12 @@ def promised_output_text(contents: str) -> list[str]:
     """The phrases of ``contents`` that put per-output text in the artifact (a negated one says the
     opposite)."""
     return [m.group(0) for m in OUTPUT_TEXT.finditer(contents) if not NEGATED.search(contents[:m.start()])]
+
+
+def keeps_judge_text_out(contents: str) -> bool:
+    """Whether one sentence of ``contents`` names every JUDGE_TEXT field and keeps them out."""
+    return any(all(name in sentence for name in JUDGE_TEXT) and KEPT_OUT.search(sentence)
+               for sentence in re.split(r"(?<=\.)\s+", flat(contents)))
 
 
 def artifact_rows() -> dict[str, tuple[str, str]]:
@@ -68,6 +80,8 @@ def test_hf_readme_public_artifacts_hold_no_output_text():
     assert leaks == {}, f"hf/README.md puts per-output text in a public artifact: {leaks}"
     logs = rows["Logs dataset"][1]
     assert "no output text" in logs.lower() and "output hashes" in logs
+    # R1-14 follow-up: nor the judges' text, which the judgements files hold beside each label.
+    assert keeps_judge_text_out(logs), "hf/README.md's logs dataset does not keep JUDGE_TEXT out"
     access, contents = rows["Raw completions"]
     assert "gated" in access and "manual approval" in access
     assert "every judged output" in contents.lower() and "refusals" in contents
@@ -85,7 +99,9 @@ def test_p08_publishes_no_output_text_and_guards_public_files_by_content():
     assert leaks == {}, f"P08 tells `lift publish datasets` to put per-output text in public: {leaks}"
     logs = next(contents for name, contents in public.items() if "logs dataset" in name.lower())
     assert "no output text" in logs.lower() and "output hashes" in logs
-    gated = [item for item in items if "(gated, manual approval)" in item]
+    logs_item = next(item for item in items if "logs dataset" in item.split(" (", 1)[0].lower())
+    assert keeps_judge_text_out(logs_item), "P08's logs dataset does not keep JUDGE_TEXT out"
+    gated =[item for item in items if "(gated, manual approval)" in item]
     assert len(gated) == 1 and "every judged output" in gated[0].lower() and "refusals" in gated[0]
     # The guard reads the content, never a label (most labels are one judge's call).
     assert not any("harmful label" in item for item in items)
