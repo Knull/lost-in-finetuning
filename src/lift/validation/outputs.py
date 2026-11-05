@@ -16,9 +16,9 @@ Codes against lift.schemas and the CLAUDE.md file layout, not against the harnes
 - Records in a precision other than ``generation.dtype`` (meta "dtype", e.g. a T4 fp16 check) are
   left out and counted, unless that precision is asked for. Naming one licenses nothing: records
   read in it must be covered by Gate 0's licence (decisions.md 27), checked by the harness's own
-  rule (``check_licence``: gate0-{dtype}.json and its bf16 gate0.json, and the harness, decoding
-  settings and GPU class the cell was made and judged with), or the read is a LicenceError. Two
-  current records for one pid (two runs mixed in one file) are an error.
+  rule (``check_licence``: gate0-{dtype}.json and its bf16 gate0.json, the harness, decoding
+  settings and GPU class the cell was made and judged with, and the judge it was judged by), or the
+  read is a LicenceError. Two current records for one pid (two runs mixed in one file) are an error.
 - A pid of the split with no record at all means the run is unfinished. The harness batches by
   length, so a partial run holds only the shortest prompts, and sampling from it would bias the
   sheet. Callers refuse such files.
@@ -231,8 +231,9 @@ def licence_problems(dtype: str, gens: Sequence[GenerationRecord], judgements: S
     applies it to every reported number (``_licence_problems``): gate0-{dtype}.json passes on at least 200
     prompts against the bf16 Gate 0 that gate0.json still records, both for the revision of Global that
     made ``gens``; ``gens`` were made under the comparison's harness, decoding settings and GPU class; and
-    the ``judgements`` with a stack (Qwen3Guard's) were made on that GPU class. Empty ``gens`` (a file
-    that cannot be read here) still need the two reports to pass."""
+    the ``judgements`` with a stack (Qwen3Guard's) were made on that GPU class by the judge the comparison
+    ran (its judge.id, the precision aside). Empty ``gens`` (a file that cannot be read here) still need
+    the two reports to pass."""
     if dtype == str(config.get("generation.dtype")):
         return []
     from lift.judge.pipeline import _licence_problems  # noqa: PLC0415 (the harness's rule, not a copy)

@@ -399,7 +399,8 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
     checks["other_judges"] = dict(judged.other)
     # A round drawn in another precision than generation.dtype is scored only while Gate 0's licence
     # covers every cell it reads: the generations (load_pool checked those of a readable file), the
-    # judgements scored here (Qwen3Guard's GPU class), and the licence itself for a file not readable now.
+    # judgements scored here (Qwen3Guard's GPU class and judge), and the licence itself for a file not
+    # readable now.
     gen_dtype = str(config.get("generation.dtype"))
     off: dict[tuple[str, str, str, str], tuple[int, str, list[str]]] = {}
     for it in main:
