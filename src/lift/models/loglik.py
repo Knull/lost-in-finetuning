@@ -83,6 +83,8 @@ split are left aside and counted (``n_outside_split``).
   split are complete under the same precision, model revision, template and task settings; otherwise
   ``vs_stock_note`` says why. It is computed when the variant's metrics are written: a stock cell scored
   again later needs the variant's line run again (``stock_scores_sha256`` names the file it paired with).
+  Stock's scores in another precision are never paired, and the note then names the precision that
+  pairs with them rather than a line that would score stock again (it would refuse stock's file).
 Metrics are recomputed from the score files, one language at a time, and never retired whole for one
 cell: a language whose file stops qualifying (started over, stale, made in another precision) moves to
 ``left_out`` with the reason, and every other language keeps its numbers. When nothing qualifies, existing
@@ -1173,14 +1175,28 @@ def _paired(mine: Mapping[str, Mapping[str, Any]], stock: Mapping[str, Mapping[s
 
 def _vs_stock(variant: str, split: str, records: Sequence[Mapping[str, Any]],
               prompts: Sequence[PromptRecord], *, dtype: str) -> tuple[dict[str, Any] | None, str | None]:
-    """(the paired comparison with stock, None), or (None, why there is none)."""
+    """(the paired comparison with stock, None), or (None, why there is none). The note names stock's line
+    (in ``dtype``) only when that line could make the scores. Stock's file made in another precision is
+    never paired and never started over from a ``dtype`` run, so then it names the precision that pairs
+    with it instead: the line would only refuse the file."""
     if variant == "stock":
         return None, "this is stock"
     path = heldout_scores_path("stock", split)
+    held, _why = _readable(path, "heldout_nll")
+    made = sorted({str(r["meta"]["dtype"]) for r in held if r["meta"].get("dtype")} - {dtype})
+    if made:
+        was = "/".join(made)
+        return None, (f"stock's held-out scores of {split} were made in {was}, not {dtype}: scores are never "
+                      f"paired across precisions, and stock's file is never started over from a run in "
+                      f"{dtype} (that would discard its {was} scores). Score this variant in {was}, where "
+                      f"{was} runs, to pair it with them")
     stock, _outside, why = _heldout_items(path, prompts, dtype=dtype, run_config=None)
     if why:
-        return None, (f"stock's held-out scores of {split} cannot be paired ({why}); run `lift heldout-loss "
-                      f"--variant stock --split {split}`, then this variant's line again")
+        line = f"lift heldout-loss --variant stock --split {split}"
+        if dtype != config.get("generation.dtype"):
+            line += f" --dtype {dtype}"
+        return None, (f"stock's held-out scores of {split} cannot be paired ({why}); run `{line}`, then this "
+                      "variant's line again")
     ours, theirs = records[0]["meta"], stock[0]["meta"]
     differ = {k: [ours.get(k), theirs.get(k)] for k in _PAIR_MUST_MATCH if ours.get(k) != theirs.get(k)}
     if differ:
