@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import random
+import re
 import sys
 import types
 from pathlib import Path
@@ -434,6 +435,54 @@ def test_lid_defaults_to_langid_only_when_needed(fake_prompt_files, monkeypatch)
     write_gens([gen(p, tag="v3") for p in pids])
     pipeline.judge_file(path, judge=FakeJudge(), out_path=pipeline.judgements_path("other", *CELL))
     assert len(built) == 1 and built[0].calls == 2
+
+
+# GlotLID's answer for a Hindi output it spreads over Devanagari labels, best first. The labels hi accepts
+# (hin_Deva, anp_Deva, mai_Deva: languages.accept_labels.hi) hold 0.30 among the top 3 and 0.51 among the top
+# 5; mar_Deva and npi_Deva are in no accept list.
+SPREAD = [("hin_Deva", 0.30), ("mar_Deva", 0.12), ("npi_Deva", 0.12), ("anp_Deva", 0.11), ("mai_Deva", 0.10)]
+
+
+class RecordingLID:
+    """lift.lang.LangID's ``top`` on every output: SPREAD cut to the k asked for; records each k."""
+
+    def __init__(self):
+        self.ks: list[int] = []
+
+    def top(self, text, k=3):
+        assert text.strip(), "LID must not run on an empty output"
+        self.ks.append(k)
+        return list(SPREAD[:k])
+
+
+def test_judge_file_reads_glotlids_top_5_so_garbled_means_not_is_lang(fake_prompt_files):
+    """R1-38 (decisions item 43): the unclear flags read GlotLID's top ``lift.lang.LID_TOP_K`` = 5 labels,
+    the ones ``LangID.is_lang`` sums, so an output whose top label is accepted is garbled exactly when is_lang
+    rejects it. Here labels 4 and 5 carry the accepted mass past 0.5: the top 3 would call it garbled."""
+    from lift import lang
+
+    accept, min_prob = config.get("languages.accept_labels"), float(config.get("langid.min_prob"))
+    assert not any(lab in labs for lab in ("mar_Deva", "npi_Deva") for labs in accept.values())
+    assert lang.accepted(SPREAD, accept, "hi", min_prob)                  # LangID.is_lang: Hindi
+    assert not lang.accepted(SPREAD[:3], accept, "hi", min_prob)          # the top 3 would reject it
+    pids = [f"prh-test-{i:04d}" for i in range(4)]
+    fake_prompt_files[("harmful", "hi")] = [make_prompt(p, "hi") for p in pids]
+    lid = RecordingLID()
+    out = pipeline.judge_file(write_gens([gen(p, lang="hi") for p in pids]), judge=FakeJudge(), lid=lid)
+    assert lang.LID_TOP_K == 5 and lid.ks == [lang.LID_TOP_K] * len(pids)
+    rows = list(read_jsonl(out))
+    assert len(rows) == len(pids)
+    for r in rows:
+        assert r["flags"]["lid_top"] == [list(p) for p in SPREAD]
+        assert not r["flags"]["garbled"] and not r["flags"]["wrong_lang"] and r["label"] == "benign"
+
+
+def test_the_module_docstring_names_the_top_5_call():
+    """R1-38: the module docstring, which a re-implementation or an audit of the flags follows, named the top
+    3 that decisions item 43 replaced."""
+    doc = " ".join((pipeline.__doc__ or "").split())
+    assert not re.findall(r"top[- ]?3\b", doc), "the docstring names GlotLID's top 3, not its top 5"
+    assert re.search(r"\btop[- ]?5\b", doc) and "LID_TOP_K" in doc
 
 
 def test_sample_is_seeded_order_free_and_adds_the_validation_rounds(fake_prompt_files, tmp_path):
