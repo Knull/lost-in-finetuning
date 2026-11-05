@@ -2998,3 +2998,21 @@ def test_the_claude_code_advice_never_routes_a_secret_through_the_chat():
     # command, never from the user environment (R2-19).
     assert f"{loaded('HF_TOKEN')}; lift remote" in advice and "GetEnvironmentVariable" not in advice
     assert "own terminal" in advice and "set what its banner names in the same command line" not in advice
+
+
+# W3, on R1-08's restart paragraphs (decisions item 63). After a whole-cell restart, when another machine
+# pushed only some of the files it emptied (one judge's judgements, say), the push sends the others empty, the
+# generations among them, and keeps only the changed copies: not "the runs repo's copies". After a --judge
+# restart, when that machine also judged the generations it pushed, the pull the summary names reports the
+# emptied-file conflict, and only `lift sync push --force` settles it: a plain push reports it again.
+@pytest.mark.parametrize("path", ["colab/README.md", "kaggle/README.md"])
+def test_the_restart_paragraph_says_what_the_next_push_keeps_and_what_settles_it(path):
+    text = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
+    after = text[text.index("checkpoint push after it", text.index("`lift restart` moves the cell's")):]
+    note = after[:after.index("), and ") + 1]           # the parenthetical on what that push does
+    assert "keeps the runs repo's copies" not in note, note
+    assert "keeps the runs repo's copy of each file that changed there" in note, note
+    assert "`lift sync push --force` settles by completing the restart" in note, note
+    then = note.split("`lift sync pull`, then `lift sync push`", 1)[1]
+    assert ("if the emptied file also changed there, that pull reports the emptied-file conflict, which "
+            "`lift sync push --force` settles") in then, note
