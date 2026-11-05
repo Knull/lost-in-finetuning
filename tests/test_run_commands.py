@@ -748,6 +748,73 @@ def test_generate_skips_a_short_cell_lists_its_remedy_and_exits_3(tiny_model_dir
     assert "easy_benign_zh_final: short of its frozen split, skipped" in caplog.text
 
 
+def frozen_generations(lang, pids, *, variant="stock"):
+    """easy_benign ``lang`` final generations of ``pids``, from frozen_cell's prompt texts, as lift generate
+    made them before a read of the split refused a cell short of its frozen split (R1-01). Placeholder
+    outputs."""
+    from lift.models.generate import generations_path
+
+    write_jsonl(generations_path(variant, "easy_benign", lang, "final"), [{
+        "key": sha256_text(f"{variant}:{lang}:{pid}"), "variant": variant, "pid": pid, "lang": lang,
+        "set": "easy_benign", "split": "final", "prompt_sha": sha256_text(f"q {pid}"), "output": "o",
+        "n_prompt_tokens": 1, "n_new_tokens": 1, "hit_cap": False, "seconds": 0.1, "meta": {"dtype": "bf16"}}
+        for pid in pids])
+
+
+def test_judge_refuses_a_short_cells_record_with_its_remedy_and_exits_3(tmp_path, monkeypatch, caplog):
+    # W3-02: lift judge reads a cell's prompt texts by pid, so it judges a short cell's generations made
+    # before R1-01 (easy_benign zh final on the real data). Its AuditKIT record then loaded the split outside
+    # the record's refusal handling: ShortCellError was a traceback after the judgements were written, and no
+    # later cell of the line ran. The record is refused with the error's remedy now (and the lines that then
+    # make it), the other cells are judged and recorded, and the line exits 3.
+    from lift.judge import pipeline
+    from lift.judge.pipeline import JudgeOutcome
+
+    class Judge:                                    # an API primary judge: no pin, no GPU, no precision
+        judge_id = "openai/placeholder-model@x"
+        short = "frontier"
+
+        def judge(self, items):
+            return [JudgeOutcome("benign", {"label": "BENIGN"}, "") for _ in items]
+
+    recorded = []
+
+    def record_safety(variant, set_name, lang, split, **kw):
+        recorded.append(lang)
+        return "a record"
+
+    frozen_cell(tmp_path, monkeypatch)
+    pids = [f"prb-test-{i:04d}" for i in range(4)]
+    for lang in ("zh", "en"):
+        frozen_generations(lang, [p for p in pids if lang == "en" or p != SHORT_PID])
+    monkeypatch.setattr(pipeline, "judge_dir", lambda role: "frontier")
+    monkeypatch.setattr(pipeline, "make_judge", lambda *a, **kw: Judge())
+    monkeypatch.setattr("lift.lang.LangID", FakeLID)
+    monkeypatch.setattr("lift.audit.record_safety", record_safety)
+    argv = ["judge", "--variant", "stock", "--split", "final", "--sets", "easy_benign", "--langs", "zh", "en"]
+    assert main(argv) == 3
+    judged_n = [len(pipeline.load_judgements("stock", "easy_benign", lang, "final")) for lang in ("zh", "en")]
+    assert judged_n == [3, 4] and recorded == ["en"]
+    generate = "lift generate --variant stock --split final --sets easy_benign --langs zh"
+    assert (f"  easy_benign_zh_final: short of its frozen split: {short_remedy()}; then, after a later job's "
+            f"`lift sync pull`, `{generate}` makes the prompts the completed file adds, and the line that "
+            "failed judges them and writes the record\n") in caplog.text
+    assert "stock easy_benign_zh_final: no AuditKIT record: easy_benign_zh: " in caplog.text
+
+
+def test_the_module_docstring_lists_every_kind_of_skipped_cell_with_its_remedy():
+    # W3-02: the module docstring still listed three kinds after W2-01 and W2-02 added short and nonfinite,
+    # and its judges remedy left out the cell only the role's restart line remedies
+    head = " ".join((run_cmd.__doc__ or "").split()).split(" Exit codes:")[0]
+    for name in ("MixedJudgesError", "ShortCellError", "NonFiniteOutputError"):
+        assert name in head, f"the module docstring does not name {name}"
+    for kind in run_cmd.SKIPPED:                    # each under its name, as the end-of-run listing heads it
+        assert re.search(rf"\. {kind} \(", head), f"the module docstring does not list the {kind} kind"
+    assert "labelling rules" in head and "reader's verdict on the failures sheet" in head
+    assert "no AuditKIT record" in head
+    assert "made in bf16 on an A100 or L4" in head and "fault to report (CLAUDE.md rule 9)" in head
+
+
 FAULT = "a fault in {}, no fp16 overflow: report it (CLAUDE.md rule 9), never tune around it"
 
 

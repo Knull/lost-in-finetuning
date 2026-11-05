@@ -6,13 +6,20 @@ Devices: the generator takes ``--device`` (cuda:0). The judge takes ``--judge-de
 cuda:1 when there are two GPUs (Kaggle T4 x2: two separate 16 GB devices) and cuda:0 otherwise
 (Colab A100: both models share the card, about 7 GB for the generator and 9 GB for the judge in bf16).
 
-A cell lift generate, judge or run-dev cannot go on with (a StaleOutputError) is logged and skipped, and
-the other cells go on. At the end each kind is listed apart with its remedy: stale (begun under another
-stack, or made from other inputs): the ``lift restart`` line that starts it over, a job line right after
-``lift sync pull``, with the lines that job needs under it; made in another precision than the run's
-(whatever refusal came first): its own ``--dtype``, or leaving it out, never a restart (that would
-discard it); another judge's judgements (MixedJudgesError): the file's judge, or the role's ``lift
-restart --judge`` line. Exit codes: 0 done; 3 done, but some cells were
+A cell lift generate, judge or run-dev cannot go on with (a StaleOutputError, or a ShortCellError when
+its prompts are loaded) is logged and skipped, and the other cells go on. At the end each kind
+(``SKIPPED``) is listed apart with its remedy. stale (begun under another stack, or made from other
+inputs): the ``lift restart`` line that starts it over, a job line right after ``lift sync pull``, with
+the lines that job needs under it. precision (made in another precision than the run's, whatever refusal
+came first): its own ``--dtype``, or leaving it out, never a restart (that would discard it). judges
+(another judge's judgements, MixedJudgesError): the file's judge, or the role's ``lift restart --judge``
+line, which alone remedies a cell refused only for its labelling rules (no current judge applies them).
+short (short of its frozen split, ShortCellError): the error's remedy, done on the laptop, most often a
+reader's verdict on the failures sheet; nothing is generated for it, and a short cell lift judge judged
+(generations made before that check) gets no AuditKIT record, refused with that remedy. nonfinite
+(decoding went non-finite, NonFiniteOutputError): in fp16 the cell is made in bf16 on an A100 or L4,
+after the cell's restart line when its file holds fp16 records to set aside; in bf16 or fp32 it is a
+fault to report (CLAUDE.md rule 9). Exit codes: 0 done; 3 done, but some cells were
 skipped or their AuditKIT record was refused (a GPU job goes on with its next lines and fails at the
 end); 1 an error. A precision other than ``generation.dtype`` is refused on a GPU with native bf16
 (compute capability 8 or more): other precisions exist only for the T4's licence (decisions.md 27).
@@ -119,7 +126,8 @@ def require_pinned(*keys: str) -> None:
 
 
 def _complete(variant: str, set_name: str, lang: str, split: str) -> bool:
-    """True if every prompt of the split has a generation (the AuditKIT record needs all of them)."""
+    """True if every prompt of the split has a generation (the AuditKIT record needs all of them). Its
+    read of the split raises ShortCellError for a cell short of its frozen split (``_record`` lists it)."""
     from lift.models.generate import generations_path, read_generations
     from lift.prompts import load
 
@@ -133,19 +141,29 @@ def _record(variant: str, set_name: str, lang: str, split: str, *, dtype: str,
             refused: dict[str, str]) -> None:
     """Write the AuditKIT record of a judged cell. A record the checked loader refuses (another
     precision, a stale judgement) is logged and kept in ``refused`` with its error rather than stopping
-    the run: the judgements are already written, and the command exits 3 at the end."""
+    the run: the judgements are already written, and the command exits 3 at the end. So is the record
+    of a cell short of its frozen split (ShortCellError, from ``_complete``'s read of the split: lift
+    judge reads prompt texts by pid, so it judges a short cell's generations made before that check),
+    kept with the error's remedy and the lines that then make the record."""
     from lift.audit import record_safety
+    from lift.data.build import ShortCellError
     from lift.models.generate import StaleOutputError
 
-    if not _complete(variant, set_name, lang, split):
-        log.info("%s %s_%s_%s: generations do not cover every prompt yet; no AuditKIT record",
-                 variant, set_name, lang, split)
-        return
+    cell = f"{set_name}_{lang}_{split}"
     try:
+        if not _complete(variant, set_name, lang, split):
+            log.info("%s %s: generations do not cover every prompt yet; no AuditKIT record", variant, cell)
+            return
         log.info("AuditKIT record: %s", record_safety(variant, set_name, lang, split, dtype=dtype))
+    except ShortCellError as exc:              # its prompt file is completed on the laptop first
+        log.error("%s %s: no AuditKIT record: %s", variant, cell, exc)
+        generate = _generate_line(variant, set_name, lang, split, dtype=dtype)
+        refused[cell] = (f"short of its frozen split: {exc.remedy}; then, after a later job's `lift sync "
+                         f"pull`, `{generate}` makes the prompts the completed file adds, and the line that "
+                         "failed judges them and writes the record")
     except (ValueError, StaleOutputError) as exc:
-        log.error("%s %s_%s_%s: no AuditKIT record: %s", variant, set_name, lang, split, exc)
-        refused[f"{set_name}_{lang}_{split}"] = str(exc)
+        log.error("%s %s: no AuditKIT record: %s", variant, cell, exc)
+        refused[cell] = str(exc)
 
 
 # Each kind of skipped cell (contract I), and the head of its end-of-run listing.
