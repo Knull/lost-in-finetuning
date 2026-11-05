@@ -12,10 +12,17 @@ verified on Nov 3 at the revisions pinned in configs/project.yaml (``sources.sft
   context passage from every closed_qa, information_extraction and summarization row, which then
   asks about a text the model never sees. A row is kept only if its English instruction (NFC,
   whitespace collapsed; 19 rows match only after that) equals a databricks-dolly-15k instruction
-  and no record with that instruction has a context: 10,526 kept, 4,482 had a context, 3 match none.
+  and no record with that instruction has a context (10,526 rows; 4,482 had a context, 3 match
+  none), and its Hindi pair is in its English pair's order. hin_Deva[0] is answer first in 5 rows,
+  635, 2496, 5630, 7510 and 13137 (checked Nov 5, all 15,011 rows being 1 turn of 2 parts): their
+  "?" endings mirror the English pair's and, in all but 13137, so do their lengths (both ratios
+  over 3, in opposite directions). ``_hindi_reversed`` flags exactly these; 7510 and 13137 had a
+  context, the other 3 are dropped as hindi_reversed: 10,523 kept.
 
 Pipeline (build.py drives it; ``build_candidate`` does one candidate end to end), with the Nov 3
-counts as aya / indicalign:
+counts as aya / indicalign. Two Nov 5 fixes take 3 more rows out of each pool before CuratorKIT
+(indicalign's reversed pairs in step 1, aya rows in step 3), so later builds count fewer;
+sft/report.json holds each build's counts:
 1. ``load_pools``: ``clean_pool`` applies clean_text to both fields and drops, counting the reason,
    empty fields, an instruction or response GlotLID does not read as Hindi, and a response whose
    character 10-gram repetition exceeds unclear.max_repetition_ratio (the judge's "repetitive"
@@ -33,8 +40,10 @@ counts as aya / indicalign:
 3. ``exclude_heldout``: removes the held-out rows, and every row that near-duplicates a held-out row
    of EITHER source, from BOTH training pools: 1,000 -> 790 / 10,322 -> 10,144. Near-duplicate
    (``heldout.near_dup``): exact character 3-gram Jaccard (the quantity MinHash estimates) of the
-   instructions >= 0.7, or of the responses >= 0.85 when both normalised responses have >= 20
-   characters; empty texts never match.
+   instructions >= 0.7, or of the responses >= 0.85, at any length (decisions item 24; a text
+   under 3 characters is its own single gram); empty texts never match. Until Nov 5 answers under
+   20 characters were skipped, a minimum item 24 never had: without it 3 more aya rows match (two
+   copy the 11- and 13-character answers of final utility items), leaving 787.
 4. ``build_candidates``: CuratorKIT's no-API path on each training pool (``run_curatorkit``): schema
    gate, exact then MinHash dedup (0.85 on character 3-grams; the first copy in row-id order stays;
    the ``raw`` stress pool skips dedup), cleaning with strip_html and collapse_whitespace off:
@@ -54,7 +63,11 @@ Files under the data dir (training rows use the messages format TRL's SFTTrainer
                                                          rejected.jsonl, lexsi_provenance.json + summary
     sft/report.json                                      every stage count and the N decision
 variant is ``dedup`` (both candidates) or ``raw`` (the stress candidate,
-train.yaml ``stress.candidate``). The utility records go to
+train.yaml ``stress.candidate``). ``build_candidates`` leaves sft/ holding exactly the variants
+report.json lists: after its checks pass it removes every sft/{cand}/{variant} and
+interim/sft/{cand}/{variant} folder the plan does not make (such as the Nov 3 aya/raw once item 47
+moved the raw sample to indicalign), and a {cand} folder left empty. lift sync deletes nothing,
+so a removed variant must also be deleted from the runs repo by hand. The utility records go to
 prompts/utility_hi.jsonl through build.py. CuratorKIT's own files carry run timestamps (manifest.json:
 run_timestamp, wall_clock_seconds and its provenance's created_at; lexsi_provenance.json:
 created_at; rejected.jsonl: each row's provenance_chain timestamps), so interim/sft/ and the
@@ -143,17 +156,36 @@ def _dolly_key(text: str) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text or "")).strip()
 
 
+def _hindi_reversed(eng: Sequence[str | None], hin: Sequence[str | None]) -> bool:
+    """Is a Dolly_T row's Hindi pair in the reverse order of its English (instruction, response)
+    pair? Either sign is enough: the "?" endings are mirrored (the English instruction ends in "?"
+    and its response does not, while Hindi part 0 does not and part 1 does), or log(len0 / len1) of
+    the English pair and of the Hindi pair both exceed log 3, with opposite signs. Texts are
+    compared after clean_text; a pair without exactly 2 parts is never called reversed."""
+    if len(eng) != 2 or len(hin) != 2:
+        return False
+    e0, e1, h0, h1 = (clean_text(t or "") for t in (*eng, *hin))
+    if e0.endswith("?") and not e1.endswith("?") and not h0.endswith("?") and h1.endswith("?"):
+        return True
+    if not (e0 and e1 and h0 and h1):
+        return False
+    en, hi = math.log(len(e0) / len(e1)), math.log(len(h0) / len(h1))
+    return min(abs(en), abs(hi)) > math.log(3) and (en > 0) != (hi > 0)
+
+
 def indicalign_rows(rows: Iterable[Mapping[str, Any]],
                     dolly_rows: Iterable[Mapping[str, Any]]) -> tuple[list[SftRow], Counter[str]]:
     """Hub "indicalign" rows (Dolly_T: doc_id, eng_Latn, hin_Deva, _row) -> SftRow, applying the
     Dolly context rule. Counts: kept, had_context (some matching Dolly record has a context),
-    no_match (the English instruction matches no Dolly record)."""
+    no_match (the English instruction matches no Dolly record), hindi_reversed (hin_Deva[0] is in
+    the reverse order of eng_Latn[0], ``_hindi_reversed``: dropped rather than swapped, as both of
+    its signs are heuristics)."""
     has_context: dict[str, bool] = {}
     for d in dolly_rows:
         key = _dolly_key(d["instruction"])
         has_context[key] = has_context.get(key, False) or bool((d.get("context") or "").strip())
     out: list[SftRow] = []
-    counts: Counter[str] = Counter(dict.fromkeys(("kept", "had_context", "no_match"), 0))
+    counts: Counter[str] = Counter(dict.fromkeys(("kept", "had_context", "no_match", "hindi_reversed"), 0))
     for r in sorted(rows, key=lambda r: int(r["_row"])):
         key = _dolly_key(r["eng_Latn"][0][0])
         if key not in has_context:
@@ -165,6 +197,9 @@ def indicalign_rows(rows: Iterable[Mapping[str, Any]],
         turn = r["hin_Deva"][0]
         if len(turn) != 2:
             raise ValueError(f"Dolly_T row {r['_row']}: hin_Deva turn has {len(turn)} parts, expected 2")
+        if _hindi_reversed(r["eng_Latn"][0], turn):
+            counts["hindi_reversed"] += 1
+            continue
         out.append(SftRow("indicalign", int(r["_row"]), int(r["_row"]), turn[0] or "", turn[1] or "",
                           {"doc_id": r["doc_id"]}))
         counts["kept"] += 1
@@ -201,7 +236,8 @@ def clean_pool(rows: Iterable[SftRow], lid: Any, *,
 def load_pools(*, cfg: Mapping[str, Any] | None = None, hub: Any = None,
                lid: Any = None) -> dict[str, tuple[list[SftRow], Counter[str]]]:
     """The two cleaned pools with their counts: loaded, every drop reason (indicalign also
-    had_context and no_match), kept. hub None -> sources.HFHub(cfg); lid None -> LangID(cfg=cfg)."""
+    had_context, no_match and hindi_reversed), kept. hub None -> sources.HFHub(cfg); lid None ->
+    LangID(cfg=cfg)."""
     cfg = cfg if cfg is not None else config.load("project")
     if hub is None:
         from lift.data.sources import HFHub
@@ -217,7 +253,8 @@ def load_pools(*, cfg: Mapping[str, Any] | None = None, hub: Any = None,
     pools: dict[str, tuple[list[SftRow], Counter[str]]] = {}
     for name, rows, before in (("aya", aya, Counter()),
                                ("indicalign", ind, Counter(had_context=ctx["had_context"],
-                                                           no_match=ctx["no_match"]))):
+                                                           no_match=ctx["no_match"],
+                                                           hindi_reversed=ctx["hindi_reversed"]))):
         pool, counts = clean_pool(rows, lid, cfg=cfg)
         loaded = len(rows) + sum(before.values())
         pools[name] = (pool, Counter({"loaded": loaded, **before, **counts}))
@@ -238,12 +275,11 @@ class _NearDup(NamedTuple):
     ngram: int
     instruction: Fraction        # thresholds as exact fractions (0.7 -> 7/10)
     response: Fraction
-    min_chars: int
 
 
 class _Grams(NamedTuple):
     ins: frozenset[str]
-    res: frozenset[str]          # empty when the response is too short to compare
+    res: frozenset[str]          # empty only for an empty response, which never matches
 
 
 def _near_cfg(cfg: Mapping[str, Any] | None) -> _NearDup:
@@ -252,13 +288,11 @@ def _near_cfg(cfg: Mapping[str, Any] | None) -> _NearDup:
     thresholds = Fraction(str(nd["instruction"])), Fraction(str(nd["response"]))
     if not all(0 < t <= 1 for t in thresholds):
         raise ValueError(f"near_dup thresholds must lie in (0, 1], got {nd}")
-    return _NearDup(int(nd["ngram"]), *thresholds, int(nd["response_min_chars"]))
+    return _NearDup(int(nd["ngram"]), *thresholds)
 
 
 def _grams(instruction: str, response: str, nd: _NearDup) -> _Grams:
-    long_enough = len(dup_key(response)) >= nd.min_chars
-    return _Grams(char_ngrams(instruction, nd.ngram),
-                  char_ngrams(response, nd.ngram) if long_enough else frozenset())
+    return _Grams(char_ngrams(instruction, nd.ngram), char_ngrams(response, nd.ngram))
 
 
 def _at_least(a: frozenset[str], b: frozenset[str], t: Fraction) -> bool:
@@ -536,6 +570,26 @@ def _curate(name: str, variant: str, rows: Sequence[SftRow],
     return out, summary
 
 
+def _remove_other_variants(plan: Iterable[tuple[str, str]]) -> None:
+    """Remove every {cand}/{variant} folder of sft_dir() and of interim/sft that ``plan`` does not
+    make (a variant train.yaml no longer asks for), then each {cand} folder left empty."""
+    keep, exports = set(plan), sft_dir()
+    for root in (exports, interim_dir() / "sft"):
+        if not root.is_dir():
+            continue
+        for cand in sorted(p for p in root.iterdir() if p.is_dir()):
+            for folder in sorted(p for p in cand.iterdir() if p.is_dir()):
+                if (cand.name, folder.name) in keep:
+                    continue
+                shutil.rmtree(folder)
+                if root == exports:
+                    log.warning("sft %s/%s: removed, the current plan does not make it; lift sync deletes "
+                                "nothing, so delete data/sft/%s/%s from the runs repo by hand",
+                                cand.name, folder.name, cand.name, folder.name)
+            if not any(cand.iterdir()):
+                cand.rmdir()
+
+
 def _write_variant(name: str, variant: str, curated: Sequence[dict], n: int, *, rows_target: int,
                    seed: int, train_pool: int, summary: dict | None) -> dict:
     """Sample ``n`` curated rows by sha256 rank, write the export, the CuratorKIT copies and
@@ -588,7 +642,9 @@ def build_candidates(train_pools: Mapping[str, Any], *,
                      cfg: Mapping[str, Any] | None = None, train_cfg: Mapping[str, Any] | None = None,
                      curate: Curate | None = None) -> dict:
     """Curate and sample every variant (each candidate deduplicated, plus the stress candidate raw),
-    write sft_dir()/report.json and return it.
+    write sft_dir()/report.json and return it. Once every variant is curated and its count checked
+    (a refused build changes nothing under sft_dir()), it removes every variant folder of
+    sft_dir() and interim/sft the plan does not make, so sft_dir() holds exactly the report's variants.
 
     Row counts (train.yaml): with ``equal_size`` true, every variant takes N = min(rows, each
     candidate's deduplicated count), the Nov 3 rule. With ``equal_size`` false (the default since
@@ -636,6 +692,7 @@ def build_candidates(train_pools: Mapping[str, Any], *,
         if short:
             log.warning("SFT variants below the target %d rows (no equal-size rule): %s", target,
                         ", ".join(f"{name}/{variant} {c}" for (name, variant), c in counts.items()))
+    _remove_other_variants(plan)
     variants = {}
     for name, variant in plan:
         rows, summary = curated[(name, variant)]

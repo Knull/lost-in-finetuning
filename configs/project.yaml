@@ -139,9 +139,9 @@ sources:
     heldout:
       per_source: 150            # x 2 sources = sizes.utility
       # A training row is a near-duplicate of a held-out row if its instruction's character 3-gram
-      # Jaccard similarity is >= 0.7, or its response's is >= 0.85 (both responses >= 20 chars).
+      # Jaccard similarity is >= 0.7, or its response's is >= 0.85, at any length (decisions item 24).
       # Exact Jaccard (the quantity MinHash estimates), against both sources' held-out rows.
-      near_dup: {ngram: 3, instruction: 0.7, response: 0.85, response_min_chars: 20}
+      near_dup: {ngram: 3, instruction: 0.7, response: 0.85}
 
 storage:
   runs_repo_env: LIFT_RUNS_REPO  # private HF dataset repo used to move outputs between Kaggle and laptop
