@@ -132,6 +132,58 @@ def test_indicalign_rows_apply_the_dolly_context_rule():
         sft.indicalign_rows(bad, dolly_rows())
 
 
+# R1-21: Dolly_T rows whose Hindi pair is answer first while the English pair is in Dolly's order, and
+# in-order controls. Placeholder text; each long part is about 10x its short one.
+SHORT_EN, LONG_EN = "Placeholder request about kites", "Placeholder answer about kites. " * 10
+SHORT_HI, LONG_HI = "पतंग के बारे में नमूना अनुरोध", "पतंग के बारे में नमूना उत्तर। " * 10
+REVERSED_PAIRS = {       # Dolly_T row: (English pair, Hindi pair)
+    635: ((SHORT_EN + "?", LONG_EN), (LONG_HI, SHORT_HI + "?")),          # both signs, like row 635
+    636: (("Placeholder question about tea?", "Placeholder answer about tea."),
+          ("चाय के बारे में नमूना उत्तर।", "चाय के बारे में नमूना प्रश्न?")),   # the "?" endings only
+    637: ((SHORT_EN, LONG_EN), (LONG_HI, SHORT_HI)),                       # the lengths only
+}
+IN_ORDER_PAIRS = {
+    640: ((SHORT_EN + "?", LONG_EN), (SHORT_HI + "?", LONG_HI)),
+    641: ((SHORT_EN + "?", LONG_EN), (SHORT_HI, LONG_HI)),                 # the Hindi lost its "?"
+    642: ((SHORT_EN, LONG_EN), ("पतंग के बारे में नमूना उत्तर। " * 2, SHORT_HI)),  # 2x the other way, under 3x
+}
+
+
+def dolly_t(row, en, hi):
+    """A Dolly_T hub row (English pair ``en``, Hindi pair ``hi``) and the context-free
+    databricks-dolly-15k record its English instruction matches."""
+    return ({"doc_id": f"doc-{row:04d}", "eng_Latn": [list(en)], "hin_Deva": [list(hi)], "_row": row},
+            {"instruction": en[0], "context": "", "response": en[1], "category": "open_qa", "_row": row})
+
+
+def test_indicalign_rows_drop_a_hindi_pair_reversed_against_its_english():
+    """R1-21: in 5 rows of the pinned Dolly_T hin_Deva[0] is answer first; such a row is dropped and
+    counted, never kept with the answer as its instruction (nor swapped: both signs are heuristics)."""
+    made = [dolly_t(row, en, hi) for row, (en, hi) in {**REVERSED_PAIRS, **IN_ORDER_PAIRS}.items()]
+    rows, counts = sft.indicalign_rows([r for r, _ in made], [d for _, d in made])
+    assert {r.hf_row: [r.instruction, r.response] for r in rows} == {
+        row: list(hi) for row, (_, hi) in IN_ORDER_PAIRS.items()}
+    assert counts == Counter(kept=3, hindi_reversed=3, had_context=0, no_match=0)
+
+
+def test_reversed_rows_are_counted_in_the_report_and_reach_no_export(data_dir):
+    """R1-21: loaded stays every hub row (kept plus every drop reason), the report lists
+    hindi_reversed, and no training export holds a reversed pair."""
+    made = [dolly_t(row, en, hi) for row, (en, hi) in REVERSED_PAIRS.items()]
+    hub_rows = indicalign_rows() + [r for r, _ in made]
+    hub = SftHub({"aya_dataset": aya_dataset_rows(), "indicalign": hub_rows,
+                  "dolly": dolly_rows() + [d for _, d in made]})
+    pools = sft.load_pools(cfg=CFG, hub=hub, lid=FakeLID())
+    counts = pools["indicalign"][1]
+    assert (counts["loaded"], counts["hindi_reversed"], counts["kept"]) == (len(hub_rows), 3, 14)
+    assert counts["loaded"] == sum(v for k, v in counts.items() if k != "loaded")
+    report, _, _ = build(pools, rows=1000)
+    assert report["sources"]["indicalign"]["loaded"] == len(hub_rows)
+    assert report["sources"]["indicalign"]["dropped"]["hindi_reversed"] == 3
+    exported = {r["id"] for p in (data_dir / "sft").rglob("sft_messages.jsonl") for r in read_jsonl(p)}
+    assert exported and exported.isdisjoint(f"ind-{row:05d}" for row in REVERSED_PAIRS)
+
+
 def test_clean_pool_counts_every_drop_reason():
     extra = [SftRow("aya", 90, 900, " \u200b ", "यह उत्तर है पर प्रश्न खाली है।"),
              SftRow("aya", 91, 901, "  \u200bटमाटर कब लगाएँ?  ",
@@ -275,16 +327,42 @@ def test_near_duplicate_instruction_threshold_is_inclusive():
                                                          "aya-00001": "utl-ind-00007"}
 
 
-def test_near_duplicate_response_threshold_and_minimum_length():
+def test_near_duplicate_response_threshold_has_no_minimum_length():
     r = ALPHA
     assert jaccard(char_ngrams(r), char_ngrams(r[:36])) == 0.85
     h = held("मूल प्रश्न का पाठ यहाँ है", r)
     rows = [cand(0, "बिल्कुल अलग पहला प्रश्न", r[:36]), cand(1, "बिल्कुल अलग दूसरा प्रश्न", r[:35])]
     assert sft.near_duplicates(rows, [h], cfg=CFG) == {"aya-00000": "utl-ind-00007"}
-    # both responses need at least response_min_chars (20) characters
-    assert sft.near_duplicates([cand(2, "अलग प्रश्न", r[:19])], [held("मूल प्रश्न", r[:19])], cfg=CFG) == {}
-    assert sft.near_duplicates([cand(3, "अलग प्रश्न", r[:20])], [held("मूल प्रश्न", r[:20])], cfg=CFG) == {
+    # R1-20: decisions item 24 sets no length minimum, so short answers are compared too (a 20-character
+    # minimum once kept copies of short held-out answers in training); a text under 3 characters is
+    # its own single gram, and empty texts still never match
+    assert sft.near_duplicates([cand(2, "अलग प्रश्न", r[:19])], [held("मूल प्रश्न", r[:19])], cfg=CFG) == {
+        "aya-00002": "utl-ind-00007"}
+    assert sft.near_duplicates([cand(3, "अलग प्रश्न", r[:2])], [held("मूल प्रश्न", r[:2])], cfg=CFG) == {
         "aya-00003": "utl-ind-00007"}
+    assert sft.near_duplicates([cand(4, "अलग प्रश्न", r[1:3])], [held("मूल प्रश्न", r[:2])], cfg=CFG) == {}
+    assert sft.near_duplicates([cand(5, "अलग प्रश्न", "")], [held("मूल प्रश्न", "")], cfg=CFG) == {}
+
+
+def test_exclude_heldout_drops_copies_of_a_short_held_out_answer():
+    """R1-20: a reworded question (instruction Jaccard under 0.7) whose short answer equals or nearly
+    equals a held-out row's leaves both training pools. The real Aya pool kept two such copies of
+    final utility answers (11 and 13 characters) under a 20-character minimum item 24 does not have."""
+    question, reworded = "सौरमंडल का सबसे बड़ा ग्रह कौन सा है?", "सौरमंडल में सबसे बड़ा ग्रह कौन है?"
+    answer, other = "बृहस्पति ग्रह।", cand(4, "पृथ्वी पर सबसे लंबी नदी का नाम लिखिए।", "नील नदी।")
+    assert jaccard(char_ngrams(question), char_ngrams(reworded)) < 0.7 and len(dup_key(answer)) < 20
+    assert jaccard(char_ngrams(answer), char_ngrams(answer[:-1])) >= 0.85
+    assert jaccard(char_ngrams(question), char_ngrams(other.instruction)) < 0.7
+    assert jaccard(char_ngrams(answer), char_ngrams(other.response)) < 0.85
+    h = SftRow("aya", 40, 140, question, answer)
+    pools = {"aya": [h, cand(2, reworded, answer), cand(3, reworded, answer[:-1]), other],
+             "indicalign": [SftRow("indicalign", 9, 9, reworded, answer, {"doc_id": "doc-9"})]}
+    train = sft.exclude_heldout(pools, [sft.heldout_record(h)], cfg=CFG)
+    assert [r.row_id() for r in train["aya"][0]] == ["aya-00004"]
+    assert train["aya"][1] == [{"id": "aya-00002", "reason": "near_dup:utl-aya-00040"},
+                               {"id": "aya-00003", "reason": "near_dup:utl-aya-00040"},
+                               {"id": "aya-00040", "reason": "heldout"}]
+    assert train["indicalign"] == ([], [{"id": "ind-00009", "reason": "near_dup:utl-aya-00040"}])
 
 
 @pytest.mark.parametrize("thresholds", [(0.7, 0.85), (0.3, 0.5), (0.95, 0.6), (1.0, 1.0)])
@@ -452,6 +530,36 @@ def test_build_candidates_without_equal_size_each_variant_keeps_its_own_count(da
         assert len(list(read_jsonl(data_dir / "sft" / key / "sft_messages.jsonl"))) == n
     assert not (data_dir / "sft" / "aya" / "raw").exists()
     assert any("no equal-size rule" in r.getMessage() for r in caplog.records)
+
+
+def test_build_candidates_removes_the_variants_the_plan_no_longer_makes(data_dir, pools, caplog):
+    """R1-02: the Nov 4 rebuild (decisions item 47: the stress raw sample moved from aya to indicalign)
+    left the Nov 3 aya/raw export in data/sft, valid-looking and synced. After build_candidates,
+    data/sft holds exactly the variants report.json lists; a refused build removes nothing."""
+    heldout = sft.build_utility_heldout(pools, cfg=CFG)
+    train = sft.exclude_heldout(pools, heldout, cfg=CFG)
+    root, work = data_dir / "sft", data_dir / "interim" / "sft"
+
+    def exports():
+        return {p.parent.relative_to(root).as_posix() for p in root.rglob("sft_messages.jsonl")}
+
+    sft.build_candidates(train, cfg=CFG, train_cfg=training_cfg(5), curate=FakeCurate())      # the Nov 3 plan
+    assert exports() == set(VARIANTS)
+    nov4 = training_cfg(5, equal_size=False, stress="indicalign")
+    before = snapshot(root)
+    with pytest.raises(ValueError, match="no SFT rows left"):
+        sft.build_candidates({**train, "indicalign": ([], [])}, cfg=CFG, train_cfg=nov4, curate=FakeCurate())
+    assert snapshot(root) == before
+    with caplog.at_level(logging.WARNING, logger="lift.data.sft"):
+        report = sft.build_candidates(train, cfg=CFG, train_cfg=nov4, curate=FakeCurate())
+    assert exports() == set(report["variants"]) == {"aya/dedup", "indicalign/dedup", "indicalign/raw"}
+    assert not (root / "aya" / "raw").exists() and not (work / "aya" / "raw").exists()
+    assert any(r.getMessage().startswith("sft aya/raw: removed") for r in caplog.records)
+    only = {**nov4, "candidates": ["indicalign"]}                  # a candidate dropped altogether
+    report = sft.build_candidates(train, cfg=CFG, train_cfg=only, curate=FakeCurate())
+    assert exports() == set(report["variants"]) == {"indicalign/dedup", "indicalign/raw"}
+    assert sorted(p.name for p in root.iterdir()) == ["indicalign", "report.json"]
+    assert sorted(p.name for p in work.iterdir()) == ["indicalign"]
 
 
 def test_the_committed_training_config_drops_the_equal_size_rule():
