@@ -182,10 +182,12 @@ def restart_cell(variant: str, set_name: str, lang: str, split: str, *, aside: P
 
     Emptied, never removed: sync never deletes, so a removed file comes back from the runs repo at the
     next pull, while an emptied one is a local edit the next push sends (an update), replacing the runs
-    repo's copy. generate and judge_file then fill it again (an empty file has no stack). An empty
-    record is retired (readers skip it): a record must not outlive the outputs it describes, and the
-    record of another precision's cell is never rewritten. The copy is written before the file is
-    emptied, so a kill in between loses nothing."""
+    repo's copy when that copy has not changed since this machine's last sync; otherwise the push reports
+    an emptied-file conflict (a merge would fill it again), which ``lift sync push --force`` settles by
+    completing the restart (R1-08). generate and judge_file then fill it again (an empty file has no
+    stack). An empty record is retired (readers skip it): a record must not outlive the outputs it
+    describes, and the record of another precision's cell is never rewritten. The copy is written before
+    the file is emptied, so a kill in between loses nothing."""
     if judge_dir is not None:
         files = [judgements_dir() / judge_dir / variant / f"{set_name}_{lang}_{split}.jsonl"]
     else:
@@ -240,7 +242,8 @@ def _start_over(restart: str | None, out_path: Path) -> str:
         return f"move {out_path} aside (no lift restart line covers that file)"
     return (f"run `{restart}` as a job line right after `lift sync pull`, followed by the line that failed "
             "(once: it sets the cell's files aside and leaves them empty, so the next push replaces the runs "
-            "repo's copies)")
+            "repo's copies, unless one changed since this machine's last sync: then that push reports an "
+            "emptied-file conflict, which `lift sync push --force` settles)")
 
 
 def gen_config(variant: LoadedVariant, *, max_new_tokens: int | None = None) -> dict[str, Any]:

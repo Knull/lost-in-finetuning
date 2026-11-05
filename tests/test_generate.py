@@ -423,6 +423,19 @@ def test_appending_under_another_stack_is_refused(stock, monkeypatch, change):
     assert exc.value.command == RESTART and path.read_bytes() == before
 
 
+def test_a_restart_line_says_when_the_next_push_replaces_the_runs_repo_copies(stock, monkeypatch):
+    # W2-04 (R1-08): the next lift sync push replaces the runs repo's copies of the files a restart emptied
+    # only when the Hub's copy has not changed since this machine's last sync; otherwise it reports an
+    # emptied-file conflict, which lift sync push --force settles
+    path = cell_path()
+    run(stock, path, ps=prompts()[:2])
+    moved_stack(monkeypatch, torch="2.99.0+cu130")
+    with pytest.raises(gen.StaleOutputError) as exc:
+        run(stock, path)
+    for text in (str(exc.value), " ".join(gen.restart_cell.__doc__.split())):
+        assert "changed since this machine's last sync" in text and "lift sync push --force" in text, text
+
+
 def test_changed_inputs_name_the_restart_line(stock, tmp_path):
     path = cell_path()
     run(stock, path)
