@@ -58,7 +58,10 @@ Rules, and why:
   Batches when judges.utility.bulk is batch (a no-op otherwise) and puts the replies in the call cache: the
   synchronous ``pairwise`` call that follows then decides every verdict exactly as without it. Prefilling
   is skipped on request (``lift utility --sync``), and with ``wait=False`` it returns at once with the
-  batches pending (FrontierBatchPending: rerun the same line to collect). "fallback" is
+  batches pending (FrontierBatchPending: rerun the same line to collect). A synchronous pass never pays
+  twice for a request an earlier batch holds (one left by ``wait=False`` or a stopped wait): ``pairwise``
+  collects that batch first once it has ended, and while it still runs stops with FrontierBatchPending,
+  judging nothing, so ``--sync`` exits 3 then too. "fallback" is
   lift.judge.local_pairwise, used only when asked for: no fallback model ever answers in the frontier
   judge's place.
 - Reported beside the win rate (``summarize``): outcome and score counts; position consistency and bias;
