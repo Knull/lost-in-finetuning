@@ -463,17 +463,20 @@ class _NonFiniteWatch:
 
     def rows(self) -> list[bool]:
         """Whether each row was marked. Raises when generate never called the processor (then nothing
-        was checked), or decoded the batch in pieces whose batch sizes do not add up to its rows (then a
-        piece may have been decoded without it)."""
+        was checked), or decoded the batch in pieces whose batch sizes do not add up to its rows: fewer, and
+        a row went unchecked; more, and a row was decoded more than once."""
         if self.marked is None:
             raise RuntimeError("model.generate never called the logits processor that checks decoding stays "
                                "finite: a wrapper must pass logits_processor on to the model's generate")
-        if any(n != self.n_rows for n in self.decodes) and sum(self.decodes) != self.n_rows:
+        total = sum(self.decodes)
+        if any(n != self.n_rows for n in self.decodes) and total != self.n_rows:
+            fewer = total < self.n_rows
             raise RuntimeError(
-                f"model.generate decoded the batch of {self.n_rows} rows in pieces, and the batch sizes of "
-                "the inner decodes that called the logits processor checking decoding stays finite, "
-                f"{self.decodes}, add up to {sum(self.decodes)}, not {self.n_rows}: a wrapper must pass "
-                "logits_processor on to every inner decode, its pieces holding each row once")
+                f"model.generate decoded the batch of {self.n_rows} rows in pieces: the inner decodes that "
+                f"called the logits processor checking decoding stays finite held {self.decodes} rows, "
+                f"{total} in all, {'fewer' if fewer else 'more'} than the batch's {self.n_rows}, so "
+                f"{'a row went unchecked' if fewer else 'a row was decoded more than once'}. A wrapper must "
+                "decode each row exactly once, in one inner decode that passes logits_processor on")
         return [bool(x) for x in self.marked.tolist()]
 
 
