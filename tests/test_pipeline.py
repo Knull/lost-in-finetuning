@@ -52,9 +52,12 @@ def quick_manifests(monkeypatch):
     monkeypatch.setattr("lift.manifest.git_sha", lambda: "test")
 
 
-# The adapter variants the tests' cells name, as P03 registers them in configs/variants.yaml.
-TEST_VARIANTS = [{"name": name, "method": "adapter", "adapter": "adapter-aya-std-s1", "seed": 1}
-                 for name in ("adapter", "adapter-aya-std-s1")]
+# The adapter variants the tests' cells name, as P03 registers them in configs/variants.yaml: with the
+# adapter's hash pinned (lift register-adapter writes artifacts.adapter), as a cell of an adapter variant is
+# read only then.
+ADAPTER_HASH = "a" * 64
+TEST_VARIANTS = [{"name": name, "method": "adapter", "adapter": "adapter-aya-std-s1", "seed": 1,
+                  "artifacts": {"adapter": ADAPTER_HASH}} for name in ("adapter", "adapter-aya-std-s1")]
 
 
 @pytest.fixture(autouse=True)
@@ -140,12 +143,15 @@ def primary_judge(judge_id=PRIMARY):
 def gen(pid, *, output=None, lang="en", set_name="harmful", split="dev", variant="stock", tag="v1",
         prompt=None, n_new=None, dtype="bf16", meta=None):
     """A GenerationRecord as lift.models.generate writes it: in ``dtype``, by this code's harness, under the
-    variant's entry in configs/variants.yaml when it has one (``meta`` overrides)."""
+    variant's entry in configs/variants.yaml when it has one, by the adapter it pins (``meta`` overrides)."""
     prompt = prompt if prompt is not None else f"prompt {pid} {lang}"      # = make_prompt's default text
     output = output if output is not None else f"{LONG} {pid}"
     made = {"dtype": dtype, "harness": generate.HARNESS_VERSION}
     if variant in variants.load_registry():
-        made["intervention"] = intervention_digest(variants.get_spec(variant))
+        spec = variants.get_spec(variant)
+        made["intervention"] = intervention_digest(spec)
+        if spec.artifacts.get("adapter"):
+            made["adapter_hash"] = spec.artifacts["adapter"]
     return GenerationRecord(
         key=sha256_text(f"{tag}|{variant}|{pid}|{lang}"), variant=variant, pid=pid, lang=lang, set=set_name,
         split=split, prompt_sha=sha256_text(prompt), output=output, n_prompt_tokens=12,
@@ -1218,6 +1224,34 @@ def test_a_cell_is_read_only_under_its_variants_current_registry_entry(fake_prom
     with pytest.raises(ValueError, match="'adapter' is not in configs/variants.yaml") as refused:
         pipeline.load_labels(*cell)
     assert "lift restart" not in str(refused.value)                 # registering it is the remedy
+
+
+@pytest.mark.parametrize("repair", [None, {"name": "wiseft-l0.50-adapter", "method": "wiseft",
+                                            "adapter": "adapter-aya-std-s1", "params": {"lam": 0.5}}],
+                         ids=["adapter", "repair"])
+def test_a_cell_of_an_adapter_variant_is_read_only_under_a_pinned_adapter_hash(fake_prompt_files, registry,
+                                                                              repair):
+    """W2-03 (R1-03 follow-up): a read compares a cell's meta.adapter_hash with its entry's artifacts.adapter
+    only when the entry pins one, so cells of two different weights registered under one name without a pin
+    both read, and a repair arm and its adapter arm made from different weights pair. A cell of a variant
+    whose spec names an adapter (the adapter method, every P05 repair) is reported only under a pinned hash
+    (lift register-adapter writes it), refused otherwise naming the registry; the per-cell hash check then
+    holds every arm to the pin."""
+    fake_prompt_files[("harmful", "en")] = [make_prompt(p) for p in PAIR_PIDS]
+    if repair is not None:
+        registry["variants"].append({**repair, "artifacts": {"adapter": ADAPTER_HASH}})
+    name = repair["name"] if repair is not None else "adapter"
+    entry = next(e for e in registry["variants"] if e["name"] == name)
+    cell = (name, *CELL[1:])
+    pipeline.judge_file(write_gens([gen(p, variant=name) for p in PAIR_PIDS]), judge=primary_judge(),
+                        lid=FakeLID())
+    assert set(pipeline.load_labels(*cell)) == set(PAIR_PIDS)         # pinned
+    del entry["artifacts"]
+    write_gens([gen(p, variant=name, meta={"adapter_hash": "b" * 64}) for p in PAIR_PIDS])   # same keys
+    with pytest.raises(ValueError, match=f"{name}'s entry in configs/variants.yaml names adapter "
+                                         "adapter-aya-std-s1 but pins no artifacts.adapter") as refused:
+        pipeline.load_labels(*cell)
+    assert "lift register-adapter" in str(refused.value) and "lift restart" not in str(refused.value)
 
 
 @pytest.mark.torch

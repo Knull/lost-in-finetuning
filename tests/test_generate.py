@@ -464,6 +464,28 @@ def test_a_refusal_says_whether_the_cell_made_again_keeps_its_keys(stock, monkey
     assert gen.StaleOutputError("a cause no one marked").keys_changed is True     # the list is drawn again
 
 
+def test_a_file_whose_records_name_no_intervention_is_never_extended(stock):
+    # W2-03 (R1-03 follow-up): every read refuses a cell whose records name no meta.intervention (made before
+    # generations recorded it), so completing such a cell (or judging it as it is) only spends GPU time on a
+    # cell that is never reported. generate refuses it with the cell's restart line; the cell made again has
+    # the same keys, as R1-03 changed no cache key.
+    from lift.io import read_jsonl, write_jsonl
+
+    path = cell_path()
+    run(stock, path, ps=prompts()[:2])
+    rows = list(read_jsonl(path))
+    for row in rows:
+        del row["meta"]["intervention"]
+    write_jsonl(path, rows)
+    before = path.read_bytes()
+    for ps in (prompts(), prompts()[:2]):                  # to extend it, or to reuse it as it is
+        with pytest.raises(gen.StaleOutputError, match="2 records name no intervention") as exc:
+            run(stock, path, ps=ps)
+        assert exc.value.command == RESTART and exc.value.keys_changed is False
+        assert f"run `{RESTART}` as a job line right after `lift sync pull`" in str(exc.value)
+        assert path.read_bytes() == before
+
+
 def test_restart_command_names_the_cell_the_judge_and_a_precision_other_than_the_default():
     assert gen.restart_command("stock", "easy_benign", "hi", "final") == (
         "lift restart --variant stock --split final --sets easy_benign --langs hi")
