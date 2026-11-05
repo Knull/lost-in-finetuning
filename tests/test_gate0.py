@@ -9,7 +9,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("transformers")
 pytest.importorskip("peft")
 
-from fakes import make_prompt  # noqa: E402
+from fakes import TINY_CHAT_TEMPLATE, TINY_PREAMBLE, build_tiny_tokenizer, make_prompt  # noqa: E402
 
 from lift import gate0  # noqa: E402
 from lift.prompts import SAFETY_SETS  # noqa: E402
@@ -164,6 +164,63 @@ def test_preamble_check_fails_on_a_prompt_that_cannot_fit(stock, prompt_store):
     long = make_prompt("har-9999", "en", "harmful", "final", text="x" * 900)
     out = gate0.check_preamble(stock, gate0.all_prompts() + [long])
     assert not out["pass"] and out["n_too_long"] == 1 and out["too_long_examples"] == ["harmful/en/har-9999"]
+
+
+# R1-23: the tiny template, and broken copies a changed Tiny Aya revision could ship. Each broken one keeps
+# everything Gate 0 checked before (one BOS, a non-empty first system block, the same prefix, every prompt
+# fitting, the reference tokenizer agreeing), so only the new rules can catch it.
+PREAMBLE_SOURCE = TINY_PREAMBLE.replace("\n", "{{ '\\n' }}")          # how TINY_CHAT_TEMPLATE writes it
+GENERATION_PROMPT = "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|><|START_RESPONSE|>"
+TEMPLATES = {
+    "unchanged": TINY_CHAT_TEMPLATE,
+    "preamble-twice": TINY_CHAT_TEMPLATE.replace(          # a second system turn before the user's
+        "{% for message in loop_messages %}",
+        f"<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>{PREAMBLE_SOURCE}<|END_OF_TURN_TOKEN|>"
+        "{% for message in loop_messages %}", 1),
+    "no-preamble": TINY_CHAT_TEMPLATE.replace(PREAMBLE_SOURCE, "Hi.", 1),       # the system turn kept
+    "no-safety-mode": TINY_CHAT_TEMPLATE.replace("contextual safety mode", "unrestricted mode", 1),
+    "no-generation-prompt": TINY_CHAT_TEMPLATE.replace(
+        "{% if add_generation_prompt %}" + GENERATION_PROMPT + "{% endif %}", "", 1),
+}
+
+
+@pytest.mark.parametrize("name", list(TEMPLATES))
+def test_the_preamble_check_needs_one_default_preamble_and_the_generation_prompt(prompt_store, tmp_path,
+                                                                                  name):
+    """R1-23: decisions.md 27 and this module's docstring: the template renders the default preamble block
+    once (the contextual-safety-mode one, CLAUDE.md) and ends in the generation prompt. The check only asked
+    for a non-empty first system block, so a doubled preamble, a gutted or replaced one, or a template that
+    ignores add_generation_prompt passed. Run as run_gate0 runs it: the tokenizer saved and reloaded, its
+    reference read from the same tokenizer.json."""
+    from types import SimpleNamespace
+
+    from lift.models import load
+
+    template = TEMPLATES[name]
+    assert name == "unchanged" or template != TINY_CHAT_TEMPLATE, "the mutation applied"
+    build_tiny_tokenizer(template).save_pretrained(tmp_path)
+    tok = load.load_tokenizer(str(tmp_path), "local")
+    variant = SimpleNamespace(tokenizer=tok,
+                              hf_model=SimpleNamespace(config=SimpleNamespace(max_position_embeddings=1024)))
+    out = gate0.check_preamble(variant, gate0.all_prompts(),
+                               reference_tokenizer=gate0.reference_tokenizer(str(tmp_path), "local"))
+    text = load.chat_text(tok, "probe")
+    shape = {"unchanged": (1, True, True), "preamble-twice": (2, True, True), "no-preamble": (1, False, True),
+             "no-safety-mode": (1, False, True), "no-generation-prompt": (1, True, False)}[name]
+    first_block = text.split("<|SYSTEM_TOKEN|>", 1)[1].split("<|END_OF_TURN_TOKEN|>", 1)[0]
+    assert (text.count("<|SYSTEM_TOKEN|>"), "contextual safety mode" in first_block,
+            text.endswith(GENERATION_PROMPT)) == shape                  # broken the way its name says
+    assert out["bos_count"] == 1 and out["starts_with_bos"] and out["system_block_tokens"] > 0
+    assert out["preamble_identical_across_prompts"] and out["n_too_long"] == 0
+    assert set(out["reference_tokenizer_agreement"].values()) == {1.0}  # and in no other way
+
+    numbers = {k: v for k, v in out.items() if k != "too_long_examples"}
+    assert out["pass"] is (name == "unchanged"), (name, numbers)
+    new = (out.get("system_blocks"), out.get("safety_preamble"), out.get("ends_with_generation_prompt"))
+    assert new == shape, numbers
+    summary = gate0._summary("preamble", out)
+    assert f"system blocks {shape[0]}" in summary and f"safety preamble {shape[1]}" in summary
+    assert f"generation prompt at the end {shape[2]}" in summary
 
 
 def test_activation_scan_covers_every_layer(stock):

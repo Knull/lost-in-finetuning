@@ -231,9 +231,19 @@ def stop_token_ids(tokenizer: Any, model: Any = None) -> list[int]:
     return sorted(ids)
 
 
+# What Gate 0 requires of the rendered chat text (decisions.md 27, Preamble). Both strings are taken from
+# the template in tests/fakes.py, which mimics Tiny Aya's (checked against the Hub's copy on Nov 3): its one
+# system block holds the default preamble, which says "You are in contextual safety mode" (CLAUDE.md: the
+# ~366-token "contextual safety mode" preamble), and the generation prompt ends the text.
+SAFETY_PREAMBLE_MARKER = "contextual safety mode"
+GENERATION_PROMPT = "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|><|START_RESPONSE|>"
+
+
 def template_stats(tokenizer: Any) -> dict[str, Any]:
     """What Gate 0 reports about the template: token counts before and after the user's text, the
-    system/preamble block's length, and the BOS check. Counts only, no template text."""
+    system/preamble block's length, and the BOS check. Counts and flags only, no template text:
+    ``system_blocks`` (the <|SYSTEM_TOKEN|> blocks rendered around one user message), ``safety_preamble``
+    (the first one holds ``SAFETY_PREAMBLE_MARKER``) and ``ends_with_generation_prompt``."""
     sentinel = "LIFTSENTINEL"
     text = chat_text(tokenizer, sentinel)
     if text.count(sentinel) != 1:
@@ -249,8 +259,12 @@ def template_stats(tokenizer: Any) -> dict[str, Any]:
         "bos_count": ids.count(bos) if bos is not None else 0,
         "starts_with_bos": bos is not None and ids[:1] == [bos],
         "generation_prompt": suffix.strip()[-60:],
+        "ends_with_generation_prompt": text.endswith(GENERATION_PROMPT),
+        "system_blocks": text.count("<|SYSTEM_TOKEN|>"),
+        "safety_preamble": False,
     }
     if "<|SYSTEM_TOKEN|>" in prefix:
         system = prefix.split("<|SYSTEM_TOKEN|>", 1)[1].split("<|END_OF_TURN_TOKEN|>", 1)[0]
         stats["system_block_tokens"] = count(system)
+        stats["safety_preamble"] = SAFETY_PREAMBLE_MARKER in system
     return stats
