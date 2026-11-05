@@ -10,12 +10,13 @@ auditkit = pytest.importorskip("auditkit")
 
 from fakes import make_prompt  # noqa: E402
 
-from lift import audit  # noqa: E402
+from lift import audit, config  # noqa: E402
+from lift.cachekey import intervention_digest  # noqa: E402
 from lift.io import read_jsonl, sha256_text, stable_json, write_jsonl  # noqa: E402
 from lift.judge import labels, pipeline  # noqa: E402
 from lift.models.generate import generations_path  # noqa: E402
 from lift.paths import metrics_dir  # noqa: E402
-from lift.schemas import GenerationRecord, JudgementRecord, UnclearFlags  # noqa: E402
+from lift.schemas import GenerationRecord, JudgementRecord, UnclearFlags, VariantSpec  # noqa: E402
 from lift.stats.paired import rates  # noqa: E402
 
 CELL = ("adapter", "harmful", "hi", "dev")
@@ -30,8 +31,12 @@ WRONG_LANG = [False, False, False, False, True, False]
 HIT_CAP = [True, False, False, True, False, False]
 GUARD_ID = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
 RULES = labels.rules_tag()                        # the labelling rules of configs/project.yaml
+# The cell's variant as P03 registers it in configs/variants.yaml: a cell is read only under its entry.
+ADAPTER = {"name": "adapter", "method": "adapter", "adapter": "adapter-aya-std-s1", "seed": 1}
+INTERVENTION = intervention_digest(VariantSpec.model_validate(ADAPTER))
 META = {"run_config": "rc0", "model_rev": "c" * 40, "harness": 1, "template": "9" * 16, "decoding": "d" * 16,
-        "torch": "2.15.0", "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB"}
+        "torch": "2.15.0", "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB",
+        "intervention": INTERVENTION, "adapter_hash": "b" * 64}
 GPU_CLASS = {"bf16": "8.0", "fp16": "7.5"}       # meta.gpu_capability: bf16 on the A100, fp16 on the T4
 STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}     # the judge's
 DIGEST = "e" * 64                                 # the bf16 Gate 0 run the T4 comparison paired with
@@ -75,7 +80,10 @@ def write_cell(dtype: str = "bf16", judged_on: str | None = None) -> None:
 
 
 @pytest.fixture
-def cell(fake_prompt_files, xdg):
+def cell(fake_prompt_files, xdg, monkeypatch):
+    load = config.load
+    registry = {"variants": [{"name": "stock", "method": "stock"}, ADAPTER]}
+    monkeypatch.setattr(config, "load", lambda name="project": registry if name == "variants" else load(name))
     fake_prompt_files[CELL[1:3]] = [make_prompt(p, CELL[2], text=TEXTS[p]) for p in PIDS]
     write_cell()
     return xdg
@@ -108,7 +116,8 @@ def test_lift_metadata_records_the_loose_rate_failures_and_provenance(cell):
     assert lift["provenance"] == {"dtype": ["bf16"], "run_config": ["rc0"], "model_rev": ["c" * 40],
                                   "harness": ["1"], "template": ["9" * 16], "decoding": ["d" * 16],
                                   "torch": ["2.15.0"], "transformers": ["5.22.1"],
-                                  "gpu": ["NVIDIA A100-SXM4-40GB"], "judge_stack": [stable_json(STACK)]}
+                                  "gpu": ["NVIDIA A100-SXM4-40GB"], "intervention": [INTERVENTION],
+                                  "adapter_hash": ["b" * 64], "judge_stack": [stable_json(STACK)]}
 
 
 def test_a_judge_without_a_loose_reading_records_none(cell):

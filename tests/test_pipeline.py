@@ -3,6 +3,7 @@ Placeholder text only."""
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -17,10 +18,12 @@ import pytest
 from fakes import make_prompt
 
 from lift import config, gate0
+from lift.cachekey import intervention_digest
 from lift.io import read_jsonl, sha256_text, stable_json, write_jsonl
 from lift.judge import labels, pipeline
 from lift.judge.frontier import load_rubric
 from lift.judge.pipeline import JudgeItem, JudgeOutcome
+from lift.models import generate, variants
 from lift.models.generate import OtherPrecisionError, StaleOutputError, generations_path, restart_command
 from lift.paths import REPO_ROOT, manifests_dir, metrics_dir, validation_dir
 from lift.schemas import GenerationRecord
@@ -47,6 +50,21 @@ T4_META = {"model_rev": REV, "harness": 1, "decoding": DECODING, "gpu_capability
 @pytest.fixture(autouse=True)
 def quick_manifests(monkeypatch):
     monkeypatch.setattr("lift.manifest.git_sha", lambda: "test")
+
+
+# The adapter variants the tests' cells name, as P03 registers them in configs/variants.yaml.
+TEST_VARIANTS = [{"name": name, "method": "adapter", "adapter": "adapter-aya-std-s1", "seed": 1}
+                 for name in ("adapter", "adapter-aya-std-s1")]
+
+
+@pytest.fixture(autouse=True)
+def registry(unpinned_revisions, monkeypatch):
+    """configs/variants.yaml with the tests' adapter variants beside its own (the returned registry, which a
+    test may change): a cell is read only for a registered variant, under its current entry."""
+    load = config.load
+    doc = {"variants": [*copy.deepcopy(load("variants")["variants"]), *copy.deepcopy(TEST_VARIANTS)]}
+    monkeypatch.setattr(config, "load", lambda name="project": doc if name == "variants" else load(name))
+    return doc
 
 
 @pytest.fixture(autouse=True)
@@ -121,13 +139,18 @@ def primary_judge(judge_id=PRIMARY):
 
 def gen(pid, *, output=None, lang="en", set_name="harmful", split="dev", variant="stock", tag="v1",
         prompt=None, n_new=None, dtype="bf16", meta=None):
+    """A GenerationRecord as lift.models.generate writes it: in ``dtype``, by this code's harness, under the
+    variant's entry in configs/variants.yaml when it has one (``meta`` overrides)."""
     prompt = prompt if prompt is not None else f"prompt {pid} {lang}"      # = make_prompt's default text
     output = output if output is not None else f"{LONG} {pid}"
+    made = {"dtype": dtype, "harness": generate.HARNESS_VERSION}
+    if variant in variants.load_registry():
+        made["intervention"] = intervention_digest(variants.get_spec(variant))
     return GenerationRecord(
         key=sha256_text(f"{tag}|{variant}|{pid}|{lang}"), variant=variant, pid=pid, lang=lang, set=set_name,
         split=split, prompt_sha=sha256_text(prompt), output=output, n_prompt_tokens=12,
         n_new_tokens=len(output.split()) if n_new is None else n_new, hit_cap=False, seconds=0.01,
-        meta={"dtype": dtype, **(meta or {})},
+        meta={**made, **(meta or {})},
     )
 
 
@@ -1107,8 +1130,8 @@ def test_paired_labels_refuses_pairs_that_mix_judges_or_generations(fake_prompt_
     make("adapter", model_rev="d" * 40)
     with pytest.raises(ValueError, match="cannot be paired.*model_rev"):
         pair()
-    make("adapter", harness=2)
-    with pytest.raises(ValueError, match="cannot be paired.*harness"):
+    make("adapter", harness=2)                    # R1-03: another harness than this code's is stale on read
+    with pytest.raises(ValueError, match="adapter/harmful_en_dev cannot be reported .*another harness"):
         pair()
 
     make("adapter", gpu="NVIDIA L4", transformers="5.23.0")          # allowed, but said
@@ -1138,6 +1161,98 @@ def test_paired_labels_refuses_another_chat_template_or_decoding(fake_prompt_fil
     assert pair()[0] == {p: "benign" for p in PAIR_PIDS}
     prov = pipeline.provenance("adapter", *CELL[1:])
     assert (prov["template"], prov["decoding"]) == (["9" * 16], ["d" * 16])
+
+
+def stale_read(cell, match):
+    """The read of ``cell`` refuses it as stale: ``match``, and the cell's restart line."""
+    with pytest.raises(ValueError, match=match) as refused:
+        pipeline.load_labels(*cell)
+    assert f"`{restart_command(*cell)}` as a job line right after `lift sync pull`" in str(refused.value)
+
+
+def test_a_cell_is_read_only_if_made_by_this_harness_and_the_pinned_global(fake_prompt_files, monkeypatch):
+    """R1-03: a read checked a cell only against itself, so a cell made by an older harness, or by another
+    revision of Global than the one configs/project.yaml pins, was reported although lift generate refuses
+    the very same cell as stale. Both are stale on read now, with the cell's restart line; the judgements, of
+    the same outputs under the same keys, are not the reason."""
+    pids, _, path = setup_cell(fake_prompt_files, n=4, meta={"model_rev": REV})
+    pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
+    assert set(pipeline.load_labels(*CELL)) == set(pids)
+
+    write_gens([gen(p, meta={"model_rev": REV, "harness": generate.HARNESS_VERSION - 1}) for p in pids])
+    stale_read(CELL, rf"4 generations were made by another harness version than this code's "
+                     rf"\({generate.HARNESS_VERSION}\)")
+    write_gens([gen(p, meta={"model_rev": REV}) for p in pids])
+    assert set(pipeline.load_labels(*CELL)) == set(pids)             # tests see Global unpinned ("main")
+    monkeypatch.setitem(config.load("project")["models"]["global"], "revision", "d" * 40)   # pinned since
+    stale_read(CELL, f"4 generations were made by another revision of Global than the {'d' * 12}")
+    monkeypatch.setitem(config.load("project")["models"]["global"], "revision", REV)         # the one used
+    assert set(pipeline.load_labels(*CELL)) == set(pids)
+
+
+def test_a_cell_is_read_only_under_its_variants_current_registry_entry(fake_prompt_files, registry):
+    """R1-03: every GenerationRecord.meta names the intervention (lift.cachekey.intervention_digest of the
+    variant's spec) and the adapter hash it was made with, and a read compares them with the variant's entry
+    in configs/variants.yaml now. A cell of an adapter retrained under its name and re-pinned, of weights
+    other than the pinned ones, or from before meta named its intervention is stale; a variant the registry
+    no longer lists is refused, naming the registry."""
+    fake_prompt_files[("harmful", "en")] = [make_prompt(p) for p in PAIR_PIDS]
+    entry = next(e for e in registry["variants"] if e["name"] == "adapter")
+    entry["artifacts"] = {"adapter": "a" * 64}                      # P03 registers the adapter's hash
+    cell = ("adapter", *CELL[1:])
+
+    def made(**meta):                                               # the same keys and outputs each time
+        return write_gens([gen(p, variant="adapter", meta=meta) for p in PAIR_PIDS])
+
+    pipeline.judge_file(made(adapter_hash="a" * 64), judge=primary_judge(), lid=FakeLID())
+    assert set(pipeline.load_labels(*cell)) == set(PAIR_PIDS)
+    made(adapter_hash="b" * 64)
+    stale_read(cell, f"4 generations were made by another adapter than the {'a' * 12} adapter's entry pins")
+    made(adapter_hash="a" * 64, intervention=None)                  # made before meta named it: never trusted
+    stale_read(cell, r"4 generations name no intervention \(meta.intervention")
+    made(adapter_hash="a" * 64)
+    assert set(pipeline.load_labels(*cell)) == set(PAIR_PIDS)
+    entry["artifacts"] = {"adapter": "c" * 64}                      # retrained under its name, re-pinned
+    stale_read(cell, "4 generations were made under another intervention than adapter's entry")
+    registry["variants"].remove(entry)
+    with pytest.raises(ValueError, match="'adapter' is not in configs/variants.yaml") as refused:
+        pipeline.load_labels(*cell)
+    assert "lift restart" not in str(refused.value)                 # registering it is the remedy
+
+
+@pytest.mark.torch
+def test_generate_records_the_intervention_and_adapter_a_read_checks(fake_prompt_files, registry, monkeypatch,
+                                                                     tiny_model_dir, tiny_lora_adapter):
+    """R1-03, end to end on the tiny model: lift generate's records and run manifest name the intervention
+    digest and the adapter hash a cell was made with, the read accepts them while the variant's registry
+    entry stands, and refuses the cell as stale once P03 pins another hash under the variant's name."""
+    import shutil
+
+    from lift.train.merge import adapter_hash
+
+    name, cell = "adapter-tiny-s1", ("adapter-tiny-s1", *CELL[1:])
+    tiny_global = {"id": str(tiny_model_dir), "revision": "main"}            # Global is the tiny checkpoint
+    monkeypatch.setitem(config.load("project")["models"], "global", tiny_global)
+    shutil.copytree(tiny_lora_adapter, variants.adapter_path(name))
+    pinned = adapter_hash(variants.adapter_path(name))
+    entry = {"name": name, "method": "adapter", "adapter": name, "seed": 1, "artifacts": {"adapter": pinned}}
+    registry["variants"].append(entry)
+    spec = variants.get_spec(name)
+    ps = [make_prompt(p) for p in PAIR_PIDS]
+    fake_prompt_files[("harmful", "en")] = ps
+    path = generate.generate(variants.build_variant(spec, device="cpu", dtype="bf16"), ps,
+                             out_path=generations_path(*cell), max_new_tokens=4)
+    made = {(g.meta["intervention"], g.meta["adapter_hash"]) for g in generate.read_generations(path)}
+    assert made == {(intervention_digest(spec), pinned)}
+    [run] = [json.loads(p.read_text(encoding="utf-8")) for p in manifests_dir().glob("generate-*.json")]
+    assert (run["intervention"], run["adapter_hash"]) == (intervention_digest(spec), pinned)
+
+    pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
+    assert set(pipeline.load_labels(*cell)) == set(PAIR_PIDS)
+    prov = pipeline.provenance(*cell)
+    assert (prov["intervention"], prov["adapter_hash"]) == ([intervention_digest(spec)], [pinned])
+    entry["artifacts"] = {"adapter": "0" * 64}                      # another adapter now under the name
+    stale_read(cell, "4 generations were made under another intervention")
 
 
 def test_the_second_judge_is_sampled(fake_prompt_files, second_judge):
