@@ -15,6 +15,7 @@ import json
 import logging
 import shutil
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -41,6 +42,7 @@ from lift.train import lora, merge  # noqa: E402
 NAME = "adapter-aya-std-s1"
 PARITY = ["hi", "नमस्ते, आप कैसे हैं?"]
 COMMIT = "b" * 40
+SHA = "c" * 40
 # The user turn alone (byte-level tokens) fills max_seq_len 1024 after the tiny preamble.
 LONG = {"id": "aya-09999", "messages": [{"role": "user", "content": "x " * 600},
                                         {"role": "assistant", "content": "ok"}]}
@@ -861,3 +863,79 @@ def test_lift_train_exits_2_on_a_refused_request_and_stops_on_unpinned_revisions
                  "--per-device-batch", "3"]) == 2
     with pytest.raises(SystemExit, match="unpinned revisions"):
         main(["train", "--candidate", "aya", "--recipe", "standard", "--seed", "1", "--device", "cpu"])
+
+
+# --- lift train --check ------------------------------------------------------------------------------
+
+
+def snapshot(root: Path) -> dict[str, str]:
+    """Every file under ``root`` with its sha256: what a step that writes nothing leaves as it was."""
+    return {p.relative_to(root).as_posix(): sha256_file(p) for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_check_builds_every_example_as_training_does_and_writes_nothing(tiny_model_dir, tiny_tokenizer,
+                                                                        utility, hub, registry,
+                                                                        isolated_dirs, monkeypatch):
+    write_sft(rows(3) + [LONG])
+    before = snapshot(isolated_dirs), registry.read_text(encoding="utf-8")
+    with monkeypatch.context() as m:
+        m.setattr("lift.models.load.load_model", lambda *a, **k: pytest.fail("a model was loaded"))
+        m.setattr(lora, "register_adapter", lambda *a, **k: pytest.fail("the registry was written"))
+        m.setattr(torch.cuda, "is_available", lambda: False)          # no GPU here, and none is asked for
+        report = lora.check_training("aya", "standard", 1, model_id=str(tiny_model_dir))     # device cuda:0
+        dropped = lora.check_training("aya", "standard", 1, model_id=str(tiny_model_dir), drop_unfit=True)
+        with pytest.raises(lora.TrainRefused, match="no CUDA GPU here"):     # the same request, training
+            lora.train_lora("aya", "standard", 1, model_id=str(tiny_model_dir), push=False)
+    assert (snapshot(isolated_dirs), registry.read_text(encoding="utf-8")) == before
+    assert not hub.pushes and hub.preflights == 0 and not manifests()
+
+    examples = [lora.build_example(tiny_tokenizer, row, 1024) for row in rows(3) + [LONG]]
+    assert report["counts"] == lora.data_stats(examples)
+    assert (report["counts"]["rows"], report["counts"]["truncated_rows"]) == (4, 1)
+    assert report["unfit"] == [{"id": "aya-09999", "prompt_tokens": examples[3]["n_prompt"], "limit": 1024}]
+    assert report["stops"] and report["kept"] == lora.data_stats(examples[:3])
+    assert report["data"]["sha256"] == sha256_file(sft_dir() / "aya" / "dedup" / "sft_messages.jsonl")
+    assert report["data"]["heldout_prompts_checked"] == 2 and report["model"]["revision"].startswith("local-")
+    out = "\n".join(lora.check_lines(report))
+    assert "rows: 4; truncated at 1024 tokens: 1" in out
+    assert f"    aya-09999, {examples[3]['n_prompt']}, 1024" in out
+    assert "lift train stops on these rows" in out and "--drop-unfit" in out
+    assert f"supervised tokens: {report['counts']['supervised_tokens']} (per row: min 0," in out
+    assert "Question 0" not in out and "x x x" not in out                 # ids and counts, never text
+
+    # --drop-unfit: what the check says training takes is what training records it took.
+    assert not dropped["stops"] and dropped["kept"] == report["kept"]
+    assert "lift train --drop-unfit drops exactly these and trains on 3 rows" in "\n".join(
+        lora.check_lines(dropped))
+    path = train(tiny_model_dir, drop_unfit=True, max_steps=1, parity=False)
+    assert read(path / "lift_train.json")["counts"] == report["kept"]
+
+
+def test_lift_train_check_reads_the_pinned_tokenizer_and_exits_0(tiny_tokenizer, utility, hub, monkeypatch,
+                                                                 capsys):
+    write_sft(rows(3) + [LONG])
+    line = ["train", "--candidate", "aya", "--recipe", "standard", "--seed", "1", "--check"]
+    loaded = []
+
+    def load_tokenizer(model_id, revision):
+        loaded.append((model_id, revision))
+        return tiny_tokenizer
+
+    monkeypatch.setattr("lift.models.load.load_tokenizer", load_tokenizer)
+    monkeypatch.setattr("lift.models.load.load_model", lambda *a, **k: pytest.fail("a model was loaded"))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(SystemExit, match="unpinned revisions"):    # the tests see models.global at "main"
+        main(line)
+    assert not loaded
+    config.load("project")["models"]["global"]["revision"] = SHA   # pinned, as configs/project.yaml is now
+    assert main(line) == 0
+    out = capsys.readouterr().out
+    assert loaded == [(config.get("models.global.id"), SHA)]
+    assert f"tokenizer: {config.get('models.global.id')}@{SHA[:12]}; max_seq_len 1024" in out
+    assert "aya-09999, " in out and "lift train stops on these rows" in out
+    assert main([*line, "--drop-unfit"]) == 0
+    assert "lift train --drop-unfit drops exactly these and trains on 3 rows" in capsys.readouterr().out
+    assert main([*line, "--per-device-batch", "3"]) == 2
+    assert "lift train --check: refused" in capsys.readouterr().err
+    assert not hub.pushes and hub.preflights == 0 and not manifests()
+    assert main(line[:-1]) == 2 and "no CUDA GPU here" in capsys.readouterr().err   # training: refused
