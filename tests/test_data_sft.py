@@ -275,16 +275,42 @@ def test_near_duplicate_instruction_threshold_is_inclusive():
                                                          "aya-00001": "utl-ind-00007"}
 
 
-def test_near_duplicate_response_threshold_and_minimum_length():
+def test_near_duplicate_response_threshold_has_no_minimum_length():
     r = ALPHA
     assert jaccard(char_ngrams(r), char_ngrams(r[:36])) == 0.85
     h = held("मूल प्रश्न का पाठ यहाँ है", r)
     rows = [cand(0, "बिल्कुल अलग पहला प्रश्न", r[:36]), cand(1, "बिल्कुल अलग दूसरा प्रश्न", r[:35])]
     assert sft.near_duplicates(rows, [h], cfg=CFG) == {"aya-00000": "utl-ind-00007"}
-    # both responses need at least response_min_chars (20) characters
-    assert sft.near_duplicates([cand(2, "अलग प्रश्न", r[:19])], [held("मूल प्रश्न", r[:19])], cfg=CFG) == {}
-    assert sft.near_duplicates([cand(3, "अलग प्रश्न", r[:20])], [held("मूल प्रश्न", r[:20])], cfg=CFG) == {
+    # R1-20: decisions item 24 sets no length minimum, so short answers are compared too (a 20-character
+    # minimum once kept copies of short held-out answers in training); a text under 3 characters is
+    # its own single gram, and empty texts still never match
+    assert sft.near_duplicates([cand(2, "अलग प्रश्न", r[:19])], [held("मूल प्रश्न", r[:19])], cfg=CFG) == {
+        "aya-00002": "utl-ind-00007"}
+    assert sft.near_duplicates([cand(3, "अलग प्रश्न", r[:2])], [held("मूल प्रश्न", r[:2])], cfg=CFG) == {
         "aya-00003": "utl-ind-00007"}
+    assert sft.near_duplicates([cand(4, "अलग प्रश्न", r[1:3])], [held("मूल प्रश्न", r[:2])], cfg=CFG) == {}
+    assert sft.near_duplicates([cand(5, "अलग प्रश्न", "")], [held("मूल प्रश्न", "")], cfg=CFG) == {}
+
+
+def test_exclude_heldout_drops_copies_of_a_short_held_out_answer():
+    """R1-20: a reworded question (instruction Jaccard under 0.7) whose short answer equals or nearly
+    equals a held-out row's leaves both training pools. The real Aya pool kept two such copies of
+    final utility answers (11 and 13 characters) under a 20-character minimum item 24 does not have."""
+    question, reworded = "सौरमंडल का सबसे बड़ा ग्रह कौन सा है?", "सौरमंडल में सबसे बड़ा ग्रह कौन है?"
+    answer, other = "बृहस्पति ग्रह।", cand(4, "पृथ्वी पर सबसे लंबी नदी का नाम लिखिए।", "नील नदी।")
+    assert jaccard(char_ngrams(question), char_ngrams(reworded)) < 0.7 and len(dup_key(answer)) < 20
+    assert jaccard(char_ngrams(answer), char_ngrams(answer[:-1])) >= 0.85
+    assert jaccard(char_ngrams(question), char_ngrams(other.instruction)) < 0.7
+    assert jaccard(char_ngrams(answer), char_ngrams(other.response)) < 0.85
+    h = SftRow("aya", 40, 140, question, answer)
+    pools = {"aya": [h, cand(2, reworded, answer), cand(3, reworded, answer[:-1]), other],
+             "indicalign": [SftRow("indicalign", 9, 9, reworded, answer, {"doc_id": "doc-9"})]}
+    train = sft.exclude_heldout(pools, [sft.heldout_record(h)], cfg=CFG)
+    assert [r.row_id() for r in train["aya"][0]] == ["aya-00004"]
+    assert train["aya"][1] == [{"id": "aya-00002", "reason": "near_dup:utl-aya-00040"},
+                               {"id": "aya-00003", "reason": "near_dup:utl-aya-00040"},
+                               {"id": "aya-00040", "reason": "heldout"}]
+    assert train["indicalign"] == ([], [{"id": "ind-00009", "reason": "near_dup:utl-aya-00040"}])
 
 
 @pytest.mark.parametrize("thresholds", [(0.7, 0.85), (0.3, 0.5), (0.95, 0.6), (1.0, 1.0)])

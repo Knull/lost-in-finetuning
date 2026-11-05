@@ -33,8 +33,11 @@ counts as aya / indicalign:
 3. ``exclude_heldout``: removes the held-out rows, and every row that near-duplicates a held-out row
    of EITHER source, from BOTH training pools: 1,000 -> 790 / 10,322 -> 10,144. Near-duplicate
    (``heldout.near_dup``): exact character 3-gram Jaccard (the quantity MinHash estimates) of the
-   instructions >= 0.7, or of the responses >= 0.85 when both normalised responses have >= 20
-   characters; empty texts never match.
+   instructions >= 0.7, or of the responses >= 0.85, at any length (decisions item 24; a text
+   under 3 characters is its own single gram); empty texts never match. The counts here and in
+   step 4 predate the Nov 5 removal of a 20-character answer minimum item 24 never had: without it
+   3 more aya rows match (two copy the 11- and 13-character answers of final utility items), so
+   aya keeps 787.
 4. ``build_candidates``: CuratorKIT's no-API path on each training pool (``run_curatorkit``): schema
    gate, exact then MinHash dedup (0.85 on character 3-grams; the first copy in row-id order stays;
    the ``raw`` stress pool skips dedup), cleaning with strip_html and collapse_whitespace off:
@@ -238,12 +241,11 @@ class _NearDup(NamedTuple):
     ngram: int
     instruction: Fraction        # thresholds as exact fractions (0.7 -> 7/10)
     response: Fraction
-    min_chars: int
 
 
 class _Grams(NamedTuple):
     ins: frozenset[str]
-    res: frozenset[str]          # empty when the response is too short to compare
+    res: frozenset[str]          # empty only for an empty response, which never matches
 
 
 def _near_cfg(cfg: Mapping[str, Any] | None) -> _NearDup:
@@ -252,13 +254,11 @@ def _near_cfg(cfg: Mapping[str, Any] | None) -> _NearDup:
     thresholds = Fraction(str(nd["instruction"])), Fraction(str(nd["response"]))
     if not all(0 < t <= 1 for t in thresholds):
         raise ValueError(f"near_dup thresholds must lie in (0, 1], got {nd}")
-    return _NearDup(int(nd["ngram"]), *thresholds, int(nd["response_min_chars"]))
+    return _NearDup(int(nd["ngram"]), *thresholds)
 
 
 def _grams(instruction: str, response: str, nd: _NearDup) -> _Grams:
-    long_enough = len(dup_key(response)) >= nd.min_chars
-    return _Grams(char_ngrams(instruction, nd.ngram),
-                  char_ngrams(response, nd.ngram) if long_enough else frozenset())
+    return _Grams(char_ngrams(instruction, nd.ngram), char_ngrams(response, nd.ngram))
 
 
 def _at_least(a: frozenset[str], b: frozenset[str], t: Fraction) -> bool:
