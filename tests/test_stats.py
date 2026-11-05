@@ -53,6 +53,26 @@ def test_bootstrap_interval_covers_estimate_and_clusters_count_once():
     assert (res_u.hi - res_u.lo) < (res_c.hi - res_c.lo)
 
 
+def test_bootstrap_interval_is_the_95_percent_one():
+    # R2-05: the level is pinned both ways. The percentile interval of the mean of 400 paired differences
+    # spans about 2 x 1.96 standard errors (the differences' population sd over sqrt(n)), at the default
+    # alpha every caller uses; a 90% interval would be about 16% narrower, a 99% one about 31% wider.
+    # alpha=0.10 spans 2 x 1.645. win_rate's interval is the same bootstrap, shifted by 0.5.
+    rng = np.random.default_rng(0)
+    n = 400
+    x = rng.binomial(1, 0.35, n).astype(float)
+    y = rng.binomial(1, 0.25, n).astype(float)
+    se = (x - y).std() / np.sqrt(n)
+    res = paired_bootstrap(x, y)
+    assert res.hi - res.lo == pytest.approx(2 * 1.959964 * se, rel=0.05)
+    res90 = paired_bootstrap(x, y, alpha=0.10)
+    assert res90.hi - res90.lo == pytest.approx(2 * 1.644854 * se, rel=0.05)
+    scores = np.array([1.0] * 60 + [0.5] * 20 + [0.0] * 20)
+    out = win_rate(scores)
+    se_win = scores.std() / np.sqrt(scores.size)
+    assert out["hi"] - out["lo"] == pytest.approx(2 * 1.959964 * se_win, rel=0.06)
+
+
 def test_bootstrap_rejects_nan_and_shape_mismatch():
     with pytest.raises(ValueError):
         paired_bootstrap([1.0, float("nan")], [0.0, 0.0])
