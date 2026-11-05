@@ -121,13 +121,14 @@ def offline_runs_repo(monkeypatch):
 
 
 def short_runs(monkeypatch, *, chunk=2, new_tokens=6):
-    """Generation capped at a few tokens, and judging in small chunks so a kill can land mid-file."""
+    """Generation capped at a few tokens, by this test's configs/project.yaml generation.max_new_tokens (lift
+    generate takes the cap from it, and a read refuses a cell made under another: R2-10), and judging in
+    small chunks so a kill can land mid-file."""
+    from lift import config
     from lift.judge import pipeline
-    from lift.models import generate as gen
 
-    real_generate, real_judge_file = gen.generate, pipeline.judge_file
-    monkeypatch.setattr(gen, "generate",
-                        lambda *a, **kw: real_generate(*a, **{**kw, "max_new_tokens": new_tokens}))
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", new_tokens)
+    real_judge_file = pipeline.judge_file
     monkeypatch.setattr(pipeline, "judge_file",
                         lambda *a, **kw: real_judge_file(*a, **{**kw, "batch_size": chunk}))
 

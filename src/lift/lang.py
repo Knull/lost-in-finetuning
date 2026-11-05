@@ -83,6 +83,9 @@ from lift.schemas import LidInfo
 
 _PREFIX = "__label__"
 
+# BLANK, has_visible, space_han (with _HAN and _KANA) and model_line (with one_line) decide what LangID.top
+# returns, and with it the stored flags.lid_top and the garbled, wrong_lang and code_mixed flags. A change
+# to any of them changes stored labels: bump lift.judge.labels.LABELS_VERSION with it.
 BLANK: tuple[str, float] = ("und_Zyyy", 0.0)   # top() of text with no visible character
 # The labels ``is_lang`` sums and the unclear flags read (lift.judge.labels.unclear_flags): GlotLID's top 5,
 # so garbled means exactly "not is_lang" for an output whose top label is accepted (decisions item 43).
@@ -107,6 +110,8 @@ class LangIdentifier(Protocol):
     def is_lang(self, text: str, lang: str) -> bool: ...
 
 
+# one_line, has_visible, space_han and model_line are LangID.top's input handling, like BLANK: a change to
+# any of them changes stored labels and needs a lift.judge.labels.LABELS_VERSION bump.
 def one_line(text: str) -> str:
     """The text as one fastText input line: inner line breaks become spaces, plus the final newline."""
     return text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ") + "\n"

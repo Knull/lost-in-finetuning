@@ -526,7 +526,8 @@ def t4_run(world, *, made_on="7.5", judged_on=None):
 def write_gate0(*, passed=True):
     """Gate 0's two reports, reduced to what its fp16 licence reads (as tests/test_pipeline.py writes
     them): gate0-fp16.json, the T4 comparison on 200 prompts against the bf16 run T4_DIGEST under this
-    harness and these decoding settings (``passed`` its verdict), and gate0.json, that bf16 Gate 0."""
+    harness and these decoding settings, judged by Qwen3Guard in fp16 (``passed`` its verdict), and
+    gate0.json, that bf16 Gate 0."""
     folder = paths.metrics_dir()
     folder.mkdir(parents=True, exist_ok=True)
     revisions = {"global": T4_REV, "judge": "a" * 40}
@@ -534,6 +535,7 @@ def write_gate0(*, passed=True):
             "harness": HARNESS_VERSION, "decoding": T4_DECODING}
     (folder / "gate0-fp16.json").write_text(json.dumps(
         {"dtype": "fp16", "reference_dtype": "bf16", "pass": passed, "gpu_capability": "7.5",
+         "judge": {"id": QWEN_FP16},
          "checks": {"precision": {"pass": True, "digest": "f" * 64}, "fp16": fp16},
          "revisions": revisions}), encoding="utf-8")
     (folder / "gate0.json").write_text(json.dumps(

@@ -58,33 +58,37 @@ Reading:
   reported number, the loose label, flags and judge failures included. Each returned judgement must
   be of a generation now in the generations file, of its current output, made from the current
   prompt text; every generation of the cell made with this code and configuration (this code's
-  ``HARNESS_VERSION``, the revision of Global configs/project.yaml pins when it pins a sha, and the
-  variant's current entry in configs/variants.yaml: ``meta.intervention``, and ``meta.adapter_hash``
-  when the entry pins ``artifacts.adapter``; a record that names no intervention is never trusted, and
-  a variant the registry does not list is refused), else the cell is stale and the refusal names its
-  restart line; every generation of the cell in ``dtype`` under one run configuration and one stack;
+  ``HARNESS_VERSION``, the revision of Global configs/project.yaml pins when it pins a sha, the cap it
+  gives, ``generation.max_new_tokens``: ``meta.max_new_tokens``, and the variant's current entry in
+  configs/variants.yaml: ``meta.intervention``, and ``meta.adapter_hash`` when the entry pins
+  ``artifacts.adapter``; a record that names no cap or no intervention is never trusted, and a variant
+  the registry does not list is refused), else the cell is stale and the refusal names its restart
+  line; every generation of the cell in ``dtype`` under one run configuration and one stack;
   every judgement on one judge stack; and the judge must be the role's configured judge (model,
   revision when pinned to a sha, the labelling rules now in force; for Qwen3Guard the precision and
   Controversial mode; for a frontier judge everything its id names but the API version, so the rubric's
   version and the sampling settings of the role's entry too: an edited rubric is another judge).
   A variant that names an adapter (the adapter method, every repair) is read only when its entry pins
   ``artifacts.adapter`` (an adapter's own entry: lift register-adapter writes it; a repair's: its
-  adapter's hash) and every other entry of method adapter that names that adapter pins the same hash (an
+  adapter's hash), an entry of method adapter names that adapter (none is left once the adapter is
+  un-registered), and every other entry of method adapter that names that adapter pins the same hash (an
   adapter trained and registered again changes only its own entry, which leaves its repairs' pins stale),
   else its cell is refused naming the registry.
   ``dtype`` defaults to ``generation.dtype`` (one precision for every reported number); any other needs Gate
   0's licence (``check_dtype_licence``), because every ``--dtype`` run names its dtype: a comparison
   that paired with the bf16 Gate 0 run gate0.json records now, and a cell made under the harness and
-  decoding settings of that comparison, generated and judged (Qwen3Guard) on its GPU class. A refusal
-  names the remedy for the side that is out of date: after a harness fix, the bf16 Gate 0 and then the
-  comparison; for a cell of another harness or GPU class, its restart line (judged elsewhere: its
-  judge's).
+  decoding settings of that comparison, generated and judged (Qwen3Guard) on its GPU class, and judged
+  (Qwen3Guard) by the judge the comparison ran (gate0-{dtype}.json judge.id, its precision aside: the
+  model, revision, labelling rules and Controversial mode). A refusal names the remedy for the side that is
+  out of date: after a harness fix, or a change of the judge (a re-pin, new labelling rules, another
+  mode), the bf16 Gate 0 and then the comparison; for a cell of another harness or GPU class, its restart
+  line (judged elsewhere, or by an older judge: its judge's).
   ``complete=True`` (every reported number) also needs a generation for every prompt of the split
   and a judgement of every generation; ``complete=False`` is for the second judge's sample and runs
   in progress.
 - ``provenance`` describes a cell (judge id and stack; generation dtype, run configuration, model
-  revision, harness, chat template, decoding settings, library versions, GPU, intervention digest and
-  adapter hash). ``paired_labels`` reads two variants' cells and refuses a pair whose judge (labelling
+  revision, harness, chat template, decoding settings and cap, library versions, GPU, intervention digest
+  and adapter hash). ``paired_labels`` reads two variants' cells and refuses a pair whose judge (labelling
   rules included), precision, model revision, harness, chat template or decoding settings differ. Every
   paired comparison downstream (Gate 2, P07) must use ``paired_labels``, never two ``load_labels`` calls.
 - ``load_judgements`` reads one file with only its own checks: never report from it.
@@ -116,6 +120,8 @@ log = logging.getLogger(__name__)
 LICENCE_MIN_PROMPTS = 200       # decisions.md 27: fp16 agrees with bf16 on 95% of the same 200 prompts
 # What a licensed cell's generations must have been made with (meta field -> where gate0-{dtype}.json records
 # it): Gate 0's comparison says nothing about another harness, other decoding settings or another GPU class.
+# A local judge's judgements of the cell must also be on that GPU class and by the judge the comparison ran
+# (its judge.id, the precision aside: _coverage_problems).
 LICENCE_COVERS = {"harness": ("checks", "fp16", "harness"), "decoding": ("checks", "fp16", "decoding"),
                   "gpu_capability": ("gpu_capability",)}
 ROLES: tuple[str, ...] = ("primary", "second")
@@ -123,8 +129,8 @@ _ROLE_ENTRIES = {"primary": "safety_primary", "second": "safety_second"}     # u
 CONTROVERSIAL_MODES = ("strict", "loose")
 EMPTY_OUTPUT_LID: tuple[tuple[str, float], ...] = (("und", 0.0),)
 QWEN3GUARD_SAFETY = ("Safe", "Unsafe", "Controversial")
-PROVENANCE_META = ("dtype", "run_config", "model_rev", "harness", "template", "decoding", "torch",
-                   "transformers", "gpu", "intervention", "adapter_hash")
+PROVENANCE_META = ("dtype", "run_config", "model_rev", "harness", "template", "decoding", "max_new_tokens",
+                   "torch", "transformers", "gpu", "intervention", "adapter_hash")
 PAIR_MUST_MATCH = ("judge_id", "dtype", "model_rev", "harness", "template", "decoding")
 PAIR_MAY_DIFFER = ("gpu", "torch", "transformers", "judge_stack")
 _STACK_FIELDS = ("torch", "transformers", "gpu_capability")     # a generation without meta["stack"]
@@ -968,7 +974,7 @@ def check_dtype_licence(dtype: str, model_rev: str | None) -> None:
     failed fp16 verdict shows although gate0.json is missing too. Every ``--dtype`` run names its dtype, so
     naming one licenses nothing. ``load_records`` asks whenever the requested dtype is not
     ``generation.dtype``, and also checks that the cell was made as the comparison was (``LICENCE_COVERS``)
-    and judged on its GPU class (``_coverage_problems``).
+    and judged on its GPU class by its judge (``_coverage_problems``).
     """
     licence, reference = metrics_dir() / f"gate0-{dtype}.json", metrics_dir() / "gate0.json"
     rerun = f"`lift smoke --compare-dtype {dtype}` on the T4"
@@ -1063,8 +1069,10 @@ def _coverage_problems(dtype: str, gens: Sequence[GenerationRecord], records: Se
     A100 job given --dtype fp16) or under another harness never had its precision compared. So must the GPU
     class of every judgement with a ``stack`` (Qwen3Guard; an API judge runs on no GPU of ours): the
     comparison ran generator and judge both on the T4 (decisions.md 27), while an fp16 judge may also run on
-    a CPU or on another GPU below compute 8. Empty when the licence cannot be read (``check_dtype_licence``
-    says so)."""
+    a CPU or on another GPU below compute 8. And every judgement with a ``stack`` must be the judge the
+    comparison ran (``_judge_coverage``: the licence's judge.id, its precision aside), as its agreement was
+    measured with that judge only: not after a re-pin, under other labelling rules or in another
+    Controversial mode. Empty when the licence cannot be read (``check_dtype_licence`` says so)."""
     path = metrics_dir() / f"gate0-{dtype}.json"
     try:
         licence = json.loads(path.read_text(encoding="utf-8"))
@@ -1092,11 +1100,44 @@ def _coverage_problems(dtype: str, gens: Sequence[GenerationRecord], records: Se
         classes = sorted({str(on) for on in judged_on.values()})
         problems.append(f"{len(off)} judgements were made on GPU class {classes}, not {path.name} "
                         f"gpu_capability {gpu!r}, e.g. {off[:5]}")
+    problems += _judge_coverage(path.name, _field(licence, "judge", "id"),
+                                [r for r in records if r.native.get("stack") is not None], dtype, role, moved)
     if problems:
         problems.append(f"a cell in {dtype} counts only when generated under the harness and decoding "
-                        "settings of Gate 0's comparison, and generated and judged on its GPU class: "
+                        "settings of Gate 0's comparison, generated and judged on its GPU class, and judged "
+                        "by the judge it ran: "
                         + "; ".join(_coverage_remedies(dtype, licence, gens, moved, cell, role)))
     return problems
+
+
+def _judge_coverage(name: str, compared: Any, local: Sequence[JudgementRecord], dtype: str, role: str,
+                    moved: set[str]) -> list[str]:
+    """Why Gate 0's comparison (``name``, whose judge.id is ``compared``) did not measure the judge of the
+    ``local`` judgements (those with a ``stack``: Qwen3Guard's; an API judge's are exempt, as from the GPU
+    class): each must carry ``compared`` but for its precision segment (``lift.gate0._judge_identity``, the
+    identity a comparison pairs runs of: model, revision, labelling rules and Controversial mode; the
+    precision is checked on its own). Adds to ``moved`` the side that is out of date by the role's configured
+    judge (``_expected_judge``): "comparison_judge" when the comparison's judge is not it (a re-pin, new
+    labelling rules or another mode since: the bf16 Gate 0 and the comparison are made again), "judge" when
+    the cell's judge is not (judged again), both when neither or both are (an unpinned revision)."""
+    from lift.gate0 import _judge_identity
+
+    if not local:
+        return []
+    if not isinstance(compared, str) or not compared:
+        return [f"{name} judge.id is missing: the licence does not say which judge its comparison ran"]
+    off = sorted(r.pid for r in local if _judge_identity(r.judge) != _judge_identity(compared))
+    if not off:
+        return []
+    rule = _expected_judge(role, dtype)[0]
+    licence_now, cell_now = bool(rule.fullmatch(compared)), all(rule.fullmatch(r.judge) for r in local)
+    if not licence_now or cell_now:
+        moved.add("comparison_judge")
+    if licence_now or not cell_now:
+        moved.add("judge")
+    judges = sorted({r.judge for r in local})
+    return [f"{len(off)} judgements were made by {judges}, not by the judge {name} judge.id names "
+            f"({compared!r}, its precision aside), e.g. {off[:5]}"]
 
 
 def _coverage_remedies(dtype: str, licence: Any, gens: Sequence[GenerationRecord], moved: Collection[str],
@@ -1107,13 +1148,15 @@ def _coverage_remedies(dtype: str, licence: Any, gens: Sequence[GenerationRecord
     comparison against the old one would not run); a cell of another one is made again. Decoding settings
     can also move without a harness bump (a stop set or cap), so for them both remedies are named. A cell
     made on another GPU class is made again on the T4, and one only judged elsewhere is judged again
-    there."""
+    there. A comparison whose judge is not the role's configured one ("comparison_judge":
+    ``_judge_coverage``) is made again after the bf16 Gate 0, which it pairs only with when that ran the
+    same judge; a cell judged by another than the comparison's and the configured one is judged again."""
     from lift.models.generate import HARNESS_VERSION
 
     made, version = _file_dtype(gens), HARNESS_VERSION
     gate0 = ("re-run the full bf16 Gate 0 on an A100 (`lift smoke`), then "
              f"`lift smoke --compare-dtype {dtype}` on the T4 (a comparison pairs only with a bf16 Gate 0 of "
-             "the same harness and decoding settings)")
+             "the same harness, decoding settings and judge)")
     remake = (f"make the cell again on the T4: run `{restart_command(*cell, dtype=made)}` as a job line "
               "right after `lift sync pull`, then generate and judge it there")
     harness = "harness" in moved
@@ -1128,6 +1171,9 @@ def _coverage_remedies(dtype: str, licence: Any, gens: Sequence[GenerationRecord
                    f"if the cell is the older one, {remake}")
     if "gpu_capability" in moved:
         out.append(f"the cell was made on another GPU class than the comparison's: {remake}")
+    if "comparison_judge" in moved:
+        out.append(f"the comparison was made with another judge than the configured {role} judge (another "
+                   f"model, revision, labelling rules or Controversial mode): {gate0}")
     if "judge" in moved and not old_cell and "gpu_capability" not in moved:
         rejudge = restart_command(*cell, judge=role, dtype=made)
         out.append(f"judge the cell again on the T4: run `{rejudge}` as a job line right after "
@@ -1175,10 +1221,12 @@ def _made_otherwise(variant: str, gens: Sequence[GenerationRecord]) -> tuple[lis
     """The generations of ``variant``'s cell that were not made with this code and configuration, as
     (pids, what) checks of a stale cell, and why the variant has no configuration to compare with (None when
     it is registered). Every generation must carry this code's ``HARNESS_VERSION``, the revision of Global
-    configs/project.yaml pins (when it pins a sha), and the intervention of the variant's entry in
-    configs/variants.yaml (``meta.intervention``; a record without one was made before generations recorded
-    it, and is never trusted), with the pinned adapter's hash (``meta.adapter_hash``) when the entry pins
-    ``artifacts.adapter``."""
+    configs/project.yaml pins (when it pins a sha), the cap configs/project.yaml gives
+    (``generation.max_new_tokens``: ``meta.max_new_tokens``; a record without one was made before
+    generations recorded it, and is never trusted: ``meta.decoding`` digests the cap with the stop set, which
+    a read cannot rebuild without the model), and the intervention of the variant's entry in
+    configs/variants.yaml (``meta.intervention``; a record without one is never trusted either), with the
+    pinned adapter's hash (``meta.adapter_hash``) when the entry pins ``artifacts.adapter``."""
     from lift.cachekey import intervention_digest
     from lift.models.generate import HARNESS_VERSION
     from lift.models.variants import get_spec
@@ -1190,6 +1238,15 @@ def _made_otherwise(variant: str, gens: Sequence[GenerationRecord]) -> tuple[lis
         checks.append(([g.pid for g in gens if g.meta.get("model_rev") != revision],
                        f"generations were made by another revision of Global than the {revision[:12]} "
                        "configs/project.yaml pins"))
+    cap = int(config.get("generation.max_new_tokens"))
+    checks += [
+        ([g.pid for g in gens if g.meta.get("max_new_tokens") is None],
+         "generations name no cap (meta.max_new_tokens: made before generations recorded it, so never "
+         "trusted)"),
+        ([g.pid for g in gens if g.meta.get("max_new_tokens") not in (None, cap)],
+         f"generations were made under another cap than the {cap} new tokens configs/project.yaml gives "
+         "(generation.max_new_tokens)"),
+    ]
     try:
         spec = get_spec(variant)
     except KeyError as exc:
@@ -1219,7 +1276,10 @@ def _adapter_pin_problems(variant: str) -> list[str]:
     adapter's hash), and every other entry of method adapter that names the same adapter (the adapter's
     own entry) must pin that hash too: an adapter trained and registered again changes only its own entry,
     so a repair entry still pinning the old hash is stale, and its cells, made from the old weights, would
-    read and pair with the new adapter arm (``PAIR_MUST_MATCH`` has no adapter field)."""
+    read and pair with the new adapter arm (``PAIR_MUST_MATCH`` has no adapter field). At least one entry
+    of method adapter must name that adapter (a variant of method adapter is one): a repair of an adapter
+    the registry no longer lists (P03 un-registers one whose fp32 merge parity failed, which nothing may
+    evaluate) has no pin to be held to, so its cells, whatever weights made them, are never read."""
     from lift.models.variants import load_registry
 
     registry = load_registry()
@@ -1249,6 +1309,14 @@ def _adapter_pin_problems(variant: str) -> list[str]:
                         f"Re-register {variant} with {other.name}'s current pin (its artifacts.adapter in "
                         "configs/variants.yaml), then make its cells again: their read then names each "
                         "cell's lift restart line")
+    if not any(other.method == "adapter" and other.adapter == spec.adapter for other in registry.values()):
+        problems.append(f"{variant}'s entry in configs/variants.yaml names adapter {spec.adapter}, but no "
+                        "entry of method adapter names it: a cell of a variant that names an adapter is read "
+                        "only while an entry of method adapter names that adapter with the same pin (the "
+                        "adapter's own entry, which `lift register-adapter` writes, and removes when the "
+                        "adapter's fp32 merge parity fails: nothing may evaluate it then). Register the "
+                        f"adapter again (`lift register-adapter {spec.adapter}`) before {variant}'s cells "
+                        f"are read, and re-register {variant} if its pin is not the one that entry pins")
     return problems
 
 
@@ -1256,9 +1324,9 @@ def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRec
                 cell: tuple[str, str, str, str], *, role: str, complete: bool, dtype: str) -> None:
     """Raise unless ``records`` can be reported (the rules are in the module docstring). A variant whose
     spec names an adapter (the adapter method, every P05 repair) is read only under the adapter hash its
-    configs/variants.yaml entry pins (artifacts.adapter), and only while every entry of method adapter that
-    names that adapter pins the same hash (``_adapter_pin_problems``), so the per-cell adapter_hash check
-    holds a repair arm and its adapter arm to one set of weights."""
+    configs/variants.yaml entry pins (artifacts.adapter), and only while an entry of method adapter names
+    that adapter and every such entry pins the same hash (``_adapter_pin_problems``), so the per-cell
+    adapter_hash check holds a repair arm and its adapter arm to one set of weights."""
     variant, set_name, lang, split = cell
     texts = {p.pid: p.text for p in prompts.load(set_name, lang, split)}
     gen_of = {g.key: g for g in gens}
@@ -1350,11 +1418,11 @@ def _describe(records: Sequence[JudgementRecord], gens: Sequence[GenerationRecor
 def provenance(variant: str, set_name: str, lang: str, split: str, *,
                judge: str = "primary") -> dict[str, Any]:
     """What one cell was made with: the judge id, the counts, for each GenerationRecord.meta field of
-    ``PROVENANCE_META`` (dtype, run_config, model_rev, harness, template, decoding, torch, transformers,
-    gpu, intervention, adapter_hash) the sorted distinct values present, as strings (older records lack
-    some fields; stock has no adapter hash), and the judge's ``judge_stack`` (canonical JSON; none for an
-    API judge). It describes and checks nothing (``load_records`` does), so it can also say why a cell is
-    refused."""
+    ``PROVENANCE_META`` (dtype, run_config, model_rev, harness, template, decoding, max_new_tokens, torch,
+    transformers, gpu, intervention, adapter_hash) the sorted distinct values present, as strings (older
+    records lack some fields; stock has no adapter hash), and the judge's ``judge_stack`` (canonical JSON;
+    none for an API judge). It describes and checks nothing (``load_records`` does), so it can also say why
+    a cell is refused."""
     from lift.models import generate
 
     records = load_judgements(variant, set_name, lang, split, judge=judge)

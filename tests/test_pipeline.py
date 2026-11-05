@@ -45,6 +45,7 @@ DIGEST = "e" * 64          # gate0.json's checks.precision.digest: the bf16 run 
 DECODING = "d" * 16
 COMPARED = {"reference_digest": DIGEST, "harness": 1, "decoding": DECODING}     # what the comparison ran with
 T4_META = {"model_rev": REV, "harness": 1, "decoding": DECODING, "gpu_capability": "7.5"}  # a T4 generation
+T4_JUDGE = f"{GUARD_ID}#{RULES}#fp16#strict"    # the judge the T4 comparison ran: the primary judge in fp16
 
 
 @pytest.fixture(autouse=True)
@@ -144,10 +145,12 @@ def primary_judge(judge_id=PRIMARY):
 def gen(pid, *, output=None, lang="en", set_name="harmful", split="dev", variant="stock", tag="v1",
         prompt=None, n_new=None, dtype="bf16", meta=None):
     """A GenerationRecord as lift.models.generate writes it: in ``dtype``, by this code's harness, under the
-    variant's entry in configs/variants.yaml when it has one, by the adapter it pins (``meta`` overrides)."""
+    cap configs/project.yaml gives, under the variant's entry in configs/variants.yaml when it has one, by the
+    adapter it pins (``meta`` overrides)."""
     prompt = prompt if prompt is not None else f"prompt {pid} {lang}"      # = make_prompt's default text
     output = output if output is not None else f"{LONG} {pid}"
-    made = {"dtype": dtype, "harness": generate.HARNESS_VERSION}
+    made = {"dtype": dtype, "harness": generate.HARNESS_VERSION,
+            "max_new_tokens": config.get("generation.max_new_tokens")}
     if variant in variants.load_registry():
         spec = variants.get_spec(variant)
         made["intervention"] = intervention_digest(spec)
@@ -177,23 +180,25 @@ def setup_cell(store, n=6, outputs=None, dtype="bf16", meta=None):
 
 
 def write_licence(dtype="fp16", *, passed=True, fp16=True, rev=REV, name=None, reference=True, ref_rev=REV,
-                  digest=DIGEST, gpu="7.5"):
+                  digest=DIGEST, gpu="7.5", judge=T4_JUDGE):
     """What Gate 0's comparison run (lift smoke --compare-dtype) writes to outputs/metrics/gate0-{dtype}.json,
     and the bf16 reference's own Gate 0 (gate0.json; ``reference`` None leaves it out), reduced to the
     fields the licence reads. ``fp16`` is the fp16 check's pass flag on a comparison of 200 prompts, or
     the whole check; either way it records ``COMPARED`` unless it says otherwise. ``digest`` is gate0.json's
     checks.precision.digest (the comparison paired with ``DIGEST``), ``gpu`` the GPU class the comparison
-    ran on (None leaves either out)."""
+    ran on, ``judge`` the id of the judge it ran (Gate 0's judge.id; gate0.json's names it in bf16, as the
+    comparison pairs only runs of one judge but for the precision); None leaves either out."""
     fp16 = {**COMPARED, **fp16} if isinstance(fp16, dict) else {"pass": fp16, "comparable": True, "n": 200,
                                                                   **COMPARED}
     doc = {"dtype": dtype, "reference_dtype": "bf16", "pass": passed,
-           **({"gpu_capability": gpu} if gpu else {}),
+           **({"gpu_capability": gpu} if gpu else {}), **({"judge": {"id": judge}} if judge else {}),
            "checks": {"precision": {"pass": True, "digest": "f" * 64}, "fp16": fp16},
            "revisions": {"global": rev, "judge": "a" * 40}}
     metrics_dir().mkdir(parents=True, exist_ok=True)
     if reference is not None:
         precision = {"pass": True, **({"digest": digest} if digest else {})}
         ref = {"dtype": "bf16", "pass": reference, "checks": {"precision": precision},
+               **({"judge": {"id": judge.replace(f"#{dtype}#", "#bf16#")}} if judge else {}),
                "revisions": {"global": ref_rev, "judge": "a" * 40}}
         (metrics_dir() / "gate0.json").write_text(json.dumps(ref), encoding="utf-8")
     path = metrics_dir() / f"{name or f'gate0-{dtype}'}.json"
@@ -1061,16 +1066,78 @@ def test_a_licence_covers_only_cells_judged_on_its_gpu_class(fake_prompt_files, 
 
 
 def test_a_licence_that_records_no_harness_decoding_or_gpu_class_covers_no_cell(fake_prompt_files):
-    """A licence from before contract J does not say what its comparison ran with, so it covers nothing."""
+    """A licence from before contract J does not say what its comparison ran with, so it covers nothing. Nor
+    does one that names no judge (R2-07) cover a cell a local judge judged."""
     t4_cell(fake_prompt_files)
     write_licence(gpu=None, fp16={"pass": True, "comparable": True, "n": 200, "harness": None,
-                                  "decoding": None})
+                                  "decoding": None}, judge=None)
     with pytest.raises(ValueError, match="cannot be reported") as refused:
         pipeline.load_labels(*CELL, dtype="fp16")
-    for where in ("checks.fp16.harness", "checks.fp16.decoding", "gpu_capability"):
+    for where in ("checks.fp16.harness", "checks.fp16.decoding", "gpu_capability", "judge.id"):
         assert f"gate0-fp16.json {where} is missing" in str(refused.value)
     write_licence()
     assert len(pipeline.load_labels(*CELL, dtype="fp16")) == 4
+
+
+PINNED_JUDGE = "a" * 40              # the judge revision the config pins (decisions item 49): GUARD_ID's
+
+
+@pytest.mark.parametrize("change", ["labelling-rules", "judge-revision", "controversial-mode"])
+def test_the_fp16_licence_covers_only_cells_judged_by_its_comparisons_judge(fake_prompt_files, monkeypatch,
+                                                                            change):
+    """R2-07: gate0-fp16.json records the judge its comparison ran (judge.id: model, revision, labelling
+    rules, precision, Controversial mode), but the licence never compared it with the licensed cell's judge.
+    So it outlived a dated change of the labelling rules (a new rules tag), a re-pin of the judge or another
+    Controversial mode: T4 cells judged under the new id read as licensed by a 95% agreement (and an fp16
+    judge scan) Gate 0 measured with another judge. Every judgement a local judge made (one with a stack)
+    must now carry the licence's judge id, its precision segment aside; otherwise the read is refused naming
+    gate0-fp16.json, and the remedy is the bf16 Gate 0 and then the comparison, which pairs only runs of one
+    judge."""
+    monkeypatch.setitem(config.load("project")["judges"]["safety_primary"], "revision", PINNED_JUDGE)
+    pids, _ = t4_cell(fake_prompt_files)             # fp16 on the T4, judged there in fp16
+    write_licence()                                  # the comparison ran this very judge
+    assert pipeline.load_labels(*CELL, dtype="fp16") == {p: "refusal" for p in pids}     # licensed: control
+    if change == "labelling-rules":
+        # A dated change to unclear.min_new_tokens moves the rules tag. The cell is set aside (its `lift
+        # restart ... --judge primary --dtype fp16` line) and judged again on the T4 under the new id, while
+        # gate0-fp16.json still records the comparison made under the old rules.
+        change_the_rules(monkeypatch)
+        pipeline.judgements_path("qwen3guard", *CELL).unlink()
+        t4_cell(fake_prompt_files)
+        [judge] = {r.judge for r in pipeline.load_judgements(*CELL)}
+        assert judge != T4_JUDGE and pipeline._expected_judge("primary", "fp16")[0].fullmatch(judge)
+    elif change == "judge-revision":                 # the comparison ran the judge of an earlier pin
+        write_licence(judge=f"Qwen/Qwen3Guard-Gen-4B@{'0' * 40}#{RULES}#fp16#strict")
+    else:                                            # the comparison ran the loose Controversial mapping
+        write_licence(judge=f"{GUARD_ID}#{RULES}#fp16#loose")
+    message = fp16_refusal()
+    other = r"4 judgements were made by \[.*\], not by the judge gate0-fp16\.json judge\.id names"
+    assert re.search(other, message), message
+    assert ("the comparison was made with another judge than the configured primary judge (another model, "
+            f"revision, labelling rules or Controversial mode): {NEW_GATE0}") in message
+    assert "lift restart" not in message and "not the configured primary judge" not in message
+    with pytest.raises(ValueError, match=r"gate0-fp16\.json judge\.id"):
+        pipeline.load_records(*CELL, complete=False, dtype="fp16")
+
+
+def test_a_cell_judged_by_an_older_judge_than_the_licences_names_its_judges_restart(
+        fake_prompt_files, monkeypatch, second_judge):
+    """R2-07, the other side: the judge was re-pinned, and the bf16 Gate 0 and the T4 comparison re-ran under
+    the new pin. A T4 cell judged before is then the stale side: its judge's restart line is the remedy, not
+    another Gate 0. A frontier (API) judge's judgements carry no stack: the licence's judge is not theirs."""
+    entry = config.load("project")["judges"]["safety_primary"]
+    monkeypatch.setitem(entry, "revision", PINNED_JUDGE)
+    pids, gens = t4_cell(fake_prompt_files)
+    monkeypatch.setitem(entry, "revision", "b" * 40)         # re-pinned, Gate 0 and the comparison re-run
+    write_licence(judge=f"Qwen/Qwen3Guard-Gen-4B@{'b' * 40}#{RULES}#fp16#strict")
+    message = fp16_refusal()
+    assert "4 judgements were made by" in message and "not the configured primary judge" in message
+    assert (f"judge the cell again on the T4: run `{RESTART} --judge primary --dtype fp16` as a job line "
+            "right after `lift sync pull`") in message
+    assert "lift smoke" not in message and "make the cell again" not in message
+    second = FakeJudge(second_judge, short=pipeline.judge_dir("second"))
+    pipeline.judge_file(generations_path(*CELL), judge=second, lid=FakeLID(), keys=[gens[0].key])
+    assert pipeline.load_labels(*CELL, judge="second", complete=False, dtype="fp16") == {pids[0]: "benign"}
 
 
 def test_a_pinned_judge_revision_is_checked(fake_prompt_files, monkeypatch):
@@ -1197,6 +1264,35 @@ def test_a_cell_is_read_only_if_made_by_this_harness_and_the_pinned_global(fake_
     assert set(pipeline.load_labels(*CELL)) == set(pids)
 
 
+def test_a_cell_is_read_only_if_made_under_the_configured_cap(fake_prompt_files, monkeypatch):
+    """R2-10: a read compared a cell with this code's harness, the pinned Global and the registry, never with
+    the decoding settings configs/project.yaml gives now. After a dated edit of generation.max_new_tokens
+    (to cut the cap-hit rate, say), a cell nobody made again was still reported under the old cap, and a pair
+    whose two arms both predate the edit still paired, though lift generate refuses those very cells as made
+    under another configuration. Every generation records its cap (meta.max_new_tokens), and a read refuses
+    a cell made under another cap than the configured one, or naming none, as stale with its restart line."""
+    pids, _, path = setup_cell(fake_prompt_files, n=4)
+    pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
+    assert set(pipeline.load_labels(*CELL)) == set(pids)
+    cap = config.get("generation.max_new_tokens")
+    assert {g.meta["max_new_tokens"] for g in generate.read_generations(path)} == {cap} == {256}
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", 512)       # the dated edit
+    stale_read(CELL, r"4 generations were made under another cap than the 512 new tokens "
+                     r"configs/project\.yaml gives \(generation\.max_new_tokens\)")
+    write_gens([gen(p) for p in pids])               # made again under it (here with the same keys)
+    assert set(pipeline.load_labels(*CELL)) == set(pids)
+    write_gens([gen(p, meta={"max_new_tokens": None}) for p in pids])     # made before records named it
+    stale_read(CELL, r"4 generations name no cap \(meta\.max_new_tokens")
+
+    for variant in ("stock", "adapter"):             # both arms of a pair made under the cap of 512
+        pair_cell(fake_prompt_files, variant)
+    assert pair()[0] == {p: "benign" for p in PAIR_PIDS}
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", cap)       # edited back
+    stale = f"stock/harmful_en_dev cannot be reported .*another cap than the {cap} new tokens"
+    with pytest.raises(ValueError, match=stale):
+        pair()
+
+
 def test_a_cell_is_read_only_under_its_variants_current_registry_entry(fake_prompt_files, registry):
     """R1-03: every GenerationRecord.meta names the intervention (lift.cachekey.intervention_digest of the
     variant's spec) and the adapter hash it was made with, and a read compares them with the variant's entry
@@ -1293,12 +1389,82 @@ def test_a_repair_cell_is_read_only_while_its_pin_is_its_adapters_current_one(fa
     assert pipeline.paired_labels(*arms, *CELL[1:]) == ({p: "benign" for p in PAIR_PIDS},) * 2
 
 
+def test_a_cell_is_refused_while_no_entry_of_method_adapter_names_its_adapter(fake_prompt_files, registry):
+    """W3-03 follow-up (wave 3, run-read VERIFY-3): a repair was held to the pin of every entry of method
+    adapter naming its adapter, but read under its own pin once no such entry was left, as after P03
+    un-registers an adapter whose fp32 merge parity failed (nothing may evaluate it, CLAUDE.md rule 9). Two
+    repairs of that adapter pinning different weights then both read, and paired (PAIR_MUST_MATCH has no
+    adapter field). A cell of a variant that names an adapter is refused unless an entry of method adapter
+    names that adapter with the same pin, naming the registry and no restart line."""
+    adapter = "adapter-aya-std-s1"
+    repairs = [{"name": f"wiseft-l{lam}-{adapter}", "method": "wiseft", "adapter": adapter,
+                "params": {"lam": float(lam)}, "artifacts": {"adapter": pin}}
+               for lam, pin in (("0.50", ADAPTER_HASH), ("0.25", "c" * 64))]
+    names = [r["name"] for r in repairs]
+    registry["variants"] += repairs
+    for name in names:
+        pair_cell(fake_prompt_files, name)
+    assert set(pipeline.load_labels(names[0], *CELL[1:])) == set(PAIR_PIDS)     # its adapter's pin
+    with pytest.raises(ValueError, match=f"{names[1]}'s entry .* pins adapter hash {'c' * 12}, but"):
+        pipeline.load_labels(names[1], *CELL[1:])                               # not its adapter's
+    own = [e for e in registry["variants"] if e["method"] == "adapter" and e["adapter"] == adapter]
+    assert [e["name"] for e in own] == ["adapter", adapter]                      # TEST_VARIANTS
+    for entry in own:                                # un-registered (P03: its fp32 merge parity failed)
+        registry["variants"].remove(entry)
+    for name in names:
+        unnamed = f"{name}'s entry in configs/variants.yaml names adapter {adapter}, but no entry of method"
+        with pytest.raises(ValueError, match=f"{unnamed} adapter names it") as refused:
+            pipeline.load_labels(name, *CELL[1:])
+        assert "lift restart" not in str(refused.value)                       # registering it is the remedy
+    with pytest.raises(ValueError, match="no entry of method adapter names it"):
+        pipeline.paired_labels(*names, *CELL[1:])
+    registry["variants"].append(own[1])              # registered again, with the same weights
+    assert set(pipeline.load_labels(names[0], *CELL[1:])) == set(PAIR_PIDS)
+
+
+def test_every_entry_of_method_adapter_naming_one_adapter_holds_the_others_to_its_pin(fake_prompt_files,
+                                                                                     registry):
+    """W3-03 (wave 3, run-read VERIFY-4): two behaviours no test pinned. The comparison is symmetric: an
+    adapter's own entry and an alias of method adapter naming the same adapter (TEST_VARIANTS' "adapter")
+    each read only while the other pins the same hash, so after the adapter is registered again with new
+    weights, the alias's cells, made from the old ones, are refused, and so are the new ones' until the
+    alias pins them too. And an own entry that pins no hash is never the same pin as a repair's."""
+    adapter = "adapter-aya-std-s1"
+    alias, own = (next(e for e in registry["variants"] if e["name"] == name) for name in ("adapter", adapter))
+    for name in ("adapter", adapter):
+        pair_cell(fake_prompt_files, name)
+    assert pipeline.paired_labels("adapter", adapter, *CELL[1:]) == ({p: "benign" for p in PAIR_PIDS},) * 2
+    own["artifacts"] = {"adapter": "c" * 64}         # trained again, registered again (--replace)
+    pair_cell(fake_prompt_files, adapter)            # and its cells made again from the new weights
+    for name, other, theirs in (("adapter", adapter, "c"), (adapter, "adapter", "a")):
+        held = (f"{name}'s entry in configs/variants.yaml pins adapter hash .*, but {other}'s entry "
+                f"\\(method adapter, adapter {adapter}\\) pins {theirs * 12}")
+        with pytest.raises(ValueError, match=held):
+            pipeline.load_labels(name, *CELL[1:])
+    alias["artifacts"] = {"adapter": "c" * 64}       # the alias pins the new weights too
+    stale_read(("adapter", *CELL[1:]), "generations were made under another intervention")
+    assert set(pipeline.load_labels(adapter, *CELL[1:])) == set(PAIR_PIDS)
+
+    repair = {"name": f"wiseft-l0.50-{adapter}", "method": "wiseft", "adapter": adapter,
+              "params": {"lam": 0.5}, "artifacts": {"adapter": "c" * 64}}
+    registry["variants"] = [e for e in registry["variants"] if e is not alias] + [repair]
+    pair_cell(fake_prompt_files, repair["name"])
+    assert set(pipeline.load_labels(repair["name"], *CELL[1:])) == set(PAIR_PIDS)
+    del own["artifacts"]                             # the adapter's own entry pins no hash
+    unpinned = f"{repair['name']}'s entry .* but {adapter}'s entry \\(method adapter, adapter {adapter}\\)"
+    with pytest.raises(ValueError, match=f"{unpinned} pins none"):
+        pipeline.load_labels(repair["name"], *CELL[1:])
+
+
 @pytest.mark.torch
 def test_generate_records_the_intervention_and_adapter_a_read_checks(fake_prompt_files, registry, monkeypatch,
                                                                      tiny_model_dir, tiny_lora_adapter):
     """R1-03, end to end on the tiny model: lift generate's records and run manifest name the intervention
     digest and the adapter hash a cell was made with, the read accepts them while the variant's registry
-    entry stands, and refuses the cell as stale once P03 pins another hash under the variant's name."""
+    entry stands, and refuses the cell as stale once P03 pins another hash under the variant's name. R2-10:
+    they name the cap too (lift generate takes it from configs/project.yaml, as every lift command runs it),
+    and after a dated edit of generation.max_new_tokens the read refuses the cell lift generate refuses as
+    made under another configuration; made again after its restart line, it reads."""
     import shutil
 
     from lift.train.merge import adapter_hash
@@ -1306,6 +1472,7 @@ def test_generate_records_the_intervention_and_adapter_a_read_checks(fake_prompt
     name, cell = "adapter-tiny-s1", ("adapter-tiny-s1", *CELL[1:])
     tiny_global = {"id": str(tiny_model_dir), "revision": "main"}            # Global is the tiny checkpoint
     monkeypatch.setitem(config.load("project")["models"], "global", tiny_global)
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", 4)    # short tiny outputs
     shutil.copytree(tiny_lora_adapter, variants.adapter_path(name))
     pinned = adapter_hash(variants.adapter_path(name))
     entry = {"name": name, "method": "adapter", "adapter": name, "seed": 1, "artifacts": {"adapter": pinned}}
@@ -1313,17 +1480,27 @@ def test_generate_records_the_intervention_and_adapter_a_read_checks(fake_prompt
     spec = variants.get_spec(name)
     ps = [make_prompt(p) for p in PAIR_PIDS]
     fake_prompt_files[("harmful", "en")] = ps
-    path = generate.generate(variants.build_variant(spec, device="cpu", dtype="bf16"), ps,
-                             out_path=generations_path(*cell), max_new_tokens=4)
-    made = {(g.meta["intervention"], g.meta["adapter_hash"]) for g in generate.read_generations(path)}
-    assert made == {(intervention_digest(spec), pinned)}
+    variant = variants.build_variant(spec, device="cpu", dtype="bf16")
+    path = generate.generate(variant, ps, out_path=generations_path(*cell))
+    made = {(g.meta["intervention"], g.meta["adapter_hash"], g.meta.get("max_new_tokens"))
+            for g in generate.read_generations(path)}
+    assert made == {(intervention_digest(spec), pinned, 4)}
     [run] = [json.loads(p.read_text(encoding="utf-8")) for p in manifests_dir().glob("generate-*.json")]
-    assert (run["intervention"], run["adapter_hash"]) == (intervention_digest(spec), pinned)
+    assert (run["intervention"], run["adapter_hash"], run.get("max_new_tokens")) == (
+        intervention_digest(spec), pinned, 4)
 
     pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
     assert set(pipeline.load_labels(*cell)) == set(PAIR_PIDS)
     prov = pipeline.provenance(*cell)
     assert (prov["intervention"], prov["adapter_hash"]) == ([intervention_digest(spec)], [pinned])
+    assert prov.get("max_new_tokens") == ["4"]
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", 6)    # a dated edit of it
+    with pytest.raises(StaleOutputError, match="another configuration"):
+        generate.generate(variant, ps, out_path=path)               # lift generate refuses the old cell
+    stale_read(cell, "4 generations were made under another cap than the 6 new tokens")   # and so does a read
+    generate.restart_cell(*cell, aside=generate.aside_root())       # its restart line, then made again
+    pipeline.judge_file(generate.generate(variant, ps, out_path=path), judge=primary_judge(), lid=FakeLID())
+    assert set(pipeline.load_labels(*cell)) == set(PAIR_PIDS)
     entry["artifacts"] = {"adapter": "0" * 64}                      # another adapter now under the name
     stale_read(cell, "4 generations were made under another intervention")
 
