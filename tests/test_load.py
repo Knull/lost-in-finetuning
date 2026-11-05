@@ -51,6 +51,9 @@ def test_template_stats_counts_the_preamble(tiny_tokenizer):
     assert stats["system_block_tokens"] > 50
     assert stats["prefix_tokens"] > stats["system_block_tokens"] > 0
     assert stats["generation_prompt"].endswith("<|CHATBOT_TOKEN|><|START_RESPONSE|>")
+    # R1-23: what Gate 0's preamble check now requires: one system block, holding the default preamble
+    assert stats["system_blocks"] == 1 and stats["safety_preamble"] is True
+    assert stats["ends_with_generation_prompt"] is True and load.SAFETY_PREAMBLE_MARKER in TINY_CHAT_TEMPLATE
 
 
 def test_stop_ids_cover_every_end_of_turn_token(tiny_tokenizer, tiny_cohere2):

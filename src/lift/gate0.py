@@ -2,9 +2,10 @@
 
 Checks (each PASS, FAIL or NOT RUN; numbers go to outputs/metrics/gate0.json and gate0.md):
 
-  preamble    the chat template renders the default preamble block once, with one BOS; the tokenizer
-              transformers builds matches the checkpoint's own tokenizer.json; every dev and final
-              prompt fits the context with 256 new tokens; the preamble's token length is reported.
+  preamble    the chat template renders the default preamble block once (one system block, holding the
+              "contextual safety mode" preamble), with one BOS, and ends with the generation prompt; the
+              tokenizer transformers builds matches the checkpoint's own tokenizer.json; every dev and
+              final prompt fits the context with 256 new tokens; the preamble's token length is reported.
   precision   200 dev prompts mixed across languages and sets, generated and judged in the run dtype
               (bf16 on an A100). A teacher-forced pass over prompt + output checks that every hidden
               state and logit is finite and records the max |activation| per layer. Its digest
@@ -129,9 +130,10 @@ def check_preamble(variant: Any, prompts: Sequence[PromptRecord], *,
                    reference_tokenizer: Any = None) -> dict[str, Any]:
     """Template, BOS, reference-tokenizer and context checks on the variant's tokenizer.
 
-    The reference tokenizer is compared on every prompt (tokenizing is cheap), per language: a
-    tokenizer class that differs only on Devanagari, Han, Arabic or Thai text must not pass on
-    English agreement alone."""
+    The template must render exactly one system block, the first holding the default preamble (its
+    ``SAFETY_PREAMBLE_MARKER``), and end with the generation prompt (``template_stats``). The reference
+    tokenizer is compared on every prompt (tokenizing is cheap), per language: a tokenizer class that
+    differs only on Devanagari, Han, Arabic or Thai text must not pass on English agreement alone."""
     from lift.models.load import chat_text, encode_chat, template_stats
 
     tok = variant.tokenizer
@@ -161,8 +163,10 @@ def check_preamble(variant: Any, prompts: Sequence[PromptRecord], *,
         out["reference_tokenizer_agreement"] = {lang: sum(v) / len(v) for lang, v in sorted(per_lang.items())}
         agreement_ok = all(share == 1.0 for share in out["reference_tokenizer_agreement"].values())
     has_system = (stats.get("system_block_tokens") or 0) > 0
+    preamble_once = stats["system_blocks"] == 1 and stats["safety_preamble"]
     out["pass"] = bool(stats["bos_count"] == 1 and stats["starts_with_bos"] and has_system and same_prefix
-                       and not too_long and agreement_ok)
+                       and not too_long and agreement_ok and preamble_once
+                       and stats["ends_with_generation_prompt"])
     return out
 
 
@@ -966,7 +970,9 @@ def _summary(check: str, c: dict[str, Any]) -> str:
     if c.get("error"):
         return str(c["error"])[:200]
     if check == "preamble":
-        return (f"system block {c.get('system_block_tokens')} tokens, prefix {c.get('prefix_tokens')}, "
+        return (f"system blocks {c.get('system_blocks')}, the first {c.get('system_block_tokens')} tokens "
+                f"(safety preamble {c.get('safety_preamble')}), generation prompt at the end "
+                f"{c.get('ends_with_generation_prompt')}, prefix {c.get('prefix_tokens')}, "
                 f"BOS {c.get('bos_count')}, longest prompt {c.get('longest_prompt_tokens')} "
                 f"of {c.get('context')}, {c.get('n_too_long')} too long, "
                 f"reference tokenizer {c.get('reference_tokenizer_agreement')}")
