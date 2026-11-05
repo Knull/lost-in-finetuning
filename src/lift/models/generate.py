@@ -413,19 +413,31 @@ class _NonFiniteWatch:
     never read, so they are never checked; -inf is left alone, as processors set it on purpose. It keeps
     one bool per row, never the scores.
 
-    A call with another batch size than the ``n_rows`` greedy_batch decodes is a wrapper decoding the batch
-    in pieces (P05's CAST, whose per-prompt gate may): which rows a piece holds is unknown, so a NaN or +inf
-    anywhere in its scores, a finished row's included, marks every row, and generate refuses the batch
-    whole, as it refuses a batch anyway."""
+    It tells the inner decodes of ``model.generate`` apart: a call continues the previous call's decode only
+    when its ids are the previous call's with one token appended (same batch size, equal prefix); any other
+    call starts a new one, and ``decodes`` records each one's batch size (the previous call's ids are all it
+    keeps for this). Inner decodes of another batch size than the ``n_rows`` greedy_batch decodes are a
+    wrapper decoding the batch in pieces (P05's CAST, whose per-prompt gate may): which rows a piece holds is
+    unknown, so a NaN or +inf anywhere in its scores, a finished row's included, marks every row, and
+    generate refuses the batch whole, as it refuses a batch anyway. The pieces must partition the batch, each
+    decoded through the processor: ``rows`` refuses pieces whose batch sizes do not add up to ``n_rows``, as
+    a piece decoded without it would go unchecked (a decode that never calls it is invisible here, so the
+    sizes are what can be checked). Inner decodes of the whole batch are marked row by row."""
 
     def __init__(self, width: int, stop_ids: Sequence[int], n_rows: int) -> None:
         self.width, self.stop_ids, self.n_rows = width, list(stop_ids), n_rows
         self.marked: Any = None             # bool per row, on the scores' device
         self._stops: Any = None
+        self.decodes: list[int] = []        # each inner decode's batch size, in call order
+        self._last: Any = None              # the previous call's ids
 
     def __call__(self, input_ids: Any, scores: Any) -> Any:
         import torch
 
+        last, self._last = self._last, input_ids
+        if not (last is not None and last.device == input_ids.device and last.shape[0] == input_ids.shape[0]
+                and last.shape[1] + 1 == input_ids.shape[1] and torch.equal(input_ids[:, :-1], last)):
+            self.decodes.append(int(input_ids.shape[0]))   # not the previous call's next step: a new decode
         if scores.shape[0] != self.n_rows:          # a piece of the batch: its rows cannot be told apart
             bad = (torch.isnan(scores) | torch.isposinf(scores)).any().reshape(1).expand(self.n_rows)
         else:
@@ -437,11 +449,18 @@ class _NonFiniteWatch:
         return scores
 
     def rows(self) -> list[bool]:
-        """Whether each row was marked. Raises when generate never called the processor: then nothing
-        was checked."""
+        """Whether each row was marked. Raises when generate never called the processor (then nothing
+        was checked), or decoded the batch in pieces whose batch sizes do not add up to its rows (then a
+        piece may have been decoded without it)."""
         if self.marked is None:
             raise RuntimeError("model.generate never called the logits processor that checks decoding stays "
                                "finite: a wrapper must pass logits_processor on to the model's generate")
+        if any(n != self.n_rows for n in self.decodes) and sum(self.decodes) != self.n_rows:
+            raise RuntimeError(
+                f"model.generate decoded the batch of {self.n_rows} rows in pieces, and the batch sizes of "
+                "the inner decodes that called the logits processor checking decoding stays finite, "
+                f"{self.decodes}, add up to {sum(self.decodes)}, not {self.n_rows}: a wrapper must pass "
+                "logits_processor on to every inner decode, its pieces holding each row once")
         return [bool(x) for x in self.marked.tolist()]
 
 
@@ -481,8 +500,9 @@ def greedy_batch(model: Any, rows: Sequence[Sequence[int]], *, pad_id: int, stop
     """Greedy-decode a batch of token id lists with left padding and an attention mask. Each output says
     whether its row's decoding went non-finite before it stopped (``_NonFiniteWatch``); the caller decides
     what that means (``generate`` refuses the batch). ``model.generate`` (a wrapper's too) must call the
-    logits processor it is handed, at least once, and return one sequence per row; it may decode the batch
-    in pieces (the check then marks every row of a non-finite batch)."""
+    logits processor it is handed and return one sequence per row. It may decode the batch in pieces, passing
+    the processor on to every inner decode, the pieces holding each row once (when their batch sizes do not
+    add up to the rows, the wrapper is refused); the check then marks every row of a non-finite batch."""
     import torch
     from transformers import LogitsProcessorList
 
