@@ -66,8 +66,10 @@ def utility_dir() -> Path:
 
 
 def scores_dir() -> Path:
-    """Per-item log-likelihood scores (P03): ``scores/belebele/{variant}/belebele_{lang}_{split}.jsonl``
-    and ``scores/heldout_loss/{variant}/utility_hi_{split}.jsonl``."""
+    """Per-item log-likelihood scores (P03):
+    ``scores/belebele/{variant}/belebele_{lang}_{split}[-{dtype}].jsonl`` and
+    ``scores/heldout_loss/{variant}/utility_hi_{split}[-{dtype}].jsonl``, ``-{dtype}`` for a precision other
+    than generation.dtype (lift.models.loglik)."""
     return output_dir() / "scores"
 
 
