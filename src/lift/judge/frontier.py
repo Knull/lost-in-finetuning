@@ -85,7 +85,12 @@ Rules, and why:
     waits for nothing, but never sends an uncached first turn that such an earlier batch holds: the batch
     is collected first if it has ended, and the run stops if it still runs (FrontierBatchPending: rerun
     once it has ended, or cancel it in the Console and rerun) or if the provider cannot look at it
-    (FrontierConfigError).
+    (FrontierConfigError). An ended batch whose every request came back canceled was canceled by a person
+    before any request finished (lift never cancels one). That says nothing about the API, and this run
+    sends its requests one by one anyway, so it is collected as such, with a warning, and they are sent
+    synchronously: the cancel remedy holds for it too. A pre-fill with bulk batch stops on such a batch
+    instead, as on any batch that answered none (below): there a cancel may mean "stop spending", which
+    must not turn into a pass at synchronous prices.
   - A batch belongs to the workspace of the key that created it: every key of that workspace sees it, and a
     key of another workspace gets a 404. So a 404 abandons a batch an earlier process submitted only when
     its state row says it was created more than 29 days ago, when the API no longer keeps its results. For
@@ -100,7 +105,9 @@ Rules, and why:
     Fable 5.1 and Mythos 5.1), its model echo checked, and cached with "via": "batch", its batch id and
     its cache tokens. Errored, expired and canceled results are not cached: the synchronous pass sends
     them again under the rules above. A batch none of whose requests succeeded stops the run instead
-    (FrontierConfigError for a configuration or account error, else FrontierUnavailable). A batch
+    (FrontierConfigError for a configuration or account error, else FrontierUnavailable), the canceled
+    batch a synchronous run meets (above) excepted; its message says what a rerun does with the requests
+    (a pre-fill with bulk batch submits them again, a synchronous run sends them one by one). A batch
     collected by a later process was reserved under the cap of the process that submitted it: its cost
     is counted here, and it is never refused.
 - Every completed call is appended to outputs/judge_cache/frontier/{provider}__{model}.jsonl, keyed
@@ -2205,10 +2212,13 @@ class FrontierJudge:
         """A synchronous run's rule for the earlier batches that hold requests it would send (``pending``;
         ``keyed`` is every distinct first turn): it submits nothing and waits for nothing, and pays for no
         request twice. After the preflight, each batch is looked at once: one that has ended is collected
-        (its replies are paid for, and go into the cache for the pass to find), one still running stops the
-        run (FrontierBatchPending), and so does a provider without the Message Batches API, which cannot look
-        at them (FrontierConfigError, before anything is sent). A 404 is handled as everywhere
-        (_batch_call)."""
+        (its replies are paid for, and go into the cache for the pass to find; one canceled before any of its
+        requests finished leaves them all to the pass, see _collect), one still running stops the run
+        (FrontierBatchPending), and so does a provider without the Message Batches API, which cannot look at
+        them (FrontierConfigError, before anything is sent). A 404 is handled as everywhere (_batch_call).
+        The pending remedy says what a rerun does after a cancel: with bulk not batch every rerun is
+        synchronous, so the rest is sent synchronously; under bulk batch this run skipped the pre-fill, and a
+        pre-fill rerun stops once on a batch that finished none (the batch path's rule), so it says so."""
         if not batches:
             return
         if not _batch_capable(self._provider):
@@ -2226,20 +2236,23 @@ class FrontierJudge:
         running: list[_Batch] = []
         for batch in live:
             if seen[batch.id][0] == "ended":
-                self._collect(batch, keyed, out)
+                self._collect(batch, keyed, out, synchronous=True)
             else:
                 running.append(batch)
         if running:
             ids = [batch.id for batch in running]
             n = sum(len(batch.keys & pending.keys()) for batch in running)
             named, it = _batch_list(ids)
+            caveat = ("" if self.bulk != "batch" else
+                      " (a pre-fill with bulk batch instead stops once on a batch that finished none, and "
+                      "submits its requests again on the rerun after)")
             raise FrontierBatchPending(
                 f"{self.judge_id}: {n} of this run's requests sit in {named}, still running, recorded in "
                 f"{self.batch_state_path} and paid for there, so this synchronous run ({reason}) stops "
                 f"rather than pay for them twice. A rerun collects {it} once ended (a pre-fill with bulk "
                 f"batch also waits for {it}); or cancel {it} in the Console and rerun: the requests finished "
-                f"by then are collected, the rest sent synchronously. {ABANDON_ENV}={','.join(ids)} gives "
-                f"{it} up instead, and those requests are paid for again",
+                f"by then are collected, the rest sent synchronously{caveat}. {ABANDON_ENV}={','.join(ids)} "
+                f"gives {it} up instead, and those requests are paid for again",
                 batch_ids=ids, n_pending=n, summary=self._summary(out, spent, reason))
 
     def _look_at(self, batches: Sequence[_Batch]) -> tuple[
@@ -2565,10 +2578,16 @@ class FrontierJudge:
         self._append_state(row)
         return row
 
-    def _collect(self, batch: _Batch, keyed: Mapping[str, str], out: dict[str, Any]) -> None:
+    def _collect(self, batch: _Batch, keyed: Mapping[str, str], out: dict[str, Any], *,
+                 synchronous: bool = False) -> None:
         """Read an ended batch's results once and cache every succeeded reply. Errored, expired and
         canceled requests are not cached (the synchronous pass sends them again); a batch in which none
-        succeeded stops the run."""
+        succeeded stops the run (_batch_failed), once it is recorded as collected. One exception, for a
+        synchronous run (``synchronous``: _settle_earlier): a batch whose every request came back canceled
+        was canceled by a person before any request finished (lift never cancels a batch), which says
+        nothing about the API, and the run sends its requests one by one anyway. It is collected as such,
+        with a warning, and its requests are left to the pass. A pre-fill with bulk batch still stops on
+        it: a person's cancel may mean "stop spending", which must not turn into a full-price pass."""
         try:
             lines = self._batch_call(f"the results of batch {batch.id}", batch,
                                      lambda: list(self._provider.batch_results(batch.id, model=self.model)))
@@ -2606,7 +2625,13 @@ class FrontierJudge:
                  tokens["input_tokens"], tokens["cache_creation_input_tokens"],
                  tokens["cache_read_input_tokens"], tokens["output_tokens"], tally.usd)
         if not counts["succeeded"]:
-            raise self._batch_failed(batch, tally, len(missing))
+            if synchronous and counts["canceled"] == len(batch.keys):
+                log.warning("frontier %s: batch %s was canceled before any of its %d requests finished (lift "
+                            "never cancels a batch: a person did). It is collected as such, and this "
+                            "synchronous run sends its requests one by one", self.judge_id, batch.id,
+                            len(batch.keys))
+                return
+            raise self._batch_failed(batch, tally, len(missing), synchronous=synchronous)
 
     def _tally_result(self, batch: _Batch, keyed: Mapping[str, str], holds: Mapping[str, float],
                       tally: _Tally, custom_id: str, kind: str,
@@ -2654,24 +2679,33 @@ class FrontierJudge:
         self._cache.put(_batch_row(key, result, cost, batch_id))
         return True
 
-    def _batch_failed(self, batch: _Batch, tally: _Tally, n_missing: int) -> Exception:
-        """The stop when no request of a batch succeeded: its requests are not sent one by one instead."""
+    def _batch_failed(self, batch: _Batch, tally: _Tally, n_missing: int, *, synchronous: bool) -> Exception:
+        """The stop when no request of a batch succeeded: its requests are not sent one by one instead. The
+        message says what a rerun does with them, the batch being collected now: a pre-fill with bulk batch
+        submits them again, a synchronous run (``synchronous``: this stop is one) sends them one by one. Under
+        bulk batch a synchronous run skipped the pre-fill, so only a rerun of that same command does."""
         n, counts = len(batch.keys), tally.counts
         by_type = dict(sorted(tally.errors.items()))
+        if not synchronous:
+            again = "they are submitted again"
+        elif self.bulk != "batch":
+            again = "they are sent synchronously"
+        else:
+            again = "the same command sends them synchronously, a pre-fill with bulk batch submits them again"
         if tally.fatal is not None:
             return self._fatal(f"no request of batch {batch.id} succeeded, and {counts['errored']} of {n} "
                                f"failed with errors by type {by_type}, among them a configuration or account "
                                f"error ({_batch_error_detail(tally.fatal)}). They stay unjudged: fix the "
-                               "cause, then rerun (they are submitted again)")
+                               f"cause, then rerun ({again})")
         if tally.first is not None:
             message = (f"{self.judge_id}: no request of batch {batch.id} succeeded: {counts['errored']} of "
                        f"{n} failed with errors by type {by_type} (the first: "
                        f"{_batch_error_detail(tally.first)}), which says nothing about the items. They stay "
-                       "unjudged: fix the cause or wait, then rerun (they are submitted again)")
+                       f"unjudged: fix the cause or wait, then rerun ({again})")
         else:
             message = (f"{self.judge_id}: batch {batch.id} answered none of its {n} requests "
                        f"({counts['expired']} expired, {counts['canceled']} canceled, {n_missing} missing). "
-                       "They stay unjudged: rerun to submit them again")
+                       f"They stay unjudged: rerun ({again})")
         stop = FrontierUnavailable(message)
         self._halt_with(stop)
         return stop
