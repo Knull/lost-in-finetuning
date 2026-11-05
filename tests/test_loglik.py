@@ -3,8 +3,9 @@
 Covered: the frozen Belebele format and its letter scoring (BOS once, the letter boundary, the next-token
 and sequence paths, a forced answer through a stub model), the held-out NLL over exactly the tokens
 training supervises, batched against one-at-a-time scoring, the resumable cache-keyed score files (resume,
-a crash, out of memory, stale cells and the --restart remedy, precision and stack refusals), wrappers
-(score_logits and its gate), the metrics files, and both commands end to end on the tiny model.
+a crash, out of memory, stale cells and the --restart remedy, precision and stack refusals: a cell made in
+another precision is never started over), wrappers (score_logits and its gate), the metrics files (per
+language and per precision), and both commands end to end on the tiny model.
 """
 
 from __future__ import annotations
@@ -535,13 +536,26 @@ def test_a_changed_text_or_answer_is_stale_and_its_restart_line_starts_the_cell_
 
 @pytest.mark.torch
 def test_another_precision_or_configuration_is_refused(stock):
+    from lift.models.generate import OtherPrecisionError
+
     rows = bel_rows(2)
     path = loglik.belebele_cell(stock, rows, lang="en", split="dev")
     before = path.read_bytes()
     with pytest.raises(loglik.ScorePrecisionError) as exc:
         loglik.belebele_cell(dataclasses.replace(stock, dtype="bf16"), rows, lang="en", split="dev")
-    assert exc.value.dtype == "fp32"
-    assert exc.value.command == "lift belebele --variant stock --split dev --langs en --restart"
+    # Not stale, and never started over, as a generations file made in another precision: no command line,
+    # so --restart skips it too (C08), and the remedies are the file's own --dtype or leaving it out.
+    assert isinstance(exc.value, OtherPrecisionError) and exc.value.dtype == "fp32"
+    assert exc.value.command is None and "lift belebele" not in str(exc.value)
+    assert exc.value.remedy == ("made in fp32: score it with --dtype fp32 where fp32 runs, or leave it out "
+                                "with --langs")
+    prompts = [utility(1)]
+    loglik.heldout_cell(stock, prompts, split="dev")
+    with pytest.raises(loglik.ScorePrecisionError) as exc:
+        loglik.heldout_cell(dataclasses.replace(stock, dtype="bf16"), prompts, split="dev")
+    assert exc.value.command is None and "lift heldout-loss" not in str(exc.value)
+    assert exc.value.remedy == ("made in fp32: score it with --dtype fp32 where fp32 runs, or leave this "
+                                "line out of the job")
     with pytest.raises(StaleOutputError, match="another configuration") as exc:
         loglik.belebele_cell(dataclasses.replace(stock, template_hash="f" * 64), rows, lang="en", split="dev")
     assert not isinstance(exc.value, loglik.ScorePrecisionError)
@@ -728,24 +742,77 @@ def test_lift_belebele_skips_a_stale_cell_and_restart_starts_it_over(tiny_model_
 
 
 @pytest.mark.torch
-def test_lift_belebele_lists_a_cell_made_in_another_precision_and_restart_discards_it(
-        tiny_model_dir, monkeypatch, caplog):
+def test_lift_belebele_never_starts_over_a_cell_made_in_another_precision(tiny_model_dir, monkeypatch,
+                                                                          caplog):
+    """C08: a run in another precision than a cell's file never discards it, --restart included, as lift
+    restart without --force: generation.dtype's file (the reported bf16 numbers, which a T4's fp16 line
+    would otherwise throw away) and the other way round. Skipped, listed without a --restart line, exit 3."""
     pin()
     tiny_build(monkeypatch, tiny_model_dir)
-    write_belebele("hi", bel_rows(2, lang="hi"))
-    argv = ["belebele", "--variant", "stock", "--split", "dev", "--langs", "hi", "--device", "cpu"]
-    assert main([*argv, "--dtype", "fp32"]) == 0
+    for lang in ("en", "hi"):
+        write_belebele(lang, bel_rows(2, lang=lang))
+    argv = ["belebele", "--variant", "stock", "--split", "dev", "--device", "cpu"]
+    assert main([*argv, "--langs", "hi"]) == 0                            # bf16, generation.dtype
+    assert main([*argv, "--langs", "en", "--dtype", "fp32"]) == 0
+    hi, en = (loglik.belebele_scores_path("stock", lang, "dev") for lang in ("hi", "en"))
+    bf16, fp32 = (metrics_dir() / "belebele" / name for name in ("stock_dev.json", "stock_dev-fp32.json"))
+    numbers = {p: loglik.read_metrics(p)["langs"] for p in (bf16, fp32)}
+    assert [list(langs) for langs in numbers.values()] == [["hi"], ["en"]]
+    runs = {"hi": ([*argv, "--langs", "hi", "--dtype", "fp32"], bf16),       # a T4's fp16 line, on a CPU
+            "en": ([*argv, "--langs", "en"], fp32)}
+    for lang, (line, theirs) in runs.items():
+        made = "bf16" if theirs == bf16 else "fp32"
+        for restart in ([], ["--restart"]):
+            caplog.clear()
+            kept = {p: p.read_bytes() for p in (hi, en, theirs, theirs.with_suffix(".md"))}
+            assert main([*line, *restart]) == 3
+            assert (f"belebele_{lang}_dev: made in {made}: score it with --dtype {made} where {made} runs, "
+                    "or leave it out with --langs\n") in caplog.text
+            assert f"--langs {lang} --restart" not in caplog.text and "set aside in" not in caplog.text
+            # Nothing discarded, and the file's precision's metrics untouched (a run writes only its own).
+            assert {p: p.read_bytes() for p in kept} == kept
+    assert not (output_dir() / ".aside").exists()
+    assert {p: loglik.read_metrics(p)["langs"] for p in numbers} == numbers
+
+
+@pytest.mark.torch
+def test_belebele_metrics_are_per_language_and_per_precision(tiny_model_dir, monkeypatch):
+    """C09: a refused or started-over cell never empties another language's numbers. Another precision's
+    metrics are left as they are, and the run's own are recomputed from the files that still qualify,
+    the cell listed under left_out meanwhile."""
+    pin()
+    tiny_build(monkeypatch, tiny_model_dir)
+    for lang in ("en", "hi"):
+        write_belebele(lang, bel_rows(3, lang=lang))
+    argv = ["belebele", "--variant", "stock", "--split", "dev", "--device", "cpu"]
+    assert main([*argv, "--langs", "hi", "en", "--dtype", "fp32"]) == 0
     fp32 = metrics_dir() / "belebele" / "stock_dev-fp32.json"
-    assert loglik.read_metrics(fp32)["langs"]["hi"]["n"] == 2
-    assert main(argv) == 3
-    assert ("belebele_hi_dev: made in fp32: score it with --dtype fp32 where fp32 runs, leave it out, or "
-            "discard its fp32 scores and score it again: lift belebele --variant stock --split dev "
-            "--langs hi --restart\n") in caplog.text
-    assert main([*argv, "--restart"]) == 0
-    assert loglik.read_metrics(fp32) is None                               # its scores were set aside
-    assert loglik.read_metrics(metrics_dir() / "belebele" / "stock_dev.json")["langs"]["hi"]["n"] == 2
-    path = loglik.belebele_scores_path("stock", "hi", "dev")
-    assert {r["meta"]["dtype"] for r in read_jsonl(path)} == {"bf16"}
+    before = fp32.read_bytes()
+    doc = loglik.read_metrics(fp32)
+    assert list(doc["langs"]) == ["en", "hi"] and not doc["left_out"]
+    code = main([*argv, "--langs", "hi", "--restart"])                    # bf16: hi's fp32 file is refused
+    assert fp32.read_bytes() == before                                      # en's fp32 numbers are kept
+    assert code == 3 and not (output_dir() / ".aside").exists()
+    assert not (metrics_dir() / "belebele" / "stock_dev.json").exists()     # nothing qualifies in bf16
+    # In the run's own precision a restart moves only that language to left_out while it is scored again.
+    rows = bel_rows(3, lang="en")
+    rows[0] = {**rows[0], "question": rows[0]["question"] + " (fixed)"}
+    write_belebele("en", rows)
+    seen, real = [], loglik.belebele_cell
+
+    def watched(variant, cell_rows, *, lang, **kw):
+        if lang == "en" and not loglik.belebele_scores_path("stock", "en", "dev").read_bytes():
+            seen.append(loglik.read_metrics(fp32))                          # emptied, before it is scored
+        return real(variant, cell_rows, lang=lang, **kw)
+
+    monkeypatch.setattr(loglik, "belebele_cell", watched)
+    assert main([*argv, "--langs", "en", "--dtype", "fp32", "--restart"]) == 0
+    assert len(seen) == 1 and list(seen[0]["langs"]) == ["hi"]
+    assert seen[0]["langs"]["hi"] == doc["langs"]["hi"]
+    assert seen[0]["left_out"] == {"en": "an empty score file (started over)"}
+    final = loglik.read_metrics(fp32)
+    assert list(final["langs"]) == ["en", "hi"] and not final["left_out"]
+    assert final["langs"]["hi"] == doc["langs"]["hi"] and final["langs"]["en"]["n"] == 3
 
 
 @pytest.mark.torch
@@ -773,6 +840,29 @@ def test_lift_heldout_loss_for_stock_then_an_adapter_pairs_them(tiny_model_dir, 
     assert stock_doc["vs_stock"] is None and stock_doc["adapter_hash"] is None
     out = capsys.readouterr().out
     assert "vs stock: row mean NLL" in out and "फूल" not in out and "बगीचे" not in out
+
+
+@pytest.mark.torch
+def test_lift_heldout_loss_never_starts_over_a_file_made_in_another_precision(tiny_model_dir,
+                                                                              fake_prompt_files,
+                                                                              monkeypatch, caplog):
+    """C08 for the held-out loss: stock's bf16 file (generation.dtype), which every adapter pairs with, is
+    never discarded by a run in another precision, --restart included; its metrics stay."""
+    pin()
+    tiny_build(monkeypatch, tiny_model_dir)
+    fake_prompt_files[("utility", "hi")] = [utility(i, "aya" if i % 2 else "ind") for i in range(3)]
+    argv = ["heldout-loss", "--variant", "stock", "--device", "cpu"]
+    assert main(argv) == 0
+    path = loglik.heldout_scores_path("stock", "dev")
+    bf16 = metrics_dir() / "heldout_loss" / "stock_dev.json"
+    before = {p: p.read_bytes() for p in (path, bf16, bf16.with_suffix(".md"))}
+    assert main([*argv, "--dtype", "fp32", "--restart"]) == 3
+    assert ("utility_hi_dev: made in bf16: score it with --dtype bf16 where bf16 runs, or leave this line "
+            "out of the job\n") in caplog.text
+    assert "--split dev --restart" not in caplog.text and "set aside in" not in caplog.text
+    assert {p: p.read_bytes() for p in before} == before
+    assert not (output_dir() / ".aside").exists()
+    assert loglik.read_metrics(bf16)["n_rows"] == 3
 
 
 @pytest.mark.torch

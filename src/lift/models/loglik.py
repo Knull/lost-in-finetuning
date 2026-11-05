@@ -51,22 +51,28 @@ outputs/scores/belebele/{variant}/belebele_{lang}_{split}.jsonl or
 outputs/scores/heldout_loss/{variant}/utility_hi_{split}.jsonl. The key is lift.cachekey.generation_key,
 with the task configuration as ``gen_cfg`` ({"task", "version", "dtype"}, then "bos" and "letters" for
 Belebele, "template" for the held-out loss) and the exact scored text as ``prompt_text`` (held-out: the
-instruction, "\\n\\x00\\n", the reference). One file is one configuration and one stack, as a generations
-file is (lift.models.generate): done keys are skipped. These raise StaleOutputError naming the command's
-``--restart`` line (ScorePrecisionError for a precision):
-- a record made under another configuration (``meta.run_config``) or in another precision;
+instruction, "\\n\\x00\\n", the reference). One file is one precision, one configuration and one stack,
+as a generations file is (lift.models.generate): done keys are skipped. A stale file raises
+StaleOutputError naming the command's ``--restart`` line:
+- a record made under another configuration (``meta.run_config``);
 - a pid under another key (a fixed text) or with another gold answer;
 - an unfinished file begun under another stack.
 That line sets the file aside under outputs/.aside/ (never synced) and leaves it EMPTY, as lift restart
 does: sync never deletes, so the next push replaces the runs repo's copy. Then it scores the cell again.
-A finished file is reused under any stack. Unlike a generations file, a score file made in another
-precision is started over by --restart too: its scores take minutes to make again.
+A finished file is reused under any stack. A file made in another precision than the run's is not stale,
+and nothing ever starts it over, --restart included, as lift restart refuses such a cell without
+--force: that would discard scores the run's precision cannot make again (a T4's fp16 line would throw
+away the bf16 scores Colab made, and the runs repo's copy at the next push). It raises
+ScorePrecisionError (an OtherPrecisionError: no command line), whose remedies are the file's own --dtype
+where that precision runs, or leaving the cell out. Score paths hold no dtype, so the precision that
+scores a cell first holds its file.
 
 Metrics are written whole and atomically (UTF-8, LF), each with a .md beside it. They cover the scores on
 disk under one configuration and precision. A precision other than ``generation.dtype`` adds "-{dtype}"
-to the name, as AuditKIT records do, so a T4's fp16 run never replaces the bf16 numbers. A score file
-qualifies when it holds every item of the split as the prompt files give it now (same text, same gold
-answer); records of items no longer in the split are left aside and counted (``n_outside_split``).
+to the name, as AuditKIT records do, and a run writes only its own precision's metrics, so a T4's fp16
+run never replaces or retires the bf16 numbers. A score file qualifies when it holds every item of the
+split as the prompt files give it now (same text, same gold answer); records of items no longer in the
+split are left aside and counted (``n_outside_split``).
 - outputs/metrics/belebele/{variant}_{split}.json: per language, the accuracy with n, from every
   qualifying score file of the variant and split made under the run's configuration. Files that do not
   qualify are listed under ``left_out`` with the reason.
@@ -77,8 +83,11 @@ answer); records of items no longer in the split are left aside and counted (``n
   split are complete under the same precision, model revision, template and task settings; otherwise
   ``vs_stock_note`` says why. It is computed when the variant's metrics are written: a stock cell scored
   again later needs the variant's line run again (``stock_scores_sha256`` names the file it paired with).
-When nothing qualifies, existing metrics files are retired (left empty, as lift restart retires AuditKIT
-records; ``read_metrics`` returns None for them), so a metrics file never outlives the scores it describes.
+Metrics are recomputed from the score files, one language at a time, and never retired whole for one
+cell: a language whose file stops qualifying (started over, stale, made in another precision) moves to
+``left_out`` with the reason, and every other language keeps its numbers. When nothing qualifies, existing
+metrics files are retired (left empty, as lift restart retires AuditKIT records; ``read_metrics`` returns
+None for them), so a metrics file never outlives the scores it describes.
 
 Logs carry counts, pids and hashes, never a prompt or answer text (rule 6).
 """
@@ -130,16 +139,20 @@ _TASK_FIELDS = {
 _OWN_META = frozenset({"dtype", "gpu", "device", "batch_size", "model_rev", "adapter_hash", "template",
                        "task", "task_version", "scoring", "run_config", "stack", *gen.STACK_FIELDS})
 _PAIR_MUST_MATCH = ("dtype", "model_rev", "template", "task")    # held-out loss vs stock
+# How a run leaves out a cell made in another precision (one Belebele line covers several cells).
+_LEAVE_OUT = {"belebele": "leave it out with --langs", "heldout_nll": "leave this line out of the job"}
 
 
-class ScorePrecisionError(gen.StaleOutputError):
-    """A score file made in another precision (``dtype``: the file's) than the run's. Unlike a generations
-    file's OtherPrecisionError it carries the --restart line (``command``): scores take minutes to make
-    again, so starting the cell over is a remedy, beside the file's own --dtype or leaving it out."""
+class ScorePrecisionError(gen.OtherPrecisionError):
+    """A score file made in another precision (``dtype``: the file's) than the run's. As a generations
+    file's OtherPrecisionError it is not stale and never started over, so ``command`` is None and
+    --restart skips it too: that would discard scores the run's precision cannot make again (the module
+    docstring). ``remedy`` is its listing line: the file's own --dtype where that precision runs, or
+    leaving the cell out."""
 
-    def __init__(self, message: str, *, command: str | None, dtype: str) -> None:
-        super().__init__(message, command=command)
-        self.dtype = dtype
+    def __init__(self, message: str, *, dtype: str, remedy: str) -> None:
+        super().__init__(message, dtype=dtype)
+        self.remedy = remedy
 
 
 # --- paths and command lines ----------------------------------------------------------------------------
@@ -155,7 +168,8 @@ def heldout_scores_path(variant: str, split: str) -> Path:
 
 def metrics_path(task: str, variant: str, split: str, *, dtype: str | None = None) -> Path:
     """outputs/metrics/{belebele|heldout_loss}/{variant}_{split}.json, with "-{dtype}" for a precision other
-    than generation.dtype (as AuditKIT records): a T4's fp16 run never replaces the bf16 metrics."""
+    than generation.dtype (as AuditKIT records): a T4's fp16 run never replaces or retires the bf16
+    metrics, as a run writes only its own precision's."""
     default = config.get("generation.dtype")
     suffix = "" if (dtype or default) == default else f"-{dtype}"
     return metrics_dir() / STAGES[task] / f"{variant}_{split}{suffix}.json"
@@ -163,8 +177,9 @@ def metrics_path(task: str, variant: str, split: str, *, dtype: str | None = Non
 
 def restart_line(task: str, variant: str, split: str, *, lang: str | None = None,
                  dtype: str | None = None) -> str:
-    """The job line that starts one score cell over (``--restart``), in ``dtype`` when that is not
-    generation.dtype (the line refuses another precision without it)."""
+    """The job line that starts one stale score cell over (``--restart``), in ``dtype`` when that is not
+    generation.dtype (the line refuses another precision without it). A cell made in another precision
+    has none: nothing starts it over (the module docstring)."""
     if task == "belebele":
         line = f"lift belebele --variant {variant} --split {split} --langs {lang} --restart"
     else:
@@ -743,17 +758,21 @@ def read_scores(path: Path, task: str) -> list[dict]:
     return records
 
 
-def _refuse_other(existing: Sequence[Mapping[str, Any]], *, name: str, dtype: str, run_config: str,
-                  out_path: Path, restart: str | None) -> None:
-    """One file is one precision and one configuration: refuse to extend a file made otherwise."""
+def _refuse_other(existing: Sequence[Mapping[str, Any]], *, task: str, name: str, dtype: str,
+                  run_config: str, out_path: Path, restart: str | None) -> None:
+    """One file is one precision and one configuration: refuse to extend a file made otherwise. The
+    precision comes first and names no command line, so --restart never discards another precision's
+    scores, whatever else differs (the configuration always does: the task config holds the dtype)."""
     made = sorted({str(r["meta"]["dtype"]) for r in existing if r["meta"].get("dtype")} - {dtype})
     if made:
         was = "/".join(made)
+        leave = _LEAVE_OUT[task]
         raise ScorePrecisionError(
             f"{out_path} holds scores made in {was}, and this run is {dtype}: one file is one precision, so "
-            f"nothing is appended. Score this cell with --dtype {was} where {was} runs, leave it out of this "
-            f"run, or discard its {was} scores and start it over: {_start_over(restart, out_path)}.",
-            command=restart, dtype=was)
+            f"nothing is appended. Score this cell with --dtype {was} where {was} runs, or {leave}. It is "
+            f"never started over, --restart or not: that would discard its {was} scores, which a run in "
+            f"{dtype} cannot make again.",
+            dtype=was, remedy=f"made in {was}: score it with --dtype {was} where {was} runs, or {leave}")
     other = sorted({str(r["pid"]) for r in existing
                     if r["variant"] != name or r["meta"].get("run_config") != run_config})
     if other:
@@ -793,8 +812,8 @@ def _run_cell(variant: LoadedVariant, *, cfg: Mapping[str, Any], units: Sequence
     if out_path.exists():
         gen.repair_tail(out_path)
         existing = read_scores(out_path, task)
-    _refuse_other(existing, name=name, dtype=variant.dtype, run_config=run_config, out_path=out_path,
-                  restart=restart)
+    _refuse_other(existing, task=task, name=name, dtype=variant.dtype, run_config=run_config,
+                  out_path=out_path, restart=restart)
     done = {str(r["pid"]): r for r in existing}
     stale = [u.pid for u in units if u.pid in done
              and (done[u.pid]["key"] != u.key or any(done[u.pid].get(f) != v for f, v in u.fixed))]
@@ -906,10 +925,11 @@ def heldout_cell(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, spl
 
 
 def start_over(path: Path) -> gen.SetAside:
-    """--restart for one score file: copy it to the same path under a new outputs/.aside/<UTC stamp>
+    """--restart for one stale score file: copy it to the same path under a new outputs/.aside/<UTC stamp>
     folder (never synced) and leave it empty. Emptied, never removed: sync never deletes, so a removed file
     would come back from the runs repo at the next pull, while an emptied one is a local edit the next push
-    sends. The copy is written before the file is emptied, so a kill in between loses nothing."""
+    sends. The copy is written before the file is emptied, so a kill in between loses nothing. Only a
+    refusal that names a --restart line leads here, which a file made in another precision never gets."""
     path = Path(path)
     if not path.is_file():
         return gen.SetAside(path, None, None)
@@ -977,15 +997,6 @@ def _retire(path: Path) -> list[Path]:
         if p.is_file() and p.stat().st_size:
             _write_text(p, "")
             done.append(p)
-    return done
-
-
-def retire_metrics(task: str, variant: str, split: str, *, dtype: str) -> list[Path]:
-    """Retire the metrics of a variant and split in ``dtype`` (each precision in "fp16/fp32"), e.g. when
-    --restart discarded a score file made in that precision: they described it. Returns the files retired."""
-    done = [p for d in dtype.split("/") for p in _retire(metrics_path(task, variant, split, dtype=d))]
-    for p in done:
-        log.info("%s: retired (left empty): the %s scores it described were set aside", p, dtype)
     return done
 
 
