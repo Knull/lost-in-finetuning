@@ -850,6 +850,28 @@ def test_the_scores_stop_on_a_refused_prompt_file_whose_generations_files_are_al
         scoring.decide_primary_judge(dry_run=True)
 
 
+def test_the_utility_score_stops_on_a_refused_prompt_file_whose_generations_files_are_missing(tmp_path,
+                                                                                            monkeypatch):
+    # W3-05 follow-up: the utility score reads its prompt file itself too, so a refused one stops it even
+    # when neither utility generations file is here (load_pool then reads no prompt file), as it stops
+    # lift validate score.
+    world = world_for(tmp_path, monkeypatch, utility=True)
+    sheet = make_utility_sheet("adapter-aya-std-s1", n=10)
+    doc = read_json(world.validation / "keys" / "utility.json")
+    prefs = {it["item_id"]: it["candidate_is"] for it in doc["items"]}
+    import_preferences(fill_sheet(sheet, world.root / "u.csv", prefs, column="preference"))
+    write_verdicts(world, "adapter-aya-std-s1", {it["pid"]: 1.0 for it in doc["items"]})
+    gone = sorted((world.outputs / "generations").rglob("utility_hi_*.jsonl"))
+    assert len(gone) == 2                                # stock and the candidate
+    for path in gone:
+        path.unlink()
+    assert score_utility(write=False)["n_judged"] == 10            # missing generations prove nothing
+    swap_stamps(world.data / "prompts" / "utility_hi.jsonl")
+    stamped = r"utility_hi: 2 records of utility_hi\.jsonl carry another split"
+    with pytest.raises(outputs.PromptFileError, match=stamped):
+        score_utility(write=False)
+
+
 def test_a_cell_short_of_its_frozen_split_is_still_read_for_the_sheets(tmp_path, monkeypatch):
     # A translation failure leaves its pid out of the prompt file until a reader's verdict resolves it.
     # Every run refuses the short cell, but the validation reads it (allow_short): a sheet may show the
