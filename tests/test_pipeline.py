@@ -1847,3 +1847,24 @@ def test_a_judge_object_takes_no_device_or_dtype(fake_prompt_files):
     _, _, path = setup_cell(fake_prompt_files)
     with pytest.raises(ValueError, match="device and dtype"):
         pipeline.judge_file(path, judge=FakeJudge(), lid=FakeLID(), device="cuda:1")
+
+
+def test_a_judged_cell_whose_prompt_left_its_split_is_refused(fake_prompt_files):
+    """R2-06: a prompt leaves a judged cell's split (a reader's bad verdict drops it from the rebuilt prompt
+    file, decisions items 25 and 46). Its generation and label are then stale for a complete and a partial
+    read and for a pair, never counted in a reported number, and the refusal names the cell's restart."""
+    removed = "prh-test-0005"
+    pids, _, path = setup_cell(fake_prompt_files, n=6, outputs={removed: f"HARM {LONG}"})
+    pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())
+    assert pipeline.load_labels(*CELL) == {p: "harmful" if p == removed else "benign" for p in pids}
+    store = fake_prompt_files[("harmful", "en")]
+    fake_prompt_files[("harmful", "en")] = [p for p in store if p.pid != removed]
+    refusal = rf"1 generations are of pids that are not dev prompts, e.g. \['{removed}'\]"
+    for complete in (True, False):
+        with pytest.raises(ValueError, match=refusal) as refused:
+            pipeline.load_records(*CELL, complete=complete)
+        assert f"`{RESTART}` as a job line right after `lift sync pull`" in str(refused.value)
+    with pytest.raises(ValueError, match=refusal):
+        pipeline.load_labels(*CELL)
+    with pytest.raises(ValueError, match=refusal):
+        pipeline.paired_labels("stock", "stock", *CELL[1:])
