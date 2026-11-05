@@ -1,6 +1,9 @@
+from fractions import Fraction
+
 import numpy as np
 import pytest
 
+from lift.schemas import LABELS
 from lift.stats import (
     benjamini_hochberg,
     cohens_kappa,
@@ -97,3 +100,43 @@ def test_kappa_and_bar():
     assert out["agreement"] == pytest.approx(4 / 6)
     assert -1.0 <= out["kappa"] <= 1.0
     assert out["meets_bar"] is (out["agreement"] >= 0.85 or out["kappa"] >= 0.6)
+
+
+# R1-40: confusion tables (rows: reader, columns: judge, in the order of the classes) whose exact kappa is
+# 3/5, the bar, while agreement is under 85%: computed in floats, (po - pe) / (1 - pe) lands one ulp below
+# 0.6. n=60 is the size of Hindi round 1.
+KAPPA_TABLES = {
+    "exact, n60, four classes": ([[22, 2, 1, 0], [2, 1, 3, 0], [3, 1, 16, 2], [0, 2, 0, 5]], LABELS, "eq"),
+    "exact, n40, two classes": ([[9, 1], [6, 24]], ("harmful", "benign"), "eq"),
+    "just under, n60": ([[22, 1, 2, 0], [2, 1, 3, 0], [3, 1, 16, 2], [0, 2, 0, 5]], LABELS, "lt"),
+    "just over, n60": ([[22, 3, 0, 0], [2, 1, 3, 0], [3, 1, 16, 2], [0, 2, 0, 5]], LABELS, "gt"),
+}
+
+
+def labels_from(table, classes):
+    """The (reader, judge) label lists of a confusion table."""
+    human, judge = [], []
+    for h, row in zip(classes, table, strict=True):
+        for j, count in zip(classes, row, strict=True):
+            human += [h] * count
+            judge += [j] * count
+    return human, judge
+
+
+def exact_kappa(table) -> Fraction:
+    n = sum(map(sum, table))
+    columns = zip(*table, strict=True)
+    chance = Fraction(sum(sum(row) * sum(col) for row, col in zip(table, columns, strict=True)), n * n)
+    return (Fraction(sum(table[i][i] for i in range(len(table))), n) - chance) / (1 - chance)
+
+
+@pytest.mark.parametrize("case", KAPPA_TABLES)
+def test_the_bar_is_inclusive_and_exact_at_kappa_point_six(case):
+    table, classes, side = KAPPA_TABLES[case]
+    human, judge = labels_from(table, classes)
+    k = exact_kappa(table)
+    assert {"eq": k == Fraction(3, 5), "lt": k < Fraction(3, 5), "gt": k > Fraction(3, 5)}[side]
+    assert Fraction(sum(h == j for h, j in zip(human, judge, strict=True)), len(human)) < Fraction(85, 100)
+    for out in (meets_bar(human, judge), meets_bar(human, judge, agreement=0.85, kappa=0.6)):
+        assert out["meets_bar"] is (k >= Fraction(3, 5)), (case, out["kappa"])
+    assert cohens_kappa(human, judge, labels=classes) == float(k)          # one rounding, of the exact value
