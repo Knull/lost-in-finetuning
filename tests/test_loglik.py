@@ -5,7 +5,8 @@ and sequence paths, a forced answer through a stub model), the held-out NLL over
 training supervises, batched against one-at-a-time scoring, the resumable cache-keyed score files (resume,
 a crash, out of memory, stale cells and the --restart remedy, precision and stack refusals: a cell made in
 another precision is never started over), wrappers (score_logits and its gate), the metrics files (per
-language and per precision), and both commands end to end on the tiny model.
+language and per precision; vs_stock never paired across precisions), and both commands end to end on the
+tiny model.
 """
 
 from __future__ import annotations
@@ -631,7 +632,9 @@ def test_heldout_metrics_pool_by_source_and_pair_with_stock(stock, fake_prompt_f
                                   spec=VariantSpec(name="adapter-x", method="adapter", adapter="adapter-x"))
     loglik.heldout_cell(adapter, prompts, split="dev")
     doc = loglik.write_heldout_metrics("adapter-x", "dev", dtype="fp32").doc
-    assert doc["vs_stock"] is None and "lift heldout-loss --variant stock --split dev" in doc["vs_stock_note"]
+    # Stock's line in this run's precision: without --dtype it would score stock in generation.dtype.
+    assert doc["vs_stock"] is None
+    assert "run `lift heldout-loss --variant stock --split dev --dtype fp32`, then" in doc["vs_stock_note"]
     loglik.heldout_cell(stock, prompts, split="dev")
     written = loglik.write_heldout_metrics("adapter-x", "dev", dtype="fp32")
     doc = json.loads(written.json_path.read_text(encoding="utf-8"))
@@ -659,6 +662,24 @@ def test_heldout_metrics_pool_by_source_and_pair_with_stock(stock, fake_prompt_f
     assert "vs stock: this variant minus stock" in written.md_path.read_text(encoding="utf-8")
     stock_doc = loglik.write_heldout_metrics("stock", "dev", dtype="fp32").doc
     assert stock_doc["vs_stock"] is None and stock_doc["vs_stock_note"] == "this is stock"
+
+
+@pytest.mark.torch
+def test_vs_stock_never_sends_a_run_to_score_stock_made_in_another_precision(stock, fake_prompt_files):
+    """C08: stock's file in another precision is never paired and never started over from this run's, so
+    the note names the precision that pairs with it, not a stock line that would only refuse the file."""
+    prompts = [utility(i, "aya" if i % 2 else "ind") for i in range(3)]
+    fake_prompt_files[("utility", "hi")] = prompts
+    loglik.heldout_cell(dataclasses.replace(stock, dtype="bf16"), prompts, split="dev")   # generation.dtype
+    adapter = dataclasses.replace(stock, adapter_hash="a" * 64,
+                                  spec=VariantSpec(name="adapter-x", method="adapter", adapter="adapter-x"))
+    loglik.heldout_cell(adapter, prompts, split="dev")                                    # fp32: a T4's fp16
+    doc = loglik.heldout_metrics("adapter-x", "dev", dtype="fp32")
+    assert doc["n_rows"] == 3 and doc["vs_stock"] is None
+    note = doc["vs_stock_note"]
+    assert note.startswith("stock's held-out scores of dev were made in bf16, not fp32: ")
+    assert note.endswith("Score this variant in bf16, where bf16 runs, to pair it with them")
+    assert "lift heldout-loss" not in note and "--restart" not in note
 
 
 # --- the commands -----------------------------------------------------------------------------------------
