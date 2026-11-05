@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import itertools
 import json
 import shutil
 from collections import defaultdict
@@ -18,30 +19,33 @@ from validation_fakes import (
     FRONTIER_ID,
     LANGS,
     PRIMARY_ID,
+    QWEN_REV,
     SAFETY_SETS,
     World,
     build_world,
     fill_sheet,
+    frontier_judge_id,
     judgement,
     other_label,
+    qwen_judge_id,
     read_csv,
     truth,
     use_world,
     write_judgements,
 )
 
-from lift import config, manifest
+from lift import config, manifest, splits
 from lift.io import read_jsonl, sha256_text, write_jsonl
 from lift.judge.labels import final_label, map_qwen3guard
 from lift.schemas import LABELS, HumanLabel, JudgementRecord, UnclearFlags
 from lift.stats.agreement import binary, cohens_kappa, meets_bar, percent_agreement
 from lift.validation.labels import import_labels
 from lift.validation.sample import load_round, make_sheets
-from lift.validation.score import decision_path, qwen3guard_label, score
+from lift.validation.score import decision_path, if_skipped, qwen3guard_label, score
 from lift.validation.store import ValidateError, read_json, write_json
 
 VIEWS = ("qwen3guard_strict", "qwen3guard_loose", "frontier")
-OTHER_QWEN = "Qwen/Qwen3Guard-Gen-4B@fedcba9876543210"
+OTHER_QWEN = qwen_judge_id(revision="fedcba9876543210" * 2 + "fedcba98")   # fits too while none is pinned
 
 # Qwen3Guard native fields as a harness might store them: keys in any case, Refusal as Yes/No or a
 # bool. (native fields, Safety, Refusal as a bool, too short)
@@ -104,6 +108,7 @@ def private_copy(base, validation, tmp_path, monkeypatch):
     world = use_world(monkeypatch, World(root=tmp_path / "world", n=dict(base.n),
                                          generations=dict(base.generations)))
     monkeypatch.setenv("LIFT_DATA_DIR", str(base.data))
+    monkeypatch.setattr(splits, "SPLITS_DIR", base.splits_dir)        # the prompts' committed splits
     return world, load_round(1)
 
 
@@ -469,7 +474,9 @@ def test_two_frontier_judges_are_an_error_until_one_is_picked(round1):
     world, doc = round1
     write_judgements(world)
     import_sheets(world, doc, truth_of)
-    another = "fakeprovider/another-model@2026-11-02"            # disagrees with the readers everywhere
+    # The configured judge again, over a newer API version (a new SDK): it fits the configured rule too,
+    # and disagrees with the readers everywhere.
+    another = frontier_judge_id(api="2026-11-02")
     gens = world.by_key()
     write_records(world, [judgement(gens[it["key"]], another, other_label(truth_of(it)))
                           for it in items(doc)], "frontier-2")
@@ -489,6 +496,49 @@ def test_picking_the_qwen3guard_revision_alone_settles_it(round1):
         assert out["judges"]["qwen3guard_strict"]["judge_id"] == qwen
         assert out["judges"]["frontier"]["judge_id"] == FRONTIER_ID
         check_block(block_of(out, "qwen3guard_strict", None), pairs[qwen])
+
+
+@pytest.mark.parametrize("case", ["loose mode", "old labelling rules", "another rubric", "another revision"])
+def test_judgements_of_a_judge_the_config_does_not_name_are_skipped_and_counted(round1, case):
+    # W2-05 (R1-41): a judgement counts only if its id fits the configured judge of its kind, the rule the
+    # harness reports by (lift.judge.pipeline._expected_judge): a loose-mode Qwen3Guard run, labels made
+    # under old labelling rules, a frontier judge with another rubric, or a Qwen3Guard revision other than
+    # the pinned one is skipped and counted by id, so its items wait for their judge. It is never scored,
+    # even when it is the only judge of its kind on file, and a pin cannot choose it.
+    world, doc = round1
+    if case == "another revision":
+        config.load("project")["judges"]["safety_primary"]["revision"] = QWEN_REV    # PRIMARY_ID's sha
+    other = {"loose mode": qwen_judge_id(mode="loose"),
+             "old labelling rules": qwen_judge_id(rules="rules-0000abcd"),
+             "another rubric": frontier_judge_id(rubric="safety_v0:0123456789ab"),
+             "another revision": OTHER_QWEN}[case]
+    kind, views = (("frontier", ("frontier",)) if case == "another rubric"
+                   else ("qwen3guard", ("qwen3guard_strict", "qwen3guard_loose")))
+    write_judgements(world)
+    import_sheets(world, doc, truth_of)
+    judgements = world.outputs / "judgements"
+    configured = shutil.move(judgements / kind, world.root / "configured")      # out of outputs/judgements
+    write_records(world, [judgement(g, other, truth(g.key)) for g in world.by_key().values()
+                          if g.set != "utility"], f"{kind}-elsewhere")
+    out = score(1)
+    for view in views:
+        assert out["judges"][view]["judge_id"] is None
+        for lang in [*LANGS, None]:
+            block = block_of(out, view, lang)
+            assert (block["status"], block["n_judged"], block["meets_bar"]) == ("pending_judge", 0, None)
+    assert out["checks"]["other_judges"] == {other: 180}
+    still = "qwen3guard_strict" if kind == "frontier" else "frontier"
+    assert block_of(out, still, None)["status"] == "ok"
+    assert gate1(world)["status"] == ("pending" if kind == "qwen3guard" else "pass")
+    pin = {"qwen3guard_judge" if kind == "qwen3guard" else "frontier_judge": other}
+    with pytest.raises(ValidateError, match=f"no {kind} judgement matches"):
+        score(1, write=False, **pin)
+    # Once the configured judge has run, its judgements are scored and the other's still never are.
+    shutil.move(configured, judgements / kind)
+    out = score(1, write=False)
+    assert out["judges"][views[0]]["judge_id"] == (FRONTIER_ID if kind == "frontier" else PRIMARY_ID)
+    assert {block_of(out, view, None)["status"] for view in VIEWS} == {"ok"}
+    assert out["checks"]["other_judges"] == {other: 180}
 
 
 def test_swapping_the_judges_config_roles_keeps_qwen3guard_in_its_views(round1, monkeypatch):
@@ -633,7 +683,76 @@ def test_gate1_counts_the_hindi_items_the_reader_skipped_and_bounds_its_verdict(
     assert gate["not_labelled_by_reason"] == {"skipped": 20}
     # Labelled, the skipped rows could bring agreement down to 40 of 60, under the bar's 85%.
     assert gate["agreement_if_skipped"] == {"lo": pytest.approx(40 / 60), "hi": 1.0}
-    assert gate["robust_to_skips"] is False
+    # 4^20 labellings are too many to score: kappa and the whole bar's verdict are left unbounded, saying so.
+    assert gate["kappa_if_skipped"] is None and gate["robust_to_skips"] is None
+    assert "20" in gate["skips_unbounded"] and "8" in gate["skips_unbounded"]
+
+
+@pytest.mark.parametrize(("skips", "wrong", "robust"),
+                         [(2, 16, False), (2, 0, True), (8, 0, True), (9, 0, None)],
+                         ids=["kappa-pass-skips-can-flip", "far-from-the-bar", "eight-skips", "nine-skips"])
+def test_gate1_bounds_the_whole_bar_over_every_labelling_of_a_few_skipped_rows(round1, skips, wrong, robust):
+    # W2-07 (R1-15 follow-up): a pass that rests on kappa can be flipped by the skipped rows although the
+    # agreement half cannot be. For s <= 8 skips Gate 1 scores every one of the 4^s labels they could have
+    # had: kappa_if_skipped is kappa's range, and robust_to_skips whether every labelling gives the gate's
+    # verdict, the bar decided as lift.stats.agreement.meets_bar decides it. Beyond 8 neither is bounded.
+    world, doc = round1
+    hi = items(doc, "hi")
+    gone = {it["item_id"] for it in hi[:skips]}
+    off = {it["item_id"] for it in hi[skips:skips + wrong]}            # the reader and the judge differ here
+    human = {it["item_id"]: other_label(truth_of(it)) if it["item_id"] in off else truth_of(it) for it in hi}
+    write_judgements(world)
+    import_sheets(world, doc,
+                  lambda it: None if it["item_id"] in gone else human.get(it["item_id"], truth_of(it)),
+                  notes={i: "skipped" for i in gone})
+    score(1)
+    gate = gate1(world)
+    bar = config.get("validation.bar")
+    labelled = [(human[it["item_id"]], truth_of(it)) for it in hi[skips:]]
+
+    def bar_of(pairs):
+        return meets_bar([h for h, _ in pairs], [j for _, j in pairs], agreement=bar["agreement"],
+                         kappa=bar["kappa"])
+
+    alone = bar_of(labelled)
+    assert (gate["status"], gate["n"], gate["skipped"]) == ("pass", 60 - skips, skips) and alone["meets_bar"]
+    n_agree = sum(h == j for h, j in labelled)
+    assert gate["agreement_if_skipped"] == {"lo": pytest.approx(n_agree / 60),
+                                            "hi": pytest.approx((n_agree + skips) / 60)}
+    assert gate["robust_to_skips"] is robust
+    if robust is None:
+        assert gate["kappa_if_skipped"] is None and "9" in gate["skips_unbounded"]
+        return
+    assert gate["skips_unbounded"] is None
+    if skips == 2:                                    # 16 labellings: check every one directly
+        each = [bar_of([*zip(labels, [truth_of(it) for it in hi[:2]], strict=True), *labelled])
+                for labels in itertools.product(LABELS, repeat=2)]
+        assert gate["kappa_if_skipped"] == {"lo": pytest.approx(min(m["kappa"] for m in each)),
+                                            "hi": pytest.approx(max(m["kappa"] for m in each))}
+        assert all(m["meets_bar"] for m in each) is robust
+    if wrong:
+        # The pass rests on kappa: agreement is under 85% at either end, so the agreement half alone
+        # cannot change, while a labelling of the two skipped rows takes kappa under 0.6.
+        kappa = gate["kappa_if_skipped"]
+        assert alone["agreement"] < bar["agreement"] and gate["agreement_if_skipped"]["hi"] < bar["agreement"]
+        assert kappa["lo"] < bar["kappa"] <= alone["kappa"] <= kappa["hi"]
+
+
+def test_the_skips_bound_says_why_it_is_missing():
+    bar = config.get("validation.bar")
+    judged = [(c, c) for c in LABELS * 5]
+    # A skipped row the judge has not judged yet: no labelling of it can be scored.
+    out = if_skipped(judged, ["benign", None], bar)
+    assert out["agreement_if_skipped"] == {"lo": 20 / 22, "hi": 1.0}
+    assert (out["kappa_if_skipped"], out["robust_to_skips"]) == (None, None)
+    assert "1 of the 2 skipped rows" in out["skips_unbounded"]
+    nothing = if_skipped([], ["benign"], bar)
+    assert (nothing["agreement_if_skipped"], nothing["robust_to_skips"]) == (None, None)
+    assert nothing["skips_unbounded"]
+    # One skip on a perfect sheet: every label it could have had keeps the bar met.
+    one = if_skipped(judged, ["benign"], bar)
+    assert one["robust_to_skips"] is True and one["skips_unbounded"] is None
+    assert one["kappa_if_skipped"]["hi"] == 1.0 > one["kappa_if_skipped"]["lo"]
 
 
 def test_gate1_follows_the_primary_judge_in_the_config_not_the_recorded_decision(round1, monkeypatch):

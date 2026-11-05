@@ -468,6 +468,22 @@ def test_a_label_column_sorted_on_its_own_stops_the_import(world, tmp_path):
     assert out["warnings"] == [] and labels_of(world) == expected(rows)
 
 
+def test_a_label_column_sorted_on_its_own_after_an_id_sort_is_a_warning(world, tmp_path):
+    # W2-08: a reader sorts the whole sheet by item_id (rows kept together), then the label column alone.
+    # The ids are no longer in the order the sheet was made, so the import cannot be sure, but labels in
+    # alphabetical order beside ids in item_id order are what that sort leaves: a warning, as before R1-44.
+    rows = filled(world)
+    labels = [row[LABEL] for row in rows[2:]]
+    for reverse in (False, True):                             # item_id order either way round
+        by_id = sorted(rows[2:], key=lambda row: row[ID], reverse=reverse)
+        assert import_labels(1, "zh", write(tmp_path / "by_id.csv", rows[:2] + by_id))["warnings"] == []
+        alone = rows[:2] + [row[:LABEL] + [label] + row[LABEL + 1:]
+                            for row, label in zip(by_id, sorted(labels), strict=True)]
+        out = import_labels(1, "zh", write(tmp_path / "sorted.csv", alone))
+        assert [w for w in out["warnings"] if "alphabetical order" in w]
+        assert labels_of(world) == expected(alone)            # a warning, not an error
+
+
 # Re-imports and the overlap sheet --------------------------------------------------------------
 
 
