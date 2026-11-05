@@ -81,9 +81,12 @@ After training
   push is logged and recorded and never fails the run: the runners' own pushes send the folder again
   (sync compares content).
 - Parity: the training model is freed, then lift.train.merge.parity_check compares the merged and the
-  unmerged adapter's greedy outputs, on the base it was trained on, on Gate 0's parity prompts
-  (``gate0_parity_sample``: the 20 dev prompts mixed over sets and languages that lift.gate0 draws for
-  its random-LoRA parity, ``mixed_sample(gate0.N_PARITY, split="dev", seed=gate0.SEED + 3)``).
+  unmerged adapter's greedy outputs, on the base it was trained on, on 20 dev prompts drawn by Gate 0's
+  parity rule (``gate0_parity_sample``: ``mixed_sample(gate0.N_PARITY, split="dev",
+  seed=gate0.SEED + 3)``, mixed over sets and languages) from the dev prompt files as they are now.
+  They are the prompts Gate 0's random-LoRA parity ran only while those dev pools are unchanged since
+  Gate 0, which records no pids: a spot-check exclusion or a fixed translation changes the draw.
+  registration.json records the rule and the pids drawn.
   In fp32 they must match token for token, or the adapter is not registered and the run fails: it is
   saved and pushed, but nothing may evaluate it until the cause is understood (CLAUDE.md rule 9).
 - The one exception is a GPU without native bf16 (a T4, where the fp32 base, about 13.4 GB, may not
@@ -1014,16 +1017,19 @@ def _push(name: str) -> dict[str, Any]:
 
 
 def gate0_parity_seed() -> int:
-    """The seed of Gate 0's merge-parity sample: lift.gate0.run_gate0 draws it with SEED + 3."""
+    """The seed of Gate 0's merge-parity rule: lift.gate0.run_gate0 draws its sample with SEED + 3."""
     from lift import gate0
 
     return gate0.SEED + GATE0_PARITY_SEED_OFFSET
 
 
 def gate0_parity_sample() -> list[Any]:
-    """Gate 0's merge-parity prompts, drawn as lift.gate0.run_gate0 draws them for its random-LoRA
-    parity (``mixed_sample(N_PARITY, split="dev", seed=SEED + 3)``: 20 dev prompts mixed over the safety
-    sets and languages), so an adapter's parity runs on the very prompts Gate 0's did."""
+    """The merge-parity prompts drawn by Gate 0's parity rule (``mixed_sample(N_PARITY, split="dev",
+    seed=SEED + 3)``, as lift.gate0.run_gate0 draws them for its random-LoRA parity: 20 dev prompts mixed
+    over the safety sets and languages) from the dev prompt files as they are now. They are the prompts
+    Gate 0's parity ran only while those 18 dev pools are unchanged since Gate 0, which records no pids:
+    a spot-check exclusion changes its cell's pick, and a fixed translation changes the text.
+    registration.json lists the pids drawn (``_parity_texts``)."""
     from lift import gate0
     from lift.prompts import mixed_sample
 
@@ -1031,8 +1037,8 @@ def gate0_parity_sample() -> list[Any]:
 
 
 def _parity_texts(given: Sequence[str] | None) -> tuple[list[str], dict[str, Any]]:
-    """The parity prompts (``gate0_parity_sample``, unless given) and how to find them again (pids, or
-    the given texts' hashes; never the texts)."""
+    """The parity prompts (``gate0_parity_sample``, unless given) and how to find them again (the rule
+    and the pids drawn, or the given texts' hashes; never the texts)."""
     if given is not None:
         texts = [str(t) for t in given]
         if not texts:
@@ -1041,8 +1047,8 @@ def _parity_texts(given: Sequence[str] | None) -> tuple[list[str], dict[str, Any
     from lift import gate0
 
     records = gate0_parity_sample()
-    source = (f"Gate 0's merge-parity sample: lift.prompts.mixed_sample({gate0.N_PARITY}, split='dev', "
-              f"seed={gate0_parity_seed()})")
+    source = ("drawn by Gate 0's merge-parity rule over the current dev prompts: "
+              f"lift.prompts.mixed_sample({gate0.N_PARITY}, split='dev', seed={gate0_parity_seed()})")
     return [r.text for r in records], {"source": source, "n": len(records),
                                        "pids": [f"{r.set}_{r.lang}:{r.pid}" for r in records]}
 
@@ -1441,10 +1447,11 @@ def train_lora(candidate: str, recipe: str, seed: int, *, out_dir: Path | None =
 
     ``out_dir`` puts the adapter elsewhere: such an adapter is never pushed (``push`` must be False) or
     registered, since the push and the registry describe outputs/adapters/{name}. ``parity_prompts``
-    default to Gate 0's 20 dev prompts (``gate0_parity_sample``). ``registry`` (tests: a file in tmp)
-    defaults to configs/variants.yaml. Raises TrainRefused (a refused request, before any GPU time, or a
-    Trainer off the recipe's batch, before its first step), ParityFailed (fp32 merge parity failed: saved
-    and pushed, not registered) or RegistryConflict (another entry under the name)."""
+    default to the 20 dev prompts drawn by Gate 0's parity rule from the dev prompts as they are now
+    (``gate0_parity_sample``). ``registry`` (tests: a file in tmp) defaults to configs/variants.yaml.
+    Raises TrainRefused (a refused request, before any GPU time, or a Trainer off the recipe's batch,
+    before its first step), ParityFailed (fp32 merge parity failed: saved and pushed, not registered)
+    or RegistryConflict (another entry under the name)."""
     from lift.models.variants import adapter_path
     from lift.train.merge import ADAPTER_WEIGHTS
 
