@@ -55,22 +55,27 @@ same-text check -> GlotLID -> the file, its excluded file and its report.
   a WARNING. The links make this a no-op in PolyRefuse's own languages; it guards hi, our zh harmless
   translations and hard_benign's.
 - Translation failures (translate.py's rules) are listed in the report and the pid is left out of
-  that file, never replaced by English. TranslationBlocked stops all Google translation for the rest
-  of the run: every file that still needs one is skipped (never a partial file), everything else is
-  built, and the summary says blocked, with ``blocked_kind`` "http_429" (Google refused this IP:
-  wait 30 minutes or more) or "streak" (ten items in a row failed every retry: a network or service
-  outage, not an IP block). --skip-translation skips the same files on request. A rerun resumes
-  from the cache. Items that failed with a transient error, or with --cache-only were not cached,
-  leave their file incomplete (summary "incomplete").
+  that file, never replaced by English. A frozen pid (fit, dev or final) left out so, unless by an
+  error a rerun translates, leaves its cell short of the frozen split until a reader's verdict on the
+  failures sheet: the report lists it (``awaiting_review``), the summary names the cell
+  (``short_cells``), and load_prompts refuses the cell meanwhile. TranslationBlocked stops all Google
+  translation for the rest of the run: every file that still needs one is skipped (never a partial
+  file), everything else is built, and the summary says blocked, with ``blocked_kind`` "http_429"
+  (Google refused this IP: wait 30 minutes or more) or "streak" (ten items in a row failed every
+  retry: a network or service outage, not an IP block). --skip-translation skips the same files on
+  request. A rerun resumes from the cache. Items that failed with a transient error, or with
+  --cache-only were not cached, leave their file incomplete (summary "incomplete").
 - hard_benign items Google failed take an NLLB translation from the cache when one passes the same
   checks; ``fallback_engine="nllb"`` (--fallback-engine nllb) makes the missing ones. Opt-in, so the
   files stay a function of the cache whatever the flags. It needs torch and transformers: a build
   that may make one runs translate.check_nllb before anything else (ImportError). A TranslationBlocked
   from NLLB is no Google block: it stops the build with a RuntimeError (the Google outputs are cached).
-- The summary's ``complete`` is False when anything was blocked, skipped or left incomplete;
-  ``rerun_needed`` is True when a rerun can add something: translation was blocked, a file was
-  skipped without --skip-translation asking for it (each skipped entry says ``requested``), or a file
-  is incomplete. ``lift data build`` exits 3 iff rerun_needed, else 0 (lift.commands.data).
+- The summary's ``complete`` is False when anything was blocked, skipped or left incomplete, or a
+  cell is short of its frozen split (``short_cells``); ``rerun_needed`` is True when a rerun can add
+  something: translation was blocked, a file was skipped without --skip-translation asking for it
+  (each skipped entry says ``requested``), or a file is incomplete (a short cell is not: only a
+  reader's verdict completes it). ``lift data build`` exits 3 iff rerun_needed, else 0
+  (lift.commands.data).
 - GlotLID: every record gets ``lid``; one its language check rejects stays in the file and is
   listed (lid_failures). Belebele: the question is checked, no field added.
 
@@ -121,22 +126,25 @@ carry run_timestamp, wall_clock_seconds, created_at and provenance timestamps.
     prompts/reports/{set}_{lang}.json    counts by split and engine; lid_failures, translation
                                          failures (and how each was resolved), exclusions (reason;
                                          detail for links), spot-check counts, the file's sha256;
-                                         PromptRecord files also list cross_split_duplicates
-                                         (belebele reports have no such key); no text
+                                         PromptRecord files also list cross_split_duplicates and
+                                         awaiting_review (split -> the frozen pids that await a
+                                         reader's verdict; belebele reports have neither key); no text
     prompts/reports/build.json           the last build: options, sources, splits (status, counts,
                                          groups and their sizes), files (PromptRecord files also
-                                         count cross_split_duplicates), complete, rerun_needed,
-                                         blocked (blocked_kind, blocked_reason), skipped (set, lang,
-                                         reason, requested), incomplete, the SFT row decision,
-                                         PolyRefuse alignment, timings
+                                         count cross_split_duplicates and carry awaiting_review),
+                                         complete, rerun_needed, blocked (blocked_kind,
+                                         blocked_reason), skipped (set, lang, reason, requested),
+                                         incomplete, short_cells (file -> awaiting_review), the SFT
+                                         row decision, PolyRefuse alignment, timings
     interim/translations/                the translation cache and spotchecks.jsonl (verdict rows:
                                          lang pid set verdict corrected note source_sha seen_sha
                                          sheet applied; the latest per (lang, pid) wins)
     sft/...                              the candidates and sft/report.json (lift.data.sft)
 ``load_prompts`` reads the prompt files for every later stage (lift.prompts.load wraps it) and checks
 every record's split stamp against the committed split first: data/prompts travels through the runs
-repo, data/splits through git. Logs, reports and exception messages carry counts, pids, labels and
-hashes, never prompt text.
+repo, data/splits through git. It also refuses a cell short of its frozen split, so nothing is
+generated, judged or reported on fewer prompts than the frozen split holds. Logs, reports and
+exception messages carry counts, pids, labels and hashes, never prompt text.
 """
 
 from __future__ import annotations
@@ -364,10 +372,13 @@ def build_all(*, only: Iterable[str] | None = None, langs: Iterable[str] | None 
 
     ``summary["complete"]`` is False when translation was blocked (``blocked``; ``blocked_kind``
     "http_429" or "streak", ``blocked_reason`` its message), a file was skipped for translation
-    (``skipped``, on request or because of the block) or a file misses items that only a rerun can
-    translate (``incomplete``). ``summary["rerun_needed"]`` is True when a rerun can add something:
-    blocked, a skipped entry whose ``requested`` is False (only --skip-translation requests one), or
-    incomplete. Listed failures (wrong language, empty, identical) are neither.
+    (``skipped``, on request or because of the block), a file misses items that only a rerun can
+    translate (``incomplete``), or a cell is short of its frozen split (``short_cells``: file ->
+    split -> the frozen pids that listed failures, wrong language, empty, identical or too long, leave
+    out until a reader's verdict on the failures sheet). ``summary["rerun_needed"]`` is True when a
+    rerun can add something: blocked, a skipped entry whose ``requested`` is False (only
+    --skip-translation requests one), or incomplete. Listed failures never set it: a rerun cannot add
+    them.
 
     With fallback_engine "nllb" and no fallback_translator, a build that may translate hard_benign
     out of English (not cache_only, not skipping translation) runs translate.check_nllb first, so a
@@ -1026,8 +1037,9 @@ def _same_text(records: Sequence[PromptRecord]) -> tuple[list[PromptRecord], lis
 def _write_prompts(run: _Run, src: _Sources, f: _File) -> None:
     """Stamp splits, drop the train/val/fit records whose text a dev/final record shares and list the
     texts that straddle dev and final (``_same_text``: it matters for our own translations, hi, zh
-    harmless and hard_benign; PolyRefuse's languages are linked before), run GlotLID, write the file,
-    its excluded file and its report."""
+    harmless and hard_benign; PolyRefuse's languages are linked before), run GlotLID, list the frozen
+    pids the file lacks that await a reader's verdict (``awaiting_review``), write the file, its
+    excluded file and its report."""
     name = f"{f.set_name}_{f.lang}"
     mapping = src.splits.get(f.set_name)
     kept, same, cross = _same_text([_stamp(f.set_name, rec, mapping) for rec in sorted(f.records, key=_pid)])
@@ -1050,6 +1062,17 @@ def _write_prompts(run: _Run, src: _Sources, f: _File) -> None:
     if len(set(pids)) != len(pids):
         repeated = sorted(p for p, n in Counter(pids).items() if n > 1)
         raise ValueError(f"{f.set_name}_{f.lang}: repeated pids {repeated[:5]}")
+    # the frozen pids the file lacks that neither a reader nor the build's rules left out, other than an
+    # error a rerun translates (the file is then incomplete): open failures that await a reader's verdict
+    accounted = {rec.pid for rec in records} | {x["pid"] for x in [*f.exclusions, *same]}
+    accounted |= {x["pid"] for x in f.failures if x["resolved"] is None and x["rule"] == "error"}
+    awaiting: dict[str, list[str]] = {}
+    for pid, split in sorted((mapping or {}).items()):
+        if pid not in accounted:
+            awaiting.setdefault(split, []).append(pid)
+    if awaiting:
+        log.warning("%s: short of its frozen split, awaiting a reader's verdict on the failures sheet: %s",
+                    name, "; ".join(f"{split} {_listed(pids)}" for split, pids in sorted(awaiting.items())))
     report = {
         "set": f.set_name, "lang": f.lang, "records": len(records),
         "by_split": _count(rec.split for rec in records),
@@ -1058,6 +1081,7 @@ def _write_prompts(run: _Run, src: _Sources, f: _File) -> None:
         "translation_failures": sorted(f.failures, key=lambda x: (x["pid"], x["engine"])),
         "exclusions": sorted([*f.exclusions, *same], key=lambda x: x["pid"]),
         "cross_split_duplicates": cross,
+        "awaiting_review": dict(sorted(awaiting.items())),
         "spotchecks": {"applied": {v: f.applied[v] for v in VERDICTS},
                        "checked": sum(bool(r.translation and r.translation.checked) for r in records),
                        "edited": sum(bool(r.translation and r.translation.edited) for r in records),
@@ -1068,6 +1092,7 @@ def _write_prompts(run: _Run, src: _Sources, f: _File) -> None:
     _write_file(run, f.set_name, f.lang, [rec.model_dump(mode="json") for rec in records],
                 [rec.model_dump(mode="json") for rec in excluded], report)
     run.files[name]["cross_split_duplicates"] = len(cross)
+    run.files[name]["awaiting_review"] = report["awaiting_review"]
 
 
 def _build_belebele(run: _Run, src: _Sources, lang: str) -> None:
@@ -1138,15 +1163,16 @@ def _summary(run: _Run, src: _Sources, options: Mapping[str, Any], sft_summary: 
              run_id: str) -> dict[str, Any]:
     files = dict(sorted(run.files.items()))
     incomplete = [name for name, entry in files.items() if entry["errors"]]
+    short = {name: entry["awaiting_review"] for name, entry in files.items() if entry.get("awaiting_review")}
     totals = {key: sum(entry[key] for entry in files.values())
               for key in ("records", "lid_failures", "translation_failures", "open_failures", "exclusions")}
     return {
         "run_id": run_id, "options": dict(options),
-        "complete": run.blocked is None and not run.skipped and not incomplete,
+        "complete": run.blocked is None and not run.skipped and not incomplete and not short,
         "rerun_needed": (run.blocked is not None or any(not x["requested"] for x in run.skipped)
                          or bool(incomplete)),
         "blocked": run.blocked is not None, "blocked_kind": run.blocked_kind, "blocked_reason": run.blocked,
-        "skipped": run.skipped, "incomplete": incomplete,
+        "skipped": run.skipped, "incomplete": incomplete, "short_cells": short,
         "files": files, "totals": {"files": len(files), **totals},
         "splits": run.splits, "sft": sft_summary, "alignment": src.alignment,
         "sources": _pins(run.cfg), "timings": run.timings,
@@ -1156,17 +1182,25 @@ def _summary(run: _Run, src: _Sources, options: Mapping[str, Any], sft_summary: 
 def build_state(summary: Mapping[str, Any]) -> str:
     """A build summary (build_all's, or build.json's) in one line, the last ``lift data build`` prints:
     "INCOMPLETE: rerun to resume from the cache" when ``rerun_needed`` (a build.json older than that
-    key: when not ``complete``), "built; N files left out by --skip-translation (run without it to
-    translate them)" when every skip was requested, else "complete"."""
+    key: when not ``complete``); else "built; " and what keeps it from complete, "N files left out by
+    --skip-translation (run without it to translate them)" when every skip was requested and "N
+    fit/dev/final items await a reader's verdict (failures sheet: ...)" for the ``short_cells``; else
+    "complete"."""
     rerun = summary.get("rerun_needed")
     if rerun is None:                                     # a build.json from before rerun_needed
         rerun = not summary.get("complete")
     if rerun:
         return "INCOMPLETE: rerun to resume from the cache"
+    parts = []
     if summary.get("skipped"):
-        return (f"built; {len(summary['skipped'])} files left out by --skip-translation (run without it to "
-                "translate them)")
-    return "complete"
+        parts.append(f"{len(summary['skipped'])} files left out by --skip-translation (run without it to "
+                     "translate them)")
+    short = summary.get("short_cells") or {}              # a build.json from before short_cells: none
+    awaiting = sum(len(pids) for cells in short.values() for pids in cells.values())
+    if awaiting:
+        parts.append(f"{awaiting} fit/dev/final items await a reader's verdict (failures sheet: lift data "
+                     "spotcheck-sheets, then lift data apply-spotchecks)")
+    return "built; " + "; ".join(parts) if parts else "complete"
 
 
 def blocked_advice(kind: str | None) -> str:
@@ -1218,7 +1252,7 @@ def _write_json(path: Path, obj: Any) -> None:
         raise
 
 
-def load_prompts(set_name: str, lang: str, split: str | None = None) -> list:
+def load_prompts(set_name: str, lang: str, split: str | None = None, *, allow_short: bool = False) -> list:
     """Read data/prompts/{set}_{lang}.jsonl (PromptRecords; belebele: dicts), optionally one split.
     Excluded records (prompts/excluded/) are never returned.
 
@@ -1227,7 +1261,15 @@ def load_prompts(set_name: str, lang: str, split: str | None = None) -> list:
     must carry the split ``_check_stamps`` gives it (data/splits/{set}.json for a pid it covers, a
     PolyRefuse train/val pid its own segment, redteam "final"). A wrong stamp, or a missing split
     file, raises ValueError, never FileNotFoundError: that means "no prompt file" to the callers that
-    go on without the language (judge.pipeline.second_judge_pids, Gate 0's all_prompts)."""
+    go on without the language (judge.pipeline.second_judge_pids, Gate 0's all_prompts).
+
+    Then every frozen pid of each split the call returns (fit, dev and final: the split file's; all of
+    them when ``split`` is None) must be in the file unless its report lists it among its exclusions
+    (a reader's spot-check bad, a fit record whose text a dev/final record has): ValueError naming the
+    remedy otherwise (``_check_frozen``), so no stage runs a cell short of its frozen split. A
+    translation failure leaves its pid out until a reader's verdict on the failures sheet resolves it.
+    ``allow_short`` skips this check, for the spot checks, which read the files as they stand: their
+    failures sheet is how a short cell is completed."""
     if set_name not in SETS or set_name == "sft":
         raise ValueError(f"unknown prompt set {set_name!r}; choose from {[s for s in SETS if s != 'sft']}")
     if split is not None and split not in _SPLIT_NAMES:
@@ -1238,9 +1280,12 @@ def load_prompts(set_name: str, lang: str, split: str | None = None) -> list:
                                 f"--langs {lang}`")
     rows = list(read_jsonl(path))
     items: list = rows if set_name == "belebele" else [PromptRecord.model_validate(row) for row in rows]
-    _check_stamps(set_name, lang, path, items)
+    mapping = _check_stamps(set_name, lang, path, items)
+    present = {x["pid"] if set_name == "belebele" else x.pid for x in items}
     if split is not None:
         items = [x for x in items if (x["split"] if set_name == "belebele" else x.split) == split]
+    if mapping is not None and not allow_short:
+        _check_frozen(set_name, lang, path, mapping, present, split)
     return items
 
 
@@ -1285,6 +1330,48 @@ def _stamp_of(set_name: str, pid: str, mapping: Mapping[str, str] | None) -> tup
         if pid.startswith(f"{prefix}-{segment}-"):
             return segment, f"its pid says {segment}"
     return None, f"not a {prefix} test, train or val pid"
+
+
+def _check_frozen(set_name: str, lang: str, path: Path, mapping: Mapping[str, str], present: set[str],
+                  split: str | None) -> None:
+    """ValueError unless the prompt file at ``path`` (``present``: its pids) holds every frozen pid of
+    ``split`` (None: of every split ``mapping`` freezes) but those its report lists among its exclusions
+    (a reader's spot-check bad; a fit record the same-text rule left out). The message gives per split
+    the count missing, and the remedy by the report's open translation failures: a reader's verdict on
+    the failures sheet, or a rerun for an item that failed with an error. A report that is missing or
+    from another build of the file (its sha256 differs) explains nothing: rebuild."""
+    short = {s: [p for p, of in sorted(mapping.items()) if of == s and p not in present]
+             for s in sorted(set(mapping.values())) if split in (None, s)}
+    if not any(short.values()):
+        return
+    report = _read_report(set_name, lang)
+    trusted = report is not None and report.get("sha256") == sha256_file(path)
+    listed: Mapping[str, Any] = report if trusted and report is not None else {}
+    excluded = {x["pid"] for x in listed.get("exclusions", [])}
+    short = {s: [p for p in pids if p not in excluded] for s, pids in short.items()}
+    short = {s: pids for s, pids in short.items() if pids}
+    if not short:
+        return
+    rules = {x["pid"]: x["rule"] for x in listed.get("translation_failures", []) if x["resolved"] is None}
+    missing = sorted(p for pids in short.values() for p in pids)
+    review = [p for p in missing if p in rules and rules[p] != "error"]
+    rerun = [p for p in missing if rules.get(p) == "error"]
+    other = [p for p in missing if p not in rules]
+    total = Counter(mapping.values())
+    parts = [", ".join(f"{s} misses {len(pids)} of its {total[s]} frozen pids" for s, pids in short.items())]
+    if review:
+        parts.append(f"{len(review)} translation failures await a reader's verdict on the failures sheet, "
+                     f"e.g. {review[:5]}: `lift data spotcheck-sheets --langs {lang}`, then `lift data "
+                     "apply-spotchecks --file <the filled sheet>`, then `lift sync push`")
+    if rerun:
+        parts.append(f"{len(rerun)} failed with an error a rerun translates, e.g. {rerun[:5]}: `lift data "
+                     f"build --only {set_name} --langs {lang}`, then `lift sync push`")
+    if other:
+        why = ("its report is missing" if report is None else "its report is from another build of the file"
+               if not trusted else "its report lists them neither as failed nor as excluded")
+        parts.append(f"{len(other)} are not explained ({why}), e.g. {other[:5]}: rebuild it (`lift data "
+                     f"build --only {set_name}`), then `lift sync push`")
+    raise ValueError(f"{set_name}_{lang}: {path.name} is short of its frozen split: " + "; ".join(parts))
 
 
 # ---------------------------------------------------------------------------- spot checks
@@ -1391,7 +1478,7 @@ def write_spotcheck_sheets(*, langs: Iterable[str] | None = None, n: int | None 
         sample: list[list[str]] = []
         failed: list[list[str]] = []
         for set_name in TRANSLATED_SETS:
-            records = load_prompts(set_name, lang)
+            records = load_prompts(set_name, lang, allow_short=True)    # short too: the sheets complete it
             tag = f"spotcheck:{lang}:{set_name}"
             candidates = [r for r in records if r.translation is not None and not r.translation.checked
                           and r.split in ("dev", "final")]
@@ -1427,7 +1514,7 @@ def _failure_rows(set_name: str, lang: str, records: Sequence[PromptRecord],
     still_open = [x for x in report["translation_failures"]
                   if x["resolved"] is None and x["pid"] not in by_pid]
     if still_open:
-        english = {r.pid: r.text for r in load_prompts(set_name, "en")}
+        english = {r.pid: r.text for r in load_prompts(set_name, "en", allow_short=True)}
         cache = TranslationCache()
         hits = {(x["pid"], x["engine"]): cache.get(x["engine"], lang, english[x["pid"]]) for x in still_open}
         missing = sorted(x["pid"] for x in still_open
@@ -1578,7 +1665,7 @@ class _Items:
         report = _read_report(set_name, lang)
         failed = [x for x in (report or {}).get("translation_failures", []) if x["pid"] not in items]
         if failed:
-            english = {rec.pid: rec.text for rec in load_prompts(set_name, "en")}
+            english = {rec.pid: rec.text for rec in load_prompts(set_name, "en", allow_short=True)}
             self._cache = self._cache if self._cache is not None else TranslationCache()
             for x in failed:
                 hit = self._cache.get(x["engine"], lang, english[x["pid"]])
@@ -1840,7 +1927,7 @@ def _uncached_items(set_name: str, lang: str, cache: TranslationCache) -> list[s
     cached = [x for x in (_read_report(set_name, lang) or {}).get("translation_failures", [])
               if x["rule"] in _CACHED_RULES]
     if cached:
-        english = {rec.pid: rec.text for rec in load_prompts(set_name, "en")}
+        english = {rec.pid: rec.text for rec in load_prompts(set_name, "en", allow_short=True)}
         missing.update(x["pid"] for x in cached if cache.get(x["engine"], lang, english[x["pid"]]) is None)
     return sorted(missing)
 
@@ -1889,9 +1976,10 @@ def _lost(before: Mapping[tuple[str, str], set[str]]) -> dict[str, list[str]]:
 def stats(*, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Counts from the prompt files (records per set, language and split) and their reports (GlotLID
     rejections, translation failures by rule, exclusions by reason type: duplicate_of,
-    near_duplicate_of, same_text_as, spotcheck; cross-split duplicates of PromptRecord files;
-    spot-check counts), the SFT row decision (sft/report.json) and the last build's state (complete,
-    rerun_needed, blocked and blocked_kind, skipped, incomplete). Counts and pids only."""
+    near_duplicate_of, same_text_as, spotcheck; cross-split duplicates and the frozen pids awaiting a
+    reader's verdict of PromptRecord files; spot-check counts), the SFT row decision (sft/report.json)
+    and the last build's state (complete, rerun_needed, blocked and blocked_kind, skipped, incomplete,
+    short_cells). Counts and pids only."""
     cfg = cfg if cfg is not None else config.load("project")
     files: dict[str, dict[str, Any]] = {}
     missing: list[str] = []
@@ -1922,6 +2010,8 @@ def stats(*, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
                 })
                 if "cross_split_duplicates" in report:            # PromptRecord files (not belebele)
                     entry["cross_split_duplicates"] = len(report["cross_split_duplicates"])
+                if "awaiting_review" in report:                   # PromptRecord files of a newer build
+                    entry["awaiting_review"] = report["awaiting_review"]
             files[name] = entry
     out: dict[str, Any] = {"files": files, "missing": missing, "sft": None, "build": None}
     sft_report = sft_dir() / "report.json"
@@ -1935,7 +2025,7 @@ def stats(*, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
     if build_json.exists():
         last = json.loads(build_json.read_text(encoding="utf-8"))
         out["build"] = {k: last.get(k) for k in ("run_id", "complete", "rerun_needed", "blocked",
-                                                 "blocked_kind", "skipped", "incomplete")}
+                                                 "blocked_kind", "skipped", "incomplete", "short_cells")}
     return out
 
 
@@ -1966,6 +2056,10 @@ def format_stats(st: Mapping[str, Any]) -> str:
         if e.get("cross_split_duplicates"):
             notes.append(f"{e['cross_split_duplicates']} texts repeat across splits (kept: the frozen split "
                          "cannot regroup them)")
+        if e.get("awaiting_review"):
+            n = sum(len(pids) for pids in e["awaiting_review"].values())
+            notes.append(f"{n} fit/dev/final items await a reader's verdict (failures sheet): "
+                         + "; ".join(f"{s} {_listed(pids)}" for s, pids in e["awaiting_review"].items()))
         if e.get("report") != "ok":
             notes.append(f"report {e.get('report')}")
         if notes:
@@ -1994,4 +2088,13 @@ def format_stats(st: Mapping[str, Any]) -> str:
                                                    for x in b["skipped"]))
         if b.get("incomplete"):
             lines.append("  missing items a rerun can translate: " + ", ".join(b["incomplete"]))
+        if b.get("short_cells"):
+            lines.append("  short of their frozen split: " + ", ".join(
+                f"{name} ({', '.join(f'{s} {len(pids)}' for s, pids in cells.items())})"
+                for name, cells in b["short_cells"].items()))
     return "\n".join(lines)
+
+
+def _listed(pids: Sequence[str], n: int = 10) -> str:
+    """Up to ``n`` pids, space-separated, then "..." if there are more."""
+    return " ".join(pids[:n]) + (" ..." if len(pids) > n else "")
