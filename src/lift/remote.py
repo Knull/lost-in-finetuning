@@ -543,9 +543,12 @@ def gather_secrets(ctx: Context, *, fetch: bool = True) -> tuple[dict[str, str],
 
 
 def missing_message(missing: list[str]) -> str:
-    example = "$env:NAME = '...'" if os.name == "nt" else "export NAME=..."
-    return (f"missing {', '.join(missing)}: set them in this shell first ({example}); HF_TOKEN can also "
-            "come from `hf auth login` with a WRITE token (pushes to the runs repo need one)")
+    # CLAUDE.md, Secrets: a hidden prompt, never a value typed on a command line or pasted into a chat.
+    example = ("$env:NAME = [Net.NetworkCredential]::new('', (Read-Host -AsSecureString 'NAME')).Password"
+               if os.name == "nt" else "read -rs NAME; export NAME")
+    return (f"missing {', '.join(missing)}: set them in this shell first, each with a hidden prompt "
+            f"({example}), never typed on a command line; HF_TOKEN can also come from `hf auth login` with "
+            "a WRITE token (pushes to the runs repo need one)")
 
 
 def scrub(text: str, masker: Masker | None = None) -> str:
