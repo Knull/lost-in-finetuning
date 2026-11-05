@@ -101,7 +101,7 @@ def test_p08_publishes_no_output_text_and_guards_public_files_by_content():
     assert "no output text" in logs.lower() and "output hashes" in logs
     logs_item = next(item for item in items if "logs dataset" in item.split(" (", 1)[0].lower())
     assert keeps_judge_text_out(logs_item), "P08's logs dataset does not keep JUDGE_TEXT out"
-    gated =[item for item in items if "(gated, manual approval)" in item]
+    gated = [item for item in items if "(gated, manual approval)" in item]
     assert len(gated) == 1 and "every judged output" in gated[0].lower() and "refusals" in gated[0]
     # The guard reads the content, never a label (most labels are one judge's call).
     assert not any("harmful label" in item for item in items)
