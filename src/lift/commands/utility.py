@@ -1,12 +1,18 @@
 """``lift utility``: the Hindi utility win rate of a variant against stock (P03); lift.utility has the rules.
 
-It follows lift.commands.run's conventions and shares its helpers. Torch is imported only when an answer
-must be generated, after the pin check, so ``--judge-only`` and a run whose answers are complete work on a
-laptop with no GPU stack (and need no pin: nothing is made from a revision). A side whose answers cannot be
-extended (a StaleOutputError: stale, or made in another precision) is listed with its remedy, and the pair
-is not judged. Exit codes: 0 done; 3 done, but something was listed with its remedy (a side skipped, the
-pair or the verdict file refused, Message Batches still running, the AuditKIT record refused), so a GPU job
-goes on with its next lines; 1 an error; 2 a refused combination of options.
+It follows lift.commands.run's conventions and shares its helpers. Every run but ``--judge-only`` checks the
+pin, then loads stock and then the candidate (one model at a time, torch imported after the pin check) and
+passes each side's answer file through ``lift.models.generate.generate``, also when the file answers every
+prompt: generate appends nothing to a current file and refuses one made under another configuration than
+the variant as registered now (another adapter, registry entry, model revision, template, decoding or
+harness), so a replaced adapter's answers are never judged as the new one's (rule 4). A side it refuses (a
+StaleOutputError: stale, or made in another precision) is listed with its remedy, and the pair is not
+judged; a side it accepts gets its check recorded (``lift.utility.record_checked``). Only ``--judge-only``,
+which loads no model, works on a laptop with no GPU stack (and needs no pin): it judges answers only as a
+GPU line checked them, and refuses a side whose registry entry, harness or pinned revision has moved since
+(``lift.utility.check_answers``). Exit codes: 0 done; 3 done, but something was listed with its remedy (a
+side skipped, the pair or the verdict file refused, Message Batches still running, the AuditKIT record
+refused), so a GPU job goes on with its next lines; 1 an error; 2 a refused combination of options.
 """
 
 from __future__ import annotations
@@ -32,16 +38,25 @@ log = logging.getLogger(__name__)
 HELP = """\
 The Hindi utility win rate of a variant against stock (Gate 1's gain check, the selection rule's utility
 condition). Both sides answer every utility_hi prompt of the split through the frozen harness (stock
-first, then the candidate, one model loaded at a time); a side whose file already answers every prompt is
-not generated again. Each pair is then judged in both orders, the candidate shown as A and then as B,
+first, then the candidate, one model loaded at a time). A side whose file already answers every prompt is
+still loaded and its file checked against the variant as registered now, and nothing is generated again:
+a file made under another adapter, registry entry, model revision, template, decoding or harness is
+listed with its lift restart line, and the pair is not judged. Each check is recorded in
+outputs/utility/checked/. Each pair is then judged in both orders, the candidate shown as A and then as B,
 scored 1 / 0.5 / 0 per order for a win / tie / loss and averaged: the win rate is the mean pair score,
 with a bootstrap interval. A failed order counts as a tie; the failures, and the win rate with them
 counted as losses and as wins, are reported beside it.
 
+--judge-only loads no model (the laptop, after lift sync pull): it judges the answers only as a GPU line
+checked them, and refuses a side with no check, one that changed since, or one whose registry entry,
+harness or pinned model revision has moved since (each listed with the line that settles it).
+
 Writes outputs/utility/{frontier|fallback}/{variant}/utility_hi_{split}.jsonl (the verdicts, rewritten
 whole), outputs/metrics/utility/{variant}_{split}.json and .md, and the AuditKIT record under
 outputs/metrics/auditkit_utility/. A verdict file that already describes every pair as it stands is reused
-with no judge call; one another judge wrote is refused until --rejudge sets it aside.
+with no judge call; one another judge wrote is refused until --rejudge sets it aside. When the pair is
+refused, its verdicts, metrics, AuditKIT record and answer check are set aside (outputs/.aside/, never
+synced) and left empty, so nothing reads them as current.
 
 The frontier judge (judges.utility) first sends its uncached requests as Message Batches when
 judges.utility.bulk is batch, waits for them and then judges from its call cache; --sync sends every
@@ -71,20 +86,21 @@ def _refused_options(args: argparse.Namespace) -> str | None:
 
 def _answer(args: argparse.Namespace, prompts: Sequence[Any], dtype: str,
             skipped: dict[str, dict[str, str]]) -> None:
-    """Generate what a side still lacks: stock first, then the candidate, one model loaded at a time and
-    freed before the next. A side ``generate`` refuses is listed in ``skipped`` under "{variant} {cell}"."""
+    """Pass both sides' answer files through the frozen harness: stock first, then the candidate, one model
+    loaded at a time and freed before the next. Always, also for a file that answers every prompt: a check
+    of the pids alone would reuse the answers of an adapter replaced since (rule 4), while ``generate``
+    compares every record with the variant as built now, appends only what is missing and refuses a file of
+    another configuration or stack. A side ``generate`` refuses is listed in ``skipped`` under "{variant}
+    {cell}"; a side it accepts gets its check recorded (``utility.record_checked``), which --judge-only
+    reads."""
     from lift import utility
 
-    names = [n for n in (utility.REFERENCE, args.variant) if not utility.complete(n, args.split, prompts)]
-    if not names:
-        log.info("stock and %s answer every %s_%s_%s prompt already; nothing to generate", args.variant,
-                 utility.SET, utility.LANG, args.split)
-        return
     require_pinned("models.global")
     _refuse_other_dtype(dtype, args.device)
     from lift.models.generate import StaleOutputError, generate, generations_path
     from lift.models.variants import build_variant, get_spec
 
+    names = (utility.REFERENCE, args.variant)
     specs = {}
     for name in names:                    # every name checked before any model loads
         try:
@@ -94,9 +110,12 @@ def _answer(args: argparse.Namespace, prompts: Sequence[Any], dtype: str,
     for name in names:
         holder = {"variant": build_variant(specs[name], device=args.device, dtype=dtype)}
         try:
-            generate(holder["variant"], prompts,
-                     out_path=generations_path(name, utility.SET, utility.LANG, args.split),
-                     batch_size=args.batch_size)
+            path = generate(holder["variant"], prompts,
+                            out_path=generations_path(name, utility.SET, utility.LANG, args.split),
+                            batch_size=args.batch_size)
+            checked = utility.record_checked(holder["variant"], args.split)
+            log.info("%s: checked against %s as registered now (%s)", utility.logical(path), name,
+                     utility.logical(checked))
         except StaleOutputError as exc:
             mine: dict[str, dict[str, str]] = {}
             _skip(mine, name, utility.SET, utility.LANG, args.split, exc, judged=None, dtype=dtype)
@@ -192,10 +211,10 @@ def register(sub: argparse._SubParsersAction) -> None:
                                                                 "memory)")
     stage = p.add_mutually_exclusive_group()
     stage.add_argument("--generate-only", action="store_true",
-                       help="stop after generating both sides' answers (a GPU job line)")
+                       help="stop after generating and checking both sides' answers (a GPU job line)")
     stage.add_argument("--judge-only", action="store_true",
-                       help="generate nothing: judge and report the answers there are (no GPU stack needed "
-                            "with the frontier judge)")
+                       help="load no model: judge and report the answers as a GPU line checked them (no GPU "
+                            "stack or pin needed with the frontier judge)")
     bulk = p.add_mutually_exclusive_group()
     bulk.add_argument("--sync", action="store_true",
                       help="send every request to the Messages API, no Message Batches (small or urgent "
