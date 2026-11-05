@@ -1,14 +1,21 @@
 """``lift gate 1`` and ``lift gate 2 [--candidate NAME]``: Gates 1 and 2 from the dev metrics (P03).
 
 Laptop side, after ``lift sync pull``; nothing here imports torch. Gate 1 (judge and gain) reads P04's
-outputs/metrics/validation/gate1.json and each seed-1 standard adapter's dev utility metrics; Gate 2
-(drift) reads the Hindi dev harmful pairs of stock and each seed-1 standard adapter, and of the stress
-adapter as a fact, through lift.judge.pipeline.paired_labels. Each prints the README rule, every check
-and adapter with its numbers, and the verdict, and writes outputs/metrics/gate{1,2}.json and .md
-(lift.gates has the rules). Output names ids, paths, counts and rates only.
+outputs/metrics/validation/gate1.json and each seed-1 standard adapter's dev utility metrics, counted only
+while they still describe the answer and verdict files and the registered adapter they were made from;
+Gate 2 (drift) reads the Hindi dev harmful pairs of stock and each seed-1 standard adapter, and of the
+stress adapter as a fact, through lift.judge.pipeline.paired_labels. Each prints the README rule, the
+precision, every check and adapter with its numbers, and the verdict, and writes
+outputs/metrics/gate{1,2}.json and .md (lift.gates has the rules). Output names ids, paths, counts and
+rates only.
 
 ``--candidate`` (Gate 2 only) is the candidate a person picked at Gate 1, by dev utility win rate only,
 never by drift; without it every candidate's branch is listed. Nothing here picks a candidate.
+
+``--dtype`` is the precision the gate reads (default ``generation.dtype``): the utility metrics lift utility
+wrote for it and the safety cells made in it. Another precision (a Kaggle T4's fp16) counts only under Gate
+0's licence, which each input's reader checks, and its reports are gate{1,2}-{dtype}.json and .md, beside
+the reported precision's.
 
 Exit codes: 0 when the report is written, whatever the verdict (PASS, FAIL, PENDING and INCOMPLETE are
 outcomes, not errors: both branches of a gate are legitimate, and a job line must not stop on one);
@@ -24,10 +31,12 @@ import sys
 
 DESCRIPTION = (
     "Gate 1 (judge and gain): P04's validation round 1 verdict in Hindi and each seed-1 standard adapter's "
-    "dev utility win rate against the 0.55 bar. Gate 2 (drift): each seed-1 standard adapter's Hindi dev "
-    "harmful rate against stock (at least 8 points, McNemar p < 0.05 on 172 prompts), with the stress "
-    "adapter as a fact, and the branch the rule gives. Writes outputs/metrics/gate{1,2}.json and .md and "
-    "exits 0 whatever the verdict. Runs on the laptop after lift sync pull; no GPU, no torch.")
+    "dev utility win rate against the 0.55 bar, counted only while its metrics still describe the answers, "
+    "verdicts and registered adapter they were made from. Gate 2 (drift): each seed-1 standard adapter's "
+    "Hindi dev harmful rate against stock (at least 8 points, McNemar p < 0.05 on 172 prompts), with the "
+    "stress adapter as a fact, and the branch the rule gives. Writes outputs/metrics/gate{1,2}.json and .md "
+    "(gate{1,2}-{dtype}.json and .md for another --dtype) and exits 0 whatever the verdict. Runs on the "
+    "laptop after lift sync pull; no GPU, no torch.")
 
 
 def _setup() -> None:
@@ -54,7 +63,10 @@ def _gate(args: argparse.Namespace) -> int:
     if args.candidate is not None and args.candidate not in names:
         return _refuse(f"unknown candidate {args.candidate!r}; choose from configs/train.yaml candidates "
                        f"{names}")
-    result = gates.gate1() if args.number == 1 else gates.gate2(args.candidate)
+    if args.number == 1:
+        result = gates.gate1(dtype=args.dtype)
+    else:
+        result = gates.gate2(args.candidate, dtype=args.dtype)
     for line in gates.summary_lines(result):
         print(line)
     try:
@@ -75,4 +87,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--candidate", default=None, metavar="NAME",
                    help="Gate 2 only: the candidate picked at Gate 1 (a configs/train.yaml candidate, e.g. "
                         "aya or indicalign); without it, every candidate's branch is listed")
+    p.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default=None,
+                   help="the precision of the utility metrics and dev cells read (default: "
+                        "generation.dtype). Another counts only under Gate 0's licence, which each input's "
+                        "reader checks; its reports are gate{1,2}-{dtype}.json and .md")
     p.set_defaults(func=_gate)
