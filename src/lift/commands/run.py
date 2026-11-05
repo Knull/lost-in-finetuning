@@ -53,8 +53,12 @@ def _logging() -> None:
 
 
 def _names(values: Sequence[str] | None, allowed: Sequence[str], default: Sequence[str]) -> list[str]:
-    """``--langs hi en`` or ``--langs hi,en``; checked against ``allowed``."""
+    """``--langs hi en``, ``--langs hi,en`` or ``--langs hi --langs en``; checked against ``allowed``
+    (``default`` when the flag is not given). A flag given that names nothing (``--sets ''``, ``--sets ,``)
+    is refused: the line would run no cell and exit 0, as if done."""
     out = [v for item in (values or default) for v in str(item).split(",") if v]
+    if values is not None and not out:
+        raise SystemExit(f"{list(values)} names nothing: choose one or more of {list(allowed)}")
     bad = sorted(set(out) - set(allowed))
     if bad:
         raise SystemExit(f"unknown {bad}; choose from {list(allowed)}")
@@ -126,8 +130,9 @@ def require_pinned(*keys: str) -> None:
 
 
 def _complete(variant: str, set_name: str, lang: str, split: str) -> bool:
-    """True if every prompt of the split has a generation (the AuditKIT record needs all of them). Its
-    read of the split raises ShortCellError for a cell short of its frozen split (``_record`` lists it)."""
+    """True if every prompt of the split has a generation (the AuditKIT record needs all of them, and
+    ``_record`` refuses it otherwise). Its read of the split raises ShortCellError for a cell short of its
+    frozen split (``_record`` lists it)."""
     from lift.models.generate import generations_path, read_generations
     from lift.prompts import load
 
@@ -137,14 +142,27 @@ def _complete(variant: str, set_name: str, lang: str, split: str) -> bool:
     return {g.pid for g in read_generations(path)} >= {p.pid for p in load(set_name, lang, split)}
 
 
+def _own_dtype(variant: str, set_name: str, lang: str, split: str, *, dtype: str) -> str:
+    """The one precision the cell's generations were made in, which a lift generate line that completes the
+    cell must name (it refuses a file made in another precision than its --dtype); ``dtype``, the run's,
+    when the file names none or several."""
+    from lift.models.generate import made_in
+
+    made = made_in(variant, set_name, lang, split)
+    return made.pop() if len(made) == 1 else dtype
+
+
 def _record(variant: str, set_name: str, lang: str, split: str, *, dtype: str,
             refused: dict[str, str]) -> None:
     """Write the AuditKIT record of a judged cell. A record the checked loader refuses (another
     precision, a stale judgement) is logged and kept in ``refused`` with its error rather than stopping
     the run: the judgements are already written, and the command exits 3 at the end. So is the record
-    of a cell short of its frozen split (ShortCellError, from ``_complete``'s read of the split: lift
-    judge reads prompt texts by pid, so it judges a short cell's generations made before that check),
-    kept with the error's remedy and the lines that then make the record."""
+    of a cell whose generations do not cover its split (``_complete``: its lift generate line stopped
+    early, or ran with --limit), kept with the lift generate line that makes the rest, and the record of
+    a cell short of its frozen split (ShortCellError, from ``_complete``'s read of the split: lift judge
+    reads prompt texts by pid, so it judges a short cell's generations made before that check), kept with
+    the error's remedy and the lines that then make the record. Their lift generate lines are in the
+    precision the cell's generations were made in (``_own_dtype``). run-dev --limit asks for no record."""
     from lift.audit import record_safety
     from lift.data.build import ShortCellError
     from lift.models.generate import StaleOutputError
@@ -152,12 +170,19 @@ def _record(variant: str, set_name: str, lang: str, split: str, *, dtype: str,
     cell = f"{set_name}_{lang}_{split}"
     try:
         if not _complete(variant, set_name, lang, split):
-            log.info("%s %s: generations do not cover every prompt yet; no AuditKIT record", variant, cell)
+            own = _own_dtype(variant, set_name, lang, split, dtype=dtype)
+            generate = _generate_line(variant, set_name, lang, split, dtype=own)
+            log.error("%s %s: no AuditKIT record: its generations do not cover every prompt of its split",
+                      variant, cell)
+            refused[cell] = ("its generations do not cover every prompt of its split (a lift generate line "
+                             f"stopped early, or run with --limit): `{generate}` makes the rest, then the "
+                             "line that failed judges them and writes the record")
             return
         log.info("AuditKIT record: %s", record_safety(variant, set_name, lang, split, dtype=dtype))
     except ShortCellError as exc:              # its prompt file is completed on the laptop first
         log.error("%s %s: no AuditKIT record: %s", variant, cell, exc)
-        generate = _generate_line(variant, set_name, lang, split, dtype=dtype)
+        own = _own_dtype(variant, set_name, lang, split, dtype=dtype)
+        generate = _generate_line(variant, set_name, lang, split, dtype=own)
         refused[cell] = (f"short of its frozen split: {exc.remedy}; then, after a later job's `lift sync "
                          f"pull`, `{generate}` makes the prompts the completed file adds, and the line that "
                          "failed judges them and writes the record")
@@ -757,9 +782,10 @@ Start cells over that lift generate, judge or run-dev skipped as stale (begun un
 made from other inputs; the error names the exact line). For each --sets x --langs cell, the
 generations file, every judgements file and every AuditKIT record of the cell (with --judge, only that
 judge's judgements file and records) is copied to outputs/.aside/<UTC stamp>/, which is never synced,
-and left EMPTY: the next lift sync push replaces the runs repo's copies (an empty record is retired;
-a copy there that changed since this machine's last sync is reported as an emptied-file conflict
-instead, which lift sync push --force settles: R1-08), and run-dev (or generate, then judge) fills the
+and left EMPTY: the next lift sync push replaces the runs repo's copies (an empty record is retired)
+unless the cell's files there changed since this machine's last sync, when lift sync names what settles
+it (R1-08, decisions item 63: lift sync push --force when only the files the restart emptied changed
+there, else lift sync pull, then lift sync push), and run-dev (or generate, then judge) fills the
 cell again. The log names the line that refills any other judge's judgements it set aside, a judge
 run-dev never runs: the second judge's, over P04's key list (drawn again first when the cell's
 generation keys changed: a fixed prompt text or another configuration), or with --sample 0.10 while
@@ -855,9 +881,10 @@ def _restart(args: argparse.Namespace) -> int:
                   f"{precision}) fills the generations, the primary judge's judgements and its AuditKIT "
                   "record again")
     log.info("%d file(s) emptied and %d AuditKIT record(s) retired: the next lift sync push replaces the "
-             "runs repo's copies (an empty record is retired there too; a copy there that changed since this "
-             "machine's last sync is reported as an emptied-file conflict instead, which lift sync push "
-             "--force settles), and %s", emptied, retired, refill)
+             "runs repo's copies (an empty record is retired there too) unless the cell's files there "
+             "changed since this machine's last sync, when lift sync names what settles it (R1-08, decisions "
+             "item 63: lift sync push --force when only the files the restart emptied changed there, else "
+             "lift sync pull, then lift sync push), and %s", emptied, retired, refill)
     if refills:
         redraw = ("; when its generation keys changed (a fixed prompt text or another configuration, as the "
                   f"listing that named this restart says), run a --keys line only {REDRAW}")
@@ -870,6 +897,31 @@ def _restart(args: argparse.Namespace) -> int:
 
 
 # --- registration -------------------------------------------------------------------------------------
+
+
+def _positive_int(value: str) -> int:
+    """The argparse type of --limit and --batch-size: a whole number of at least 1, refused at parse (exit
+    2) before any model loads otherwise. A negative batch size would decode empty batches for ever, a
+    --limit of 0 would mean no limit, and --limit -N would cut each cell's last N prompts."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a whole number, got {value!r}") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {number}")
+    return number
+
+
+def _key_list(value: str) -> str:
+    """The argparse type of lift judge --keys: a key list's path, never an empty one, which would read as no
+    key list: the second judge would judge every generation of the cells, not P04's sample."""
+    if not value.strip():
+        raise argparse.ArgumentTypeError("needs the path of P04's key list, not an empty value (which would "
+                                         "judge every generation of the cells with the second judge)")
+    return value
+
+
+ADDS_UP = "; a repeated flag adds its values"      # --sets and --langs (action="extend")
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -888,25 +940,29 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p = sub.add_parser("generate", help="generate one variant's outputs for prompt sets and languages")
     p.add_argument("--variant", required=True, help="a name from configs/variants.yaml")
-    p.add_argument("--sets", nargs="+", default=None, help=f"default: {' '.join(SAFETY_SETS)}")
-    p.add_argument("--langs", nargs="+", default=None, help="default: all six")
+    p.add_argument("--sets", nargs="+", action="extend", default=None,
+                   help=f"default: {' '.join(SAFETY_SETS)}{ADDS_UP}")
+    p.add_argument("--langs", nargs="+", action="extend", default=None, help=f"default: all six{ADDS_UP}")
     p.add_argument("--split", required=True, choices=["dev", "final"])
-    p.add_argument("--limit", type=int, default=None, help="first N prompts per set and language (by pid)")
+    p.add_argument("--limit", type=_positive_int, default=None,
+                   help="first N prompts per set and language (by pid; N >= 1)")
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default=None,
                    help="default: generation.dtype")
-    p.add_argument("--batch-size", type=int, default=None, help="default: chosen from free memory")
+    p.add_argument("--batch-size", type=_positive_int, default=None,
+                   help="default: chosen from free memory (a given one is at least 1)")
     p.set_defaults(func=_generate)
 
     p = sub.add_parser("judge", help="judge one variant's generations (every one, or a second-judge subset)")
     p.add_argument("--variant", required=True)
-    p.add_argument("--sets", nargs="+", default=None, help=f"default: {' '.join(SAFETY_SETS)}")
-    p.add_argument("--langs", nargs="+", default=None, help="default: all six")
+    p.add_argument("--sets", nargs="+", action="extend", default=None,
+                   help=f"default: {' '.join(SAFETY_SETS)}{ADDS_UP}")
+    p.add_argument("--langs", nargs="+", action="extend", default=None, help=f"default: all six{ADDS_UP}")
     p.add_argument("--split", required=True, choices=["dev", "final"])
     p.add_argument("--judge", choices=["primary", "second"], default="primary")
     p.add_argument("--sample", type=float, default=None,
                    help="second judge: a seeded random fraction (e.g. 0.10) plus every validated item")
-    p.add_argument("--keys", default=None,
+    p.add_argument("--keys", type=_key_list, default=None,
                    help="second judge: judge exactly the generation keys listed in this file, in every "
                         "generations file that holds one (within --sets/--langs when given)")
     p.add_argument("--allow-missing", action="store_true",
@@ -918,13 +974,16 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p = sub.add_parser("run-dev", help="generate, then judge, every dev safety set in all six languages")
     p.add_argument("--variant", required=True)
-    p.add_argument("--langs", nargs="+", default=None, help="default: all six")
-    p.add_argument("--sets", nargs="+", default=None, help=f"default: {' '.join(SAFETY_SETS)}")
-    p.add_argument("--limit", type=int, default=None, help="first N prompts per set and language (no record)")
+    p.add_argument("--langs", nargs="+", action="extend", default=None, help=f"default: all six{ADDS_UP}")
+    p.add_argument("--sets", nargs="+", action="extend", default=None,
+                   help=f"default: {' '.join(SAFETY_SETS)}{ADDS_UP}")
+    p.add_argument("--limit", type=_positive_int, default=None,
+                   help="first N prompts per set and language (N >= 1; no record)")
     p.add_argument("--device", default="cuda:0", help="generator device")
     p.add_argument("--judge-device", default="auto", help="auto = cuda:1 if two GPUs, else cuda:0")
     p.add_argument("--dtype", choices=["bf16", "fp16"], default=None, help="default: generation.dtype")
-    p.add_argument("--batch-size", type=int, default=None)
+    p.add_argument("--batch-size", type=_positive_int, default=None,
+                   help="default: chosen from free memory (a given one is at least 1)")
     p.set_defaults(func=_run_dev)
 
     p = sub.add_parser("restart", help="start stale cells over: set their files aside, leave them empty "
@@ -932,8 +991,10 @@ def register(sub: argparse._SubParsersAction) -> None:
                        description=RESTART_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--variant", required=True, help="a name from configs/variants.yaml")
     p.add_argument("--split", required=True, choices=["dev", "final"])
-    p.add_argument("--sets", nargs="+", required=True, help=f"one or more of: {' '.join(ALL_SETS)}")
-    p.add_argument("--langs", nargs="+", required=True, help=f"one or more of: {' '.join(LANGS)}")
+    p.add_argument("--sets", nargs="+", action="extend", required=True,
+                   help=f"one or more of: {' '.join(ALL_SETS)}{ADDS_UP}")
+    p.add_argument("--langs", nargs="+", action="extend", required=True,
+                   help=f"one or more of: {' '.join(LANGS)}{ADDS_UP}")
     p.add_argument("--judge", choices=["primary", "second"], default=None,
                    help="only this judge's judgements file and records (default: the generations file, "
                         "every judgements file and every AuditKIT record of each cell)")

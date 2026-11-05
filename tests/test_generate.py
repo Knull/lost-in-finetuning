@@ -120,6 +120,26 @@ def test_unneutralised_model_is_refused(tiny_model_dir, stock, tmp_path):
                      max_new_tokens=CAP)
 
 
+@pytest.mark.parametrize("key, locked, edited", [("template", "default", "no_preamble"),
+                                                  ("padding_side", "left", "right")])
+def test_a_generation_setting_the_harness_does_not_implement_is_refused(stock, tmp_path, key, locked, edited):
+    # R2-16: generation.template entered every cache key without changing what is rendered (chat_text always
+    # renders the tokenizer's default template, its preamble included), and generation.padding_side was read
+    # by nothing (greedy_batch left-pads). An edit of either lock was mislabelled or ignored; it is refused
+    # now, as do_sample is. The committed values change no key: template stays in gen_config, padding_side
+    # stays out.
+    from lift import config
+
+    cfg = gen.gen_config(stock, max_new_tokens=CAP)
+    assert sorted(cfg) == ["do_sample", "dtype", "harness", "max_new_tokens", "stop_ids", "template"]
+    assert cfg["template"] == "default"
+    config.load("project")["generation"][key] = edited          # this test's view of configs/project.yaml
+    path = tmp_path / "g.jsonl"
+    with pytest.raises(ValueError, match=rf"generation\.{key} must be '{locked}', not '{edited}'"):
+        gen.generate(stock, prompts(), out_path=path, max_new_tokens=CAP)
+    assert not path.exists()
+
+
 def test_records_carry_hashes_counts_and_meta(stock, tmp_path, isolated_dirs):
     recs = run(stock, tmp_path / "g.jsonl", batch_size=2)
     p = prompts()[1]
@@ -425,15 +445,22 @@ def test_appending_under_another_stack_is_refused(stock, monkeypatch, change):
 
 def test_a_restart_line_says_when_the_next_push_replaces_the_runs_repo_copies(stock, monkeypatch):
     # W2-04 (R1-08): the next lift sync push replaces the runs repo's copies of the files a restart emptied
-    # only when the Hub's copy has not changed since this machine's last sync; otherwise it reports an
-    # emptied-file conflict, which lift sync push --force settles
+    # unless the cell's files there changed since this machine's last sync. W3 (docs, VERIFY-5): the refusal
+    # and restart_cell then said such a copy is an emptied-file conflict, which lift sync push --force
+    # settles, and that the push replaces the Hub's copy when that copy has not changed. Both overstate
+    # (decisions item 63): --force settles it only when nothing but the emptied files changed there, else
+    # lift sync pull, then lift sync push; and an unchanged copy is held back with the cell's other files.
     path = cell_path()
     run(stock, path, ps=prompts()[:2])
     moved_stack(monkeypatch, torch="2.99.0+cu130")
     with pytest.raises(gen.StaleOutputError) as exc:
         run(stock, path)
+    settles = (r"lift sync names what settles it[^`]*`+lift sync push --force`+ when only the files the "
+               r"restart emptied changed there, else `+lift sync pull`+, then `+lift sync push`+")
     for text in (str(exc.value), " ".join(gen.restart_cell.__doc__.split())):
-        assert "changed since this machine's last sync" in text and "lift sync push --force" in text, text
+        assert "unless the cell's files there changed since this machine's last sync" in text, text
+        assert re.search(settles, text), text
+        assert "emptied-file conflict" not in text and "has not changed" not in text, text
 
 
 def test_changed_inputs_name_the_restart_line(stock, tmp_path):
@@ -665,6 +692,17 @@ def test_a_wrapper_that_decodes_the_batch_in_pieces_is_checked_as_a_whole(stock,
     assert sorted(exc.value.pids) == ["p-000", "p-001"] and not path.exists()
 
 
+# greedy_batch's refusal of inner decodes that do not partition the batch, as the pieces fall short of its
+# rows or cover one twice. W3 (watch, VERIFY-2): it said a wrapper "must pass logits_processor on to every
+# inner decode", which points the wrong way when the pieces over-cover: that wrapper did pass it on.
+PIECES = ("model.generate decoded the batch of {n} rows in pieces: the inner decodes that called the logits "
+          "processor checking decoding stays finite held {sizes} rows, {total} in all, ")
+EXACTLY_ONCE = ("A wrapper must decode each row exactly once, in one inner decode that passes "
+                "logits_processor on")
+UNCHECKED = PIECES + "fewer than the batch's {n}, so a row went unchecked. " + EXACTLY_ONCE
+TWICE = PIECES + "more than the batch's {n}, so a row was decoded more than once. " + EXACTLY_ONCE
+
+
 @pytest.mark.parametrize("poison", [1, None])
 def test_a_wrapper_that_decodes_in_pieces_must_pass_the_check_on_to_every_piece(stock, tmp_path, poison):
     # W3-01 (W2-02 follow-up): the check accepted a wrapper decoding in pieces once any piece had called it.
@@ -677,13 +715,13 @@ def test_a_wrapper_that_decodes_in_pieces_must_pass_the_check_on_to_every_piece(
     kw = dict(pad_id=tok.pad_token_id, stop_ids=gen.gen_config(stock, max_new_tokens=CAP)["stop_ids"],
               max_new_tokens=CAP, device="cpu")
     probe = _InPieces(stock.model, tok.pad_token_id, poison=poison, watched={0})
-    with pytest.raises(RuntimeError, match="must pass logits_processor on to every inner decode"):
+    with pytest.raises(RuntimeError, match=re.escape(UNCHECKED.format(n=2, sizes=[1], total=1))):
         gen.greedy_batch(probe, rows, **kw)
     assert probe.calls == 2                                     # both rows decoded, row 1 unchecked
     wrapped = dataclasses.replace(stock, model=_InPieces(stock.model, tok.pad_token_id, poison=poison,
                                                          watched={0}), base=stock.model)
     path = tmp_path / "g.jsonl"
-    with pytest.raises(RuntimeError, match="every inner decode") as exc:
+    with pytest.raises(RuntimeError, match="must decode each row exactly once") as exc:
         run(wrapped, path, ps=prompts([LONG, SHORT]), batch_size=2)
     assert not isinstance(exc.value, gen.StaleOutputError) and not path.exists()
 
@@ -703,9 +741,10 @@ def test_a_batch_decoded_in_pieces_is_checked_only_when_the_pieces_partition_it(
         assert [(o.ids, o.stopped, o.n_generated, o.nonfinite) for o in split] == whole
     poisoned = _InPieces(stock.model, tok.pad_token_id, poison=2, pieces=[[0], [1, 2]])     # SHORT overflows
     assert [o.nonfinite for o in gen.greedy_batch(poisoned, rows, **kw)] == [True, True, True]
-    for pieces in ([[0, 1, 2], [1]], [[0, 1], [1, 2]]):
-        with pytest.raises(RuntimeError, match="must pass logits_processor on to every inner decode"):
+    for pieces, sizes in (([[0, 1, 2], [1]], [3, 1]), ([[0, 1], [1, 2]], [2, 2])):
+        with pytest.raises(RuntimeError) as exc:
             gen.greedy_batch(_InPieces(stock.model, tok.pad_token_id, pieces=pieces), rows, **kw)
+        assert str(exc.value) == TWICE.format(n=3, sizes=sizes, total=4)      # each piece passed it on
 
 
 def test_the_watch_tells_inner_decodes_apart_by_their_ids():
@@ -728,11 +767,13 @@ def test_the_watch_tells_inner_decodes_apart_by_their_ids():
                 (watch((rows[:1], 3), (rows[1:], 2)), [1, 1]), (watch((rows[:1], 1), (lookalike, 2)), [1, 1])]
     for w, decodes in accepted:
         assert w.decodes == decodes and w.rows() == [False, False]
-    refused = [(watch((rows[:1], 3)), [1]), (watch((rows[1:], 1), (rows[1:], 2), (rows[:1], 1)), [1, 1, 1])]
-    for w, decodes in refused:
+    refused = [(watch((rows[:1], 3)), [1], UNCHECKED),
+               (watch((rows[1:], 1), (rows[1:], 2), (rows[:1], 1)), [1, 1, 1], TWICE)]
+    for w, decodes, message in refused:
         assert w.decodes == decodes
-        with pytest.raises(RuntimeError, match="must pass logits_processor on to every inner decode"):
+        with pytest.raises(RuntimeError) as exc:
             w.rows()
+        assert str(exc.value) == message.format(n=2, sizes=decodes, total=sum(decodes))
     nan = gen._NonFiniteWatch(3, stop_ids=[99], n_rows=2)        # the whole batch: still marked row by row
     scores = torch.zeros(2, 4)
     scores[1, 0] = float("nan")
@@ -827,6 +868,19 @@ def test_out_of_memory_halves_the_batch_and_never_skips(stock, tmp_path, monkeyp
     monkeypatch.setattr(gen, "greedy_batch", always_oom)
     with pytest.raises(torch.cuda.OutOfMemoryError):
         run(stock, tmp_path / "dead.jsonl", batch_size=2)
+
+
+@pytest.mark.parametrize("batch_size", [0, -1, -8])
+def test_a_batch_size_below_one_is_refused_before_anything_is_decoded(stock, tmp_path, monkeypatch,
+                                                                      batch_size):
+    # R2-14: generate() kept any truthy batch size. A negative one decoded empty batches for ever (todo[i:i +
+    # size] is empty once i + size <= i, and i never moves), logging a progress line each time; 0 meant
+    # "chosen from free memory". Refused now, as judge_file refuses its batch_size.
+    monkeypatch.setattr(gen, "greedy_batch", lambda *a, **kw: pytest.fail("a batch was decoded"))
+    path = tmp_path / "g.jsonl"
+    with pytest.raises(ValueError, match=rf"batch_size must be at least 1, got {batch_size}"):
+        gen.generate(stock, prompts(), out_path=path, batch_size=batch_size, max_new_tokens=CAP)
+    assert not path.exists()
 
 
 def test_too_long_prompt_raises_instead_of_truncating(stock, tmp_path):
