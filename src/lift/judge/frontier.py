@@ -55,12 +55,14 @@ Rules, and why:
   run would (parse, the one reminder turn, sent synchronously, refusals, failures, the probe rule). Batch
   and sync runs therefore give identical judgements, and bulk is in neither the judge id nor any cache
   key. safety() and pairwise() never send a batch themselves: `lift judge` calls them per 64-item chunk,
-  which would mean one batch, and up to a day's wait, per chunk. Prefill does nothing when bulk is not
+  which would mean one batch, and up to a day's wait, per chunk. Prefill submits nothing when bulk is not
   batch, when the provider has no batch API (OpenAI, a plain FakeProvider), or when fewer than
   ``batch_min_items`` (20) first turns are uncached.
-  - Before anything is submitted: the synchronous preflight with the exact settings (a batch validates
-    its requests only when it ends, up to 24 h later), then the worst case of every request at batch
-    prices reserved against the spend cap at once, because a submitted batch cannot be stopped.
+  - Before any batch is looked at or submitted: the synchronous preflight with the exact settings (a batch
+    validates its requests only when it ends, up to 24 h later, and a bad key, model or endpoint must stop
+    the run before a batch is looked up or anything is recorded); before a create, the worst case of every
+    request at batch prices reserved against the spend cap at once, because a submitted batch cannot be
+    stopped.
   - Requests go in chunks of at most 10,000 (well under the API's 256 MB), each request's custom_id its
     64-hex cache key. The rubric's system message goes as one text block with a 1-hour cache_control
     marker (the rubric as a cached system prompt; both rubrics are probably shorter than Sonnet 5.5's
@@ -71,13 +73,28 @@ Rules, and why:
     (with a warning: if the batch was created after all, they are paid twice).
   - Batch state: {cache file stem}.batches.jsonl beside the call cache, one row per event, each with a
     unique "key" because lift sync merges judge_cache JSONL by key. "submitted" (batch id, judge id, API
-    version, keys) is appended the moment the create returns; then "collected" (counts, tokens, cost) or
-    "abandoned" (the API no longer knows a batch an earlier process submitted: its requests are judged
-    without it); "create_unknown" records a create that may have gone through.
+    version, keys, creation time) is appended the moment the create returns; then "collected" (counts,
+    tokens, cost) or "abandoned" (see below: its requests are judged without it); "create_unknown"
+    records a create that may have gone through.
   - A rerun (after a crash, Ctrl+C or wait=False's FrontierBatchPending) collects a batch the state file
     lists as submitted and not collected instead of submitting its requests again; a batch recorded with
     another judge id or API version is never collected. Polling logs a heartbeat every ``batch_poll_s``
     (30 s) and gives up after ``batch_wait_s`` (24 h) with FrontierBatchPending: the batch keeps running.
+  - No request is paid for twice. A synchronous run (bulk not batch, a provider without the batch API, or
+    safety() / pairwise() called without a pre-fill, as `lift utility --sync` does) submits nothing and
+    waits for nothing, but never sends an uncached first turn that such an earlier batch holds: the batch
+    is collected first if it has ended, and the run stops if it still runs (FrontierBatchPending: rerun
+    once it has ended, or cancel it in the Console and rerun) or if the provider cannot look at it
+    (FrontierConfigError).
+  - A batch belongs to the workspace of the key that created it: every key of that workspace sees it, and a
+    key of another workspace gets a 404. So a 404 abandons a batch an earlier process submitted only when
+    its state row says it was created more than 29 days ago, when the API no longer keeps its results. For
+    a younger one, or one with no readable creation time, the run stops (FrontierConfigError) and nothing
+    is recorded: the key probably belongs to another workspace or organisation, or ANTHROPIC_BASE_URL points
+    elsewhere, so rerun with the key that submitted it. LIFT_ABANDON_BATCHES (comma-separated batch ids)
+    gives up batches a person knows were deleted: each one it names that the state file lists as open
+    gets an "abandoned" row with reason "abandoned by hand" before the state is used, and its uncached
+    requests are sent again (paid twice if it ran).
   - A succeeded result is costed from its usage at batch prices (half of everything; cache writes 1.25x
     for 5 minutes and 2x for 1 hour or without a TTL split, reads 0.1x, 0.05x on Opus 5.5, 0.025x on
     Fable 5.1 and Mythos 5.1), its model echo checked, and cached with "via": "batch", its batch id and
@@ -118,7 +135,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
@@ -169,6 +186,11 @@ CACHE_WRITE_1H = 2.0
 CACHE_READ = 0.1
 CACHE_READ_BY_MODEL = {"claude-opus-5-5": 0.05, "claude-fable-5-1": 0.025, "claude-mythos-5-1": 0.025}
 SYSTEM_CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"}
+# The API keeps a batch's results this many days after the batch is created (claude-api reference): only a
+# 404 for a batch older than that abandons it. ABANDON_ENV names batches a person gives up by hand.
+BATCH_RESULTS_DAYS = 29
+ABANDON_ENV = "LIFT_ABANDON_BATCHES"
+ABANDONED_BY_HAND = "abandoned by hand"
 # The Messages API's HTTP status for each error type an errored batch result can carry, so that
 # ProviderError.kind classifies it as it would a synchronous call's error.
 BATCH_ERROR_STATUS = {"invalid_request_error": 400, "authentication_error": 401, "billing_error": 402,
@@ -272,13 +294,16 @@ class FrontierUnavailable(RuntimeError):
 
 
 class FrontierBatchPending(RuntimeError):
-    """A Message Batch of a pre-fill is still running: ``prefill_*(wait=False)`` looked once, or
-    ``batch_wait_s`` passed. Nothing is lost: the batch keeps running server-side and is recorded in the
-    batch state file, so a rerun of the same command collects it and submits none of its requests again. Do
-    not judge those items synchronously in this process: their requests are paid for in the batch.
+    """A Message Batch is still running: ``prefill_*(wait=False)`` looked once, ``batch_wait_s`` passed, or
+    a synchronous run (a pre-fill with bulk not batch, or safety() / pairwise() called without one) met an
+    earlier batch, still running, that holds requests it would send. Nothing is lost: the batch keeps running
+    server-side and is recorded in the batch state file, so a rerun of the same command collects it and
+    sends none of its requests again. Do not judge those items synchronously in this process: their
+    requests are paid for in the batch.
 
-    ``batch_ids`` names the batches still running, ``n_pending`` counts their requests, and ``summary``
-    is the pre-fill's summary so far (prefill_safety's return value)."""
+    ``batch_ids`` names the batches still running, ``n_pending`` counts their requests (in a synchronous
+    run, the ones it would have sent), and ``summary`` is the pre-fill's summary so far (prefill_safety's
+    return value)."""
 
     def __init__(self, message: str, *, batch_ids: Sequence[str], n_pending: int,
                  summary: Mapping[str, Any]) -> None:
@@ -289,8 +314,9 @@ class FrontierBatchPending(RuntimeError):
 
 
 class _BatchGone(Exception):
-    """The API answered 404 for a batch that an earlier process submitted: it was deleted, its results
-    expired (29 days after creation), or it belongs to another workspace or API key."""
+    """The API answered 404 for a batch that an earlier process submitted more than BATCH_RESULTS_DAYS days
+    ago: the API no longer keeps its results. (A 404 for a younger batch is no sign it is gone: another
+    workspace's key gets one too. It stops the run instead; see FrontierJudge._unknown_batch.)"""
 
 
 def _one_line(text: Any) -> str:
@@ -1298,6 +1324,44 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _empty_summary(n_requests: int, n_cached: int) -> dict[str, Any]:
+    """A pre-fill's summary before anything is submitted or collected (prefill_safety's return value)."""
+    return {"mode": "sync", "reason": None, "n_requests": n_requests, "n_cached": n_cached, "n_submitted": 0,
+            "n_collected": 0, "n_errored": 0, "n_expired": 0, "n_canceled": 0, "batch_ids": [], "usd": 0.0}
+
+
+def _closed_batches(rows: Sequence[Mapping[str, Any]]) -> set[Any]:
+    """The ids of the batches a state file records as collected or abandoned: never looked at again."""
+    return {row.get("batch_id") for row in rows if row.get("event") in ("collected", "abandoned")}
+
+
+def _past_results_window(created: str | None) -> bool:
+    """Whether a batch whose state row says it was created at ``created`` (ISO 8601) is more than
+    BATCH_RESULTS_DAYS days old, so that the API no longer keeps its results. A missing or unreadable time
+    is not: such a batch counts as young, and a 404 for it stops the run instead of abandoning it."""
+    if not created:
+        return False
+    try:
+        when = datetime.fromisoformat(created)
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return datetime.now(UTC) - when > timedelta(days=BATCH_RESULTS_DAYS)
+
+
+def _hand_abandoned() -> list[str]:
+    """The batch ids LIFT_ABANDON_BATCHES names (commas or whitespace between them), each once, in order."""
+    return list(dict.fromkeys(i for i in re.split(r"[\s,]+", os.environ.get(ABANDON_ENV, "")) if i))
+
+
+def _batch_list(ids: Sequence[str]) -> tuple[str, str]:
+    """How a message names ``ids`` ("batch X" or "2 batches (X, Y)"), and the object pronoun for them."""
+    if len(ids) == 1:
+        return f"batch {ids[0]}", "it"
+    return f"{len(ids)} batches ({', '.join(ids)})", "them"
+
+
 def _chunks(items: Sequence[tuple[str, str]], size: Callable[[str], int]) -> list[list[tuple[str, str]]]:
     """``items`` ((key, user) pairs) cut, in order, into batches of at most BATCH_MAX_REQUESTS requests
     and BATCH_MAX_BYTES of request body, ``size`` being one request's body size in bytes."""
@@ -1418,10 +1482,12 @@ def _stop_error(errors: list[BaseException], results: list[dict | None]) -> Base
 
 @dataclass(frozen=True)
 class _Batch:
-    """A batch a pre-fill waits for: its id and its requests' cache keys."""
+    """A batch a pre-fill waits for: its id, its requests' cache keys, and when its state row says it was
+    created (None when the row records no time), which decides what a 404 for it means."""
 
     id: str
     keys: frozenset[str]
+    created: str | None = None
 
 
 _TALLY_TOKENS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
@@ -1512,6 +1578,8 @@ class FrontierJudge:
         self._key_locks: dict[str, list[Any]] = {}       # key -> [lock, number of holders and waiters]
         self._state_lock = threading.Lock()
         self._state_repaired = False
+        self._settle_lock = threading.Lock()                  # one synchronous pass settles earlier batches
+        self._hand_noted: set[str] = set()                    # LIFT_ABANDON_BATCHES ids already reported
         self._batch_holds: dict[str, dict[str, float]] = {}   # batch id -> key -> USD this process reserved
         self._submitted_here: set[str] = set()                # batches this instance created
         self._stats: dict[str, Any] = dict.fromkeys(
@@ -1579,8 +1647,11 @@ class FrontierJudge:
         SpendCapExceeded and FrontierUnavailable stop the run and carry the finished results in
         ``partial``. An item-level API error is recorded only when the whole call finishes, after the
         API answered a request sent after it came in (a probe, if no item's request did): a stopped
-        call leaves its item unjudged (None in ``partial``), so a rerun asks the API again. A pairwise
-        judge refuses (ValueError)."""
+        call leaves its item unjudged (None in ``partial``), so a rerun asks the API again. An uncached
+        pair that an earlier batch holds (recorded as submitted, neither collected nor abandoned) is never
+        sent: before anything is, that batch is collected if it has ended, else the call raises
+        FrontierBatchPending (FrontierConfigError for a provider without the batch API), as a synchronous
+        pre-fill does. A pairwise judge refuses (ValueError)."""
         self._require_kind("safety", "safety")
         return self._judge_all(self._safety_users(prompts, responses, prompt_langs))
 
@@ -1590,7 +1661,8 @@ class FrontierJudge:
         both orders to cancel position bias). A judge failure (a refusal, a reply unparseable after the
         reminder, an item-level API error) has winner None and the cause in ``error``; it is returned,
         never dropped. Everything else as safety(): identical pairs are judged once, the stops carry
-        ``partial``. A safety judge refuses (ValueError)."""
+        ``partial``, a request an earlier batch holds is never sent again. A safety judge refuses
+        (ValueError)."""
         self._require_kind("pairwise", "pairwise")
         return self._judge_all(self._pairwise_users(instructions, a, b))
 
@@ -1603,8 +1675,12 @@ class FrontierJudge:
         cached now), "n_errored", "n_expired", "n_canceled" (results left to the synchronous pass),
         "batch_ids" (batches submitted or collected now), "usd" (what this call spent: the preflight and
         the collected results, at their own prices)}. ``wait=False`` looks at each batch once and raises
-        FrontierBatchPending if one still runs; so does a wait past ``batch_wait_s``. A stop of the
-        synchronous path (FrontierConfigError, SpendCapExceeded, FrontierUnavailable) stops it too."""
+        FrontierBatchPending if one still runs; so does a wait past ``batch_wait_s``. In a synchronous run
+        (bulk not batch, no batch API) nothing is submitted or waited for, but an earlier batch that holds
+        one of these uncached requests is collected if it has ended, and stops the run if it has not
+        (FrontierBatchPending; FrontierConfigError when the provider cannot look at it): no request is paid
+        for twice. A stop of the synchronous path (FrontierConfigError, SpendCapExceeded,
+        FrontierUnavailable) stops it too."""
         self._require_kind("safety", "prefill_safety")
         return self._prefill(self._safety_users(prompts, responses, prompt_langs), wait=wait)
 
@@ -1637,11 +1713,17 @@ class FrontierJudge:
         return [self.render_pair(i, x, y) for i, x, y in zip(instructions, a, b, strict=True)]
 
     def _judge_all(self, users: Sequence[str]) -> list[dict]:
-        """Judge rendered user turns (safety() and pairwise() share this): dedupe, judge each distinct
-        turn on the thread pool, probe before recording item-level API errors, share the results with
-        the duplicates, and stop as safety() describes."""
+        """Judge rendered user turns (safety() and pairwise() share this): settle the earlier batches that
+        hold an uncached one (_settle_before_sync), dedupe, judge each distinct turn on the thread pool,
+        probe before recording item-level API errors, share the results with the duplicates, and stop as
+        safety() describes."""
         if not users:
             return []
+        try:
+            self._settle_before_sync(users)
+        except _STOPS as stop:
+            stop.partial = [None] * len(users)               # stopped before any item was judged
+            raise
         first: dict[str, int] = {}
         for i, user in enumerate(users):
             first.setdefault(user, i)
@@ -2063,22 +2145,26 @@ class FrontierJudge:
 
     # --------------------------------------------------------------------- bulk pre-fill internals --
     def _prefill(self, users: Sequence[str], *, wait: bool) -> dict:
-        """prefill_safety() and prefill_pairwise() on rendered first turns: collect the earlier batches
-        that hold an uncached one, submit the rest (at least batch_min_items of them), wait, collect."""
+        """prefill_safety() and prefill_pairwise() on rendered first turns. A synchronous run (bulk not batch,
+        no batch API) only settles the earlier batches that hold an uncached one (_settle_earlier). Otherwise:
+        the preflight and one look at each such earlier batch, then the rest submitted (at least
+        batch_min_items of them), the wait, and the collection."""
         keyed = {self._key(user, ()): user for user in dict.fromkeys(users)}
         pending = {key: user for key, user in keyed.items() if self._cache.get(key) is None}
-        out: dict[str, Any] = {"mode": "sync", "reason": None, "n_requests": len(keyed),
-                               "n_cached": len(keyed) - len(pending), "n_submitted": 0, "n_collected": 0,
-                               "n_errored": 0, "n_expired": 0, "n_canceled": 0, "batch_ids": [], "usd": 0.0}
+        out = _empty_summary(len(keyed), len(keyed) - len(pending))
         spent = self.stats["usd"]
         reason = self._sync_reason(len(keyed), len(pending))
+        if not pending:                       # nothing is sent at all, so nothing can be paid twice
+            return self._prefilled(out, spent, reason)
         if reason is not None:
+            earlier = self._earlier_batches(self._state_rows(), pending)
+            self._settle_earlier(earlier, keyed, pending, out, spent=spent, reason=reason)
             return self._prefilled(out, spent, reason)
         with self._lock:
             if self._halt is not None:
                 raise self._halt
-        rows = _read_state(self.batch_state_path)
-        earlier, seen = self._earlier_batches(rows, pending)
+        rows = self._state_rows()
+        earlier, seen = self._look_at(self._earlier_batches(rows, pending))
         covered = {key for batch in earlier for key in batch.keys}
         todo = [(key, user) for key, user in pending.items() if key not in covered]
         if len(todo) < self.batch_min_items:
@@ -2090,6 +2176,111 @@ class FrontierJudge:
         batches = earlier + (self._submit_all(todo, rows, out) if todo else [])
         self._await_batches(batches, keyed, wait=wait, out=out, spent=spent, seen=seen)
         return self._prefilled(out, spent, None)
+
+    def _settle_before_sync(self, users: Sequence[str]) -> None:
+        """safety() and pairwise()'s own guard against paying twice, for a caller that skipped the pre-fill
+        (`lift utility --sync`) or ran it in a synchronous mode: before anything is sent, the earlier batches
+        that hold an uncached first turn of ``users`` are settled as a synchronous pre-fill settles them
+        (_settle_earlier). A judge that never submitted a batch (no state file), or one whose uncached turns
+        no open batch holds, reads the file at most and sends nothing. A halted judge is left to the pass,
+        which raises its stop as before."""
+        if not self.batch_state_path.exists():
+            return
+        with self._lock:
+            if self._halt is not None:
+                return
+        keyed = {self._key(user, ()): user for user in dict.fromkeys(users)}
+        pending = {key: user for key, user in keyed.items() if self._cache.get(key) is None}
+        if not pending:
+            return
+        with self._settle_lock:                  # two concurrent passes never collect one batch twice
+            earlier = self._earlier_batches(self._state_rows(), pending)
+            if earlier:
+                out = _empty_summary(len(keyed), len(keyed) - len(pending))
+                self._settle_earlier(earlier, keyed, pending, out, spent=self.stats["usd"],
+                                     reason=f"{self.rubric.kind}() without a pre-fill")
+
+    def _settle_earlier(self, batches: Sequence[_Batch], keyed: Mapping[str, str], pending: Mapping[str, str],
+                        out: dict[str, Any], *, spent: float, reason: str) -> None:
+        """A synchronous run's rule for the earlier batches that hold requests it would send (``pending``;
+        ``keyed`` is every distinct first turn): it submits nothing and waits for nothing, and pays for no
+        request twice. After the preflight, each batch is looked at once: one that has ended is collected
+        (its replies are paid for, and go into the cache for the pass to find), one still running stops the
+        run (FrontierBatchPending), and so does a provider without the Message Batches API, which cannot look
+        at them (FrontierConfigError, before anything is sent). A 404 is handled as everywhere
+        (_batch_call)."""
+        if not batches:
+            return
+        if not _batch_capable(self._provider):
+            ids = [batch.id for batch in batches]
+            n = sum(len(batch.keys & pending.keys()) for batch in batches)
+            named, it = _batch_list(ids)
+            raise self._fatal(
+                f"{n} of this run's requests sit in {named}, submitted earlier and recorded in "
+                f"{self.batch_state_path}, and are paid for there, but {type(self._provider).__name__} has "
+                f"no Message Batches API to collect {it} with, so this run stops rather than pay for them "
+                "twice: rerun with a judge that has one (the Anthropic provider), or set "
+                f"{ABANDON_ENV}={','.join(ids)} to give {it} up and send the requests again (paid twice if "
+                "they ran)")
+        live, seen = self._look_at(batches)
+        running: list[_Batch] = []
+        for batch in live:
+            if seen[batch.id][0] == "ended":
+                self._collect(batch, keyed, out)
+            else:
+                running.append(batch)
+        if running:
+            ids = [batch.id for batch in running]
+            n = sum(len(batch.keys & pending.keys()) for batch in running)
+            named, it = _batch_list(ids)
+            raise FrontierBatchPending(
+                f"{self.judge_id}: {n} of this run's requests sit in {named}, still running, recorded in "
+                f"{self.batch_state_path} and paid for there, so this synchronous run ({reason}) stops "
+                f"rather than pay for them twice. A rerun collects {it} once ended (a pre-fill with bulk "
+                f"batch also waits for {it}); or cancel {it} in the Console and rerun: the requests finished "
+                f"by then are collected, the rest sent synchronously. {ABANDON_ENV}={','.join(ids)} gives "
+                f"{it} up instead, and those requests are paid for again",
+                batch_ids=ids, n_pending=n, summary=self._summary(out, spent, reason))
+
+    def _look_at(self, batches: Sequence[_Batch]) -> tuple[
+            list[_Batch], dict[str, tuple[str, dict[str, int]]]]:
+        """One look at each of ``batches`` (earlier batches, in order), after the synchronous preflight: a bad
+        key, model or endpoint stops the run before any batch is looked up or anything recorded. Returns the
+        batches still in play and the status each just had; one abandoned on its look is dropped."""
+        live: list[_Batch] = []
+        seen: dict[str, tuple[str, dict[str, int]]] = {}
+        if batches:
+            self._ensure_preflight()
+        for batch in batches:
+            status = self._poll(batch)
+            if status is not None:
+                live.append(batch)
+                seen[batch.id] = status
+        return live, seen
+
+    def _state_rows(self) -> list[dict[str, Any]]:
+        """The batch state file's rows, after the hand abandonments LIFT_ABANDON_BATCHES asks for: each batch
+        it names that the file lists as submitted, and neither collected nor abandoned, gets an "abandoned"
+        row (reason "abandoned by hand") first, so the run that follows judges its requests without it. A
+        name the file does not list as submitted is reported once and changes nothing."""
+        rows = _read_state(self.batch_state_path)
+        named = _hand_abandoned()
+        if not named:
+            return rows
+        closed = _closed_batches(rows)
+        submitted = {row.get("batch_id") for row in rows if row.get("event") == "submitted"}
+        for batch_id in named:
+            if batch_id in submitted and batch_id not in closed:
+                log.warning("frontier %s: batch %s, recorded in %s, is abandoned by hand (%s): its uncached "
+                            "requests are sent without it, and paid for again if it ran", self.judge_id,
+                            batch_id, self.batch_state_path, ABANDON_ENV)
+                rows.append(self._append_abandoned(batch_id, ABANDONED_BY_HAND))
+                closed.add(batch_id)
+            elif batch_id not in submitted and batch_id not in self._hand_noted:
+                self._hand_noted.add(batch_id)
+                log.info("frontier %s: %s names batch %s, which %s does not list as submitted: nothing to "
+                         "abandon", self.judge_id, ABANDON_ENV, batch_id, self.batch_state_path)
+        return rows
 
     def _sync_reason(self, n_requests: int, n_pending: int) -> str | None:
         """Why a pre-fill sends no batch at all (None: it may)."""
@@ -2115,20 +2306,21 @@ class FrontierJudge:
                  s["n_collected"], s["n_errored"], s["n_expired"], s["n_canceled"], s["usd"])
         return s
 
-    def _earlier_batches(self, rows: Sequence[Mapping[str, Any]], pending: Mapping[str, str]) -> tuple[
-            list[_Batch], dict[str, tuple[str, dict[str, int]]]]:
-        """The batches the state file lists as submitted, and neither collected nor abandoned, that hold
-        a pending request (in submission order), with the status each just had. One recorded with another
-        judge id or API version is refused; one the API no longer knows is abandoned."""
-        closed = {row.get("batch_id") for row in rows if row.get("event") in ("collected", "abandoned")}
+    def _earlier_batches(self, rows: Sequence[Mapping[str, Any]], pending: Mapping[str, str]) -> list[_Batch]:
+        """The batches the state file lists as submitted, and neither collected nor abandoned, that hold a
+        pending request, in submission order, each with the creation time its row records. No API call: the
+        caller looks at them after the preflight (_look_at). One recorded with another judge id or API
+        version is refused."""
+        closed = _closed_batches(rows)
         batches: list[_Batch] = []
-        seen: dict[str, tuple[str, dict[str, int]]] = {}
+        chosen: set[str] = set()
         for row in rows:
-            batch_id, keys = row.get("batch_id"), row.get("keys")
+            batch_id, keys, created = row.get("batch_id"), row.get("keys"), row.get("created")
             if (row.get("event") != "submitted" or not isinstance(batch_id, str) or not isinstance(keys, list)
-                    or batch_id in closed or batch_id in seen):
+                    or batch_id in closed or batch_id in chosen):
                 continue
-            batch = _Batch(batch_id, frozenset(k for k in keys if isinstance(k, str)))
+            batch = _Batch(batch_id, frozenset(k for k in keys if isinstance(k, str)),
+                           created if isinstance(created, str) else None)
             n = sum(key in pending for key in batch.keys)
             if not n:
                 continue
@@ -2138,11 +2330,9 @@ class FrontierJudge:
                     f"submitted by {row.get('judge')!r} (API {row.get('api_version')!r}), and a judge never "
                     f"collects another judge's batch (this one speaks API {self.api_version}): collect it "
                     "with the judge that submitted it")
-            status = self._poll(batch)
-            if status is not None:
-                batches.append(batch)
-                seen[batch_id] = status
-        return batches, seen
+            batches.append(batch)
+            chosen.add(batch_id)
+        return batches
 
     def _submit_all(self, todo: Sequence[tuple[str, str]], rows: Sequence[Mapping[str, Any]],
                     out: dict[str, Any]) -> list[_Batch]:
@@ -2199,11 +2389,12 @@ class FrontierJudge:
             self._submitted_here.add(batch_id)
         log.info("frontier %s: submitted batch %s: %d requests, up to %.4f USD reserved", self.judge_id,
                  batch_id, len(keys), reserved)
+        created = _now()
         self._append_state({"key": f"batch:{batch_id}:submitted", "event": "submitted", "batch_id": batch_id,
                             "judge": self.judge_id, "api_version": self.api_version, "keys": keys,
-                            "n": len(keys), "reserved_usd": round(reserved, 6), "created": _now()})
+                            "n": len(keys), "reserved_usd": round(reserved, 6), "created": created})
         self._count(batch_requests=len(keys))
-        return _Batch(batch_id, frozenset(keys))
+        return _Batch(batch_id, frozenset(keys), created)
 
     def _create_failed(self, err: ProviderError, keys: Sequence[str], reserved: float,
                        attempts: int) -> Exception:
@@ -2296,16 +2487,17 @@ class FrontierJudge:
     def _poll(self, batch: _Batch) -> tuple[str, dict[str, int]] | None:
         """The batch's (processing status, counts); None once it is abandoned."""
         try:
-            return self._batch_call(f"the status of batch {batch.id}", batch.id,
+            return self._batch_call(f"the status of batch {batch.id}", batch,
                                     lambda: self._provider.batch_status(batch.id))
         except _BatchGone as gone:
             self._abandon(batch, str(gone))
             return None
 
-    def _batch_call(self, what: str, batch_id: str, call: Callable[[], _T]) -> _T:
+    def _batch_call(self, what: str, batch: _Batch, call: Callable[[], _T]) -> _T:
         """``call``, a batch API read that is safe to repeat (a status, a results download), backing off
         on transient errors as _request does. A 404 for a batch an earlier process submitted raises
-        _BatchGone; any other failure stops the run, the batch left to a rerun."""
+        _BatchGone when its state row dates it more than BATCH_RESULTS_DAYS days back, and stops the run
+        otherwise (_unknown_batch); any other failure stops the run, the batch left to a rerun."""
         attempt = 0
         while True:
             attempt += 1
@@ -2315,8 +2507,10 @@ class FrontierJudge:
             try:
                 return call()
             except ProviderError as err:
-                if err.status == 404 and batch_id not in self._submitted_here:
-                    raise _BatchGone(_describe(err, attempt)) from None
+                if err.status == 404 and batch.id not in self._submitted_here:
+                    if _past_results_window(batch.created):
+                        raise _BatchGone(_describe(err, attempt)) from None
+                    raise self._unknown_batch(batch, err, attempt) from None
                 if err.kind != "retryable" or attempt >= MAX_ATTEMPTS:
                     raise self._batch_stop(err, attempt, what) from None
                 delay = _backoff(attempt, err.retry_after)
@@ -2339,21 +2533,44 @@ class FrontierJudge:
         return self._fatal(f"{what} failed: {detail}. The batch is recorded in {self.batch_state_path}: fix "
                            "the cause, then rerun to collect it")
 
+    def _unknown_batch(self, batch: _Batch, err: ProviderError, attempts: int) -> FrontierConfigError:
+        """The stop when the API answers 404 for a batch an earlier process submitted less than
+        BATCH_RESULTS_DAYS days ago, or at a time its row does not record. The API keeps such a batch, and
+        every key of the workspace that created it sees it, so the 404 says this key or endpoint is not the
+        one that submitted it; abandoning the batch would pay for its requests twice, and the abandonment
+        would sync to every machine. Nothing is recorded: a rerun with the right key collects it."""
+        when = f"on {batch.created}" if batch.created else "at a time it does not record"
+        return self._fatal(
+            f"batch {batch.id}, recorded in {self.batch_state_path} as submitted {when}, is unknown to the "
+            f"API ({_describe(err, attempts)}), though the API keeps a batch's results for "
+            f"{BATCH_RESULTS_DAYS} days. A batch belongs to the workspace of the key that created it, so "
+            "this key is probably from another workspace or organisation, or ANTHROPIC_BASE_URL points "
+            "elsewhere: rerun with the key that submitted it, and the batch is collected (nothing was "
+            f"recorded). If the Console shows the batch was deleted, set {ABANDON_ENV}={batch.id} and rerun "
+            "to give it up: its uncached requests are then sent again")
+
     def _abandon(self, batch: _Batch, detail: str) -> None:
-        log.warning("frontier %s: batch %s, recorded in %s, is unknown to the API (%s): it was deleted, its "
-                    "results expired 29 days after it was created, or it belongs to another workspace or "
-                    "API key. It is abandoned: its requests that are still uncached are judged without it",
-                    self.judge_id, batch.id, self.batch_state_path, detail)
-        self._append_state({"key": f"batch:{batch.id}:abandoned", "event": "abandoned",
-                            "batch_id": batch.id, "judge": self.judge_id, "api_version": self.api_version,
-                            "reason": detail, "abandoned": _now()})
+        """Give up a batch the API answered 404 for more than BATCH_RESULTS_DAYS days after its creation."""
+        log.warning("frontier %s: batch %s, recorded in %s as submitted on %s, more than %d days ago, is "
+                    "unknown to the API (%s): its results are no longer kept. It is abandoned: its requests "
+                    "that are still uncached are judged without it", self.judge_id, batch.id,
+                    self.batch_state_path, batch.created, BATCH_RESULTS_DAYS, detail)
+        self._append_abandoned(batch.id, detail)
+
+    def _append_abandoned(self, batch_id: str, reason: str) -> dict[str, Any]:
+        """Record a batch as abandoned (never looked at again, here or on any machine lift sync reaches),
+        and return the row."""
+        row = {"key": f"batch:{batch_id}:abandoned", "event": "abandoned", "batch_id": batch_id,
+               "judge": self.judge_id, "api_version": self.api_version, "reason": reason, "abandoned": _now()}
+        self._append_state(row)
+        return row
 
     def _collect(self, batch: _Batch, keyed: Mapping[str, str], out: dict[str, Any]) -> None:
         """Read an ended batch's results once and cache every succeeded reply. Errored, expired and
         canceled requests are not cached (the synchronous pass sends them again); a batch in which none
         succeeded stops the run."""
         try:
-            lines = self._batch_call(f"the results of batch {batch.id}", batch.id,
+            lines = self._batch_call(f"the results of batch {batch.id}", batch,
                                      lambda: list(self._provider.batch_results(batch.id, model=self.model)))
         except _BatchGone as gone:
             self._abandon(batch, str(gone))
