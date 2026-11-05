@@ -19,14 +19,14 @@ verified on Nov 3 at the revisions pinned in configs/project.yaml (``sources.sft
   over 3, in opposite directions). ``_hindi_reversed`` flags exactly these; 7510 and 13137 had a
   context, the other 3 are dropped as hindi_reversed: 10,523 kept.
 
-Pipeline (build.py drives it; ``build_candidate`` does one candidate end to end), with the Nov 3
-counts as aya / indicalign. Two Nov 5 fixes take 3 more rows out of each pool before CuratorKIT
-(indicalign's reversed pairs in step 1, aya rows in step 3), so later builds count fewer;
-sft/report.json holds each build's counts:
+Pipeline (build.py drives it; ``build_candidate`` does one candidate end to end), with the counts
+of the pinned sources under the Nov 5 rules as aya / indicalign (sft/report.json holds each
+build's counts; the Nov 4 build, before two R1 fixes took 3 more rows out of each pool, counted
+10,526 / 10,322 / 10,144 / 9,958 for indicalign and 790 / 679 for aya):
 1. ``load_pools``: ``clean_pool`` applies clean_text to both fields and drops, counting the reason,
    empty fields, an instruction or response GlotLID does not read as Hindi, and a response whose
    character 10-gram repetition exceeds unclear.max_repetition_ratio (the judge's "repetitive"
-   rule): 1,153 -> 1,000 / 10,526 -> 10,322.
+   rule): 1,153 -> 1,000 / 10,523 -> 10,319.
 2. ``build_utility_heldout``: ``heldout.per_source`` (150) rows per source, ranked by
    sha256(seed, tag, row id) among rows whose instruction occurs once in the pool and that
    CuratorKIT's schema gate keeps (10-2,048 tokens), with no two near-duplicates among the 300 (the
@@ -38,20 +38,20 @@ sft/report.json holds each build's counts:
    ``build_candidate`` (``check_frozen_heldout``) stop with ValueError before writing a training
    row unless the draw gives exactly its pids.
 3. ``exclude_heldout``: removes the held-out rows, and every row that near-duplicates a held-out row
-   of EITHER source, from BOTH training pools: 1,000 -> 790 / 10,322 -> 10,144. Near-duplicate
+   of EITHER source, from BOTH training pools: 1,000 -> 787 / 10,319 -> 10,141. Near-duplicate
    (``heldout.near_dup``): exact character 3-gram Jaccard (the quantity MinHash estimates) of the
    instructions >= 0.7, or of the responses >= 0.85, at any length (decisions item 24; a text
    under 3 characters is its own single gram); empty texts never match. Until Nov 5 answers under
    20 characters were skipped, a minimum item 24 never had: without it 3 more aya rows match (two
-   copy the 11- and 13-character answers of final utility items), leaving 787.
+   copy the 11- and 13-character answers of final utility items), so 63 rows go, not 60.
 4. ``build_candidates``: CuratorKIT's no-API path on each training pool (``run_curatorkit``): schema
    gate, exact then MinHash dedup (0.85 on character 3-grams; the first copy in row-id order stays;
    the ``raw`` stress pool skips dedup), cleaning with strip_html and collapse_whitespace off:
-   790 -> 679 (raw 788) / 10,144 -> 9,958. Then the row counts: since Nov 4 (decisions item 47,
-   ``equal_size: false``) each variant takes min(train.yaml rows, its own curated rows) by sha256
-   rank, so aya trains on 679 and indicalign on 3,000, and the stress recipe's raw sample is
-   indicalign's. The Nov 3 rule (``equal_size: true``: every variant takes min(rows, aya dedup,
-   indicalign dedup) = 679) stays available. report.json records the decision.
+   787 -> 677 (raw 785) / 10,141 -> 9,955 (raw 9,982). Then the row counts: since Nov 4
+   (decisions item 47, ``equal_size: false``) each variant takes min(train.yaml rows, its own
+   curated rows) by sha256 rank, so aya trains on 677 and indicalign on 3,000, and the stress
+   recipe's raw sample is indicalign's. The Nov 3 rule (``equal_size: true``: every variant takes
+   min(rows, aya dedup, indicalign dedup) = 677) stays available. report.json records the decision.
 
 Files under the data dir (training rows use the messages format TRL's SFTTrainer reads):
     interim/sft/{cand}/{variant}/input.jsonl             CuratorKIT input {id, instruction, output}
