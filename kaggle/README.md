@@ -76,7 +76,7 @@ A markdown cell on top repeats the usage and the T4 rule. Then come two code cel
 JOB = """
 lift sync pull
 lift info
-# paste the stage's commands here, one per line (on a T4, generate/judge/run-dev take --dtype fp16)
+# paste the stage's commands here, one per line (on a T4, every model line takes --dtype fp16)
 """
 ```
 
@@ -166,7 +166,9 @@ long stage into several lines.
 ## Jobs on a T4 x2
 
 - **fp16 everywhere.** Every `lift generate`, `lift judge` and `lift run-dev` line takes
-  `--dtype fp16`, and so does a `lift restart` line, as lift prints it here. The loader refuses
+  `--dtype fp16`, and so does a `lift restart` line, as lift prints it here. So do `lift train`
+  (with `--per-device-batch 1 --parity-dtype fp16`; all three seeds of a recipe on one GPU type and
+  precision), `lift utility --generate-only`, `lift belebele` and `lift heldout-loss`. The loader refuses
   bf16 on a GPU without native bf16, so a missing flag fails loudly. The dtype is part of the cache
   key, so fp16 outputs never mix with bf16 ones. These lines are for the T4 alone: on a GPU with
   native bf16 (compute capability 8 or more, such as Colab's A100 or L4), generate, judge and
