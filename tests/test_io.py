@@ -97,3 +97,11 @@ def test_existing_keys_skips_lines_that_are_not_records(tmp_path):
     assert existing_keys(path) == {"a", "c"}
     assert existing_keys(path, field="other") == {"b"}
     assert existing_keys(tmp_path / "missing.jsonl") == set()
+
+
+# R1-26 follow-up: a record whose field held a list or an object, which no set can hold, made existing_keys
+# raise TypeError (unhashable type) instead of passing the line over like the other non-records.
+def test_existing_keys_skips_records_whose_field_is_a_list_or_an_object(tmp_path):
+    path = tmp_path / "unhashable.jsonl"
+    path.write_bytes(b'{"key": "a"}\n{"key": ["x"]}\n{"key": {"k": "y"}}\n{"key": []}\n{"key": "b"}\n')
+    assert existing_keys(path) == {"a", "b"}
