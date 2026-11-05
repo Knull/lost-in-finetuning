@@ -50,21 +50,35 @@ Jobs are launched from the laptop with `lift remote`, which drives Google's Cola
    $env:LIFT_JUDGE_MAX_USD = "<cap>"
    ```
 
-   For Claude Code sessions, whose tool calls cannot prompt, set them once at user scope instead, in
-   your own PowerShell window, then restart the Claude desktop app (the judge key and the cap only
-   for frontier-judge jobs):
+   For Claude Code sessions, whose tool calls cannot prompt, store each secret once instead, in your
+   own PowerShell window, in a file that only your Windows account on this laptop can decrypt
+   (`Export-Clixml` encrypts it with DPAPI). The two settings, `LIFT_RUNS_REPO` and
+   `LIFT_JUDGE_MAX_USD`, are not secrets and go at user scope; then restart the Claude desktop app
+   (the judge key and the cap only for frontier-judge jobs):
 
    ```powershell
-   [Environment]::SetEnvironmentVariable('GITHUB_TOKEN', [Net.NetworkCredential]::new('', (Read-Host -AsSecureString 'GITHUB_TOKEN')).Password, 'User')
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\.lift"
+   Read-Host -AsSecureString 'GITHUB_TOKEN' | Export-Clixml "$env:USERPROFILE\.lift\GITHUB_TOKEN.xml"
+   Read-Host -AsSecureString 'HF_TOKEN' | Export-Clixml "$env:USERPROFILE\.lift\HF_TOKEN.xml"
+   Read-Host -AsSecureString 'OPENAI_API_KEY' | Export-Clixml "$env:USERPROFILE\.lift\OPENAI_API_KEY.xml"
    [Environment]::SetEnvironmentVariable('LIFT_RUNS_REPO', '<hf-user>/lift-runs', 'User')
-   [Environment]::SetEnvironmentVariable('HF_TOKEN', [Net.NetworkCredential]::new('', (Read-Host -AsSecureString 'HF_TOKEN')).Password, 'User')
-   [Environment]::SetEnvironmentVariable('OPENAI_API_KEY', [Net.NetworkCredential]::new('', (Read-Host -AsSecureString 'OPENAI_API_KEY')).Password, 'User')
    [Environment]::SetEnvironmentVariable('LIFT_JUDGE_MAX_USD', '<cap>', 'User')
    ```
 
-   This form keeps each value in plain text in the registry (`HKCU\Environment`) until it is removed.
-   When you no longer need one, remove it in your own PowerShell window with
-   `[Environment]::SetEnvironmentVariable('NAME', $null, 'User')`.
+   A session loads each secret only in the command line that runs lift (see "From Claude Code"
+   below), and that shell ends with the tool call. So no secret sits in an environment that later
+   processes inherit: a local `pip install` (which runs third-party build code), pytest and new
+   windows get none of them. A program that runs as you can still decrypt the files: what they
+   prevent is the inheriting.
+
+   An earlier version of this step set the secrets themselves at user scope, which keeps them in
+   plain text in the registry (`HKCU\Environment`) and hands them to every process started after
+   that. If you followed it, remove each one in your own PowerShell window:
+   `[Environment]::SetEnvironmentVariable('HF_TOKEN', $null, 'User')`, and the same for
+   `GITHUB_TOKEN`, `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. Running processes keep the values they
+   started with, so then close your PowerShell windows and restart the Claude desktop app. When you
+   no longer need a stored secret, delete its file:
+   `Remove-Item "$env:USERPROFILE\.lift\HF_TOKEN.xml"`.
 
    `hf auth login` must store a WRITE token for the runs repo too, not the read token that
    downloads the models: the job's pushes use it, and so does the push retry of
@@ -279,13 +293,18 @@ Notes:
 - **From Claude Code.** Start `lift remote` with `run_in_background`, because foreground commands
   stop at 10 minutes, and check its exit code (table above): a 4 means a VM may still be billing,
   and a 6 means `watch` kept one running on purpose, billing, with outputs on it that no push sent.
-  A session never asks for or accepts a secret in the chat. Each tool call runs in a new shell, so
-  it loads each name that `lift remote` lists as missing (an exit 2, or the exit-6 banner) from the
-  user environment (step 6) in the same command line:
-  `$env:HF_TOKEN = [Environment]::GetEnvironmentVariable('HF_TOKEN', 'User'); lift remote watch <name>`.
-  If `lift remote` still names one, it is not set there: the session stops and asks the user to set
-  it in their own terminal. After a 6, `lift remote stop <name>` instead gives the outputs up. Keep
-  the laptop awake for the whole run.
+  A session never asks for or accepts a secret in the chat. Each tool call runs in a new shell, and
+  no secret is in its environment (step 6 stores them in files), so the session loads each secret a
+  lift command needs from its file, in the command line that runs that command, one assignment
+  each: `GITHUB_TOKEN` and `HF_TOKEN` for a launch, `HF_TOKEN` for watch's push retry and for
+  `lift sync`, and the judge key for a frontier-judge job (`HF_TOKEN` is not needed when
+  `hf auth login` holds a WRITE token):
+  `$env:HF_TOKEN = [Net.NetworkCredential]::new('', (Import-Clixml "$env:USERPROFILE\.lift\HF_TOKEN.xml")).Password; lift remote watch <name>`.
+  The value then lives only in that tool call's shell, which ends with it. If `lift remote` still
+  names one (an exit 2, or the exit-6 banner), it is not stored (`LIFT_RUNS_REPO`: not set at user
+  scope): the session stops and asks the user to store or set it in their own terminal (step 6).
+  After a 6, `lift remote stop <name>` instead gives the outputs up. Keep the laptop awake for the
+  whole run.
 
 ## What happens to secrets
 
@@ -315,7 +334,9 @@ Notes:
   VM when the job ends, after one push retry if the job's final push failed (not with exit 2). That
   retry runs with watch's own shell: it needs a WRITE token for the runs repo in `HF_TOKEN` (or from
   `hf auth login`, logged in with a WRITE token, not the read token that downloads the models) and
-  `LIFT_RUNS_REPO`, which a new PowerShell window lacks unless step 6 set them at user scope;
+  `LIFT_RUNS_REPO`. A new PowerShell window has `LIFT_RUNS_REPO` once step 6 set it at user scope,
+  but not `HF_TOKEN`: set it there with a hidden prompt, or load it from its stored file in the
+  command line that runs watch (step 6);
   `GITHUB_TOKEN` is not needed. Before the retry, watch checks the runs repo as a launch does
   (`lift sync check --write`). When the secrets are missing (watch says so when it starts), that
   check fails, or the retry's push exits 2, watch keeps the VM, with the outputs on it, and prints a
