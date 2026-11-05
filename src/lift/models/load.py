@@ -66,8 +66,15 @@ def check_dtype_supported(dtype: str, device: str) -> None:
 
 
 def _local_revision(path: Path) -> str:
-    """A content hash standing in for the commit sha of a model saved to a local directory."""
-    files = sorted(p for p in path.rglob("*") if p.is_file() and ".cache" not in p.parts)
+    """A content hash standing in for the commit sha of a model saved to a local directory.
+
+    Only the ``.cache`` folder inside the directory is skipped (the metadata ``hf download --local-dir``
+    leaves there), so a directory that itself sits below a ``.cache`` folder, such as a hub snapshot, is
+    hashed by its own files. A directory with no file left to hash raises: its hash would be one constant
+    for every such directory."""
+    files = sorted(p for p in path.rglob("*") if p.is_file() and ".cache" not in p.relative_to(path).parts)
+    if not files:
+        raise ValueError(f"{path} holds no file to hash (outside its .cache folder): not a saved model")
     digest = sha256_obj([[p.relative_to(path).as_posix(), sha256_file(p)] for p in files])
     return f"local-{digest[:40]}"
 
