@@ -26,6 +26,8 @@ from validation_fakes import (
     World,
     build_world,
     fill_sheet,
+    judgement,
+    qwen_judge_id,
     read_csv,
     read_round,
     truth,
@@ -37,7 +39,7 @@ from validation_fakes import (
 
 from lift import config, paths
 from lift.cli import build_parser, main
-from lift.io import read_jsonl, sha256_file
+from lift.io import read_jsonl, sha256_file, write_jsonl
 from lift.validation.store import read_json
 
 CANDIDATE = "adapter-aya-std-s1"
@@ -383,6 +385,44 @@ def test_utility_sheet_import_and_score(tmp_path, monkeypatch, capsys):
     scored = read_json(world.outputs / "metrics" / "validation" / "utility.json")
     assert scored["n_judged"] == 60
     assert scored["agreement"] == pytest.approx(54 / 60)
+    assert_private(world, *printed, metrics_text(world))
+
+
+def test_score_names_the_judges_it_skipped_and_the_pins_help_says_what_a_pin_chooses(tmp_path, monkeypatch,
+                                                                                     capsys):
+    # W3-06: judgements of a judge the config does not name (here a loose-mode Qwen3Guard run) are skipped
+    # and never scored. round{N}.md lists them; so does the command, next to the loose-view warning, naming
+    # each judge id and its count, so a judge whose judgements were all skipped is not just "0/n judged".
+    world = use_world(monkeypatch, build_world(tmp_path / "world", utility=False, **ROUND1))
+    assert cli(capsys, "sample", "--round", 1)[0] == 0
+    printed = [import_round(world, capsys, 1, tmp_path / "sent")]
+    loose = qwen_judge_id(mode="loose")
+    gens = world.by_key()
+    files: dict[tuple[str, str, str, str], list[dict]] = {}
+    for it in sorted(read_round(world.validation, 1)["items"], key=lambda it: it["item_id"])[:5]:
+        g = gens[it["key"]]
+        files.setdefault((g.variant, g.set, g.lang, g.split), []).append(
+            judgement(g, loose, truth(g.key)).model_dump())
+    for (variant, set_name, lang, split), rows in files.items():
+        name = f"{set_name}_{lang}_{split}.jsonl"
+        write_jsonl(world.outputs / "judgements" / "qwen3guard-loose" / variant / name, rows)
+    code, out = cli(capsys, "score", "--round", 1)
+    assert code == 0, out
+    printed.append(out)
+    assert read_json(world.outputs / "metrics" / "validation" / "round1.json")["checks"]["other_judges"] == {
+        loose: 5}
+    assert [line.strip() for line in out.splitlines() if loose in line] == [
+        f"warning: judgements by a judge the config does not name were skipped, never scored (by judge id): "
+        f"{loose} 5"]
+    # A pin chooses only among the configured judge's ids, and a model (provider/model) alone matches every
+    # revision (API version): the whole id chooses one.
+    for step in ("score", "decide-judge"):
+        with pytest.raises(SystemExit):
+            main(["validate", step, "--help"])
+        shown = " ".join(capsys.readouterr().out.split())
+        assert shown.count("A pin chooses only among the configured judge's ids") == 2, step
+        assert "the model alone matches every revision" in shown
+        assert "provider/model alone matches every API version, so give the whole id to choose one" in shown
     assert_private(world, *printed, metrics_text(world))
 
 
