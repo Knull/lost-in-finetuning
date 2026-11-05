@@ -1572,6 +1572,130 @@ def test_a_restart_of_judgements_is_never_undone_by_a_merge(tmp_path, monkeypatc
     assert hub.files[J2] == b""
 
 
+# R1-08: a file with no records on one side is what lift restart leaves. Judgements merged into it, or it into
+# them, still pair when the restart kept the generations (--judge, or the old cell on the Hub), so the merge
+# would undo the restart while every sync reports ok. Neither direction merges it.
+RESTARTS = pytest.mark.parametrize("judge_dir", [None, "qwen3guard"], ids=["whole-cell", "judge-only"])
+
+
+def says(report: sync.SyncReport, *parts: str) -> bool:
+    """Whether one line of the report's summary holds every one of ``parts``."""
+    return any(all(part in line for part in parts) for line in report.summary())
+
+
+def restarted_meanwhile(tmp_path: Path, monkeypatch, judge_dir: str | None) -> tuple[FakeHub, list[str]]:
+    """The Hub holds a cell judged in part (k1, k2), and machines A and B pulled it. B runs `lift restart`
+    (with --judge primary when ``judge_dir``); A, still on the old code, then judges k3 and k4 (making them
+    first when the whole cell restarts) and pushes. Ends on B before its next sync; returns the files its
+    restart emptied."""
+    cell = [gen_row(f"k{i}", f"p{i}") for i in range(1, 5)]
+    hub = FakeHub({GEN: lines(*(cell if judge_dir else cell[:2])), JUD: judged(cell[:2], "benign")})
+    a, b = tmp_path / "A", tmp_path / "B"
+    machine(a, monkeypatch)
+    assert sync.pull(api=hub).ok
+    machine(b, monkeypatch)
+    assert sync.pull(api=hub).ok
+    restart(judge_dir=judge_dir)
+    machine(a, monkeypatch)
+    if not judge_dir:
+        append(local(GEN), lines(*cell[2:]))
+    append(local(JUD), judged(cell[2:], "benign"))
+    assert sync.push(api=hub).ok and keys_of_bytes(hub.files[JUD]) == ["k1", "k2", "k3", "k4"]
+    machine(b, monkeypatch)
+    return hub, [JUD] if judge_dir else [GEN, JUD]
+
+
+@RESTARTS
+def test_a_restart_is_never_undone_by_its_own_next_push(tmp_path, monkeypatch, judge_dir):
+    """R1-08. B's checkpoint push after `lift restart` finds the cell changed on the Hub too: A judged two
+    more keys meanwhile. A merge would fill the emptied files with the Hub's records again, and the judge
+    line that follows would resume past every key instead of judging the cell again. The push keeps the
+    Hub's copies and the empty ones here, uploads those under conflicts/ and names the --force that
+    completes the restart."""
+    hub, emptied = restarted_meanwhile(tmp_path, monkeypatch, judge_dir)
+    on_hub = {p: hub.files[p] for p in emptied}
+    pushed = sync.push(api=hub)
+    assert {p: keys_of(local(p)) for p in emptied} == {p: [] for p in emptied}, pushed.files
+    first = emptied[0]                    # a whole cell's judgements are held back with its generations
+    assert not pushed.ok and pushed.emptied == {first: "here"}
+    assert {p: pushed.files[p] for p in emptied} == {p: "conflict" for p in emptied}
+    assert {p: hub.files[p] for p in emptied} == on_hub
+    assert all(hub.files[pushed.conflict_copies[p]] == b"" for p in emptied)
+    assert (f"  CONFLICT {first} (not merged: emptied here by lift restart; local copy on the Hub at "
+            f"{pushed.conflict_copies[first]})") in pushed.summary()
+    assert says(pushed, "1 file(s) emptied here by lift restart",
+                "lift sync push --force completes the restart", "lift sync pull --force takes the Hub's copy")
+    forced = sync.push(api=hub, force=True)
+    assert forced.ok and {p: forced.files[p] for p in emptied} == {p: "force" for p in emptied}
+    assert {p: hub.files[p] for p in emptied} == {p: b"" for p in emptied}
+
+
+@RESTARTS
+def test_a_restart_is_never_undone_by_its_own_next_pull(tmp_path, monkeypatch, judge_dir):
+    """R1-08, with a pull after the restart: it keeps the empty files and records no sync state for them, so
+    the next push conflicts too instead of sending the Hub's records back here. `pull --force` takes the
+    Hub's copies instead, keeping the empty ones under outputs/.sync-backup."""
+    hub, emptied = restarted_meanwhile(tmp_path, monkeypatch, judge_dir)
+    synced = json.loads(state_file().read_text())["files"]
+    pulled = sync.pull(api=hub)
+    assert {p: keys_of(local(p)) for p in emptied} == {p: [] for p in emptied}, pulled.files
+    first = emptied[0]                    # a whole cell's judgements wait for its generations
+    assert not pulled.ok and pulled.emptied == {first: "here"}
+    assert {p: pulled.files[p] for p in emptied} == {p: "conflict" for p in emptied}
+    assert json.loads(state_file().read_text())["files"] == synced
+    assert f"  CONFLICT {first} (not merged: emptied here by lift restart)" in pulled.summary()
+    assert says(pulled, "1 file(s) emptied here by lift restart",
+                "lift sync push --force completes the restart", "lift sync pull --force takes the Hub's copy")
+    forced = sync.pull(api=hub, force=True)
+    assert forced.ok and {p: forced.files[p] for p in emptied} == {p: "force" for p in emptied}
+    assert all(local(p).read_bytes() == hub.files[p] != b"" for p in emptied)
+    assert {p: Path(forced.backups[p]).read_bytes() for p in emptied} == {p: b"" for p in emptied}
+
+
+@RESTARTS
+def test_records_from_before_a_restart_never_go_back_over_the_hubs_empty_copy(tmp_path, monkeypatch,
+                                                                             judge_dir):
+    """R1-08. B's restart went up (an update: the Hub's copies are empty) while A, which pulled before it,
+    judged two more keys on the old code (making them first when the whole cell restarts). Merged, A's
+    records would go back over the empty copies: by push, or by a pull that records the empty copy as
+    synced, after which the push sends them as an update. Both keep A's copy as a conflict; `pull --force`
+    completes the restart here, keeping A's records under outputs/.sync-backup."""
+    cell = [gen_row(f"k{i}", f"p{i}") for i in range(1, 5)]
+    hub = FakeHub({GEN: lines(*(cell if judge_dir else cell[:2])), JUD: judged(cell[:2], "benign")})
+    emptied = [JUD] if judge_dir else [GEN, JUD]
+    a, b = tmp_path / "A", tmp_path / "B"
+    machine(a, monkeypatch)
+    assert sync.pull(api=hub).ok
+    machine(b, monkeypatch)
+    assert sync.pull(api=hub).ok
+    restart(judge_dir=judge_dir)
+    restarted = sync.push(api=hub)
+    assert restarted.ok and {p: restarted.files[p] for p in emptied} == {p: "update" for p in emptied}
+    machine(a, monkeypatch)
+    if not judge_dir:
+        append(local(GEN), lines(*cell[2:]))
+    append(local(JUD), judged(cell[2:], "benign"))
+    mine = {p: local(p).read_bytes() for p in emptied}
+    pulled = sync.pull(api=hub)
+    pushed = sync.push(api=hub)
+    on_hub = {p: keys_of_bytes(hub.files[p]) for p in emptied}
+    assert on_hub == {p: [] for p in emptied}, (pulled.files, pushed.files)
+    first = emptied[0]
+    for report in (pulled, pushed):
+        assert not report.ok and report.emptied == {first: "hub"}
+        assert {p: report.files[p] for p in emptied} == {p: "conflict" for p in emptied}
+        assert says(report, f"  CONFLICT {first} (not merged: emptied on the Hub by lift restart")
+        assert says(report, "1 file(s) emptied on the Hub by lift restart",
+                    "lift sync pull --force completes the restart here",
+                    "lift sync push --force sends the local copy over it")
+    assert {p: local(p).read_bytes() for p in emptied} == mine
+    assert hub.files[pushed.conflict_copies[first]] == mine[first]
+    forced = sync.pull(api=hub, force=True)
+    assert forced.ok and {p: local(p).read_bytes() for p in emptied} == {p: b"" for p in emptied}
+    assert {p: Path(forced.backups[p]).read_bytes() for p in emptied} == mine
+    assert sync.push(api=hub).ok and {p: hub.files[p] for p in emptied} == {p: b"" for p in emptied}
+
+
 def test_an_auditkit_record_goes_up_only_if_it_counts_the_judgements_beside_it():
     """A record is the cell's numbers: its keys_sha256 and labels_sha256 must be those of the judgements the
     Hub will hold, else it is held back with the restart line of its judge's role."""
