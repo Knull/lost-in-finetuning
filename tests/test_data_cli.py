@@ -327,6 +327,56 @@ def test_apply_exits_3_when_the_rebuild_loses_records_and_1_without_the_cache(di
     assert "harmful_hi: 9 items (e.g." in caplog.text and capsys.readouterr().out == ""
 
 
+def test_apply_exits_1_and_names_the_rebuild_when_it_stops_after_the_verdicts_are_stored(dirs, monkeypatch,
+                                                                                         capsys, caplog):
+    # W3-04: a ValueError from the rebuild comes after the verdicts are stored, and applying the sheet again
+    # finds them unchanged and rebuilds nothing. So the line says they are stored and the rebuild stopped,
+    # and names the line that rebuilds their files from them (from the cache, as apply-spotchecks does).
+    use_fixtures(monkeypatch)
+    assert main(["data", "build", "--only", "harmful", "--langs", "en", "hi"]) == 0
+    sheet = dirs.sheets / "sheet.csv"
+    sheet.parent.mkdir(parents=True)
+    records = build.load_prompts("harmful", "hi")
+    assert not any(r.translation.checked for r in records)
+    write_sheet(sheet, sheet_rows(records[:2], "ok"))
+    real = build._build_file
+
+    def stops(run, src, set_name, lang):
+        raise ValueError("fake: the rebuild stops")
+
+    monkeypatch.setattr(build, "_build_file", stops)
+    capsys.readouterr()
+    caplog.set_level(logging.ERROR)
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 1
+    logged = " ".join(caplog.text.split())
+    rebuild = "`lift data build --only harmful --langs hi --cache-only`"
+    assert "2 new verdicts are stored" in logged and "fake: the rebuild stops" in logged
+    assert rebuild in logged and "Traceback" not in logged and capsys.readouterr().out == ""
+    stored = (dirs.data / "interim" / "translations" / "spotchecks.jsonl").read_text(encoding="utf-8")
+    assert len(stored.splitlines()) == 2
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 0      # as the line says: no rebuild
+    assert capsys.readouterr().out.splitlines()[-1] == "0 verdicts applied, 2 unchanged; rebuilt nothing"
+    monkeypatch.setattr(build, "_build_file", real)
+    assert main(["data", "build", "--only", "harmful", "--langs", "hi", "--cache-only"]) == 0
+    assert {r.pid for r in build.load_prompts("harmful", "hi") if r.translation.checked} == {
+        r.pid for r in records[:2]}
+
+    def interrupted(run, src, set_name, lang):
+        raise RuntimeError("fake: not a ValueError")
+
+    monkeypatch.setattr(build, "_build_file", interrupted)       # any other error: its traceback, after
+    write_sheet(sheet, sheet_rows(records[2:3], "ok"))            # a line that says what is stored
+    caplog.clear()
+    with pytest.raises(RuntimeError, match="not a ValueError"):
+        build.apply_spotchecks(sheet, ctx=build.BuildContext.default())
+    logged = " ".join(caplog.text.split())
+    assert "1 new verdicts are stored" in logged and rebuild in logged
+    with pytest.raises(SystemExit):
+        main(["data", "apply-spotchecks", "--help"])
+    shown = " ".join(capsys.readouterr().out.split())
+    assert "or the rebuild stops (the verdicts are stored:" in shown
+
+
 def test_apply_exits_1_when_glotlid_cannot_load_and_stores_nothing(dirs, monkeypatch, capsys, caplog):
     use_fixtures(monkeypatch)
     assert main(["data", "build", "--only", "harmful", "--langs", "en", "hi"]) == 0
