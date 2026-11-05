@@ -10,7 +10,8 @@ StaleOutputError: stale, or made in another precision) is listed with its remedy
 judged; a side it accepts gets its check recorded (``lift.utility.record_checked``). Only ``--judge-only``,
 which loads no model, works on a laptop with no GPU stack (and needs no pin): it judges answers only as a
 GPU line checked them, and refuses a side whose registry entry, harness or pinned revision has moved since
-(``lift.utility.check_answers``). Exit codes: 0 done; 3 done, but something was listed with its remedy (a
+(``lift.utility.check_answers``); such a refusal keeps the checks, so a git pull settles one this checkout
+is behind on, with no GPU line. Exit codes: 0 done; 3 done, but something was listed with its remedy (a
 side skipped, the pair or the verdict file refused, Message Batches still running, the AuditKIT record
 refused), so a GPU job goes on with its next lines; 1 an error; 2 a refused combination of options.
 """
@@ -55,8 +56,10 @@ Writes outputs/utility/{frontier|fallback}/{variant}/utility_hi_{split}.jsonl (t
 whole), outputs/metrics/utility/{variant}_{split}.json and .md, and the AuditKIT record under
 outputs/metrics/auditkit_utility/. A verdict file that already describes every pair as it stands is reused
 with no judge call; one another judge wrote is refused until --rejudge sets it aside. When the pair is
-refused, its verdicts, metrics, AuditKIT record and answer check are set aside (outputs/.aside/, never
-synced) and left empty, so nothing reads them as current.
+refused, its verdicts, metrics and AuditKIT record are set aside (outputs/.aside/, never synced) and left
+empty, so nothing reads them as current. The answer checks are kept, and checked again on every run: a
+refusal this checkout settles (a git pull, when it is behind the ref the GPU job ran) needs no GPU line.
+Only lift restart of the cell retires a check.
 
 The frontier judge (judges.utility) first sends its uncached requests as Message Batches when
 judges.utility.bulk is batch, waits for them and then judges from its call cache. --no-wait submits the
