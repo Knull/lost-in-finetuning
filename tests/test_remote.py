@@ -2921,9 +2921,39 @@ def hidden_prompt(name: str) -> str:
     return f"[Net.NetworkCredential]::new('', (Read-Host -AsSecureString '{name}')).Password"
 
 
+# R2-19: for Claude Code sessions, step 6 and .env.example kept each secret at user scope, the runs repo's
+# WRITE token included, so every process started afterwards inherited it, the third-party build code of a
+# local pip install too (colab/job.py Job._env: secrets go to lift only, never to git or pip). The operator
+# now stores each one encrypted for their Windows account (Export-Clixml: DPAPI), and a session loads it
+# only in the command line that runs lift. LIFT_RUNS_REPO and LIFT_JUDGE_MAX_USD are settings.
+STORED = '"$env:USERPROFILE\\.lift\\{name}.xml"'
+USER_SCOPE = re.compile(r"\[Environment\]::SetEnvironmentVariable\(\s*'(?P<name>[A-Z][A-Z0-9_]*)'\s*,\s*"
+                        r"(?P<value>[^\n]+?)\s*,\s*'User'\s*\)")
+
+
+def stored(name: str) -> str:
+    """How the operator stores one secret for Claude Code sessions, in their own window."""
+    return f"Read-Host -AsSecureString '{name}' | Export-Clixml {STORED.format(name=name)}"
+
+
+def loaded(name: str) -> str:
+    """How a session loads one stored secret, in the command line that runs lift."""
+    return (f"$env:{name} = [Net.NetworkCredential]::new('', (Import-Clixml {STORED.format(name=name)}))"
+            ".Password")
+
+
 @pytest.mark.parametrize("path", ["colab/README.md", "kaggle/README.md", ".env.example"])
 def test_no_runbook_types_a_secret_on_a_command_line(path):
     assert typed_secrets((REPO_ROOT / path).read_text(encoding="utf-8")) == [], path
+
+
+@pytest.mark.parametrize("path", ["colab/README.md", "kaggle/README.md", ".env.example"])
+def test_no_runbook_keeps_a_secret_at_user_scope(path):
+    text = (REPO_ROOT / path).read_text(encoding="utf-8")
+    kept = sorted({m["name"] for m in USER_SCOPE.finditer(text)       # `$null` removes one instead
+                   if re.fullmatch(SECRET_NAME, m["name"]) and m["value"].strip() != "$null"})
+    assert kept == [], (f"{path} keeps {', '.join(kept)} at user scope, so every process started afterwards "
+                        "inherits them, the build code of a local pip install included")
 
 
 def test_the_colab_setup_step_sets_each_secret_with_a_hidden_prompt():
@@ -2931,8 +2961,14 @@ def test_the_colab_setup_step_sets_each_secret_with_a_hidden_prompt():
     assert typed_secrets(step) == []
     for name in ("GITHUB_TOKEN", "HF_TOKEN", "OPENAI_API_KEY"):
         assert f"$env:{name} = {hidden_prompt(name)}" in step, name
-        # The one-time form for Claude Code sessions, typed in the user's own window.
-        assert f"[Environment]::SetEnvironmentVariable('{name}', {hidden_prompt(name)}, 'User')" in step, name
+        # The one-time form for Claude Code sessions, typed in the user's own window (R2-19).
+        assert stored(name) in step, name
+    assert 'New-Item -ItemType Directory -Force "$env:USERPROFILE\\.lift"' in step
+    words = " ".join(step.split())
+    # Why not at user scope, and how to remove a secret an earlier step 6 put there, or a stored one.
+    assert "pip install" in words and "inherit" in words
+    assert "[Environment]::SetEnvironmentVariable('HF_TOKEN', $null, 'User')" in words
+    assert f"Remove-Item {STORED.format(name='HF_TOKEN')}" in words
 
 
 @pytest.mark.parametrize("os_name", ["nt", "posix"], ids=["powershell", "posix-shell"])
@@ -2950,12 +2986,15 @@ def test_lift_remote_never_says_to_type_a_missing_secret(monkeypatch, os_name):
         assert "`hf auth login` with a WRITE token" in text
     example = f"$env:NAME = {hidden_prompt('NAME')}" if os_name == "nt" else "read -rs NAME; export NAME"
     assert example in launch
+    # R2-19: in a Claude Code session, a secret step 6 stored is loaded in the command line that runs lift.
+    assert (f"{loaded('NAME')}; lift remote" in launch) == (os_name == "nt")
 
 
 def test_the_claude_code_advice_never_routes_a_secret_through_the_chat():
     advice = " ".join(readme().split("**From Claude Code.**", 1)[1].split("\n\n", 1)[0].split())
     assert "a 6 means" in advice and "lift remote watch" in advice
     assert "never asks for or accepts a secret in the chat" in advice
-    # It loads what lift remote names from the user environment, in the command line that needs it.
-    assert "$env:HF_TOKEN = [Environment]::GetEnvironmentVariable('HF_TOKEN', 'User'); lift remote" in advice
+    # It loads each secret a lift command needs from its stored file, in the command line that runs that
+    # command, never from the user environment (R2-19).
+    assert f"{loaded('HF_TOKEN')}; lift remote" in advice and "GetEnvironmentVariable" not in advice
     assert "own terminal" in advice and "set what its banner names in the same command line" not in advice
