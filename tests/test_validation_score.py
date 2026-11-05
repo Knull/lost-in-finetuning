@@ -19,12 +19,15 @@ from validation_fakes import (
     FRONTIER_ID,
     LANGS,
     PRIMARY_ID,
+    QWEN_REV,
     SAFETY_SETS,
     World,
     build_world,
     fill_sheet,
+    frontier_judge_id,
     judgement,
     other_label,
+    qwen_judge_id,
     read_csv,
     truth,
     use_world,
@@ -42,7 +45,7 @@ from lift.validation.score import decision_path, if_skipped, qwen3guard_label, s
 from lift.validation.store import ValidateError, read_json, write_json
 
 VIEWS = ("qwen3guard_strict", "qwen3guard_loose", "frontier")
-OTHER_QWEN = "Qwen/Qwen3Guard-Gen-4B@fedcba9876543210"
+OTHER_QWEN = qwen_judge_id(revision="fedcba9876543210" * 2 + "fedcba98")   # fits too while none is pinned
 
 # Qwen3Guard native fields as a harness might store them: keys in any case, Refusal as Yes/No or a
 # bool. (native fields, Safety, Refusal as a bool, too short)
@@ -471,7 +474,9 @@ def test_two_frontier_judges_are_an_error_until_one_is_picked(round1):
     world, doc = round1
     write_judgements(world)
     import_sheets(world, doc, truth_of)
-    another = "fakeprovider/another-model@2026-11-02"            # disagrees with the readers everywhere
+    # The configured judge again, over a newer API version (a new SDK): it fits the configured rule too,
+    # and disagrees with the readers everywhere.
+    another = frontier_judge_id(api="2026-11-02")
     gens = world.by_key()
     write_records(world, [judgement(gens[it["key"]], another, other_label(truth_of(it)))
                           for it in items(doc)], "frontier-2")
@@ -491,6 +496,49 @@ def test_picking_the_qwen3guard_revision_alone_settles_it(round1):
         assert out["judges"]["qwen3guard_strict"]["judge_id"] == qwen
         assert out["judges"]["frontier"]["judge_id"] == FRONTIER_ID
         check_block(block_of(out, "qwen3guard_strict", None), pairs[qwen])
+
+
+@pytest.mark.parametrize("case", ["loose mode", "old labelling rules", "another rubric", "another revision"])
+def test_judgements_of_a_judge_the_config_does_not_name_are_skipped_and_counted(round1, case):
+    # W2-05 (R1-41): a judgement counts only if its id fits the configured judge of its kind, the rule the
+    # harness reports by (lift.judge.pipeline._expected_judge): a loose-mode Qwen3Guard run, labels made
+    # under old labelling rules, a frontier judge with another rubric, or a Qwen3Guard revision other than
+    # the pinned one is skipped and counted by id, so its items wait for their judge. It is never scored,
+    # even when it is the only judge of its kind on file, and a pin cannot choose it.
+    world, doc = round1
+    if case == "another revision":
+        config.load("project")["judges"]["safety_primary"]["revision"] = QWEN_REV    # PRIMARY_ID's sha
+    other = {"loose mode": qwen_judge_id(mode="loose"),
+             "old labelling rules": qwen_judge_id(rules="rules-0000abcd"),
+             "another rubric": frontier_judge_id(rubric="safety_v0:0123456789ab"),
+             "another revision": OTHER_QWEN}[case]
+    kind, views = (("frontier", ("frontier",)) if case == "another rubric"
+                   else ("qwen3guard", ("qwen3guard_strict", "qwen3guard_loose")))
+    write_judgements(world)
+    import_sheets(world, doc, truth_of)
+    judgements = world.outputs / "judgements"
+    configured = shutil.move(judgements / kind, world.root / "configured")      # out of outputs/judgements
+    write_records(world, [judgement(g, other, truth(g.key)) for g in world.by_key().values()
+                          if g.set != "utility"], f"{kind}-elsewhere")
+    out = score(1)
+    for view in views:
+        assert out["judges"][view]["judge_id"] is None
+        for lang in [*LANGS, None]:
+            block = block_of(out, view, lang)
+            assert (block["status"], block["n_judged"], block["meets_bar"]) == ("pending_judge", 0, None)
+    assert out["checks"]["other_judges"] == {other: 180}
+    still = "qwen3guard_strict" if kind == "frontier" else "frontier"
+    assert block_of(out, still, None)["status"] == "ok"
+    assert gate1(world)["status"] == ("pending" if kind == "qwen3guard" else "pass")
+    pin = {"qwen3guard_judge" if kind == "qwen3guard" else "frontier_judge": other}
+    with pytest.raises(ValidateError, match=f"no {kind} judgement matches"):
+        score(1, write=False, **pin)
+    # Once the configured judge has run, its judgements are scored and the other's still never are.
+    shutil.move(configured, judgements / kind)
+    out = score(1, write=False)
+    assert out["judges"][views[0]]["judge_id"] == (FRONTIER_ID if kind == "frontier" else PRIMARY_ID)
+    assert {block_of(out, view, None)["status"] for view in VIEWS} == {"ok"}
+    assert out["checks"]["other_judges"] == {other: 180}
 
 
 def test_swapping_the_judges_config_roles_keeps_qwen3guard_in_its_views(round1, monkeypatch):

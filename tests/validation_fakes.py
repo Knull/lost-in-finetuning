@@ -7,6 +7,9 @@ never contain a variant name, a set name or a judge label (the leak tests rely o
 The world commits its own split files (``World.splits_dir``, data/splits in the repo), which
 ``use_world`` makes lift.splits.SPLITS_DIR: the prompt files are read through
 lift.data.build.load_prompts, which refuses a split stamp the committed split does not give.
+
+The judge ids are the ones the configured judges write (``qwen_judge_id``, ``frontier_judge_id``),
+since the validation reads only those (lift.validation.outputs.judge_rules).
 """
 
 from __future__ import annotations
@@ -17,9 +20,12 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from lift import config
 from lift import splits as frozen_splits
 from lift.data.build import SPLIT_SETS
 from lift.io import sha256_obj, sha256_text, write_jsonl
+from lift.judge import frontier
+from lift.judge.labels import rules_tag
 from lift.schemas import (
     LABELS,
     GenerationRecord,
@@ -29,8 +35,40 @@ from lift.schemas import (
     UtilityVerdict,
 )
 
-PRIMARY_ID = "Qwen/Qwen3Guard-Gen-4B@0123456789abcdef"
-FRONTIER_ID = "fakeprovider/frontier-model@2026-11-01"
+QWEN_REV = "0123456789abcdef0123456789abcdef01234567"   # any sha: tests see the configured one as "main"
+FRONTIER_API = "2026-11-01"                             # any API version fits the configured rule
+
+
+def _judges_entry(kind: str) -> tuple[str, dict]:
+    """(name, block) of the judges block of configs/project.yaml that makes the ``kind`` judge."""
+    for name in ("safety_primary", "safety_second"):
+        block = config.get(f"judges.{name}")
+        if ("provider" in block) == (kind == "frontier"):
+            return name, block
+    raise LookupError(f"no judges block makes a {kind} judge")
+
+
+def qwen_judge_id(*, dtype: str = "bf16", mode: str | None = None, revision: str = QWEN_REV,
+                  rules: str | None = None) -> str:
+    """A Qwen3Guard judge id as the harness writes it, {model}@{revision}#{rules tag}#{dtype}#{mode}; by
+    default one the configured rule accepts (the configured model and mode, the labelling rules now)."""
+    _, entry = _judges_entry("qwen3guard")
+    return f"{entry['id']}@{revision}#{rules or rules_tag()}#{dtype}#{mode or entry['controversial']}"
+
+
+def frontier_judge_id(*, api: str = FRONTIER_API, rubric: str | None = None, rules: str | None = None) -> str:
+    """A frontier judge id as the harness writes it, {FrontierJudge.judge_id}#{rules tag}; by default the
+    configured judge's (its provider, model, rubric version and settings tag, which
+    lift.judge.pipeline._expected_judge builds its rule from), spoken to over API version ``api``."""
+    name, entry = _judges_entry("frontier")
+    s = frontier._settings(entry["provider"], name, {})
+    tag = frontier._settings_tag(s["temperature"], s["effort"], s["thinking"], s["max_tokens"])
+    version = rubric or frontier.load_rubric(entry["rubric"]).version
+    return f"{entry['provider']}/{entry['model']}@{version}+{tag}+api{api}#{rules or rules_tag()}"
+
+
+PRIMARY_ID = qwen_judge_id()
+FRONTIER_ID = frontier_judge_id()
 UTILITY_ID = "fakeprovider/utility-model@2026-11-01"
 LANGS = ("hi", "zh", "es", "en")
 SAFETY_SETS = ("harmful", "easy_benign", "hard_benign")
@@ -163,12 +201,15 @@ def write_generations(world: World, variant: str, set_name: str, lang: str, spli
 
 
 def judgement(gen: GenerationRecord, judge: str, label: str) -> JudgementRecord:
+    """``judge``'s judgement of ``gen`` with final label ``label``: Qwen3Guard's native fields for a
+    Qwen3Guard id (any revision, precision or mode), a frontier judge's otherwise."""
+    qwen = "Qwen3Guard" in judge
     native, flags = qwen_native(label, gen.key)
-    if judge != PRIMARY_ID:
+    if not qwen:
         native = {"label": label.upper(), "reason": "fake"}
     return JudgementRecord(key=gen.key, variant=gen.variant, pid=gen.pid, lang=gen.lang, set=gen.set,
                            split=gen.split, judge=judge,
-                           judge_label=label if label != "unclear" or judge != PRIMARY_ID else "benign",
+                           judge_label=label if label != "unclear" or not qwen else "benign",
                            label=label, flags=flags, native=native, output_sha=sha256_text(gen.output))
 
 

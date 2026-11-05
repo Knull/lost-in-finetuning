@@ -2,16 +2,20 @@
 
 ``score(round_no)`` compares the readers' labels with each judge, per language and pooled:
 
-- qwen3guard_strict: Qwen3Guard's final label (Controversial counts as harmful);
+- qwen3guard_strict: the configured Qwen3Guard judge's final label (Controversial counts as harmful);
 - qwen3guard_loose: the same judgement under the loose mapping (Controversial follows the refusal
   flag), recomputed from the record's ``native`` fields with lift.judge.labels, as a sensitivity
   analysis. It is withheld if the stored label of any labelled item's record disagrees with the
   strict mapping of its own native fields, since the fields are then being misread;
-- frontier: the frontier (second) judge's final label.
+- frontier: the configured frontier (second) judge's final label.
 
 Views are tied to the judges themselves, not to their config roles, so scoring still works after
 the decision swaps which one is primary. ``primary_view`` says which view is the primary judge now,
-as configs/project.yaml has it.
+as configs/project.yaml has it. Only the judges the config names are scored: a judgement counts only
+if its id fits the rule the harness reports by (lift.validation.outputs.judge_rules: the model, the
+pinned revision, the labelling rules, the round's precision and the Controversial mode; for the
+frontier judge its rubric and sampling settings). Any other (a loose-mode or superseded run) is
+skipped and counted by judge id (``checks.other_judges``), and its item waits for its judge.
 
 Only the main reader's labels are the ground truth; the Hindi overlap sheet is used for
 inter-annotator agreement only. Items without a label (skipped, unlabelled, missing) are left out
@@ -359,11 +363,14 @@ def collect(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
         return state, sha256_text(rec.output)
 
     states = {it["key"]: output_now(it) for it in main}
+    # The Qwen3Guard id a judgement must carry names the precision the round was drawn in.
     judged = load_judgements(
-        [Target(it["key"], it["variant"], it["set"], it["lang"], it["split"], it["pid"], states[it["key"]][1])
+        [Target(it["key"], it["variant"], it["set"], it["lang"], it["split"], it["pid"], states[it["key"]][1],
+                docs[it["round"]].get("dtype"))
          for it in main],
         qwen3guard_judge=qwen3guard_judge, frontier_judge=frontier_judge)
     checks["stale_judgements"] = dict(judged.stale)
+    checks["other_judges"] = dict(judged.other)
     # A round drawn in another precision than generation.dtype is scored only while Gate 0's licence
     # covers every cell it reads: the generations (load_pool checked those of a readable file), the
     # judgements scored here (Qwen3Guard's GPU class), and the licence itself for a file not readable now.
@@ -775,6 +782,9 @@ def render_score(doc: dict) -> str:
               ]
     if c.get("prompt_file_missing"):
         lines.append(f"- Labelled items whose prompt file is missing here: {c['prompt_file_missing']}.")
+    if c.get("other_judges"):
+        lines.append("- Items judged by a judge the config does not name, never scored (by judge id): "
+                     + ", ".join(f"`{j}` {n}" for j, n in sorted(c["other_judges"].items())) + ".")
     if c.get("labels_changed_since_decision"):
         lines.append(f"- Labels changed since the judge decision: "
                      f"{', '.join(c['labels_changed_since_decision'])}.")

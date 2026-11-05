@@ -14,8 +14,10 @@ from validation_fakes import (
     PRIMARY_ID,
     build_world,
     fill_sheet,
+    frontier_judge_id,
     make_generation,
     other_label,
+    qwen_judge_id,
     truth,
     use_world,
     write_generations,
@@ -213,15 +215,25 @@ def test_a_refused_redraw_names_the_option_that_differs(tmp_path, monkeypatch):
 
 
 def test_judge_pins_match_the_harness_id_forms():
-    qwen_a = "Qwen/Qwen3Guard-Gen-4B@aaaa#bf16"
-    qwen_b = "Qwen/Qwen3Guard-Gen-4B@bbbb#bf16"
+    # Two revisions of the configured Qwen3Guard both fit its rule while the config pins none.
+    qwen_a, qwen_b = qwen_judge_id(revision="a" * 40), qwen_judge_id(revision="b" * 40)
     assert judge_kind(qwen_a) == judge_kind(qwen_b) == "qwen3guard"
     assert judge_kind(FRONTIER_ID) == "frontier"
-    for pin in (qwen_a, "Qwen/Qwen3Guard-Gen-4B@aaaa"):            # with or without the #dtype
+    for pin in (qwen_a, qwen_a.split("#", 1)[0]):                  # the whole id, or model@revision
         assert judge_kind(qwen_a, qwen3guard_judge=pin) == "qwen3guard"
         assert judge_kind(qwen_b, qwen3guard_judge=pin) is None     # never relabelled as frontier
         assert judge_kind(FRONTIER_ID, qwen3guard_judge=pin) == "frontier"
-    assert judge_kind(FRONTIER_ID, frontier_judge=FRONTIER_ID.split("@")[0]) == "frontier"
+    # The whole id, the FrontierJudge id (up to the rules tag), or provider/model alone.
+    for pin in (FRONTIER_ID, FRONTIER_ID.split("#", 1)[0], FRONTIER_ID.split("@", 1)[0]):
+        assert judge_kind(FRONTIER_ID, frontier_judge=pin) == "frontier"
+    assert judge_kind(frontier_judge_id(api="2026-11-02"), frontier_judge=FRONTIER_ID) is None
+    # W2-05: harness ids of judges the config does not name are no kind, whatever a pin says: another
+    # mode, precision, labelling rules or rubric, another model, or an id without the rules tag.
+    for other in (qwen_judge_id(mode="loose"), qwen_judge_id(dtype="fp16"),
+                  qwen_judge_id(rules="rules-0000abcd"), frontier_judge_id(rubric="safety_v0:0123456789ab"),
+                  "Qwen/Qwen3Guard-Gen-4B@aaaa#bf16#strict", "otherprovider/other-model@2026-11-02"):
+        assert judge_kind(other) is judge_kind(other, qwen3guard_judge=other, frontier_judge=other) is None
+    assert judge_kind(qwen_judge_id(dtype="fp16"), dtype="fp16") == "qwen3guard"     # outputs drawn in fp16
 
 
 def test_a_pin_that_matches_no_judgement_is_an_error(tmp_path, monkeypatch):
@@ -399,11 +411,18 @@ def test_the_fallback_judge_never_switches_and_its_decision_is_robust(tmp_path, 
     keys = [it["key"] for it in load_round(1)["items"]]
     world.primary_flip |= set(keys[:40])
     write_judgements(world)
-    for path in (world.outputs / "judgements" / "frontier").rglob("*.jsonl"):
-        write_jsonl(path, [{**r, "judge": "CohereLabs/aya-expanse-8b@abc123"} for r in read_jsonl(path)])
     hi = [it["item_id"] for it in load_round(1)["items"] if it["sheet"] == "round1_hi"]
     import_truth(world, leave=set(hi[:2]))
+    # Only a configured judge's judgements are read (W2-05), so the fallback is in play once the frontier
+    # judge the config names is the fallback model (judges.safety_fallback names it).
+    from lift import config
+
+    load = config.load
+    changed = copy.deepcopy(load("project"))
+    changed["judges"]["safety_fallback"]["id"] = FRONTIER_ID.split("@", 1)[0]
+    monkeypatch.setattr(config, "load", lambda name="project": changed if name == "project" else load(name))
     doc = scoring.decide_primary_judge(dry_run=True, allow_incomplete=True)
+    assert doc["frontier_kind"] == "fallback"
     assert doc["rule_met"] and not doc["rule_applies"] and not doc["switch_primary"]
     assert doc["diagnostics"]["skips"]["robust_to_skips"] is True
 
@@ -487,7 +506,7 @@ def test_the_decision_texts_use_the_configured_threshold(tmp_path, monkeypatch):
 
 T4_REV, T4_DECODING, T4_DIGEST = "c" * 40, "d" * 16, "e" * 64   # Global's sha, decoding digest, the bf16 run
 T4_STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "7.5"}
-QWEN_FP16 = PRIMARY_ID + "#fp16#strict"         # the harness's id for Qwen3Guard run in fp16, strict mapping
+QWEN_FP16 = qwen_judge_id(dtype="fp16")         # the harness's id for Qwen3Guard run in fp16, strict mapping
 
 
 def t4_run(world, *, made_on="7.5", judged_on=None):
