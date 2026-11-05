@@ -212,8 +212,9 @@ included (`lift train` and `lift gate` never exit 3). A cell is skipped when:
 - **It was made in another precision**: its generations were made in another dtype than this run's
   (fp16 on a T4, say). Run with `--dtype <that dtype>` on the kind of GPU that made them, or leave
   the cell out with `--sets`/`--langs`. This is never a restart, which would discard them. The score
-  files of `lift belebele` and `lift heldout-loss` follow the same rule: their listing gives the
-  file's `--dtype` or leaving it out, never a `--restart` line, and `--restart` skips such a cell.
+  files of `lift belebele` and `lift heldout-loss` are per precision (another precision than bf16 is
+  named `-{dtype}`), so a run never meets another precision's; only a hand-placed file holding
+  another precision's scores is listed (exit 3), and `--restart` never starts it over.
 - **Its judge differs**: its judgements file was made by another judge (another judge id, which
   shows the judge's dtype and mode). Run with that judge, or the printed
   `lift restart ... --judge ROLE` line.

@@ -36,11 +36,16 @@ first on main).
     - Precision: bf16 weights and autocast on a GPU with native bf16, fp16 on a T4, fp32 only on the
       CPU (tests); the LoRA weights stay fp32 or the run stops. A seed is refused when another seed's
       adapter of the same candidate and recipe was trained in another precision or GPU class.
-    - After saving: the adapter hash, merge parity on Gate 0's own parity sample (20 dev prompts,
-      `mixed_sample(20, split="dev", seed=20261107)`), and a push of outputs/adapters/{name} at once (a
-      push error never fails training; the sync preflight runs before GPU time). Every token must match
-      in fp32, or the adapter is not registered (rule 9). On a T4 only, where an fp32 copy may not fit,
-      `--parity-dtype fp16` records the share that match and registers the adapter with a warning.
+    - After saving: the adapter hash, merge parity on 20 dev prompts drawn by Gate 0's parity rule
+      (`mixed_sample(20, split="dev", seed=20261107)`) from the dev prompts as they are now (Gate 0's own
+      sample while those pools are unchanged; the pids drawn are recorded), and a push of
+      outputs/adapters/{name} at once (a push error never fails training; the sync preflight runs
+      before GPU time). Every token must match in fp32, or the adapter is not registered (rule 9). On a
+      T4 only, where an fp32 copy may not fit, `--parity-dtype fp16` records the share that match and
+      registers the adapter with a warning. An fp32 parity recorded later for the same hash decides: if
+      it fails, the adapter is un-registered (its entry removed by lift train and, on the laptop, by
+      `lift register-adapter`), and `build_variant` and Gates 1 and 2 refuse any adapter whose
+      registration.json records a failed fp32 parity for its hash.
     - Registration: the GPU job writes the configs/variants.yaml entry, which is lost with the VM
       (configs/ is not synced), and outputs/adapters/{name}/registration.json, which is pushed. On the
       laptop, `lift sync pull` then `lift register-adapter NAME` writes the same entry from the pulled
@@ -69,10 +74,14 @@ first on main).
       (intervention digest, pinned adapter hash), harness version or pinned models.global revision has
       moved since. Metrics are version 2 and name the answer files, verdict file, adapter hash and
       intervention they describe.
-    - A refused pair, and `lift restart` of a utility cell (of stock's: every candidate's), set aside
-      and empty what was derived from it (verdicts, metrics, check records, AuditKIT records), so no
-      number outlives the answers it describes; sync never deletes, so the files are emptied, not
-      removed.
+    - A refused pair sets aside and empties what was derived from it (verdicts, metrics, AuditKIT
+      records), so no number outlives the answers it describes, but keeps the answer-check records:
+      check_answers re-validates them on every read, and a refusal this checkout causes (a registry
+      behind the GPU job's ref) must not destroy what only a GPU line can remake. `lift restart` of a
+      utility cell (of stock's: every candidate's) also retires the check records. A side the GPU
+      line's generate refuses as stale has its check withdrawn and the pair's derived files set aside,
+      so the job's push carries the refusal to the laptop. Sync never deletes, so the files are
+      emptied, not removed.
     - Hindi fidelity is the share of outputs whose top GlotLID label is in accept_labels.hi (the
       is_lang share is reported beside it), pooled and by source (Aya references are human-written,
       IndicAlign's machine-translated).
@@ -93,7 +102,9 @@ first on main).
       costed from usage at batch prices.
     - A create is never retried after a failure that may have gone through (the API takes no
       idempotency key): the run stops and a rerun sends at most that one chunk again. A batch in which
-      no request succeeded stops the run instead of being resent one request at a time.
+      no request succeeded stops a pre-fill run instead of being resent one request at a time; a
+      synchronous run treats one a person canceled before any request finished as collected and sends
+      its requests itself.
     - Resume: a state file beside the call cache (every row with a unique "key", so sync merges it)
       lets a rerun on any machine collect a batch instead of paying for it twice. A synchronous run
       collects an earlier batch holding its requests, or stops while it still runs. A batch still
@@ -112,11 +123,13 @@ first on main).
     - Held-out loss: the utility dev split unless --split final (rule 1), per-token NLL of the
       reference answer's assistant tokens, never truncated, pooled and by source; against stock only
       when stock's scores share the configuration and token counts.
-    - Score files are keyed through `lift.cachekey.generation_key` and hold one configuration and one
-      stack. `--restart` sets aside and empties only a cell that is stale under the run's own precision;
-      a cell made in another precision is never started over (listed, exit 3). Metrics in another
-      precision are named -{dtype}, and a language whose scores no longer qualify leaves only its own
-      numbers out.
+    - Score files are keyed through `lift.cachekey.generation_key`, hold one configuration and one
+      stack, and are per precision: another precision than generation.dtype is named -{dtype}, as the
+      metrics are, so a T4 run never takes a Colab cell's file and each precision pairs with its own
+      stock scores (found in review: the first precision to score a cell would otherwise have locked
+      the other out). `--restart` sets aside and empties only a stale cell; a hand-placed file holding
+      another precision's scores is refused (listed, exit 3), never started over. A language whose
+      scores no longer qualify leaves only its own numbers out.
 54. **Gates 1 and 2** (`lift gate`).
     - Gate 1's gain check compares each seed-1 standard adapter's dev win rate (the point estimate, as
       the README states it, exactly as k/4n; failed orders as ties) with 0.55 and prints its interval and

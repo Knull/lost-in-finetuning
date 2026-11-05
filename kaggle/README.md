@@ -184,9 +184,9 @@ long stage into several lines.
   as made in another precision, listed, and the line exits 3. Never restart such a cell from here:
   a restart would discard its bf16 outputs, so `lift restart --dtype fp16` refuses it, with nothing
   moved, unless `--force` is given, which is never right here. The score files of `lift belebele`
-  and `lift heldout-loss` (outputs/scores/) follow the same rule: a bf16 score cell is listed as made
-  in another precision and the line exits 3, and `--restart` never starts it over. Leave it out with
-  `--langs` (or leave the heldout-loss line out).
+  and `lift heldout-loss` (outputs/scores/) need none of this: a precision other than bf16 gets its
+  own files (`...-fp16.jsonl`, as the metrics do), so a T4 line never meets Colab's score cells, and
+  each precision's held-out loss pairs with stock's scores in the same precision.
 - **Two GPUs.** A T4 x2 is two separate 16 GB devices. The generator runs on `cuda:0` and the judge
   on `cuda:1`: `--judge-device auto` (run-dev and smoke) and `--device auto` (judge) pick `cuda:1`
   when there are two GPUs. In `lift run-dev`, both work at the same time. `lift train` runs one

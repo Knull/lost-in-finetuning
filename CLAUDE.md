@@ -98,10 +98,10 @@ six languages, so pairing, splitting and clustering all go by pid.
 - Generations: `outputs/generations/{variant}/{set}_{lang}_{split}.jsonl`
 - Judgements: `outputs/judgements/{judge}/{variant}/{set}_{lang}_{split}.jsonl`
 - Utility verdicts: `outputs/utility/{judge}/{variant}/utility_hi_{split}.jsonl`; per-item
-  log-likelihood scores: `outputs/scores/{belebele,heldout_loss}/{variant}/*.jsonl`. Never put either
+  log-likelihood scores: `outputs/scores/{belebele,heldout_loss}/{variant}/*[-{dtype}].jsonl`. Never put either
   under outputs/judgements/ or outputs/metrics/auditkit/{judge}/{variant}/: lift.sync pairs those
   with safety cells.
-- Metrics: `outputs/metrics/{utility,belebele,heldout_loss}/{variant}_{split}.json`,
+- Metrics: `outputs/metrics/{utility,belebele,heldout_loss}/{variant}_{split}[-{dtype}].json`,
   `outputs/metrics/gate{0,1,2}.json`
 - Adapters: `outputs/adapters/{name}/` (name `adapter-{candidate}-{std|stress}-s{seed}`)
 - Run manifests (cost section): `outputs/manifests/*.json`
