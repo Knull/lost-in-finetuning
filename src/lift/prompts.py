@@ -24,7 +24,8 @@ SAFETY_SETS: tuple[str, ...] = ("harmful", "easy_benign", "hard_benign")
 def load(set_name: str, lang: str, split: str | None = None) -> list[PromptRecord]:
     """PromptRecords of one set and language (optionally one split), sorted by pid. The split is the
     committed one (build.load_prompts refuses a file whose stamps differ from data/splits), and every
-    frozen pid of the splits returned is there (or was left out on purpose: a reader's bad verdict)."""
+    frozen pid of the splits returned is there, unless the file's report lists it as left out on
+    purpose (a reader's bad verdict; a fit record whose text a dev/final record has)."""
     from lift.data import build
 
     rows = build.load_prompts(set_name, lang, split)
