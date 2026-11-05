@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import copy
 import csv
+import inspect
 import json
 import math
 import random
 import re
+import shlex
 from collections import defaultdict
 from pathlib import Path
 
@@ -31,13 +33,16 @@ from validation_fakes import (
 
 from lift import config, sync
 from lift.cli import main
+from lift.commands import run as run_cmd
 from lift.io import read_jsonl, sha256_file, write_jsonl
-from lift.models.generate import ASIDE_DIR
+from lift.judge import pipeline
+from lift.judge.pipeline import JudgeOutcome
+from lift.models.generate import ASIDE_DIR, generations_path
 from lift.schemas import UtilityVerdict
 from lift.stats.agreement import cohens_kappa, percent_agreement
 from lift.validation.outputs import Prompts
-from lift.validation.sample import load_round, make_sheets
-from lift.validation.second_judge import second_judge_dir, second_judge_sample
+from lift.validation.sample import DEFAULT_SEED, load_round, make_sheets
+from lift.validation.second_judge import chosen_pids, second_judge_dir, second_judge_sample
 from lift.validation.store import ValidateError
 from lift.validation.utility import (
     UTILITY_COLUMNS,
@@ -311,6 +316,69 @@ def test_cli_second_judge_sample(tmp_path, monkeypatch, capsys):
         keys = f"validation/keys/second_judge/{name}.txt"
         assert re.search(rf"--variant {re.escape(variant)} --split {split} --sets [a-z_ ]+ --langs [a-z ]+ "
                          rf"--keys {re.escape(keys)}", printed)
+
+
+# R2-08: decisions item 31's random part is drawn twice. P04's lists (lift.validation.second_judge, ranked
+# with lift.validation.sample.DEFAULT_SEED, a share of second_judge_fraction) are the canonical path; the
+# harness's `lift judge --judge second --sample F` (lift.judge.pipeline.second_judge_pids through judge_file,
+# ranked with split_seed: lift judge has no --seed) must reproduce them exactly, and it is what a restart's
+# refill line runs while P04 has drawn no list (lift.commands.run._judge_line). So that neither draw can move
+# alone: the seeds and the shares are one, and the two samplers draw the same pids.
+
+class FakeLID:
+    def top(self, text, k=5):
+        return [("hin_Deva", 0.99)][:k]
+
+
+class FakeSecondJudge:
+    """Stands in for the second judge: every output a refusal, written to outputs/judgements/fake/."""
+
+    judge_id = "fake-second-judge@0001"
+    short = "fake"
+
+    def judge(self, items):
+        return [JudgeOutcome("refusal", {"call": "refuse"}, "raw") for _ in items]
+
+
+def refill_fraction(cell=("stock", "harmful", "hi", "dev")) -> float:
+    """The --sample share of the line that refills the second judge's file of ``cell`` while P04 has drawn
+    no key list for it, read from the line the code builds."""
+    words = shlex.split(run_cmd._judge_line(*cell, role="second", dtype="bf16"))
+    assert "--sample" in words and "--keys" not in words, words
+    return float(words[words.index("--sample") + 1])
+
+
+def test_p04s_default_seed_is_the_split_seed_the_harness_samples_with():
+    assert DEFAULT_SEED == int(config.get("split_seed"))
+    assert inspect.signature(second_judge_sample).parameters["seed"].default == DEFAULT_SEED
+
+
+def test_the_refill_lines_sample_is_the_configured_second_judge_share():
+    assert refill_fraction() == float(config.get("second_judge_fraction"))
+
+
+def test_the_harness_sample_judges_exactly_p04s_random_part(tmp_path, monkeypatch):
+    monkeypatch.setattr("lift.manifest.git_sha", lambda: "test")          # judge_file's run manifests
+    world = second_judge_world(tmp_path, monkeypatch, dev=("stock",), final=("stock",), langs=("hi", "en"))
+    cells = sorted(cell for cell in world.generations if cell[1] != "utility")
+    # Each cell's refill line, run as lift judge runs it (judge_file's sample= and its default seed) before
+    # P04 has drawn any list, then P04's draw as `lift validate second-judge-sample --no-validated` makes it.
+    judged = {}
+    for cell in cells:
+        out = pipeline.judge_file(generations_path(*cell), judge=FakeSecondJudge(), lid=FakeLID(),
+                                  sample=refill_fraction(cell))
+        judged[cell] = {r["pid"] for r in read_jsonl(out)}
+    second_judge_sample(require_validated=False)
+    listed = set(key_lists()["random.txt"])
+    p04 = {cell: {g.pid for g in world.generations[cell] if g.key in listed} for cell in cells}
+    assert all(p04.values()) and ("stock", "redteam", "hi", "final") in p04
+    assert {c: sorted(pids) for c, pids in judged.items()} == {c: sorted(pids) for c, pids in p04.items()}
+    # And the two samplers are one draw at any share and seed, set and split.
+    for fraction, seed in ((0.1, DEFAULT_SEED), (0.25, DEFAULT_SEED), (0.5, 7)):
+        p04_draw = chosen_pids(Prompts(), fraction, seed)
+        assert len(p04_draw) == 7                         # three sets in dev and final, and redteam final
+        harness = {k: pipeline.second_judge_pids(*k, fraction, seed) for k in p04_draw}
+        assert harness == p04_draw, (fraction, seed)
 
 
 # ---------------------------------------------------------------------------------------------
