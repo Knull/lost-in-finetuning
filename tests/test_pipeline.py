@@ -19,9 +19,10 @@ from fakes import make_prompt
 from lift import config, gate0
 from lift.io import read_jsonl, sha256_text, stable_json, write_jsonl
 from lift.judge import labels, pipeline
+from lift.judge.frontier import load_rubric
 from lift.judge.pipeline import JudgeItem, JudgeOutcome
 from lift.models.generate import OtherPrecisionError, StaleOutputError, generations_path, restart_command
-from lift.paths import manifests_dir, metrics_dir, validation_dir
+from lift.paths import REPO_ROOT, manifests_dir, metrics_dir, validation_dir
 from lift.schemas import GenerationRecord
 
 CELL = ("stock", "harmful", "en", "dev")
@@ -29,7 +30,10 @@ LONG = "placeholder words that make a long enough answer"
 GUARD_ID = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
 RULES = labels.rules_tag()                      # the labelling rules of configs/project.yaml
 PRIMARY = f"{GUARD_ID}#{RULES}#bf16#strict"     # the configured primary judge, in bf16 and strict mode
-SECOND = f"openai/placeholder-model@safety_v1:0123456789ab+t0+max1024#{RULES}"
+# What FrontierAdapter names the second judge that ``second_judge`` configures: the rubric's version, OpenAI's
+# default sampling (temperature 0, 1024 tokens), the API version its SDK speaks and the labelling rules.
+SECOND = (f"openai/placeholder-model@{load_rubric(config.get('judges.safety_second.rubric')).version}"
+          f"+t0+max1024+apichat.completions:developer#{RULES}")
 REV = "c" * 40                                  # Global's commit sha, as generate records it in meta
 STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}      # an A100
 L4 = {**STACK, "gpu_capability": "8.9"}
@@ -61,7 +65,7 @@ def judge_stack(monkeypatch):
 
 @pytest.fixture
 def second_judge(monkeypatch):
-    """judges.safety_second with a chosen model (configs/project.yaml still says TBD); its judge id."""
+    """judges.safety_second with a placeholder OpenAI model; the id its judge writes (``SECOND``)."""
     entry = config.load("project")["judges"]["safety_second"]
     monkeypatch.setitem(entry, "provider", "openai")
     monkeypatch.setitem(entry, "model", "placeholder-model")
@@ -1162,6 +1166,64 @@ def test_a_partial_read_still_refuses_stale_judgements(fake_prompt_files, second
     pipeline.judge_file(path, judge=other, lid=FakeLID(), keys=[gens[1].key])
     with pytest.raises(ValueError, match="not the configured second judge openai/placeholder-model@"):
         pipeline.load_labels(*CELL, judge="second", complete=False)
+
+
+def offline_frontier(monkeypatch):
+    """make_judge's frontier judges answer from a FakeProvider (every item REFUSAL, the preflight BENIGN):
+    no SDK, key, spend cap or network."""
+    from lift.judge import frontier
+
+    class Offline(frontier.FrontierJudge):
+        def __init__(self, *args, **kwargs):
+            reply = frontier.FakeProvider.reply("REFUSAL")
+            super().__init__(*args, client=frontier.FakeProvider(lambda call: reply), **kwargs)
+
+    monkeypatch.setattr(frontier, "FrontierJudge", Offline)
+    monkeypatch.delenv(frontier.SPEND_CAP_ENV, raising=False)
+
+
+def test_a_frontier_judges_cells_are_read_only_under_its_configured_rubric_and_settings(
+        fake_prompt_files, monkeypatch, tmp_path):
+    """R1-09: for a frontier role the read required only ``{provider}/{model}@``, so cells judged before the
+    rubric was revised (its header: an edit "invalidates earlier judgements") or before the judge's entry
+    gained a setting were reported as the configured judge's. A frontier judge's id must now be the role's
+    configured judge exactly (rubric version, sampling settings, labelling rules) but for the API version its
+    SDK speaks (constraints.txt pins the SDK)."""
+    offline_frontier(monkeypatch)
+    judge = pipeline.make_judge("second")                 # judges.safety_second as configured
+    rule, shown = pipeline._expected_judge("second", "bf16")
+    assert rule.fullmatch(judge.judge_id)
+    pids, gens, path = setup_cell(fake_prompt_files, n=4)
+    pipeline.judge_file(path, judge=judge, lid=FakeLID(), keys=[g.key for g in gens[:2]])
+    sampled = {p: "refusal" for p in pids[:2]}
+    assert pipeline.load_labels(*CELL, judge="second", complete=False) == sampled
+
+    entry = config.load("project")["judges"]["safety_second"]
+    v1 = (REPO_ROOT / entry["rubric"]).read_bytes()
+    v2 = v1.replace(b"You are a careful content-safety", b"You are a meticulous content-safety")
+    assert v2 != v1
+    (tmp_path / "safety_v2.md").write_bytes(v2)               # an edit, made the way the rubric's header says
+    moves = {"rubric": (entry, "rubric", str(tmp_path / "safety_v2.md")),
+             "max_tokens": (entry, "max_tokens", 64), "effort": (entry, "effort", "medium"),
+             "rules": (config.load("project")["unclear"], "min_new_tokens", 50)}
+    for name, (node, key, value) in moves.items():
+        with monkeypatch.context() as m:
+            m.setitem(node, key, value)
+            assert pipeline.make_judge("second").judge_id != judge.judge_id, name
+            with pytest.raises(ValueError, match="not the configured second judge"):
+                pipeline.load_labels(*CELL, judge="second", complete=False)
+    assert pipeline.load_labels(*CELL, judge="second", complete=False) == sampled
+
+    api = judge.judge_id.replace("+apifake#", "+api2027-01-15#")      # another SDK's API version: same judge
+    assert api != judge.judge_id and rule.fullmatch(api)
+    assert shown == judge.judge_id.replace("+apifake#", "+api<version>#")
+    judges = config.load("project")["judges"]                          # the decision rule swaps the entries
+    qwen = dict(judges["safety_primary"])
+    monkeypatch.setitem(judges, "safety_primary", dict(entry, max_tokens=512))
+    monkeypatch.setitem(judges, "safety_second", qwen)
+    primary = pipeline.make_judge("primary")                           # its own entry's settings
+    assert "+max512+" in primary.judge_id and pipeline._expected_judge("primary", "bf16")[0].fullmatch(
+        primary.judge_id)
 
 
 class FakeGuard:

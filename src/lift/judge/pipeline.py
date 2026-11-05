@@ -59,8 +59,9 @@ Reading:
   be of a generation now in the generations file, of its current output, made from the current
   prompt text; every generation of the cell in ``dtype`` under one run configuration and one stack;
   every judgement on one judge stack; and the judge must be the role's configured judge (model,
-  revision when pinned to a sha, the labelling rules now in force, and for Qwen3Guard the precision and
-  Controversial mode).
+  revision when pinned to a sha, the labelling rules now in force; for Qwen3Guard the precision and
+  Controversial mode; for a frontier judge everything its id names but the API version, so the rubric's
+  version and the sampling settings of the role's entry too: an edited rubric is another judge).
   ``dtype`` defaults to ``generation.dtype`` (one precision for every reported number); any other needs Gate
   0's licence (``check_dtype_licence``), because every ``--dtype`` run names its dtype: a comparison
   that paired with the bf16 Gate 0 run gate0.json records now, and a cell made under the harness and
@@ -915,14 +916,24 @@ def load_judgements(variant: str, set_name: str, lang: str, split: str, *,
 
 
 def _expected_judge(role: str, dtype: str) -> tuple[re.Pattern[str], str]:
-    """The judge ids a reported file of ``role`` may hold, and how to name them: the configured model
-    (and revision, when the config pins a sha), then the tag of the labelling rules now in force
-    (``#{labels.rules_tag()}``); for Qwen3Guard also ``#{dtype}#{mode}``."""
+    """The judge ids a reported file of ``role`` may hold, and how to name them. A frontier judge's id is
+    the configured judge's exactly but for the API version its SDK speaks: the provider, model, rubric
+    version (file stem and sha) and sampling settings of the role's entry, as ``FrontierJudge.judge_id``
+    names them, then the tag of the labelling rules now in force (``#{labels.rules_tag()}``). A Qwen3Guard
+    id names the configured model (and revision, when the config pins a sha), then the rules tag and
+    ``#{dtype}#{mode}``."""
     entry = _judge_entry(role)
     rules = f"#{labels.rules_tag()}"
     if _entry_kind(role, entry) == "frontier":
-        prefix = f"{entry.get('provider')}/{entry.get('model')}@"
-        return re.compile(re.escape(prefix) + ".+" + re.escape(rules)), prefix + "..." + rules
+        from lift.judge.frontier import _check_choice, _settings, _settings_tag, load_rubric
+
+        provider, model, where = entry.get("provider"), entry.get("model"), _ROLE_ENTRIES[role]
+        _check_choice(provider, model, where)
+        settings = _settings(provider, where, {})
+        tag = _settings_tag(settings["temperature"], settings["effort"], settings["thinking"],
+                            settings["max_tokens"])
+        head = f"{provider}/{model}@{load_rubric(entry['rubric']).version}+{tag}+api"
+        return re.compile(re.escape(head) + "[^#]+" + re.escape(rules)), f"{head}<version>{rules}"
     revision = str(entry.get("revision", ""))
     pinned = bool(_SHA.fullmatch(revision))
     tail = f"{rules}#{dtype}#{_controversial_mode(role, entry)}"
