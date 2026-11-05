@@ -78,12 +78,17 @@ Rules, and why:
   (``generation.{side}.checked``: its path and sha256, and the run configuration, adapter hash,
   intervention, model revision and harness it names).
 - Retired, never left behind (``retire``). What lift utility derived from a pair (both judge dirs' verdict
-  files, the metrics, the AuditKIT utility records, the answer check) must not outlive the answers it
-  describes: P04 reads verdicts by pid and Gate 1 reads the metrics. When ``evaluate`` refuses a pair, and
-  when ``lift restart`` starts a utility cell over (for stock's cell, every candidate's: each was paired
-  with stock's answers), they are copied to outputs/.aside/ (never synced; verdict copies are named
-  ``*.jsonl.aside``) and left empty, never removed: sync never deletes, so the next push replaces the runs
-  repo's copies, and every reader takes an empty file for none.
+  files, the metrics, the AuditKIT utility records) must not outlive the answers it describes: P04 reads
+  verdicts by pid and Gate 1 reads the metrics. When ``evaluate`` refuses a pair, and when ``lift restart``
+  starts a utility cell over (for stock's cell, every candidate's: each was paired with stock's answers),
+  they are copied to outputs/.aside/ (never synced; verdict copies are named ``*.jsonl.aside``) and left
+  empty, never removed: sync never deletes, so the next push replaces the runs repo's copies, and every
+  reader takes an empty file for none. A refused pair keeps its answer checks. ``check_answers`` reads
+  each one again on every run, against its file, the registry, the harness and the pin, so a kept check
+  never lets stale answers through, while only a GPU line can make one again; and a refusal may be this
+  checkout's own (a registry entry, harness or pin it is behind the GPU job's ref on), which a git pull
+  settles: ``--judge-only`` then judges the pair again (the frontier judge from its call cache), with no
+  GPU line. A check goes only with the answers it names (``lift restart`` of the cell).
 - No instruction, answer or judge reason is ever logged: counts, ids, paths and hashes only.
 """
 
@@ -719,18 +724,22 @@ def set_aside(path: Path) -> Path | None:
     return _set_aside(path, aside_root(), suffix=ASIDE_SUFFIX).copy
 
 
-def retire(variant: str, split: str, dtype: str | None = None, *,
-           aside: Path | None = None) -> list[SetAside]:
+def retire(variant: str, split: str, dtype: str | None = None, *, aside: Path | None = None,
+           check: bool = True) -> list[SetAside]:
     """Retire what lift utility derived from ``variant``'s pair with stock on ``split`` (module docstring):
     both judge dirs' verdict files, the metrics .json and .md, the AuditKIT utility records (redacted and
-    full) and the recorded answer check, ``dtype``'s files, or every precision's when ``dtype`` is None (a
-    restart: the answers it sets aside are one file, whatever their precision). Each is copied under
-    ``aside`` (default a new outputs/.aside/<UTC stamp>, never synced; a verdict file's copy named
-    ``*.jsonl.aside``, so P04's scan of every .jsonl under outputs/ never reads it as current verdicts) and
-    left empty, never removed: sync never deletes, so a removed file would come back at the next pull, while
-    an emptied one is a local edit the next push sends. An empty file is none to every reader (Gate 1,
-    P04, ``reusable``, ``check_answers``). Returns what happened to each file (``SetAside``; records None for
-    a file that is not here, no copy for an empty one)."""
+    full) and, with ``check``, the variant's recorded answer check; ``dtype``'s files, or every precision's
+    when ``dtype`` is None (a restart: the answers it sets aside are one file, whatever their precision).
+    ``check`` is for ``lift restart`` of the cell, which sets aside the answers the check names. A refused
+    pair passes False (``_retire_refused``): ``check_answers`` reads a kept check again on every run, so it
+    never lets stale answers through, while only a GPU line could make it again, and a refusal this
+    checkout settles with a git pull must not need one. Each file is copied under ``aside`` (default a new
+    outputs/.aside/<UTC stamp>, never synced; a verdict file's copy named ``*.jsonl.aside``, so P04's scan
+    of every .jsonl under outputs/ never reads it as current verdicts) and left empty, never removed: sync
+    never deletes, so a removed file would come back at the next pull, while an emptied one is a local edit
+    the next push sends. An empty file is none to every reader (Gate 1, P04, ``reusable``,
+    ``check_answers``). Returns what happened to each file (``SetAside``; records None for a file that is
+    not here, no copy for an empty one)."""
     from lift.audit import TEXT_POLICIES, utility_record_path
 
     aside = aside or aside_root()
@@ -742,7 +751,8 @@ def retire(variant: str, split: str, dtype: str | None = None, *,
         for judge_dir in JUDGE_DIRS:
             for text in TEXT_POLICIES:
                 files[utility_record_path(judge_dir, variant, split, text=text, dtype=d)] = ""
-        files[checked_path(variant, split, dtype=d)] = ""
+        if check:
+            files[checked_path(variant, split, dtype=d)] = ""
     return [_set_aside(path, aside, suffix=suffix) for path, suffix in files.items()]
 
 
@@ -1043,13 +1053,16 @@ def _judge_into(path: Path, pairing: Pairing, judge: Any, *, judge_dir: str, pre
 
 
 def _retire_refused(variant: str, split: str, dtype: str) -> None:
-    """``retire`` a refused pair's derived files in ``dtype``, logging what went: paths and counts only."""
+    """``retire`` a refused pair's derived files in ``dtype``, logging what went: paths and counts only. Both
+    sides' answer checks are kept (``retire``'s ``check``): the refusal may be this checkout's own, which a
+    git pull settles with no GPU line, and ``check_answers`` reads every kept check again."""
     aside = aside_root()
-    done = [s for s in retire(variant, split, dtype, aside=aside) if s.copy is not None]
+    done = [s for s in retire(variant, split, dtype, aside=aside, check=False) if s.copy is not None]
     if done:
         log.warning("%s vs %s, %s_%s_%s: the pair is refused, so the %d files derived from it are set aside "
-                    "in %s and left empty, and no reader takes them for current: %s", variant, REFERENCE, SET,
-                    LANG, split, len(done), aside, ", ".join(logical(s.path) for s in done))
+                    "in %s and left empty, and no reader takes them for current (the answer checks are kept, "
+                    "and checked again on every run): %s", variant, REFERENCE, SET, LANG, split, len(done),
+                    aside, ", ".join(logical(s.path) for s in done))
 
 
 @dataclass(frozen=True)
@@ -1073,10 +1086,11 @@ def evaluate(variant: str, split: str, *, judge_dir: str = "frontier", dtype: st
     """Pair, check (``check_answers``), judge (or reuse a current verdict file), report and record ``variant``
     against stock on the utility prompts of ``split`` (module docstring). ``judge`` and ``lid`` default to
     ``make_judge`` and ``make_lid`` (tests pass fakes). ``prefill`` applies to the frontier judge only. A pair
-    refused at pairing or checking has its derived files in ``dtype`` retired (``retire``) before the
-    UtilityRefused propagates, so nothing reads them as current; a refused verdict file (another judge's, or
-    unreadable) retires nothing, its remedy being --rejudge. A refused AuditKIT record (ValueError) is
-    returned in ``record_error``, the metrics being written; the frontier judge's stops and
+    refused at pairing or checking has its derived files in ``dtype`` (verdicts, metrics, AuditKIT records)
+    retired before the UtilityRefused propagates, so nothing reads them as current, and both answer checks
+    kept (``_retire_refused``): only ``lift restart`` of the cell retires a check. A refused verdict file
+    (another judge's, or unreadable) retires nothing, its remedy being --rejudge. A refused AuditKIT record
+    (ValueError) is returned in ``record_error``, the metrics being written; the frontier judge's stops and
     FrontierBatchPending propagate."""
     from lift import audit
 
