@@ -29,9 +29,10 @@ from validation_fakes import (
     write_verdicts,
 )
 
-from lift import config
+from lift import config, sync
 from lift.cli import main
 from lift.io import read_jsonl, sha256_file, write_jsonl
+from lift.models.generate import ASIDE_DIR
 from lift.schemas import UtilityVerdict
 from lift.stats.agreement import cohens_kappa, percent_agreement
 from lift.validation.outputs import Prompts
@@ -610,6 +611,28 @@ def test_score_utility_finds_verdicts_anywhere_under_outputs(tmp_path, monkeypat
     # Or read from the files given.
     given = score_utility(verdict_files=[path])
     assert given["n_judged"] == 20 and list(given["verdict_files"]) == [str(path)]
+
+
+def test_score_utility_never_reads_verdicts_from_what_lift_sync_never_syncs(tmp_path, monkeypatch):
+    # R1-42: outputs/.sync-backup (local copies a forced pull replaced), outputs/.aside (what lift restart
+    # set aside) and Gate 0's staging hold superseded or local-only copies. A UtilityVerdict names no
+    # generation key, so read as current verdicts they would fill in the pairs the current file lacks.
+    world = utility_world(tmp_path, monkeypatch)
+    items = draw(20)
+    answer(world, {it["item_id"]: "tie" for it in items})
+    scores = {it["pid"]: 1.0 for it in items}
+    current = write_verdicts(world, CANDIDATE, dict(list(scores.items())[:12]))   # 8 pairs not judged yet
+    stamp = "20261105T000000Z"
+    stores = (f"{ASIDE_DIR}/{stamp}/utility", f"{sync.BACKUP_DIR}/{stamp}/outputs/utility",
+              "gate0/bf16/precision.new")
+    aside, *_ = [write_verdicts(world, CANDIDATE, scores,
+                                path=world.outputs / store / CANDIDATE / "utility_hi_dev.jsonl")
+                 for store in stores]
+    out = score_utility()
+    assert (out["n_labelled"], out["n_judged"], out["n_missing"], out["complete"]) == (20, 12, 8, False)
+    assert [Path(f).resolve() for f in out["verdict_files"]] == [current.resolve()]
+    # Named on purpose (--verdicts), a set-aside copy is read like any other file.
+    assert score_utility(verdict_files=[aside], write=False)["n_judged"] == 20
 
 
 def test_score_utility_with_two_judges_needs_a_judge_id(tmp_path, monkeypatch):
