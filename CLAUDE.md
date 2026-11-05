@@ -142,8 +142,11 @@ six languages, so pairing, splitting and clustering all go by pid.
   key. One file never holds two stacks (torch, transformers, GPU class): a finished cell is reused
   on any stack, but an unfinished one resumes only on the stack that started it, or is made again
   with the `lift restart` line its refusal prints (a job line right after `lift sync pull`).
-  `lift generate`, `judge` and `run-dev` exit 3 when they finished but skipped cells (each listed
-  with its remedy); the runners go on with the next line.
+  `lift generate`, `judge`, `run-dev`, `utility`, `belebele` and `heldout-loss` exit 3 when they
+  finished but skipped cells or left some for a rerun (each listed with its remedy); the runners go
+  on with the next line (`lift train` and `lift gate` never exit 3). On a T4 every model line takes
+  `--dtype fp16`: `generate`, `judge`, `run-dev`, `train`, `utility --generate-only`, `belebele`
+  and `heldout-loss` (`lift train`'s other T4 flags are in kaggle/README.md, Jobs on a T4 x2).
 - **Secrets.** `HF_TOKEN` (with accepted access to tiny-aya-global and tiny-aya-base),
   `GITHUB_TOKEN` (remote runtimes clone this private repo), the judge API key with its spend cap
   `LIFT_JUDGE_MAX_USD` (per lift process), `LIFT_RUNS_REPO`, and `GOOGLE_TRANSLATE_API_KEY` (the
