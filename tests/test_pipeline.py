@@ -1868,3 +1868,26 @@ def test_a_judged_cell_whose_prompt_left_its_split_is_refused(fake_prompt_files)
         pipeline.load_labels(*CELL)
     with pytest.raises(ValueError, match=refusal):
         pipeline.paired_labels("stock", "stock", *CELL[1:])
+
+
+def test_load_records_refuses_generations_made_under_two_run_configurations(fake_prompt_files):
+    """R2-21: a cell is one run configuration (meta.run_config digests the chat template, the cap and the
+    stop ids, which no other read-time check sees): generations of two in one file (merged by hand, or a
+    writer's regression) are refused by every read and by a pair; the same records under one read."""
+    pids = [f"prh-test-{i:04d}" for i in range(4)]
+    fake_prompt_files[("harmful", "en")] = [make_prompt(p) for p in pids]
+    made_a = {"run_config": "a" * 16, "template": "9" * 16, "decoding": "d" * 16}      # the configured cap
+    made_b = {"run_config": "b" * 16, "template": "9" * 16, "decoding": "e" * 16}      # another cap
+    gens = [gen(p, meta=made_a) for p in pids[:2]] + [gen(p, tag="cap-512", meta=made_b) for p in pids[2:]]
+    path = write_gens(gens)
+    pipeline.judge_file(path, judge=primary_judge(), lid=FakeLID())         # judge_file never reads it
+    mixed = r"generations mix 2 run configurations \['a{16}', 'b{16}'\]"
+    for complete in (True, False):
+        with pytest.raises(ValueError, match=mixed):
+            pipeline.load_records(*CELL, complete=complete)
+    with pytest.raises(ValueError, match=mixed):
+        pipeline.load_labels(*CELL)
+    with pytest.raises(ValueError, match=mixed):
+        pipeline.paired_labels("stock", "stock", *CELL[1:])
+    write_gens([g.model_copy(update={"meta": {**g.meta, **made_a}}) for g in gens])
+    assert pipeline.load_labels(*CELL) == dict.fromkeys(pids, "benign")
