@@ -18,6 +18,19 @@ Rules, and why:
   (``pipeline._licence_problems``, the rule every safety cell is read under), and its files carry the dtype
   in their names, so they never replace the reported precision's. A refusal is a ``UtilityRefused`` that
   names its remedy.
+- Checked answers (``record_checked``, ``check_answers``). A pair is judged only from answer files a GPU line
+  checked against their variant as it is registered now. Every ``lift utility`` run but ``--judge-only``
+  loads both sides and passes each file through ``lift.models.generate.generate``, also when the file
+  answers every prompt: it appends nothing to a current file and refuses one made under another
+  configuration (another adapter or registry entry, model revision, chat template, decoding settings or
+  harness: a StaleOutputError naming the cell's ``lift restart`` line), so the answers of a replaced adapter
+  are never reported as the new one's (rule 4). The command then records the check beside the answers,
+  outputs/utility/checked/{variant}/utility_hi_{split}.json: the file's sha256 and run configuration, and
+  the adapter hash, intervention digest, model revision and harness version the variant was built with.
+  ``evaluate`` reads it without loading a model (``--judge-only``, on the laptop) and refuses a side whose
+  check is missing or names another file, or whose registry entry (its intervention digest, a pinned
+  adapter hash), harness version or pinned model revision has moved since: the GPU line checks it again
+  (``--generate-only``), or the cell's ``lift restart`` line starts it over.
 - Both orders. Every pair is judged twice in one ``pairwise`` call: order AB shows the candidate as A and
   stock as B, order BA the reverse. In each order the candidate scores 1 for a win, 0.5 for a tie and 0 for
   a loss (so "B" in order BA is a win), and the pair's score is the mean of its two orders: 1, 0.75, 0.5,
@@ -54,7 +67,20 @@ Rules, and why:
   and stays in the denominator); both answer files' provenance and cap-hit rates; and all of it again by
   source (pid utl-aya: Aya Dataset, human-written Hindi; utl-ind: IndicAlign Dolly_T, machine-translated).
   Metrics go to outputs/metrics/utility/{variant}_{split}.json and .md (UTF-8, LF, atomic), then
-  ``lift.audit.record_utility`` writes the AuditKIT record from the same files.
+  ``lift.audit.record_utility`` writes the AuditKIT record from the same files. Version 2 of the metrics
+  also names what the numbers were made from, so a reader can tell when they no longer describe the files
+  or the registry: besides each answer file's sha256 (``generation.{side}.file_sha256``) and the verdict
+  file's (``verdicts_sha256``), the candidate's adapter hash and intervention digest
+  (``candidate_adapter_hash``, ``candidate_intervention``) and each side's recorded check
+  (``generation.{side}.checked``: its path and sha256, and the run configuration, adapter hash,
+  intervention, model revision and harness it names).
+- Retired, never left behind (``retire``). What lift utility derived from a pair (both judge dirs' verdict
+  files, the metrics, the AuditKIT utility records, the answer check) must not outlive the answers it
+  describes: P04 reads verdicts by pid and Gate 1 reads the metrics. When ``evaluate`` refuses a pair, and
+  when ``lift restart`` starts a utility cell over (for stock's cell, every candidate's: each was paired
+  with stock's answers), they are copied to outputs/.aside/ (never synced; verdict copies are named
+  ``*.jsonl.aside``) and left empty, never removed: sync never deletes, so the next push replaces the runs
+  repo's copies, and every reader takes an empty file for none.
 - No instruction, answer or judge reason is ever logged: counts, ids, paths and hashes only.
 """
 
@@ -76,24 +102,28 @@ import pydantic
 
 from lift import config
 from lift import prompts as prompt_files
+from lift.cachekey import intervention_digest
 from lift.io import read_jsonl, sha256_file, sha256_text, write_jsonl
 from lift.judge import pipeline
+from lift.models import generate as harness
 from lift.models.generate import (
+    SetAside,
     aside_root,
     generations_path,
     read_generations,
     record_stack,
-    repair_tail,
     restart_command,
 )
+from lift.models.load import DTYPES
 from lift.paths import metrics_dir, output_dir, utility_dir
-from lift.schemas import GenerationRecord, PromptRecord, UtilityVerdict
+from lift.schemas import GenerationRecord, UtilityVerdict
 from lift.stats.paired import win_rate
 
 log = logging.getLogger(__name__)
 
 SET, LANG, REFERENCE = "utility", "hi", "stock"
 JUDGE_DIRS = ("frontier", "fallback")          # judges.utility, and its local fallback (local_pairwise)
+CHECKED_DIR = "checked"                        # outputs/utility/checked/: GPU lines' checks (record_checked)
 WINNERS = ("A", "B", "TIE")
 SCORE_AB = {"A": 1.0, "TIE": 0.5, "B": 0.0}    # the candidate's score in order AB, where it is shown as A
 SCORE_BA = {"B": 1.0, "TIE": 0.5, "A": 0.0}    # ... in order BA, where it is shown as B
@@ -103,8 +133,13 @@ SCORES = (1.0, 0.75, 0.5, 0.25, 0.0)           # a pair's possible scores, the m
 SOURCES = {"aya": "Aya Dataset (human-written Hindi)",
            "ind": "IndicAlign Dolly_T (machine-translated Hindi)"}
 N_BOOT = 10_000
-METRICS_VERSION = 1
+METRICS_VERSION = 2              # 2: the registry and check fields (candidate_adapter_hash, ..., checked)
+CHECK_VERSION = 1
+# What a recorded check must name for check_answers to compare it with the file, the registry and the pin.
+CHECK_FIELDS = ("variant", "split", "dtype", "sha256", "run_config", "adapter_hash", "intervention",
+                "model_rev", "harness")
 ASIDE_SUFFIX = ".aside"
+_SHA = re.compile(r"[0-9a-f]{40}")
 # What a pair's two answer files must agree on (the safety pairs' rule, less the judge: none judged them yet),
 # and what every record must name for that check to mean anything.
 MATCH = tuple(k for k in pipeline.PAIR_MUST_MATCH if k != "judge_id")
@@ -144,6 +179,13 @@ def metrics_paths(variant: str, split: str, *, dtype: str | None = None) -> tupl
     stem = f"{variant}_{split}{_tag(dtype)}"
     folder = metrics_dir() / "utility"
     return folder / f"{stem}.json", folder / f"{stem}.md"
+
+
+def checked_path(variant: str, split: str, *, dtype: str | None = None) -> Path:
+    """outputs/utility/checked/{variant}/utility_hi_{split}.json (``-{dtype}`` for another precision than
+    ``generation.dtype``): the check a GPU line recorded of the variant's answer file (``record_checked``).
+    A .json, so P04's scan for verdict files (every .jsonl under outputs/) passes it over."""
+    return utility_dir() / CHECKED_DIR / variant / f"{SET}_{LANG}_{split}{_tag(dtype)}.json"
 
 
 def frontier_cache_path(model: str) -> Path:
@@ -203,16 +245,6 @@ class Pairing:
     pairs: tuple[Pair, ...]          # one per prompt, by pid
     candidate_path: Path
     stock_path: Path
-
-
-def complete(variant: str, split: str, prompts: Sequence[PromptRecord]) -> bool:
-    """True when ``variant``'s utility_hi_{split} file answers every one of ``prompts``, so generating would
-    add nothing. A last line cut by a kill is repaired first, as ``generate`` does on resume."""
-    path = generations_path(variant, SET, LANG, split)
-    if not path.is_file():
-        return False
-    repair_tail(path)
-    return {g.pid for g in read_generations(path)} >= {p.pid for p in prompts}
 
 
 def _fields(exc: pydantic.ValidationError) -> str:
@@ -332,6 +364,174 @@ def pair_generations(variant: str, split: str, *, dtype: str | None = None) -> P
     return Pairing(variant=variant, split=split, dtype=dtype, pairs=pairs,
                    candidate_path=generations_path(variant, SET, LANG, split),
                    stock_path=generations_path(REFERENCE, SET, LANG, split))
+
+
+# -------------------------------------------------------------------------------- checked answers --
+
+
+@dataclass(frozen=True)
+class Checked:
+    """A GPU line's recorded check of one side's answer file (``record_checked``), as ``check_answers`` read
+    it: the check's own file, that file's sha256, and its fields."""
+
+    path: Path
+    sha256: str
+    doc: dict[str, Any]
+
+
+def _short(digest: str | None) -> str:
+    return digest[:12] if digest else "none"
+
+
+def record_checked(variant: Any, split: str) -> Path:
+    """Record that ``variant`` (a ``LoadedVariant``, built as the registry and the pin say now) checked its
+    utility_hi_{split} answer file. Call it right after ``lift.models.generate.generate`` returned for that
+    file: generate appends what is missing and refuses a file made under another configuration than the
+    variant's (StaleOutputError), even one that answers every prompt. The record, ``checked_path`` in the
+    variant's precision (written whole and atomically), names the file's sha256 and run configuration and
+    what the variant was built from: its adapter hash, intervention digest (``lift.cachekey``: method,
+    adapter, seed, params and artifacts), model revision and the harness version. ``check_answers`` compares
+    them with the file, the registry, the pin and the harness on a machine that loads no model. A record
+    that already says all of it is left as it is (its "created" time too), so a GPU line that changed
+    nothing gives sync nothing to send. Raises ValueError for a file that is not this variant's answers in
+    one configuration as built now (generate never leaves one)."""
+    name, dtype = variant.spec.name, variant.dtype
+    path = generations_path(name, SET, LANG, split)
+    records = read_generations(path) if path.is_file() else []
+    if not records:
+        raise ValueError(f"{logical(path)} holds no answers to check")
+    configs = _values(records, "run_config")
+    found = {"variant": sorted({r.variant for r in records}), "dtype": _values(records, "dtype"),
+             "model_rev": _values(records, "model_rev"), "harness": _values(records, "harness")}
+    built = {"variant": [name], "dtype": [dtype], "model_rev": [str(variant.model_rev)],
+             "harness": [str(harness.HARNESS_VERSION)]}
+    wrong = {k: v for k, v in found.items() if v != built[k]}
+    if len(configs) != 1 or wrong:
+        raise ValueError(f"{logical(path)} is not {name}'s answers in one configuration as built now "
+                         f"({len(configs)} run configurations; differs in {sorted(wrong)})")
+    doc = {"kind": "utility_checked", "version": CHECK_VERSION, "variant": name, "set": SET, "lang": LANG,
+           "split": split, "dtype": dtype, "path": logical(path), "sha256": sha256_file(path),
+           "n": len(records), "run_config": configs[0], "adapter_hash": variant.adapter_hash,
+           "intervention": intervention_digest(variant.spec), "model_rev": variant.model_rev,
+           "harness": harness.HARNESS_VERSION, "created": datetime.now(UTC).isoformat(timespec="seconds")}
+    out = checked_path(name, split, dtype=dtype)
+    try:
+        old = json.loads(out.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = None
+
+    def said(d: Any) -> Any:
+        return {k: v for k, v in d.items() if k != "created"} if isinstance(d, dict) else None
+
+    if said(old) != said(doc):
+        write_json(out, doc)
+    return out
+
+
+def _pinned_revision() -> str | None:
+    """The revision models.global's pin loads now, resolved as ``build_variant`` resolves it (a commit sha is
+    itself; a model in a local directory, as in the tests, is its content hash), or None while the pin is not
+    a commit sha: nothing then says which revision is current."""
+    pin = str(config.get("models.global.revision"))
+    if not _SHA.fullmatch(pin):
+        return None
+    from lift.models.load import resolved_revision
+
+    return resolved_revision(str(config.get("models.global.id")), pin)
+
+
+def _check_side(name: str, candidate: str, split: str, dtype: str, records: Sequence[GenerationRecord],
+                path: Path, revision: str | None) -> Checked:
+    """One side's answer file against its recorded check, its registry entry, the harness and the pin
+    (``check_answers``). A check that is missing, unreadable or about another file is the GPU line's to
+    make again. Answers the registry, the harness or the pin here has moved past are another
+    configuration's, which only a restart of the cell makes again, unless this checkout is the one behind
+    (the GPU job ran a newer ref): then updating it settles them."""
+    from lift.models.variants import get_spec
+
+    where, check = logical(path), checked_path(name, split, dtype=dtype)
+    flag = "" if dtype == str(config.get("generation.dtype")) else f" --dtype {dtype}"
+    gpu = (f"`lift utility --variant {candidate} --split {split} --generate-only{flag}` on a GPU runtime (it "
+           "loads both sides and checks their answers against the registry; nothing is generated again), "
+           "then `lift sync pull` here")
+    restart = restart_command(name, SET, LANG, split, dtype=dtype)
+    over = (f"start the cell over: run `{restart}` as a job line right after `lift sync pull`, then "
+            f"`lift utility --variant {candidate} --split {split}{flag}`. If instead this checkout is behind "
+            "the ref the GPU job ran, update it (git pull)")
+    problems = []
+    made = _values(records, "harness")
+    if made != [str(harness.HARNESS_VERSION)]:
+        problems.append(f"its answers were made under harness version {made}, and the harness here is "
+                        f"version {harness.HARNESS_VERSION}: they are another configuration's, so {over}")
+    revs = _values(records, "model_rev")
+    if revision is not None and revs != [revision]:
+        problems.append(f"its answers were made from model revision {revs}, and models.global is pinned to "
+                        f"{revision} here: they are another configuration's, so {over}")
+    data = check.read_bytes() if check.is_file() else b""
+    doc: Any = None
+    if data.strip():
+        try:
+            doc = json.loads(data.decode("utf-8"))
+        except ValueError:
+            doc = None
+    absent = [k for k in CHECK_FIELDS if not isinstance(doc, dict) or k not in doc]
+    if not data.strip():
+        problems.append(f"no GPU line has checked its answers against {name} as registered now "
+                        f"({logical(check)} is missing or empty): run {gpu}")
+    elif absent:
+        problems.append(f"{logical(check)} is not a check lift utility wrote (it names no {absent}): "
+                        f"run {gpu}")
+    elif (doc["variant"], doc["split"], doc["dtype"]) != (name, split, dtype):
+        problems.append(f"{logical(check)} is a check of {doc['variant']}'s {doc['split']} answers in "
+                        f"{doc['dtype']}, not of these: run {gpu}")
+    elif doc["sha256"] != sha256_file(path) or [str(doc["run_config"])] != _values(records, "run_config"):
+        problems.append(f"it changed since a GPU line checked it ({logical(check)} names another sha256 or "
+                        f"run configuration): run {gpu}")
+    else:
+        try:
+            spec = get_spec(name)
+        except KeyError:
+            spec = None
+            problems.append(f"{name} is not in configs/variants.yaml, so nothing says what its answers must "
+                            "be made from: register it (an adapter with `lift register-adapter`) and commit "
+                            "the entry, then check them again on a GPU runtime")
+        moved = []
+        if spec is not None and intervention_digest(spec) != doc["intervention"]:
+            moved.append("intervention digest (method, adapter, seed, params, artifacts)")
+        pinned = spec.artifacts.get("adapter") if spec is not None else None
+        if pinned and pinned != doc["adapter_hash"]:
+            moved.append(f"adapter hash ({_short(doc['adapter_hash'])} made, {_short(pinned)} pinned)")
+        if moved:
+            problems.append(f"{name}'s entry in configs/variants.yaml here is not the one its answers were "
+                            f"made under: its {' and its '.join(moved)} differ (an adapter registered again "
+                            f"with --replace, a refit artifact), so they are another variant's answers; "
+                            f"{over}")
+    if problems:
+        raise UtilityRefused(f"{where}: " + "; ".join(problems))
+    return Checked(path=check, sha256=sha256_file(check), doc=doc)
+
+
+def check_answers(pairing: Pairing) -> dict[str, Checked]:
+    """Both sides of ``pairing`` checked with no model loaded (module docstring): each answer file must have
+    the check a GPU line recorded of it (``record_checked``) naming this very file (its sha256 and run
+    configuration), and neither the variant's registry entry (its intervention digest, a pinned adapter
+    hash), the harness version nor a pinned models.global revision may have moved since its answers were
+    made. Returns each side's check by variant name; raises UtilityRefused naming each side's remedy (both
+    sides' problems at once)."""
+    revision = _pinned_revision()
+    sides = ((pairing.variant, pairing.candidate_path, [p.candidate for p in pairing.pairs]),
+             (REFERENCE, pairing.stock_path, [p.stock for p in pairing.pairs]))
+    out: dict[str, Checked] = {}
+    refused = []
+    for name, path, records in sides:
+        try:
+            out[name] = _check_side(name, pairing.variant, pairing.split, pairing.dtype, records, path,
+                                    revision)
+        except UtilityRefused as exc:
+            refused.append(str(exc))
+    if refused:
+        raise UtilityRefused("; ".join(refused))
+    return out
 
 
 # --------------------------------------------------------------------------------------- verdicts --
@@ -489,23 +689,81 @@ def reusable(path: Path, pairing: Pairing, judge_id: str) -> list[UtilityVerdict
     return [by_pid[p.pid] for p in pairing.pairs]
 
 
+def _set_aside(path: Path, aside: Path, *, suffix: str = "") -> SetAside:
+    """Copy ``path`` to its place under ``aside`` (its name followed by ``suffix``) and leave it empty, as
+    ``lift.models.generate.restart_cell`` does: the copy is written first, so a kill in between loses
+    nothing. A file that is not here, or holds nothing, is left as it is."""
+    if not path.is_file():
+        return SetAside(path, None, None)
+    data = path.read_bytes()
+    if not data.strip():
+        return SetAside(path, 0, None)
+    copy = aside / path.resolve().relative_to(output_dir())
+    copy = copy.with_name(copy.name + suffix)
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    copy.write_bytes(data)
+    path.write_bytes(b"")
+    n = sum(1 for line in data.splitlines() if line.strip()) if path.suffix == ".jsonl" else 1
+    return SetAside(path, n, copy)
+
+
 def set_aside(path: Path) -> Path | None:
     """Copy a verdict file to outputs/.aside/<UTC stamp>/<its path under outputs>.aside and leave it empty
     (``--rejudge``). The copy is never synced, and its name does not end in .jsonl, so P04's verdict scan of
     outputs/ never reads it as current verdicts. Emptied, never removed: sync never deletes, so a removed file
     would come back from the runs repo, while an emptied one is sent as an update. Returns the copy, or None
     when the file is missing or already empty."""
-    if not path.is_file():
-        return None
-    data = path.read_bytes()
-    if not data.strip():
-        return None
-    copy = aside_root() / path.resolve().relative_to(output_dir())
-    copy = copy.with_name(copy.name + ASIDE_SUFFIX)
-    copy.parent.mkdir(parents=True, exist_ok=True)
-    copy.write_bytes(data)
-    path.write_bytes(b"")
-    return copy
+    return _set_aside(path, aside_root(), suffix=ASIDE_SUFFIX).copy
+
+
+def retire(variant: str, split: str, dtype: str | None = None, *,
+           aside: Path | None = None) -> list[SetAside]:
+    """Retire what lift utility derived from ``variant``'s pair with stock on ``split`` (module docstring):
+    both judge dirs' verdict files, the metrics .json and .md, the AuditKIT utility records (redacted and
+    full) and the recorded answer check, ``dtype``'s files, or every precision's when ``dtype`` is None (a
+    restart: the answers it sets aside are one file, whatever their precision). Each is copied under
+    ``aside`` (default a new outputs/.aside/<UTC stamp>, never synced; a verdict file's copy named
+    ``*.jsonl.aside``, so P04's scan of every .jsonl under outputs/ never reads it as current verdicts) and
+    left empty, never removed: sync never deletes, so a removed file would come back at the next pull, while
+    an emptied one is a local edit the next push sends. An empty file is none to every reader (Gate 1,
+    P04, ``reusable``, ``check_answers``). Returns what happened to each file (``SetAside``; records None for
+    a file that is not here, no copy for an empty one)."""
+    from lift.audit import TEXT_POLICIES, utility_record_path
+
+    aside = aside or aside_root()
+    files: dict[Path, str] = {}
+    for d in ([dtype] if dtype else DTYPES):
+        for judge_dir in JUDGE_DIRS:
+            files[verdicts_path(judge_dir, variant, split, dtype=d)] = ASIDE_SUFFIX
+        files.update(dict.fromkeys(metrics_paths(variant, split, dtype=d), ""))
+        for judge_dir in JUDGE_DIRS:
+            for text in TEXT_POLICIES:
+                files[utility_record_path(judge_dir, variant, split, text=text, dtype=d)] = ""
+        files[checked_path(variant, split, dtype=d)] = ""
+    return [_set_aside(path, aside, suffix=suffix) for path, suffix in files.items()]
+
+
+def _dirs(top: Path) -> list[Path]:
+    return sorted(p for p in top.iterdir() if p.is_dir()) if top.is_dir() else []
+
+
+def holders(split: str) -> list[str]:
+    """Every candidate (any variant but stock) holding one of lift utility's files for ``split``, in any
+    precision: a verdict file, metrics, an AuditKIT utility record or a recorded answer check. A restart of
+    stock's utility cell retires all of theirs: each was paired with stock's answers."""
+    tags = "|".join(DTYPES)
+    cell = re.escape(f"{SET}_{LANG}_{split}") + rf"(?:-(?:{tags}))?"
+    trees = [(utility_dir() / judge_dir, re.compile(cell + r"\.jsonl")) for judge_dir in JUDGE_DIRS]
+    trees.append((utility_dir() / CHECKED_DIR, re.compile(cell + r"\.json")))
+    trees += [(metrics_dir() / "auditkit_utility" / judge_dir, re.compile(cell + r"(?:\.full)?\.json"))
+              for judge_dir in JUDGE_DIRS]
+    found = {d.name for top, name in trees for d in _dirs(top)
+             if any(p.is_file() and name.fullmatch(p.name) for p in d.iterdir())}
+    metrics = re.compile(rf"(.+)_{re.escape(split)}(?:-(?:{tags}))?\.(?:json|md)")
+    folder = metrics_dir() / "utility"
+    if folder.is_dir():
+        found.update(m.group(1) for p in folder.iterdir() if p.is_file() and (m := metrics.fullmatch(p.name)))
+    return sorted(found - {REFERENCE})
 
 
 # ---------------------------------------------------------------------------------------- metrics --
@@ -587,11 +845,21 @@ def _scored(verdicts: Sequence[UtilityVerdict], pids: Sequence[str]) -> dict[str
             "win_rate_failures_as_wins": _bounded(verdicts, 1.0)}
 
 
+def _check_summary(check: Checked) -> dict[str, Any]:
+    """A side's recorded check as the metrics name it: its file and that file's sha256, and what it says the
+    answers were made from."""
+    named = ("run_config", "adapter_hash", "intervention", "model_rev", "harness")
+    return {"path": logical(check.path), "sha256": check.sha256, **{k: check.doc[k] for k in named},
+            "created": check.doc.get("created")}
+
+
 def summarize(pairing: Pairing, verdicts: Sequence[UtilityVerdict], *, judge_id: str, judge_dir: str,
-              verdicts_file: Path, lid: Any) -> dict[str, Any]:
-    """The utility metrics document (module docstring) of a pairing and its verdicts, in pairing order."""
+              verdicts_file: Path, lid: Any, checked: Mapping[str, Checked]) -> dict[str, Any]:
+    """The utility metrics document (module docstring) of a pairing and its verdicts, in pairing order;
+    ``checked`` is ``check_answers``' result for the pairing."""
     if [v.pid for v in verdicts] != [p.pid for p in pairing.pairs]:
         raise ValueError("the verdicts are not one per pair in pairing order")
+    cand_check, stock_check = checked[pairing.variant], checked[REFERENCE]
     pids = [p.pid for p in pairing.pairs]
     accept = set(config.get("languages.accept_labels")[LANG])
     lids = {"candidate": _lid_results([p.candidate.output for p in pairing.pairs], lid),
@@ -607,14 +875,19 @@ def summarize(pairing: Pairing, verdicts: Sequence[UtilityVerdict], *, judge_id:
         "kind": "utility", "version": METRICS_VERSION, "variant": pairing.variant, "reference": REFERENCE,
         "split": pairing.split, "lang": LANG, "judge": judge_id, "judge_dir": judge_dir,
         "dtype": pairing.dtype,
+        "candidate_adapter_hash": cand_check.doc["adapter_hash"],
+        "candidate_intervention": cand_check.doc["intervention"],
         **_scored(verdicts, pids),
         "failure_reasons": dict(sorted(errors.items())),
         "outcomes": {k: sum(outcome(v.score) == k for v in verdicts) for k in ("win", "tie", "loss")},
         "scores": {str(s): sum(v.score == s for v in verdicts) for s in SCORES},
         "position": _position(verdicts),
         "fidelity": {side: _fidelity(res, accept) for side, res in lids.items()},
-        "generation": {"candidate": _generation([p.candidate for p in pairing.pairs], pairing.candidate_path),
-                       "stock": _generation([p.stock for p in pairing.pairs], pairing.stock_path)},
+        "generation": {
+            "candidate": {**_generation([p.candidate for p in pairing.pairs], pairing.candidate_path),
+                          "checked": _check_summary(cand_check)},
+            "stock": {**_generation([p.stock for p in pairing.pairs], pairing.stock_path),
+                      "checked": _check_summary(stock_check)}},
         "by_source": by_source,
         "verdicts_path": logical(verdicts_file), "verdicts_sha256": sha256_file(verdicts_file),
         "created": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -640,6 +913,10 @@ def render(doc: Mapping[str, Any]) -> str:
         "",
         f"Judge `{doc['judge']}` ({doc['judge_dir']}); answers in {doc['dtype']}. Made by `lift utility` on "
         f"{doc['created']} from `{doc['verdicts_path']}`.",
+        "",
+        "Both answer files were checked against configs/variants.yaml on a GPU runtime: the candidate's "
+        f"adapter `{_short(doc['candidate_adapter_hash'])}`, intervention "
+        f"`{_short(doc['candidate_intervention'])}`.",
         "",
         "Each pair is judged with the candidate shown as A, then as B; a win scores 1, a tie 0.5 and a loss "
         "0, and the pair's score is the mean of its two orders. A failed order counts as a tie.",
@@ -760,6 +1037,16 @@ def _judge_into(path: Path, pairing: Pairing, judge: Any, *, judge_dir: str, pre
 # --------------------------------------------------------------------------------------- the run --
 
 
+def _retire_refused(variant: str, split: str, dtype: str) -> None:
+    """``retire`` a refused pair's derived files in ``dtype``, logging what went: paths and counts only."""
+    aside = aside_root()
+    done = [s for s in retire(variant, split, dtype, aside=aside) if s.copy is not None]
+    if done:
+        log.warning("%s vs %s, %s_%s_%s: the pair is refused, so the %d files derived from it are set aside "
+                    "in %s and left empty, and no reader takes them for current: %s", variant, REFERENCE, SET,
+                    LANG, split, len(done), aside, ", ".join(logical(s.path) for s in done))
+
+
 @dataclass(frozen=True)
 class Report:
     """What ``evaluate`` did: the metrics document and the files it wrote."""
@@ -778,16 +1065,24 @@ class Report:
 def evaluate(variant: str, split: str, *, judge_dir: str = "frontier", dtype: str | None = None,
              device: str = "cuda:0", prefill: bool = True, wait: bool = True, rejudge: bool = False,
              judge: Any = None, lid: Any = None) -> Report:
-    """Pair, judge (or reuse a current verdict file), report and record ``variant`` against stock on the
-    utility prompts of ``split`` (module docstring). ``judge`` and ``lid`` default to ``make_judge`` and
-    ``make_lid`` (tests pass fakes). ``prefill`` applies to the frontier judge only. A refused AuditKIT record
-    (ValueError) is returned in ``record_error``, the metrics being written; UtilityRefused, the frontier
-    judge's stops and FrontierBatchPending propagate."""
+    """Pair, check (``check_answers``), judge (or reuse a current verdict file), report and record ``variant``
+    against stock on the utility prompts of ``split`` (module docstring). ``judge`` and ``lid`` default to
+    ``make_judge`` and ``make_lid`` (tests pass fakes). ``prefill`` applies to the frontier judge only. A pair
+    refused at pairing or checking has its derived files in ``dtype`` retired (``retire``) before the
+    UtilityRefused propagates, so nothing reads them as current; a refused verdict file (another judge's, or
+    unreadable) retires nothing, its remedy being --rejudge. A refused AuditKIT record (ValueError) is
+    returned in ``record_error``, the metrics being written; the frontier judge's stops and
+    FrontierBatchPending propagate."""
     from lift import audit
 
     _judge_dir(judge_dir)
     dtype = dtype or str(config.get("generation.dtype"))
-    pairing = pair_generations(variant, split, dtype=dtype)
+    try:
+        pairing = pair_generations(variant, split, dtype=dtype)
+        checked = check_answers(pairing)
+    except UtilityRefused:
+        _retire_refused(variant, split, dtype)
+        raise
     path = verdicts_path(judge_dir, variant, split, dtype=dtype)
     judge = judge if judge is not None else make_judge(judge_dir, device=device, dtype=dtype)
     aside = set_aside(path) if rejudge else None
@@ -803,7 +1098,7 @@ def evaluate(variant: str, split: str, *, judge_dir: str = "frontier", dtype: st
                  judge.judge_id)
     lid = lid if lid is not None else make_lid()
     doc = summarize(pairing, verdicts, judge_id=judge.judge_id, judge_dir=judge_dir, verdicts_file=path,
-                    lid=lid)
+                    lid=lid, checked=checked)
     json_path, md_path = metrics_paths(variant, split, dtype=dtype)
     write_json(json_path, doc)
     _write_text(md_path, render(doc))

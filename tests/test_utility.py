@@ -1,7 +1,8 @@
 """lift.utility, ``lift utility`` and lift.judge.local_pairwise, offline: both orders scored and averaged,
 failures kept as ties and counted, verdict files that P04's blind check reads, the pairing refusals, the
-win-rate wiring, Hindi fidelity (tests/datafakes.py FakeLID), the command end to end over fake judges, and
-the fallback judge over a canned generator. Placeholder texts only; nothing is downloaded."""
+answer checks against the registry and their refusals, what a refused pair retires, the win-rate wiring,
+Hindi fidelity (tests/datafakes.py FakeLID), the command end to end over fake judges, and the fallback judge
+over a canned generator. Placeholder texts only; nothing is downloaded."""
 
 from __future__ import annotations
 
@@ -18,10 +19,12 @@ import pytest
 from datafakes import FakeLID
 from fakes import build_tiny_tokenizer, make_prompt
 
-from lift import config, utility
+from lift import audit, config, utility
+from lift.cachekey import intervention_digest
 from lift.cli import main
 from lift.io import read_jsonl, sha256_file, sha256_text, write_jsonl
 from lift.judge import frontier, local_pairwise
+from lift.models import generate as gen
 from lift.models.generate import GreedyOutput, generations_path, read_generations
 from lift.paths import REPO_ROOT, adapters_dir, manifests_dir, metrics_dir, output_dir
 from lift.schemas import GenerationRecord, UtilityVerdict, VariantSpec
@@ -40,6 +43,38 @@ RUBRIC = REPO_ROOT / "configs" / "rubrics" / "utility_v1.md"
 SAFETY_RUBRIC = REPO_ROOT / "configs" / "rubrics" / "safety_v1.md"
 REV = "e" * 40
 FAILED = "unparseable judge output"
+ADAPTER = "a" * 64                     # the candidate's adapter hash, as its registry entry pins it
+RESTART = "lift restart --variant {} --split dev --sets utility --langs hi"
+
+
+def entry(name: str, adapter: str | None = ADAPTER) -> VariantSpec:
+    """A configs/variants.yaml entry: stock's, or the candidate's adapter entry pinning ``adapter``."""
+    if name == "stock":
+        return VariantSpec(name="stock", method="stock")
+    return VariantSpec(name=name, method="adapter", adapter=name,
+                       artifacts={"adapter": adapter} if adapter else {})
+
+
+@pytest.fixture(autouse=True)
+def registry(monkeypatch):
+    """configs/variants.yaml as these tests see it, {name: VariantSpec}: stock and the candidate, its adapter
+    hash pinned. A test registers another entry by replacing one in the dict."""
+    specs = {name: entry(name) for name in ("stock", CANDIDATE)}
+    monkeypatch.setattr("lift.models.variants.load_registry", lambda: dict(specs))
+    return specs
+
+
+def check(variant: str, meta: dict | None = None) -> Path:
+    """The check lift utility's GPU line records once generate has passed ``variant``'s answer file
+    (``utility.record_checked``), by the variant as the registry builds it now (a stand-in for the loaded
+    model, which record_checked never touches)."""
+    from lift.models.variants import get_spec
+
+    spec = get_spec(variant)
+    built = SimpleNamespace(spec=spec, dtype=(meta or {}).get("dtype", META["dtype"]),
+                            model_rev=(meta or {}).get("model_rev", META["model_rev"]),
+                            adapter_hash=spec.artifacts.get("adapter"))
+    return utility.record_checked(built, SPLIT)
 
 
 def answer(variant: str, pid: str) -> str:
@@ -59,13 +94,16 @@ def record(variant: str, pid: str, *, output: str | None = None, meta: dict | No
 
 
 def write_side(variant: str, pids=PIDS, *, outputs: dict | None = None, meta: dict | None = None,
-               meta_of: dict | None = None) -> dict[str, str]:
-    """One side's utility_hi_dev answers (written in reverse pid order, as batches would); {pid: output}."""
+               meta_of: dict | None = None, checked: bool = True) -> dict[str, str]:
+    """One side's utility_hi_dev answers (written in reverse pid order, as batches would) and, with
+    ``checked``, the GPU line's check of them (``check``); {pid: output}."""
     records = [record(variant, pid, output=(outputs or {}).get(pid), meta={**(meta or {}),
                                                                            **(meta_of or {}).get(pid, {})})
                for pid in pids]
     write_jsonl(generations_path(variant, "utility", "hi", SPLIT),
                 [r.model_dump() for r in reversed(records)])
+    if checked:
+        check(variant, meta)
     return {r.pid: r.output for r in records}
 
 
@@ -250,12 +288,17 @@ def test_hindi_fidelity_of_both_sides_keeps_every_answer_in_the_denominator(fake
     assert m["by_source"]["ind"]["fidelity"]["stock"]["is_lang_hi"] == 2 / 3
 
 
-def test_the_metrics_name_both_answer_files_and_the_verdict_file(world, audited):
+def test_the_metrics_name_both_answer_files_the_verdict_file_and_what_the_answers_were_checked_against(
+        world, audited):
+    # Version 2 (C06/C15/C18): beside each file's sha256, the candidate's adapter hash and intervention digest
+    # and each side's recorded check, so a reader can tell when the metrics no longer describe the registry.
     report = evaluate(FakeJudge(world.cand))
     m = report.metrics
     assert (m["kind"], m["version"], m["variant"], m["reference"], m["split"], m["lang"]) == (
-        "utility", 1, CANDIDATE, "stock", SPLIT, "hi")
+        "utility", 2, CANDIDATE, "stock", SPLIT, "hi")
     assert (m["judge"], m["judge_dir"], m["dtype"]) == (JUDGE_ID, "frontier", "bf16")
+    assert m["candidate_adapter_hash"] == ADAPTER
+    assert m["candidate_intervention"] == intervention_digest(entry(CANDIDATE))
     for side, variant in (("candidate", CANDIDATE), ("stock", "stock")):
         g = m["generation"][side]
         path = generations_path(variant, "utility", "hi", SPLIT)
@@ -263,6 +306,13 @@ def test_the_metrics_name_both_answer_files_and_the_verdict_file(world, audited)
         assert g["file_sha256"] == sha256_file(path) and g["variant"] == variant
         assert (g["n"], g["n_cap_hits"], g["cap_hit_rate"], g["mean_new_tokens"]) == (6, 1, 1 / 6, 40.0)
         assert g["model_rev"] == ["c" * 40] and g["run_config"] == [f"rc-{variant}"] and len(g["stack"]) == 1
+        checked = g["checked"]
+        assert checked["path"] == f"outputs/utility/checked/{variant}/utility_hi_dev.json"
+        assert checked["sha256"] == sha256_file(utility.checked_path(variant, SPLIT))
+        assert (checked["run_config"], checked["model_rev"], checked["harness"]) == (
+            f"rc-{variant}", "c" * 40, 1)
+        assert checked["adapter_hash"] == (ADAPTER if variant == CANDIDATE else None)
+        assert checked["intervention"] == intervention_digest(entry(variant))
     assert m["verdicts_path"] == f"outputs/utility/frontier/{CANDIDATE}/utility_hi_dev.jsonl"
     assert m["verdicts_sha256"] == sha256_file(report.verdicts_path)
     json_path, md_path = utility.metrics_paths(CANDIDATE, SPLIT)
@@ -272,6 +322,7 @@ def test_the_metrics_name_both_answer_files_and_the_verdict_file(world, audited)
     assert json.loads(raw) == json.loads(json.dumps(m))
     md = md_path.read_text(encoding="utf-8")
     assert "| win rate (n=6 pairs) | 1.000" in md and "| aya: Aya Dataset" in md
+    assert f"the candidate's adapter `{ADAPTER[:12]}`" in md
     for text in [*TEXTS.values(), *world.cand.values(), *world.stock.values()]:
         assert text not in md and text.encode("utf-8") not in raw
 
@@ -320,7 +371,7 @@ def test_answers_to_a_changed_prompt_name_the_cells_restart_line(world):
 
 @pytest.mark.parametrize("field", ["template", "model_rev", "harness", "decoding"])
 def test_answers_made_under_other_settings_are_never_paired(world, field):
-    write_side(CANDIDATE, meta={field: "other"})
+    write_side(CANDIDATE, meta={field: "other"}, checked=False)
     message = refusal()
     assert "cannot be paired" in message and f"'{field}': (['other'], ['{META[field]}'])" in message
     for variant in (CANDIDATE, "stock"):
@@ -363,6 +414,131 @@ def test_answers_to_other_pids_or_cells_are_refused(world):
 def test_stock_is_never_the_candidate():
     with pytest.raises(ValueError, match="cannot be stock"):
         utility.pair_generations("stock", SPLIT)
+
+
+# --- answers checked against the registry, and what a refused pair retires ---------------------------------
+
+
+def check_refusal() -> str:
+    with pytest.raises(utility.UtilityRefused) as exc:
+        utility.check_answers(utility.pair_generations(CANDIDATE, SPLIT))
+    return str(exc.value)
+
+
+def test_a_check_names_the_answer_file_and_what_the_variant_was_built_from(world):
+    for variant in (CANDIDATE, "stock"):
+        path = utility.checked_path(variant, SPLIT)
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        answers = generations_path(variant, "utility", "hi", SPLIT)
+        assert path == output_dir() / "utility" / "checked" / variant / "utility_hi_dev.json"
+        assert (doc["kind"], doc["variant"], doc["split"], doc["dtype"], doc["n"]) == (
+            "utility_checked", variant, SPLIT, "bf16", 6)
+        assert (doc["path"], doc["sha256"]) == (f"outputs/generations/{variant}/utility_hi_dev.jsonl",
+                                                sha256_file(answers))
+        assert (doc["run_config"], doc["model_rev"], doc["harness"]) == (f"rc-{variant}", "c" * 40, 1)
+        assert doc["adapter_hash"] == (ADAPTER if variant == CANDIDATE else None)
+        assert doc["intervention"] == intervention_digest(entry(variant))
+    before = utility.checked_path(CANDIDATE, SPLIT).read_bytes()
+    check(CANDIDATE)                                    # the same check again: the file is left as it is
+    assert utility.checked_path(CANDIDATE, SPLIT).read_bytes() == before
+    assert set(utility.check_answers(utility.pair_generations(CANDIDATE, SPLIT))) == {CANDIDATE, "stock"}
+    with pytest.raises(ValueError, match="not stock's answers in one configuration"):
+        check("stock", {"model_rev": "f" * 40})                 # never a check of what was not built
+
+
+def test_answers_no_gpu_line_checked_are_refused_with_the_gpu_line(world):
+    # C06/C15/C18: a machine that loads no model judges only answers a GPU line passed through generate.
+    utility.checked_path(CANDIDATE, SPLIT).unlink()
+    message = check_refusal()
+    assert f"no GPU line has checked its answers against {CANDIDATE} as registered now" in message
+    assert f"`lift utility --variant {CANDIDATE} --split dev --generate-only` on a GPU runtime" in message
+    assert "outputs/generations/stock/" not in message           # stock's answers were checked: not refused
+
+
+@pytest.mark.parametrize("change, expected", [
+    ("answers", "it changed since a GPU line checked it"),
+    ("unreadable", "is not a check lift utility wrote"),
+    ("another file's", "is a check of stock's dev answers in bf16, not of these"),
+])
+def test_a_check_that_does_not_name_the_answers_as_they_are_is_refused(world, change, expected):
+    path = utility.checked_path(CANDIDATE, SPLIT)
+    if change == "answers":                                    # made again, and not checked since
+        write_side(CANDIDATE, outputs={PIDS[0]: "यह दोबारा बना उत्तर है"}, checked=False)
+    elif change == "unreadable":
+        path.write_text("{", encoding="utf-8")
+    else:
+        shutil.copyfile(utility.checked_path("stock", SPLIT), path)
+    message = check_refusal()
+    assert expected in message and f"--variant {CANDIDATE} --split dev --generate-only" in message
+
+
+def test_answers_of_a_replaced_registry_entry_are_refused_with_the_restart_line(world, registry):
+    # C06/C15/C18: the adapter was trained again and registered with --replace after its answers were made.
+    registry[CANDIDATE] = entry(CANDIDATE, adapter="b" * 64)
+    message = check_refusal()
+    assert f"{CANDIDATE}'s entry in configs/variants.yaml here is not the one its answers" in message
+    assert "this checkout is behind the ref the GPU job ran, update it (git pull)" in message
+    assert "intervention digest" in message
+    assert "adapter hash (aaaaaaaaaaaa made, bbbbbbbbbbbb pinned)" in message
+    assert RESTART.format(CANDIDATE) in message and RESTART.format("stock") not in message
+    registry[CANDIDATE] = entry(CANDIDATE, adapter=None)       # unpinned now: still another intervention
+    assert "intervention digest" in check_refusal()
+    registry.pop(CANDIDATE)
+    assert f"{CANDIDATE} is not in configs/variants.yaml" in check_refusal()
+
+
+def test_answers_made_under_another_harness_are_refused_on_both_sides(world, monkeypatch):
+    monkeypatch.setattr(gen, "HARNESS_VERSION", 2)            # a harness fix since: every answer is stale
+    message = check_refusal()
+    assert "its answers were made under harness version ['1'], and the harness here is version 2" in message
+    assert RESTART.format(CANDIDATE) in message and RESTART.format("stock") in message
+
+
+@pytest.mark.parametrize("pin, refused", [("main", False), ("c" * 40, False), ("d" * 40, True)])
+def test_the_answers_model_revision_is_compared_with_the_pin_once_there_is_one(world, pin, refused):
+    # Unpinned ("main"), nothing says which revision is current; pinned, both sides must be made from it.
+    config.load("project")["models"]["global"]["revision"] = pin
+    pairing = utility.pair_generations(CANDIDATE, SPLIT)
+    if not refused:
+        assert set(utility.check_answers(pairing)) == {CANDIDATE, "stock"}
+        return
+    message = check_refusal()
+    assert f"made from model revision ['{'c' * 40}'], and models.global is pinned to {pin} here" in message
+    assert RESTART.format(CANDIDATE) in message and RESTART.format("stock") in message
+
+
+def test_a_refused_pair_retires_what_was_derived_from_it(world, audited):
+    # C07: the verdicts, metrics, AuditKIT record and answer check of a pair that can no longer be paired are
+    # copied aside and left empty (never removed: sync never deletes), so P04 and Gate 1 cannot read them.
+    from lift.validation.utility import find_verdict_files
+
+    report = evaluate(FakeJudge(world.cand))
+    derived = {report.verdicts_path: ".aside", report.metrics_json: "", report.metrics_md: "",
+               report.record_path: "", utility.checked_path(CANDIDATE, SPLIT): ""}
+    before = {path: path.read_bytes() for path in derived}
+    assert all(before.values()) and find_verdict_files() == [report.verdicts_path]
+    write_side(CANDIDATE, PIDS[:-1], checked=False)          # an answer lost: the pair is refused (rule 3)
+    judge = FakeJudge(world.cand)
+    with pytest.raises(utility.UtilityRefused, match="have no answer"):
+        evaluate(judge)
+    stamp, = (output_dir() / ".aside").iterdir()
+    for path, suffix in derived.items():
+        copy = stamp / path.relative_to(output_dir())
+        assert path.read_bytes() == b"" and copy.with_name(copy.name + suffix).read_bytes() == before[path]
+    assert find_verdict_files() == [] and not judge.calls    # P04 reads neither the emptied file nor the copy
+    assert utility.checked_path("stock", SPLIT).read_bytes()     # stock's answers are not in question
+    with pytest.raises(utility.UtilityRefused):
+        evaluate(judge)                                         # refused again: nothing left to set aside
+    assert len(list((output_dir() / ".aside").iterdir())) == 1
+
+
+def test_a_refused_verdict_file_retires_nothing(world, audited):
+    evaluate(FakeJudge(world.cand, judge_id=OTHER_JUDGE))
+    json_path, _md = utility.metrics_paths(CANDIDATE, SPLIT)
+    before = json_path.read_bytes()
+    with pytest.raises(utility.UtilityRefused, match="--rejudge"):
+        evaluate(FakeJudge(world.cand))                     # another judge's file: --rejudge is the remedy
+    assert json_path.read_bytes() == before and not (output_dir() / ".aside").exists()
 
 
 # --- verdict files ----------------------------------------------------------------------------------------
@@ -548,10 +724,10 @@ def test_help_works_without_a_gpu_stack(monkeypatch, capsys):
     assert exc.value.code == 0 and "usage" in capsys.readouterr().out
 
 
-def test_complete_answers_are_judged_and_reported_with_no_gpu_stack_or_pin(cli, world, monkeypatch, capsys,
-                                                                            caplog):
+def test_judge_only_judges_and_reports_checked_answers_with_no_gpu_stack_or_pin(cli, world, monkeypatch,
+                                                                                 capsys, caplog):
     monkeypatch.setitem(sys.modules, "torch", None)              # `import torch` raises ImportError
-    assert main(ARGV) == 0                                       # every answer is there: nothing generated
+    assert main([*ARGV, "--judge-only"]) == 0                    # it loads no model: no torch, no pin
     out = capsys.readouterr().out
     assert "win rate 1.000" in out and "failed orders 0 of 12" in out and "verdicts (judged now)" in out
     assert "outputs/metrics/auditkit_utility/frontier/adapter-aya-std-s1/utility_hi_dev.json" in out
@@ -561,6 +737,16 @@ def test_complete_answers_are_judged_and_reported_with_no_gpu_stack_or_pin(cli, 
     assert "verdicts (reused)" in capsys.readouterr().out
     for text in [*TEXTS.values(), *world.cand.values(), *world.stock.values()]:
         assert text not in out and text not in caplog.text
+
+
+def test_a_run_that_may_generate_needs_the_pin_even_when_every_answer_is_there(cli, monkeypatch):
+    # C06/C15/C18: answers to every prompt are no reason to skip the GPU line's check of them, which builds
+    # both sides from the pinned revision; the refusal comes before any torch import.
+    monkeypatch.setitem(sys.modules, "torch", None)
+    for extra in ([], ["--generate-only"]):
+        with pytest.raises(SystemExit, match="unpinned revisions"):
+            main([*ARGV, *extra])
+    assert not cli.calls
 
 
 def test_incomplete_answers_need_the_pin_before_any_torch_import(world, monkeypatch):
@@ -576,16 +762,91 @@ def test_judge_only_lists_a_refused_pair_and_exits_3(cli, monkeypatch, caplog):
     assert "not judged" in caplog.text and "have no answer" in caplog.text and not cli.calls
 
 
-def test_generate_only_judges_nothing(cli):
+@pytest.fixture
+def gpu_line(cli, monkeypatch):
+    """lift utility's GPU line with no GPU: models.global pinned to the answers' revision, and build_variant
+    and generate replaced by stand-ins that record their calls. The stand-in generate leaves a file as it is,
+    as the real one leaves a current complete file, and refuses the file of each variant in ``stale`` as the
+    real one refuses a file made under another configuration."""
+    from lift.models import variants
+
+    config.load("project")["models"]["global"]["revision"] = META["model_rev"]
+    calls = SimpleNamespace(built=[], generated=[], stale=set())
+
+    def build(spec, *, device, dtype):
+        calls.built.append(spec.name)
+        return SimpleNamespace(spec=spec, dtype=dtype, device=device, model_rev=META["model_rev"],
+                               adapter_hash=spec.artifacts.get("adapter"))
+
+    def generate(variant, prompts, *, out_path, batch_size=None):
+        name = variant.spec.name
+        calls.generated.append((name, [p.pid for p in prompts]))
+        assert out_path == generations_path(name, "utility", "hi", SPLIT)
+        if name in calls.stale:
+            raise gen.StaleOutputError(f"{out_path} holds records made under another configuration",
+                                       command=gen.restart_command(name, "utility", "hi", SPLIT))
+        return out_path
+
+    monkeypatch.setattr(variants, "build_variant", build)
+    monkeypatch.setattr(gen, "generate", generate)
+    return calls
+
+
+def test_every_run_but_judge_only_loads_both_sides_and_checks_their_complete_answers(gpu_line, cli):
+    # C06/C15/C18: answer files holding every pid still go through generate, stock first, then the
+    # candidate: it compares every record with the variant as registered now, and appends nothing to a
+    # current file. The check is recorded; --generate-only stops before any judging.
+    sides = ["stock", CANDIDATE]
+    for name in sides:
+        utility.checked_path(name, SPLIT).unlink()                # no GPU line has checked them yet
+    answers = {name: generations_path(name, "utility", "hi", SPLIT).read_bytes() for name in sides}
     assert main([*ARGV, "--generate-only"]) == 0
+    assert gpu_line.built == sides and gpu_line.generated == [(name, PIDS) for name in sides]
     assert not cli.calls and not utility.verdicts_path("frontier", CANDIDATE, SPLIT).exists()
+    for name in sides:
+        doc = json.loads(utility.checked_path(name, SPLIT).read_text(encoding="utf-8"))
+        assert doc["sha256"] == hashlib.sha256(answers[name]).hexdigest()
+        assert (doc["adapter_hash"], doc["intervention"]) == (ADAPTER if name == CANDIDATE else None,
+                                                              intervention_digest(entry(name)))
+    checks = {name: utility.checked_path(name, SPLIT).read_bytes() for name in sides}
+    assert main(ARGV) == 0                                       # the whole line: loaded again, then judged
+    assert gpu_line.built == sides * 2 and len(cli.calls) == 1
+    assert {name: utility.checked_path(name, SPLIT).read_bytes() for name in sides} == checks
+
+
+@pytest.mark.parametrize("stale", ["stock", CANDIDATE])
+def test_a_side_generate_refuses_is_listed_with_its_restart_line_and_nothing_is_judged(gpu_line, cli, stale,
+                                                                                       caplog):
+    gpu_line.stale.add(stale)
+    assert main(ARGV) == 3
+    assert gpu_line.built == ["stock", CANDIDATE]               # the other side is still loaded and checked
+    assert not cli.calls and not utility.metrics_paths(CANDIDATE, SPLIT)[0].exists()
+    assert f"  {stale} utility_hi_dev: {RESTART.format(stale)}\n" in caplog.text
+    assert "not judged, as a side's answers were skipped" in caplog.text
+
+
+def test_judge_only_refuses_the_answers_of_a_replaced_adapter_and_retires_their_files(cli, registry, caplog):
+    # C06/C15/C18 and C07 on the laptop: after `lift register-adapter --replace`, the old adapter's answers
+    # are refused with no model loaded, and the verdicts, metrics, AuditKIT record and check made from them
+    # are set aside and left empty, so neither Gate 1 nor P04 takes them for the new adapter's.
+    assert main([*ARGV, "--judge-only"]) == 0 and len(cli.calls) == 1
+    derived = [utility.verdicts_path("frontier", CANDIDATE, SPLIT), *utility.metrics_paths(CANDIDATE, SPLIT),
+               audit.utility_record_path("frontier", CANDIDATE, SPLIT),
+               utility.checked_path(CANDIDATE, SPLIT)]
+    assert all(path.read_bytes() for path in derived)
+    registry[CANDIDATE] = entry(CANDIDATE, adapter="b" * 64)
+    assert main([*ARGV, "--judge-only"]) == 3 and len(cli.calls) == 1
+    assert "not judged" in caplog.text and RESTART.format(CANDIDATE) in caplog.text
+    assert all(path.read_bytes() == b"" for path in derived)
+    assert f"the pair is refused, so the {len(derived)} files derived from it are set aside" in caplog.text
 
 
 def test_sync_skips_the_prefill_and_no_wait_exits_3_while_batches_run(cli, caplog):
-    assert main([*ARGV, "--sync"]) == 0 and not cli.prefills and len(cli.calls) == 1
+    argv = [*ARGV, "--judge-only"]
+    assert main([*argv, "--sync"]) == 0 and not cli.prefills and len(cli.calls) == 1
     cli.pending = Pending("1 batch still in progress")
     utility.verdicts_path("frontier", CANDIDATE, SPLIT).write_bytes(b"")      # judge them again
-    assert main([*ARGV, "--no-wait"]) == 3
+    assert main([*argv, "--no-wait"]) == 3
     assert cli.prefills[-1]["wait"] is False and len(cli.calls) == 1
     assert "1 batch still in progress" in caplog.text and "rerun the same line to collect" in caplog.text
 
@@ -595,7 +856,7 @@ def test_a_refused_auditkit_record_exits_3_with_the_metrics_written(cli, monkeyp
         raise ValueError("placeholder refusal")
 
     monkeypatch.setattr("lift.audit.record_utility", refuse)
-    assert main(ARGV) == 3
+    assert main([*ARGV, "--judge-only"]) == 3
     assert "no AuditKIT record: placeholder refusal" in caplog.text
     assert utility.metrics_paths(CANDIDATE, SPLIT)[0].is_file()
 
@@ -620,26 +881,25 @@ def test_exclusive_options_are_refused_by_the_parser(extra):
 
 
 @pytest.mark.torch
-def test_the_command_generates_stock_then_the_candidate_once_then_judges(fake_prompt_files, tiny_model_dir,
-                                                                         tiny_lora_adapter, audited,
-                                                                         monkeypatch):
+def test_the_command_generates_stock_then_the_candidate_once_then_judges_and_refuses_a_replaced_adapter(
+        fake_prompt_files, tiny_model_dir, tiny_lora_adapter, audited, registry, monkeypatch, caplog):
     pytest.importorskip("peft")
-    from lift.models import generate as gen
     from lift.models import variants
+    from lift.train.merge import adapter_hash
 
-    config.load("project")["models"]["global"]["revision"] = "b" * 40
+    # Pinned, with the tiny model standing in for Global (a local directory resolves to its content hash).
+    config.load("project")["models"]["global"].update(id=str(tiny_model_dir), revision="b" * 40)
     pids = PIDS[:2] + PIDS[3:4]
     fake_prompt_files[("utility", "hi")] = [make_prompt(p, "hi", "utility", SPLIT, text=TEXTS[p])
                                             for p in pids]
-    shutil.copytree(tiny_lora_adapter, adapters_dir() / CANDIDATE)
-    specs = {"stock": VariantSpec(name="stock", method="stock"),
-             CANDIDATE: VariantSpec(name=CANDIDATE, method="adapter", adapter=CANDIDATE)}
-    monkeypatch.setattr(variants, "load_registry", lambda: dict(specs))
+    adapter = adapters_dir() / CANDIDATE
+    shutil.copytree(tiny_lora_adapter, adapter)
+    registry[CANDIDATE] = entry(CANDIDATE, adapter=adapter_hash(adapter))
     built, real_build, real_generate = [], variants.build_variant, gen.generate
 
     def build(spec, *, device, dtype):
         built.append(spec.name)
-        return real_build(spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir))
+        return real_build(spec, device="cpu", dtype=dtype)
 
     monkeypatch.setattr(variants, "build_variant", build)
     monkeypatch.setattr(gen, "generate", lambda *a, **kw: real_generate(*a, **{**kw, "max_new_tokens": 4}))
@@ -649,10 +909,31 @@ def test_the_command_generates_stock_then_the_candidate_once_then_judges(fake_pr
     argv = [*ARGV, "--device", "cpu", "--dtype", "bf16"]
     assert main(argv) == 0
     assert built == ["stock", CANDIDATE] and len(judge.calls) == 1
-    for name in ("stock", CANDIDATE):
-        assert sorted(g.pid for g in read_generations(generations_path(name, "utility", "hi", SPLIT))) == pids
-    monkeypatch.setattr(variants, "build_variant", lambda *a, **k: pytest.fail("a complete side was rebuilt"))
-    assert main(argv) == 0 and len(judge.calls) == 1             # nothing generated, the verdicts reused
+    files = {name: generations_path(name, "utility", "hi", SPLIT) for name in ("stock", CANDIDATE)}
+    for path in files.values():
+        assert sorted(g.pid for g in read_generations(path)) == pids
+    answers = {name: path.read_bytes() for name, path in files.items()}
+    # C06/C15/C18: a rerun on complete answers loads both sides again, appends nothing, reuses the verdicts.
+    assert main(argv) == 0
+    assert built == ["stock", CANDIDATE] * 2 and len(judge.calls) == 1
+    assert {name: path.read_bytes() for name, path in files.items()} == answers
+    metrics = utility.metrics_paths(CANDIDATE, SPLIT)[0]
+    reported = metrics.read_bytes()
+    assert json.loads(reported)["candidate_adapter_hash"] == registry[CANDIDATE].artifacts["adapter"]
+    # The adapter is trained again (other weights: here another lora_alpha) and registered with --replace.
+    cfg_path = adapter / "adapter_config.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg_path.write_text(json.dumps({**cfg, "lora_alpha": 2 * cfg["lora_alpha"]}), encoding="utf-8")
+    registry[CANDIDATE] = entry(CANDIDATE, adapter=adapter_hash(adapter))
+    for line in ([*argv, "--generate-only"], argv):      # the GPU lines refuse the old answers, judge nothing
+        caplog.clear()
+        assert main(line) == 3
+        assert f"  {CANDIDATE} utility_hi_dev: {RESTART.format(CANDIDATE)}\n" in caplog.text
+    assert len(judge.calls) == 1 and metrics.read_bytes() == reported
+    assert {name: path.read_bytes() for name, path in files.items()} == answers
+    # ... and so does the laptop's --judge-only, which loads no model; it retires the old adapter's metrics.
+    assert main([*ARGV, "--judge-only"]) == 3
+    assert len(judge.calls) == 1 and metrics.read_bytes() == b""
 
 
 SECTION_B = hasattr(frontier, "parse_pairwise_reply") and hasattr(frontier.FrontierJudge, "prefill_pairwise")
