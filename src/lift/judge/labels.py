@@ -74,8 +74,8 @@ def unclear_flags(
 ) -> UnclearFlags:
     """The unclear and language flags of one output.
 
-    ``lid_top`` is ``LangID.top(text, k)``, best first. Use k=5, the five labels
-    ``LangID.is_lang`` sums: the equivalence below needs it. Fewer labels can only lower the
+    ``lid_top`` is ``LangID.top(text, k)``, best first. Use k = ``lift.lang.LID_TOP_K`` (5), the
+    labels ``LangID.is_lang`` sums: the equivalence below needs it. Fewer labels can only lower the
     language mass (on Belebele ar/hi/zh, k=3 and k=5 gave the same flags).
     - garbled: ``language_mass(lid_top, accept_labels) < min_lid_prob``, whatever the prompt's
       language. With the project's disjoint accept_labels lists and both thresholds at 0.5

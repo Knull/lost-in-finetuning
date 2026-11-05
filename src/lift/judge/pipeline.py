@@ -1,9 +1,10 @@
 """Judge a generations file into a judgements file, and read judgements back for reporting.
 Implemented in P02.
 
-For each selected GenerationRecord: GlotLID top-3 on the output (an empty or whitespace-only output
-gets ``[("und", 0.0)]`` without a LID call) -> unclear flags -> judge, in chunks -> final label
-(lift.judge.labels) -> one JudgementRecord appended per item to
+For each selected GenerationRecord: GlotLID's top 5 on the output (``lift.lang.LID_TOP_K``, the labels
+``LangID.is_lang`` sums: decisions item 43; an empty or whitespace-only output gets ``[("und", 0.0)]``
+without a LID call) -> unclear flags -> judge, in chunks -> final label (lift.judge.labels) -> one
+JudgementRecord appended per item to
 outputs/judgements/{judge_dir}/{variant}/{set}_{lang}_{split}.jsonl after each chunk.
 
 - Exactly one judgement per selected generation, naming the output it judged (``output_sha``: the
@@ -86,6 +87,7 @@ from typing import Any, Protocol
 from lift import config, prompts
 from lift.io import append_jsonl, read_jsonl, sha256_obj, sha256_text, stable_json
 from lift.judge import labels
+from lift.lang import LID_TOP_K
 from lift.models.generate import OtherPrecisionError, StaleOutputError, restart_command
 from lift.paths import REPO_ROOT, judgements_dir, metrics_dir, validation_dir
 from lift.schemas import GenerationRecord, JudgementRecord, UnclearFlags
@@ -712,7 +714,7 @@ def _check_judge_stack(out_path: Path, existing: Collection[JudgementRecord], st
 
 def _flags(g: GenerationRecord, lid: Any, accept: Mapping[str, Sequence[str]],
            unclear: Mapping[str, Any]) -> UnclearFlags:
-    lid_top = lid.top(g.output, k=5) if g.output.strip() else list(EMPTY_OUTPUT_LID)
+    lid_top = lid.top(g.output, k=LID_TOP_K) if g.output.strip() else list(EMPTY_OUTPUT_LID)
     return labels.unclear_flags(
         text=g.output, n_new_tokens=g.n_new_tokens, lid_top=lid_top, prompt_lang=g.lang,
         accept_labels=accept, min_new_tokens=int(unclear["min_new_tokens"]),
