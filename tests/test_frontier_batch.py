@@ -323,15 +323,21 @@ def test_errored_expired_and_canceled_requests_are_left_for_the_sync_pass():
     (ProviderError("BatchItemError", status=400, code="invalid_request_error", message="placeholder rule"),
      FrontierUnavailable, r"errors by type \{'invalid_request_error': 5\}"),
     ("expired", FrontierUnavailable, "answered none of its 5 requests \\(5 expired"),
+    # canceled by a person before any request finished: on the batch path the stop stays (a cancel may mean
+    # "stop spending"); a synchronous run sends them instead (test_a_synchronous_run_sends_the_requests_...)
+    ("canceled", FrontierUnavailable, "answered none of its 5 requests \\(0 expired, 5 canceled"),
 ])
 def test_a_batch_in_which_nothing_succeeded_stops_the_run(fail, stop, match):
     if fail == "expired":
         fake = FakeBatchProvider(verdicts, expire=lambda call: True)
+    elif fail == "canceled":
+        fake = FakeBatchProvider(verdicts, cancel=lambda call: True)
     else:
         fake = FakeBatchProvider(verdicts, fail_all=fail)
     judge = batch_judge(fake)
-    with pytest.raises(stop, match=match):
+    with pytest.raises(stop, match=match) as excinfo:
         judge.prefill_pairwise(*pairs(5))
+    assert str(excinfo.value).endswith("rerun (they are submitted again)")   # what a pre-fill's rerun does
     with pytest.raises(stop):
         judge.pairwise(*pairs(5))                                       # the judge stays stopped
     assert item_calls(fake) == [] and fake.batch_calls == []            # nothing sent one by one
@@ -549,6 +555,86 @@ def test_a_synchronous_run_stops_rather_than_pay_again_for_a_running_batch(run, 
     fake.polls = 0                                                      # ended now: the same line collects it
     assert judge.pairwise(*pairs(5)) == sync_reference(verdicts).pairwise(*pairs(5))
     assert sorted(index(c) for c in item_calls(fake)) == [3, 4]         # only the two it does not hold
+
+
+@pytest.mark.parametrize("run", SYNC_RUNS)
+def test_the_pending_remedy_says_what_a_rerun_does_after_a_cancel(run, utility_entry):
+    # With bulk not batch every rerun is synchronous, so the remedy holds as written. Under bulk batch this
+    # run skipped the pre-fill, and a pre-fill rerun stops once on a batch that finished none (the batch
+    # path's stop), so the remedy says so.
+    fake, _ = open_batch(3, polls=5)
+    if run == "pre-fill with bulk sync":
+        utility_entry(bulk="sync")
+    judge = batch_judge(fake)
+    call = judge.prefill_pairwise if run == "pre-fill with bulk sync" else judge.pairwise
+    with pytest.raises(FrontierBatchPending) as excinfo:
+        call(*pairs(3))
+    message = str(excinfo.value)
+    assert ("cancel it in the Console and rerun: the requests finished by then are collected, the rest sent "
+            "synchronously") in message
+    caveat = ("(a pre-fill with bulk batch instead stops once on a batch that finished none, and submits its "
+              "requests again on the rerun after)")
+    assert (caveat in message) == (run == "pairwise without a pre-fill")
+
+
+@pytest.mark.parametrize("run", SYNC_RUNS)
+def test_a_synchronous_run_sends_the_requests_of_a_batch_canceled_before_any_finished(run, utility_entry,
+                                                                                         caplog):
+    # The remedy above taken: a person cancels the batch in the Console, here before any of its requests
+    # finished (lift never cancels one), and reruns. That says nothing about the API, and the run sends them
+    # one by one anyway: it collects the batch as such and judges them synchronously, without a stop.
+    fake = FakeBatchProvider(verdicts, polls=5, cancel=lambda call: True)
+    with pytest.raises(FrontierBatchPending):
+        batch_judge(fake).prefill_pairwise(*pairs(3), wait=False)
+    [batch_id] = fake.batches
+    if run == "pre-fill with bulk sync":
+        utility_entry(bulk="sync")
+    method = "prefill_pairwise" if run == "pre-fill with bulk sync" else "pairwise"
+    with pytest.raises(FrontierBatchPending, match="cancel it in the Console and rerun"):
+        getattr(batch_judge(fake), method)(*pairs(3))
+    fake.polls = 0                                                      # canceled: it ends, none finished
+    caplog.set_level(logging.WARNING, logger=frontier.__name__)
+    judge = batch_judge(fake)                                           # the rerun
+    if run == "pre-fill with bulk sync":
+        summary = judge.prefill_pairwise(*pairs(3))
+        assert [summary[k] for k in ("mode", "n_collected", "n_canceled", "batch_ids")] == [
+            "sync", 0, 3, [batch_id]]
+    assert judge.pairwise(*pairs(3)) == sync_reference(verdicts).pairwise(*pairs(3))
+    assert len(item_calls(fake)) == 3 and fake.batch_calls == [] and len(fake.batches) == 1
+    rows = state_rows(judge)
+    assert [r["event"] for r in rows] == ["submitted", "collected"]     # closed: never looked at again
+    assert (rows[1]["n_succeeded"], rows[1]["n_canceled"]) == (0, 3)
+    [note] = [r.getMessage() for r in caplog.records
+              if r.levelno == logging.WARNING and batch_id in r.getMessage()]
+    assert f"batch {batch_id} was canceled before any of its 3 requests finished" in note
+    assert "instruction-" not in note and "answer-" not in note        # ids and counts only, never a text
+
+
+@pytest.mark.parametrize("run", SYNC_RUNS)
+def test_a_synchronous_run_still_stops_on_a_batch_that_answered_none_and_names_its_rerun(run, utility_entry):
+    # Expired as well as canceled is no hand cancel alone, so the stop stays on the synchronous path too. Its
+    # remedy says what a rerun of this synchronous run does, and the rerun does it: the batch is collected
+    # now, so its requests are sent one by one, and no batch is submitted.
+    fake = FakeBatchProvider(verdicts, polls=1, expire=lambda call: index(call) == 0,
+                             cancel=lambda call: True)
+    with pytest.raises(FrontierBatchPending):
+        batch_judge(fake).prefill_pairwise(*pairs(3), wait=False)
+    if run == "pre-fill with bulk sync":
+        utility_entry(bulk="sync")
+    judge = batch_judge(fake)
+    call = judge.prefill_pairwise if run == "pre-fill with bulk sync" else judge.pairwise
+    none = r"answered none of its 3 requests \(1 expired, 2 canceled"
+    with pytest.raises(FrontierUnavailable, match=none) as exc:
+        call(*pairs(3))
+    again = ("they are sent synchronously" if run == "pre-fill with bulk sync" else
+             "the same command sends them synchronously, a pre-fill with bulk batch submits them again")
+    assert str(exc.value).endswith(f"rerun ({again})")
+    assert item_calls(fake) == [] and fake.batch_calls == []            # nothing sent one by one instead
+    rerun = batch_judge(fake)
+    if run == "pre-fill with bulk sync":
+        assert rerun.prefill_pairwise(*pairs(3))["n_submitted"] == 0
+    assert rerun.pairwise(*pairs(3)) == sync_reference(verdicts).pairwise(*pairs(3))
+    assert len(item_calls(fake)) == 3 and len(fake.batches) == 1
 
 
 def test_a_judge_without_the_batch_api_stops_rather_than_pay_again(monkeypatch):
