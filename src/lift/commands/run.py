@@ -141,6 +141,16 @@ def _complete(variant: str, set_name: str, lang: str, split: str) -> bool:
     return {g.pid for g in read_generations(path)} >= {p.pid for p in load(set_name, lang, split)}
 
 
+def _own_dtype(variant: str, set_name: str, lang: str, split: str, *, dtype: str) -> str:
+    """The one precision the cell's generations were made in, which a lift generate line that completes the
+    cell must name (it refuses a file made in another precision than its --dtype); ``dtype``, the run's,
+    when the file names none or several."""
+    from lift.models.generate import made_in
+
+    made = made_in(variant, set_name, lang, split)
+    return made.pop() if len(made) == 1 else dtype
+
+
 def _record(variant: str, set_name: str, lang: str, split: str, *, dtype: str,
             refused: dict[str, str]) -> None:
     """Write the AuditKIT record of a judged cell. A record the checked loader refuses (another
@@ -148,7 +158,8 @@ def _record(variant: str, set_name: str, lang: str, split: str, *, dtype: str,
     the run: the judgements are already written, and the command exits 3 at the end. So is the record
     of a cell short of its frozen split (ShortCellError, from ``_complete``'s read of the split: lift
     judge reads prompt texts by pid, so it judges a short cell's generations made before that check),
-    kept with the error's remedy and the lines that then make the record."""
+    kept with the error's remedy and the lines that then make the record, whose lift generate line is in
+    the precision the cell's generations were made in (``_own_dtype``)."""
     from lift.audit import record_safety
     from lift.data.build import ShortCellError
     from lift.models.generate import StaleOutputError
@@ -161,7 +172,8 @@ def _record(variant: str, set_name: str, lang: str, split: str, *, dtype: str,
         log.info("AuditKIT record: %s", record_safety(variant, set_name, lang, split, dtype=dtype))
     except ShortCellError as exc:              # its prompt file is completed on the laptop first
         log.error("%s %s: no AuditKIT record: %s", variant, cell, exc)
-        generate = _generate_line(variant, set_name, lang, split, dtype=dtype)
+        own = _own_dtype(variant, set_name, lang, split, dtype=dtype)
+        generate = _generate_line(variant, set_name, lang, split, dtype=own)
         refused[cell] = (f"short of its frozen split: {exc.remedy}; then, after a later job's `lift sync "
                          f"pull`, `{generate}` makes the prompts the completed file adds, and the line that "
                          "failed judges them and writes the record")
