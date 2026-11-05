@@ -2,6 +2,9 @@
 
 Codes against lift.schemas and the CLAUDE.md file layout, not against the harness code:
 
+- Prompt files are read through lift.data.build.load_prompts, the reader of every stage, so a pid's
+  split is the committed split file's (data/splits): a file stamped from another assignment, or a
+  missing split file, is refused (``Prompts``). A cell short of its frozen split is still read.
 - A generation is *current* when its ``prompt_sha`` equals ``sha256_text`` of the prompt text now
   in data/prompts. A translation fixed after a run (the native spot checks) leaves a stale record
   behind until the harness regenerates the file, which it does for the whole file: the other
@@ -137,7 +140,12 @@ def fields_of(err: pydantic.ValidationError) -> str:
 
 
 class Prompts:
-    """PromptRecords by (set, lang) and pid, read on first use."""
+    """PromptRecords by (set, lang) and pid, read on first use through lift.data.build.load_prompts, the
+    reader of every stage: a record whose split stamp is not the one the committed split file
+    (data/splits) gives its pid, or a missing split file, is a ValidateError naming the remedy, so
+    dev/final membership here is the committed split's. A cell short of its frozen split (a translation
+    failure awaiting a reader's verdict, which every run refuses) is still read (``allow_short``): a sheet
+    may show its prompts meanwhile."""
 
     def __init__(self) -> None:
         self._cache: dict[tuple[str, str], dict[str, PromptRecord]] = {}
@@ -152,17 +160,20 @@ class Prompts:
     def get(self, set_name: str, lang: str) -> dict[str, PromptRecord]:
         key = (set_name, lang)
         if key not in self._cache:
+            from lift.data import build  # noqa: PLC0415 (the one reader of the prompt files, not a copy)
+
             path = self.path(set_name, lang)
             if not path.is_file():
                 raise ValidateError(f"{path} is missing: build the prompt sets (lift data build) "
                                     "or fetch them (lift sync pull)")
+            try:
+                found = build.load_prompts(set_name, lang, allow_short=True)
+            except pydantic.ValidationError as e:     # its own message would quote the prompt text
+                raise ValidateError(f"{path}: a record is not a PromptRecord ({fields_of(e)})") from None
+            except (OSError, ValueError) as e:        # stamps, the split file, an unreadable line
+                raise ValidateError(str(e)) from None
             records: dict[str, PromptRecord] = {}
-            for i, row in read_records(path):
-                try:
-                    rec = PromptRecord.model_validate(row)
-                except pydantic.ValidationError as e:
-                    raise ValidateError(f"{path}:{i}: not a PromptRecord "
-                                        f"({fields_of(e)})") from None
+            for rec in found:
                 if rec.pid in records:
                     raise ValidateError(f"{path}: pid {rec.pid} appears twice")
                 records[rec.pid] = rec
