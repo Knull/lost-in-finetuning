@@ -35,9 +35,12 @@ sweep, apply the selection rule (overall and per repair family), and hand over t
      artifact through a check that refuses a declared sha256 the file no longer has, and have
      `build_variant` refuse a builder whose loaded hashes differ from `spec.artifacts`. A CAST fit
      re-run in place must change the keys or stop the run, never resume a cell under it.
-   - Every repair's registry entry pins its adapter (`artifacts.adapter`, as `lift
-     register-adapter` writes it). Since R1, the reporting door refuses a cell of a variant
-     that names an adapter without a pinned hash, and refuses a cell whose recorded adapter hash
+   - Every repair's registry entry pins its adapter (`artifacts.adapter`): the hash the adapter's
+     own entry pins now (`lift register-adapter` writes that one). An adapter trained and
+     registered again changes only its own entry, so register each of its repairs again with the
+     new pin, then make their cells again. Since R1, the reporting door refuses a cell of a
+     variant that names an adapter without a pinned hash or with a pin the adapter's own entry
+     does not share, and refuses a cell whose recorded adapter hash
      is not the pin. That is how a repair arm and its adapter arm are known to come from the same
      weights.
    - A CAST wrapper's `generate` must pass `logits_processor` (with every other keyword) on to

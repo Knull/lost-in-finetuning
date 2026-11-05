@@ -68,7 +68,10 @@ Reading:
   Controversial mode; for a frontier judge everything its id names but the API version, so the rubric's
   version and the sampling settings of the role's entry too: an edited rubric is another judge).
   A variant that names an adapter (the adapter method, every repair) is read only when its entry pins
-  ``artifacts.adapter`` (lift register-adapter writes it), else its cell is refused naming the registry.
+  ``artifacts.adapter`` (an adapter's own entry: lift register-adapter writes it; a repair's: its
+  adapter's hash) and every other entry of method adapter that names that adapter pins the same hash (an
+  adapter trained and registered again changes only its own entry, which leaves its repairs' pins stale),
+  else its cell is refused naming the registry.
   ``dtype`` defaults to ``generation.dtype`` (one precision for every reported number); any other needs Gate
   0's licence (``check_dtype_licence``), because every ``--dtype`` run names its dtype: a comparison
   that paired with the bf16 Gate 0 run gate0.json records now, and a cell made under the harness and
@@ -1209,14 +1212,53 @@ def _made_otherwise(variant: str, gens: Sequence[GenerationRecord]) -> tuple[lis
     return checks, None
 
 
+def _adapter_pin_problems(variant: str) -> list[str]:
+    """Why the registry does not hold the cells of ``variant`` (registered) to its adapter's current
+    weights; none for a variant that names no adapter. Its configs/variants.yaml entry must pin
+    ``artifacts.adapter`` (an adapter's own entry, which lift register-adapter writes; a repair's, its
+    adapter's hash), and every other entry of method adapter that names the same adapter (the adapter's
+    own entry) must pin that hash too: an adapter trained and registered again changes only its own entry,
+    so a repair entry still pinning the old hash is stale, and its cells, made from the old weights, would
+    read and pair with the new adapter arm (``PAIR_MUST_MATCH`` has no adapter field)."""
+    from lift.models.variants import load_registry
+
+    registry = load_registry()
+    spec = registry[variant]
+    if not spec.adapter:
+        return []
+    pinned = spec.artifacts.get("adapter")
+    if not pinned:
+        writer = ("`lift register-adapter` writes it" if spec.method == "adapter" else
+                  f"a repair's entry pins its adapter's hash, the one {spec.adapter}'s own entry pins")
+        return [f"{variant}'s entry in configs/variants.yaml names adapter {spec.adapter} but pins no "
+                "artifacts.adapter: a cell of a variant that names an adapter is read only under the hash "
+                f"its entry pins ({writer}), so that every arm made from that adapter comes from the same "
+                "weights"]
+    problems = []
+    for other in registry.values():
+        if other.name == variant or other.method != "adapter" or other.adapter != spec.adapter:
+            continue
+        theirs = other.artifacts.get("adapter")
+        if theirs == pinned:
+            continue
+        shown = theirs[:12] if theirs else "none"
+        problems.append(f"{variant}'s entry in configs/variants.yaml pins adapter hash {pinned[:12]}, but "
+                        f"{other.name}'s entry (method adapter, adapter {spec.adapter}) pins {shown}: every "
+                        "arm made from an adapter is read only under the hash the adapter's own entry pins "
+                        "now, and an adapter trained and registered again changes only that entry. "
+                        f"Re-register {variant} with {other.name}'s current pin (its artifacts.adapter in "
+                        "configs/variants.yaml), then make its cells again: their read then names each "
+                        "cell's lift restart line")
+    return problems
+
+
 def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRecord], gpath: Path,
                 cell: tuple[str, str, str, str], *, role: str, complete: bool, dtype: str) -> None:
     """Raise unless ``records`` can be reported (the rules are in the module docstring). A variant whose
     spec names an adapter (the adapter method, every P05 repair) is read only under the adapter hash its
-    configs/variants.yaml entry pins (artifacts.adapter, which lift register-adapter writes), so the
-    per-cell adapter_hash check holds a repair arm and its adapter arm to one set of weights."""
-    from lift.models.variants import get_spec
-
+    configs/variants.yaml entry pins (artifacts.adapter), and only while every entry of method adapter that
+    names that adapter pins the same hash (``_adapter_pin_problems``), so the per-cell adapter_hash check
+    holds a repair arm and its adapter arm to one set of weights."""
     variant, set_name, lang, split = cell
     texts = {p.pid: p.text for p in prompts.load(set_name, lang, split)}
     gen_of = {g.key: g for g in gens}
@@ -1245,13 +1287,7 @@ def _check_cell(records: Sequence[JudgementRecord], gens: Sequence[GenerationRec
             (list(set(texts) - {g.pid for g in gens}), f"of {len(texts)} prompts have no generation"),
         ]
     problems = [f"{len(pids)} {what}, e.g. {sorted(pids)[:5]}" for pids, what in checks if pids]
-    if unregistered:
-        problems.append(unregistered)
-    elif (spec := get_spec(variant)).adapter and not spec.artifacts.get("adapter"):
-        problems.append(f"{variant}'s entry in configs/variants.yaml names adapter {spec.adapter} but pins "
-                        "no artifacts.adapter: a cell of a variant that names an adapter is read only under "
-                        "the hash its entry pins (`lift register-adapter` writes it), so that every arm made "
-                        "from that adapter comes from the same weights")
+    problems += [unregistered] if unregistered else _adapter_pin_problems(variant)
     problems += _one_configuration(gens, records, dtype)
     if dtype != str(config.get("generation.dtype")):
         problems += _licence_problems(dtype, gens, records, cell, role)
