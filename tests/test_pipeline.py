@@ -45,6 +45,7 @@ DIGEST = "e" * 64          # gate0.json's checks.precision.digest: the bf16 run 
 DECODING = "d" * 16
 COMPARED = {"reference_digest": DIGEST, "harness": 1, "decoding": DECODING}     # what the comparison ran with
 T4_META = {"model_rev": REV, "harness": 1, "decoding": DECODING, "gpu_capability": "7.5"}  # a T4 generation
+T4_JUDGE = f"{GUARD_ID}#{RULES}#fp16#strict"    # the judge the T4 comparison ran: the primary judge in fp16
 
 
 @pytest.fixture(autouse=True)
@@ -177,23 +178,25 @@ def setup_cell(store, n=6, outputs=None, dtype="bf16", meta=None):
 
 
 def write_licence(dtype="fp16", *, passed=True, fp16=True, rev=REV, name=None, reference=True, ref_rev=REV,
-                  digest=DIGEST, gpu="7.5"):
+                  digest=DIGEST, gpu="7.5", judge=T4_JUDGE):
     """What Gate 0's comparison run (lift smoke --compare-dtype) writes to outputs/metrics/gate0-{dtype}.json,
     and the bf16 reference's own Gate 0 (gate0.json; ``reference`` None leaves it out), reduced to the
     fields the licence reads. ``fp16`` is the fp16 check's pass flag on a comparison of 200 prompts, or
     the whole check; either way it records ``COMPARED`` unless it says otherwise. ``digest`` is gate0.json's
     checks.precision.digest (the comparison paired with ``DIGEST``), ``gpu`` the GPU class the comparison
-    ran on (None leaves either out)."""
+    ran on, ``judge`` the id of the judge it ran (Gate 0's judge.id; gate0.json's names it in bf16, as the
+    comparison pairs only runs of one judge but for the precision); None leaves either out."""
     fp16 = {**COMPARED, **fp16} if isinstance(fp16, dict) else {"pass": fp16, "comparable": True, "n": 200,
                                                                   **COMPARED}
     doc = {"dtype": dtype, "reference_dtype": "bf16", "pass": passed,
-           **({"gpu_capability": gpu} if gpu else {}),
+           **({"gpu_capability": gpu} if gpu else {}), **({"judge": {"id": judge}} if judge else {}),
            "checks": {"precision": {"pass": True, "digest": "f" * 64}, "fp16": fp16},
            "revisions": {"global": rev, "judge": "a" * 40}}
     metrics_dir().mkdir(parents=True, exist_ok=True)
     if reference is not None:
         precision = {"pass": True, **({"digest": digest} if digest else {})}
         ref = {"dtype": "bf16", "pass": reference, "checks": {"precision": precision},
+               **({"judge": {"id": judge.replace(f"#{dtype}#", "#bf16#")}} if judge else {}),
                "revisions": {"global": ref_rev, "judge": "a" * 40}}
         (metrics_dir() / "gate0.json").write_text(json.dumps(ref), encoding="utf-8")
     path = metrics_dir() / f"{name or f'gate0-{dtype}'}.json"
@@ -1061,16 +1064,78 @@ def test_a_licence_covers_only_cells_judged_on_its_gpu_class(fake_prompt_files, 
 
 
 def test_a_licence_that_records_no_harness_decoding_or_gpu_class_covers_no_cell(fake_prompt_files):
-    """A licence from before contract J does not say what its comparison ran with, so it covers nothing."""
+    """A licence from before contract J does not say what its comparison ran with, so it covers nothing. Nor
+    does one that names no judge (R2-07) cover a cell a local judge judged."""
     t4_cell(fake_prompt_files)
     write_licence(gpu=None, fp16={"pass": True, "comparable": True, "n": 200, "harness": None,
-                                  "decoding": None})
+                                  "decoding": None}, judge=None)
     with pytest.raises(ValueError, match="cannot be reported") as refused:
         pipeline.load_labels(*CELL, dtype="fp16")
-    for where in ("checks.fp16.harness", "checks.fp16.decoding", "gpu_capability"):
+    for where in ("checks.fp16.harness", "checks.fp16.decoding", "gpu_capability", "judge.id"):
         assert f"gate0-fp16.json {where} is missing" in str(refused.value)
     write_licence()
     assert len(pipeline.load_labels(*CELL, dtype="fp16")) == 4
+
+
+PINNED_JUDGE = "a" * 40              # the judge revision the config pins (decisions item 49): GUARD_ID's
+
+
+@pytest.mark.parametrize("change", ["labelling-rules", "judge-revision", "controversial-mode"])
+def test_the_fp16_licence_covers_only_cells_judged_by_its_comparisons_judge(fake_prompt_files, monkeypatch,
+                                                                            change):
+    """R2-07: gate0-fp16.json records the judge its comparison ran (judge.id: model, revision, labelling
+    rules, precision, Controversial mode), but the licence never compared it with the licensed cell's judge.
+    So it outlived a dated change of the labelling rules (a new rules tag), a re-pin of the judge or another
+    Controversial mode: T4 cells judged under the new id read as licensed by a 95% agreement (and an fp16
+    judge scan) Gate 0 measured with another judge. Every judgement a local judge made (one with a stack)
+    must now carry the licence's judge id, its precision segment aside; otherwise the read is refused naming
+    gate0-fp16.json, and the remedy is the bf16 Gate 0 and then the comparison, which pairs only runs of one
+    judge."""
+    monkeypatch.setitem(config.load("project")["judges"]["safety_primary"], "revision", PINNED_JUDGE)
+    pids, _ = t4_cell(fake_prompt_files)             # fp16 on the T4, judged there in fp16
+    write_licence()                                  # the comparison ran this very judge
+    assert pipeline.load_labels(*CELL, dtype="fp16") == {p: "refusal" for p in pids}     # licensed: control
+    if change == "labelling-rules":
+        # A dated change to unclear.min_new_tokens moves the rules tag. The cell is set aside (its `lift
+        # restart ... --judge primary --dtype fp16` line) and judged again on the T4 under the new id, while
+        # gate0-fp16.json still records the comparison made under the old rules.
+        change_the_rules(monkeypatch)
+        pipeline.judgements_path("qwen3guard", *CELL).unlink()
+        t4_cell(fake_prompt_files)
+        [judge] = {r.judge for r in pipeline.load_judgements(*CELL)}
+        assert judge != T4_JUDGE and pipeline._expected_judge("primary", "fp16")[0].fullmatch(judge)
+    elif change == "judge-revision":                 # the comparison ran the judge of an earlier pin
+        write_licence(judge=f"Qwen/Qwen3Guard-Gen-4B@{'0' * 40}#{RULES}#fp16#strict")
+    else:                                            # the comparison ran the loose Controversial mapping
+        write_licence(judge=f"{GUARD_ID}#{RULES}#fp16#loose")
+    message = fp16_refusal()
+    other = r"4 judgements were made by \[.*\], not by the judge gate0-fp16\.json judge\.id names"
+    assert re.search(other, message), message
+    assert ("the comparison was made with another judge than the configured primary judge (another model, "
+            f"revision, labelling rules or Controversial mode): {NEW_GATE0}") in message
+    assert "lift restart" not in message and "not the configured primary judge" not in message
+    with pytest.raises(ValueError, match=r"gate0-fp16\.json judge\.id"):
+        pipeline.load_records(*CELL, complete=False, dtype="fp16")
+
+
+def test_a_cell_judged_by_an_older_judge_than_the_licences_names_its_judges_restart(
+        fake_prompt_files, monkeypatch, second_judge):
+    """R2-07, the other side: the judge was re-pinned, and the bf16 Gate 0 and the T4 comparison re-ran under
+    the new pin. A T4 cell judged before is then the stale side: its judge's restart line is the remedy, not
+    another Gate 0. A frontier (API) judge's judgements carry no stack: the licence's judge is not theirs."""
+    entry = config.load("project")["judges"]["safety_primary"]
+    monkeypatch.setitem(entry, "revision", PINNED_JUDGE)
+    pids, gens = t4_cell(fake_prompt_files)
+    monkeypatch.setitem(entry, "revision", "b" * 40)         # re-pinned, Gate 0 and the comparison re-run
+    write_licence(judge=f"Qwen/Qwen3Guard-Gen-4B@{'b' * 40}#{RULES}#fp16#strict")
+    message = fp16_refusal()
+    assert "4 judgements were made by" in message and "not the configured primary judge" in message
+    assert (f"judge the cell again on the T4: run `{RESTART} --judge primary --dtype fp16` as a job line "
+            "right after `lift sync pull`") in message
+    assert "lift smoke" not in message and "make the cell again" not in message
+    second = FakeJudge(second_judge, short=pipeline.judge_dir("second"))
+    pipeline.judge_file(generations_path(*CELL), judge=second, lid=FakeLID(), keys=[gens[0].key])
+    assert pipeline.load_labels(*CELL, judge="second", complete=False, dtype="fp16") == {pids[0]: "benign"}
 
 
 def test_a_pinned_judge_revision_is_checked(fake_prompt_files, monkeypatch):

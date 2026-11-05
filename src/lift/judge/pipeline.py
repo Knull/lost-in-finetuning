@@ -76,10 +76,12 @@ Reading:
   ``dtype`` defaults to ``generation.dtype`` (one precision for every reported number); any other needs Gate
   0's licence (``check_dtype_licence``), because every ``--dtype`` run names its dtype: a comparison
   that paired with the bf16 Gate 0 run gate0.json records now, and a cell made under the harness and
-  decoding settings of that comparison, generated and judged (Qwen3Guard) on its GPU class. A refusal
-  names the remedy for the side that is out of date: after a harness fix, the bf16 Gate 0 and then the
-  comparison; for a cell of another harness or GPU class, its restart line (judged elsewhere: its
-  judge's).
+  decoding settings of that comparison, generated and judged (Qwen3Guard) on its GPU class, and judged
+  (Qwen3Guard) by the judge the comparison ran (gate0-{dtype}.json judge.id, its precision aside: the
+  model, revision, labelling rules and Controversial mode). A refusal names the remedy for the side that is
+  out of date: after a harness fix, or a change of the judge (a re-pin, new labelling rules, another
+  mode), the bf16 Gate 0 and then the comparison; for a cell of another harness or GPU class, its restart
+  line (judged elsewhere, or by an older judge: its judge's).
   ``complete=True`` (every reported number) also needs a generation for every prompt of the split
   and a judgement of every generation; ``complete=False`` is for the second judge's sample and runs
   in progress.
@@ -117,6 +119,8 @@ log = logging.getLogger(__name__)
 LICENCE_MIN_PROMPTS = 200       # decisions.md 27: fp16 agrees with bf16 on 95% of the same 200 prompts
 # What a licensed cell's generations must have been made with (meta field -> where gate0-{dtype}.json records
 # it): Gate 0's comparison says nothing about another harness, other decoding settings or another GPU class.
+# A local judge's judgements of the cell must also be on that GPU class and by the judge the comparison ran
+# (its judge.id, the precision aside: _coverage_problems).
 LICENCE_COVERS = {"harness": ("checks", "fp16", "harness"), "decoding": ("checks", "fp16", "decoding"),
                   "gpu_capability": ("gpu_capability",)}
 ROLES: tuple[str, ...] = ("primary", "second")
@@ -969,7 +973,7 @@ def check_dtype_licence(dtype: str, model_rev: str | None) -> None:
     failed fp16 verdict shows although gate0.json is missing too. Every ``--dtype`` run names its dtype, so
     naming one licenses nothing. ``load_records`` asks whenever the requested dtype is not
     ``generation.dtype``, and also checks that the cell was made as the comparison was (``LICENCE_COVERS``)
-    and judged on its GPU class (``_coverage_problems``).
+    and judged on its GPU class by its judge (``_coverage_problems``).
     """
     licence, reference = metrics_dir() / f"gate0-{dtype}.json", metrics_dir() / "gate0.json"
     rerun = f"`lift smoke --compare-dtype {dtype}` on the T4"
@@ -1064,8 +1068,10 @@ def _coverage_problems(dtype: str, gens: Sequence[GenerationRecord], records: Se
     A100 job given --dtype fp16) or under another harness never had its precision compared. So must the GPU
     class of every judgement with a ``stack`` (Qwen3Guard; an API judge runs on no GPU of ours): the
     comparison ran generator and judge both on the T4 (decisions.md 27), while an fp16 judge may also run on
-    a CPU or on another GPU below compute 8. Empty when the licence cannot be read (``check_dtype_licence``
-    says so)."""
+    a CPU or on another GPU below compute 8. And every judgement with a ``stack`` must be the judge the
+    comparison ran (``_judge_coverage``: the licence's judge.id, its precision aside), as its agreement was
+    measured with that judge only: not after a re-pin, under other labelling rules or in another
+    Controversial mode. Empty when the licence cannot be read (``check_dtype_licence`` says so)."""
     path = metrics_dir() / f"gate0-{dtype}.json"
     try:
         licence = json.loads(path.read_text(encoding="utf-8"))
@@ -1093,11 +1099,44 @@ def _coverage_problems(dtype: str, gens: Sequence[GenerationRecord], records: Se
         classes = sorted({str(on) for on in judged_on.values()})
         problems.append(f"{len(off)} judgements were made on GPU class {classes}, not {path.name} "
                         f"gpu_capability {gpu!r}, e.g. {off[:5]}")
+    problems += _judge_coverage(path.name, _field(licence, "judge", "id"),
+                                [r for r in records if r.native.get("stack") is not None], dtype, role, moved)
     if problems:
         problems.append(f"a cell in {dtype} counts only when generated under the harness and decoding "
-                        "settings of Gate 0's comparison, and generated and judged on its GPU class: "
+                        "settings of Gate 0's comparison, generated and judged on its GPU class, and judged "
+                        "by the judge it ran: "
                         + "; ".join(_coverage_remedies(dtype, licence, gens, moved, cell, role)))
     return problems
+
+
+def _judge_coverage(name: str, compared: Any, local: Sequence[JudgementRecord], dtype: str, role: str,
+                    moved: set[str]) -> list[str]:
+    """Why Gate 0's comparison (``name``, whose judge.id is ``compared``) did not measure the judge of the
+    ``local`` judgements (those with a ``stack``: Qwen3Guard's; an API judge's are exempt, as from the GPU
+    class): each must carry ``compared`` but for its precision segment (``lift.gate0._judge_identity``, the
+    identity a comparison pairs runs of: model, revision, labelling rules and Controversial mode; the
+    precision is checked on its own). Adds to ``moved`` the side that is out of date by the role's configured
+    judge (``_expected_judge``): "comparison_judge" when the comparison's judge is not it (a re-pin, new
+    labelling rules or another mode since: the bf16 Gate 0 and the comparison are made again), "judge" when
+    the cell's judge is not (judged again), both when neither or both are (an unpinned revision)."""
+    from lift.gate0 import _judge_identity
+
+    if not local:
+        return []
+    if not isinstance(compared, str) or not compared:
+        return [f"{name} judge.id is missing: the licence does not say which judge its comparison ran"]
+    off = sorted(r.pid for r in local if _judge_identity(r.judge) != _judge_identity(compared))
+    if not off:
+        return []
+    rule = _expected_judge(role, dtype)[0]
+    licence_now, cell_now = bool(rule.fullmatch(compared)), all(rule.fullmatch(r.judge) for r in local)
+    if not licence_now or cell_now:
+        moved.add("comparison_judge")
+    if licence_now or not cell_now:
+        moved.add("judge")
+    judges = sorted({r.judge for r in local})
+    return [f"{len(off)} judgements were made by {judges}, not by the judge {name} judge.id names "
+            f"({compared!r}, its precision aside), e.g. {off[:5]}"]
 
 
 def _coverage_remedies(dtype: str, licence: Any, gens: Sequence[GenerationRecord], moved: Collection[str],
@@ -1108,13 +1147,15 @@ def _coverage_remedies(dtype: str, licence: Any, gens: Sequence[GenerationRecord
     comparison against the old one would not run); a cell of another one is made again. Decoding settings
     can also move without a harness bump (a stop set or cap), so for them both remedies are named. A cell
     made on another GPU class is made again on the T4, and one only judged elsewhere is judged again
-    there."""
+    there. A comparison whose judge is not the role's configured one ("comparison_judge":
+    ``_judge_coverage``) is made again after the bf16 Gate 0, which it pairs only with when that ran the
+    same judge; a cell judged by another than the comparison's and the configured one is judged again."""
     from lift.models.generate import HARNESS_VERSION
 
     made, version = _file_dtype(gens), HARNESS_VERSION
     gate0 = ("re-run the full bf16 Gate 0 on an A100 (`lift smoke`), then "
              f"`lift smoke --compare-dtype {dtype}` on the T4 (a comparison pairs only with a bf16 Gate 0 of "
-             "the same harness and decoding settings)")
+             "the same harness, decoding settings and judge)")
     remake = (f"make the cell again on the T4: run `{restart_command(*cell, dtype=made)}` as a job line "
               "right after `lift sync pull`, then generate and judge it there")
     harness = "harness" in moved
@@ -1129,6 +1170,9 @@ def _coverage_remedies(dtype: str, licence: Any, gens: Sequence[GenerationRecord
                    f"if the cell is the older one, {remake}")
     if "gpu_capability" in moved:
         out.append(f"the cell was made on another GPU class than the comparison's: {remake}")
+    if "comparison_judge" in moved:
+        out.append(f"the comparison was made with another judge than the configured {role} judge (another "
+                   f"model, revision, labelling rules or Controversial mode): {gate0}")
     if "judge" in moved and not old_cell and "gpu_capability" not in moved:
         rejudge = restart_command(*cell, judge=role, dtype=made)
         out.append(f"judge the cell again on the T4: run `{rejudge}` as a job line right after "

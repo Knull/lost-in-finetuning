@@ -24,7 +24,9 @@ Checks (each PASS, FAIL or NOT RUN; numbers go to outputs/metrics/gate0.json and
               that passed (gate0.json) for the same revision, on all of at least 200 prompts made with
               the same inputs and decoding settings, and only with the very outputs that Gate 0 judged
               (its checks.precision.digest). It records that digest and the pairs' harness and decoding,
-              which the licence holds every fp16 cell to (check_dtype_licence).
+              which the licence holds every fp16 cell to (check_dtype_licence), and its judge (judge.id,
+              as every Gate 0 does), which a local judge's judgements of the cell must carry, the
+              precision aside: the agreement was measured with that judge only.
   throughput  batch sizes 8, 16 and 32 at real prompt lengths: prompts/sec, tokens/sec, peak memory.
   dry_run     20 prompts x 6 languages x 3 sets through generate and judge: exactly one generation
               and one judgement per prompt, and no judge failure.
