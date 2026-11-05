@@ -11,7 +11,9 @@ answer and the candidate adapter's answer to the same instruction.
   columns, never which model wrote which. The reader puts A, B or tie in ``preference``.
 - Pairs whose stock or candidate output was remade after the sheet was made are left out of the
   score and counted, since verdicts are joined by pid and would be about answers the reader never
-  saw. A sheet drawn in another precision than ``generation.dtype`` (``--dtype``) is drawn and
+  saw. A generations or prompt file that is missing here proves nothing, but a prompt file that is
+  here and refused (lift.validation.outputs.PromptFileError: a stale or foreign copy) stops the
+  score. A sheet drawn in another precision than ``generation.dtype`` (``--dtype``) is drawn and
   scored only while Gate 0's licence covers both cells (lift.validation.outputs.check_licence).
 - Scoring turns the reader's preference into the candidate's score (win 1, tie 0.5, loss 0) and
   compares it with the utility judge's UtilityVerdict, whose score averages both presentation
@@ -49,6 +51,7 @@ from lift.stats.paired import paired_bootstrap, win_rate
 from lift.validation.labels import parse_filled
 from lift.validation.outputs import (
     LicenceError,
+    PromptFileError,
     Prompts,
     check_licence,
     fields_of,
@@ -367,9 +370,9 @@ def score_utility(*, verdict_files: list[Path] | None = None, judge_id: str | No
         try:
             pool = load_pool(*cell, prompts, prompt_check=doc.get("prompt_check", True),
                              dtype=doc.get("dtype"))
-        except LicenceError:
+        except (LicenceError, PromptFileError):  # a prompt file here but refused is never "unreadable"
             raise
-        except ValidateError:
+        except ValidateError:          # a missing prompt file, or a generations file not readable now
             pool = None
         # A sheet drawn in another precision than generation.dtype is scored only while Gate 0's licence
         # covers both cells: load_pool checks the records it keeps, and this also a file not readable here.

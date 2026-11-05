@@ -144,12 +144,12 @@ carry run_timestamp, wall_clock_seconds, created_at and provenance timestamps.
                                          sheet applied; the latest per (lang, pid) wins)
     sft/...                              the candidates and sft/report.json (lift.data.sft)
 ``load_prompts`` reads the prompt files for every later stage (lift.prompts.load wraps it) and checks
-every record's split stamp against the committed split first: data/prompts travels through the runs
-repo, data/splits through git. A read of one split also refuses a cell short of its frozen split
-(``ShortCellError``), so nothing is generated or reported on fewer prompts than the frozen split holds:
-every stage that makes or reports a cell reads its split. A read of every split, whose callers only
-look texts up by pid, checks the stamps alone. Logs, reports and exception messages carry counts,
-pids, labels and hashes, never prompt text.
+every record's split stamp against the committed split first (``SplitStampError``, also for a missing
+split file): data/prompts travels through the runs repo, data/splits through git. A read of one split
+also refuses a cell short of its frozen split (``ShortCellError``), so nothing is generated or reported
+on fewer prompts than the frozen split holds: every stage that makes or reports a cell reads its
+split. A read of every split, whose callers only look texts up by pid, checks the stamps alone. Logs,
+reports and exception messages carry counts, pids, labels and hashes, never prompt text.
 """
 
 from __future__ import annotations
@@ -234,6 +234,15 @@ class ShortCellError(ValueError):
         self.set_name, self.lang = set_name, lang
         self.missing = {split: list(pids) for split, pids in missing.items()}
         self.remedy = remedy
+
+
+class SplitStampError(ValueError):
+    """A prompt file whose records carry another split than the committed split gives them (a stale or
+    foreign copy, stamped from another split assignment), or whose set's committed split file is missing,
+    so its stamps cannot be checked (``_check_stamps``). A ValueError, so the callers that go on without a
+    language on one (judge.pipeline.second_judge_pids, Gate 0's all_prompts) are unchanged; P04's scores,
+    which go on without a prompt file that is missing here, stop on it (lift.validation.outputs.Prompts
+    makes it a PromptFileError): the file is here, and wrong."""
 
 
 def reader_remedy(langs: Iterable[str]) -> str:
@@ -1300,8 +1309,10 @@ def load_prompts(set_name: str, lang: str, split: str | None = None, *, allow_sh
     committed split's, never the stamp a synced file carries: every record, before the split filter,
     must carry the split ``_check_stamps`` gives it (data/splits/{set}.json for a pid it covers, a
     PolyRefuse train/val pid its own segment, redteam "final"). A wrong stamp, or a missing split
-    file, raises ValueError, never FileNotFoundError: that means "no prompt file" to the callers that
-    go on without the language (judge.pipeline.second_judge_pids, Gate 0's all_prompts).
+    file, raises SplitStampError (a ValueError), never FileNotFoundError: a ValueError means "no prompt
+    file" to the callers that go on without the language (judge.pipeline.second_judge_pids, Gate 0's
+    all_prompts), while P04's scores, which go on without a prompt file that is missing, stop on it
+    (lift.validation.outputs.PromptFileError).
 
     Then a read of one split (``split`` given) needs every frozen pid of it (fit, dev or final: the split
     file's) in the file unless its report lists it among its exclusions (a reader's spot-check bad, a fit
@@ -1336,17 +1347,18 @@ def load_prompts(set_name: str, lang: str, split: str | None = None, *, allow_sh
 
 def _check_stamps(set_name: str, lang: str, path: Path, items: Sequence) -> dict[str, str] | None:
     """The committed split of ``set_name`` (None for redteam, which has no split file), once every item
-    of its prompt file at ``path`` carries the split ``_stamp_of`` gives it. ValueError naming the count,
-    the first pids and the remedy otherwise, or when the committed split file is missing."""
+    of its prompt file at ``path`` carries the split ``_stamp_of`` gives it. SplitStampError naming the
+    count, the first pids and the remedy otherwise, or when the committed split file is missing."""
     mapping: dict[str, str] | None = None
     if set_name in SPLIT_SETS:
         try:
             mapping = splits.load_split(set_name)
         except FileNotFoundError:
             shown = _shown(splits.SPLITS_DIR / f"{set_name}.json")
-            raise ValueError(f"{set_name}_{lang}: the committed split file {shown} is missing, so the split "
-                             "stamps of the prompt file cannot be checked: split files are committed "
-                             "(data/splits) and never recomputed; run from a checkout that has it") from None
+            raise SplitStampError(f"{set_name}_{lang}: the committed split file {shown} is missing, so the "
+                                  "split stamps of the prompt file cannot be checked: split files are "
+                                  "committed (data/splits) and never recomputed; run from a checkout that "
+                                  "has it") from None
     wrong = []
     for item in items:
         pid, stamp = (item["pid"], item["split"]) if isinstance(item, dict) else (item.pid, item.split)
@@ -1354,10 +1366,10 @@ def _check_stamps(set_name: str, lang: str, path: Path, items: Sequence) -> dict
         if stamp != want:
             wrong.append(f"{pid} {stamp} ({why})")
     if wrong:
-        raise ValueError(f"{set_name}_{lang}: {len(wrong)} records of {path.name} carry another split than "
-                         f"the committed split gives them, e.g. {', '.join(wrong[:5])}: the file was stamped "
-                         "from another split assignment (a stale or foreign copy); rebuild it (`lift data "
-                         f"build --only {set_name}`), then `lift sync push`")
+        raise SplitStampError(f"{set_name}_{lang}: {len(wrong)} records of {path.name} carry another split "
+                              f"than the committed split gives them, e.g. {', '.join(wrong[:5])}: the file "
+                              "was stamped from another split assignment (a stale or foreign copy); rebuild "
+                              f"it (`lift data build --only {set_name}`), then `lift sync push`")
     return mapping
 
 
