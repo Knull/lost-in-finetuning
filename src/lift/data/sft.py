@@ -62,9 +62,11 @@ Files under the data dir (training rows use the messages format TRL's SFTTrainer
     sft/{cand}/{variant}/curatorkit/                     LF copies of CuratorKIT's manifest.json,
                                                          rejected.jsonl, lexsi_provenance.json + summary
     sft/report.json                                      every stage count and the N decision
-variant is ``dedup`` (both candidates) or ``raw`` (the stress candidate,
-train.yaml ``stress.candidate``). ``build_candidates`` leaves sft/ holding exactly the variants
-report.json lists: after its checks pass it removes every sft/{cand}/{variant} and
+variant is ``dedup`` (both candidates, the standard recipe: train.yaml ``standard.dedup: true``)
+or ``raw`` (the stress candidate, ``stress.candidate``: ``stress.dedup: false``). The plan is
+fixed, so ``build_candidates`` refuses any other dedup setting (ValueError naming the keys), and a
+train.yaml without ``equal_size`` (KeyError), before anything is written. It leaves sft/ holding
+exactly the variants report.json lists: after its checks pass it removes every sft/{cand}/{variant} and
 interim/sft/{cand}/{variant} folder the plan does not make (such as the Nov 3 aya/raw once item 47
 moved the raw sample to indicalign), and a {cand} folder left empty. lift sync deletes nothing,
 so a removed variant must also be deleted from the runs repo by hand. The utility records go to
@@ -543,8 +545,20 @@ def run_curatorkit(rows: list[dict], out_dir: Path, *, dedup: bool) -> list[dict
 
 
 def _variants(train_cfg: Mapping[str, Any]) -> list[tuple[str, str]]:
-    """(candidate, variant): every candidate deduplicated, plus the stress candidate raw."""
-    return [(name, "dedup") for name in train_cfg["candidates"]] + [(train_cfg["stress"]["candidate"], "raw")]
+    """(candidate, variant): every candidate deduplicated (the standard recipe), plus the stress
+    candidate raw (the stress recipe). The plan is fixed, as README pre-registers the recipes, so
+    train.yaml must say so: ValueError naming the keys unless standard.dedup is true and stress.dedup
+    false (a missing stress.dedup would inherit true), raised before anything is written."""
+    std, stress = train_cfg["standard"], train_cfg["stress"]
+    wrong = [f"{key} is {'missing' if value is None else json.dumps(value)}, not {json.dumps(want)}"
+             for key, value, want in (("standard.dedup", std.get("dedup"), True),
+                                      ("stress.dedup", stress.get("dedup"), False)) if value is not want]
+    if wrong:
+        raise ValueError(f"configs/train.yaml: {'; '.join(wrong)}. lift.data.sft deduplicates every "
+                         "candidate (the standard recipe) and gives the stress candidate its raw rows (the "
+                         "stress recipe trains on undeduplicated rows, README): another plan needs a code "
+                         "change and a docs/decisions.md entry; nothing was written")
+    return [(name, "dedup") for name in train_cfg["candidates"]] + [(stress["candidate"], "raw")]
 
 
 def _curate(name: str, variant: str, rows: Sequence[SftRow],
@@ -646,9 +660,12 @@ def build_candidates(train_pools: Mapping[str, Any], *,
     (a refused build changes nothing under sft_dir()), it removes every variant folder of
     sft_dir() and interim/sft the plan does not make, so sft_dir() holds exactly the report's variants.
 
-    Row counts (train.yaml): with ``equal_size`` true, every variant takes N = min(rows, each
-    candidate's deduplicated count), the Nov 3 rule. With ``equal_size`` false (the default since
-    Nov 4, decisions item 47), each variant takes min(rows, its own curated count).
+    The plan (``_variants``) is fixed: train.yaml standard.dedup must be true and stress.dedup false
+    (ValueError otherwise). Row counts (train.yaml ``equal_size``, a required key: a train config
+    without it is refused with KeyError, never given the rule item 47 replaced): with ``equal_size``
+    true, every variant takes N = min(rows, each candidate's deduplicated count), the Nov 3 rule. With
+    ``equal_size`` false (the committed value since Nov 4, decisions item 47), each variant takes
+    min(rows, its own curated count). Both checks run before anything is written.
 
     ``train_pools`` is exclude_heldout's result; ``pool_counts`` (load_pools' counters, by source)
     fills the loaded and dropped counts of the report. curate None -> run_curatorkit. The report:
@@ -663,10 +680,10 @@ def build_candidates(train_pools: Mapping[str, Any], *,
     train_cfg = train_cfg if train_cfg is not None else config.load("train")
     curate = curate if curate is not None else run_curatorkit
     target, seed = int(train_cfg["rows"]), int(cfg["split_seed"])
+    equal = bool(train_cfg["equal_size"])           # required: no fallback to the replaced Nov 3 rule
     plan = _variants(train_cfg)
     curated = {(name, variant): _curate(name, variant, _rows(train_pools[name]), curate)
                for name, variant in plan}
-    equal = bool(train_cfg.get("equal_size", True))
     if equal:
         sizes = {name: len(curated[(name, "dedup")][0]) for name in train_cfg["candidates"]}
         n = min(target, *sizes.values())

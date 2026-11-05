@@ -568,6 +568,42 @@ def test_the_committed_training_config_drops_the_equal_size_rule():
     assert cfg["rows"] == 3000
 
 
+@pytest.mark.parametrize(("section", "value", "key"), [("standard", False, "standard.dedup is false"),
+                                                       ("stress", True, "stress.dedup is true"),
+                                                       ("stress", None, "stress.dedup is missing")],
+                         ids=["standard-raw", "stress-dedup", "stress-inherits"])
+def test_build_candidates_refuses_a_dedup_setting_its_fixed_plan_does_not_make(data_dir, pools, section,
+                                                                              value, key):
+    """R2-18: the plan is fixed (every candidate deduplicated, the stress candidate raw, as README
+    pre-registers the recipes), so a train.yaml whose standard.dedup is not true or whose stress.dedup is
+    not false (missing: it would inherit standard's true) is refused, naming the key, before anything is
+    written; it never builds the fixed plan against the config."""
+    heldout = sft.build_utility_heldout(pools, cfg=CFG)
+    train = sft.exclude_heldout(pools, heldout, cfg=CFG)
+    train_cfg = training_cfg(5, equal_size=False, stress="indicalign")
+    if value is None:
+        del train_cfg[section]["dedup"]
+    else:
+        train_cfg[section]["dedup"] = value
+    curate = FakeCurate()
+    with pytest.raises(ValueError, match=re.escape(f"configs/train.yaml: {key}, not ")):
+        sft.build_candidates(train, cfg=CFG, train_cfg=train_cfg, curate=curate)
+    assert curate.calls == [] and not data_dir.exists()
+
+
+def test_build_candidates_needs_equal_size_in_the_train_config(data_dir, pools):
+    """R2-18: equal_size is read with no fallback: a train config without it is an error before anything
+    is written, never the Nov 3 equal-size rule decisions item 47 replaced."""
+    heldout = sft.build_utility_heldout(pools, cfg=CFG)
+    train = sft.exclude_heldout(pools, heldout, cfg=CFG)
+    train_cfg = training_cfg(5, equal_size=False, stress="indicalign")
+    del train_cfg["equal_size"]
+    curate = FakeCurate()
+    with pytest.raises(KeyError, match="equal_size"):
+        sft.build_candidates(train, cfg=CFG, train_cfg=train_cfg, curate=curate)
+    assert curate.calls == [] and not data_dir.exists()
+
+
 def test_build_candidates_files_and_reports(data_dir, pools):
     report, train, heldout = build(pools)
     root = data_dir / "sft"
