@@ -31,8 +31,10 @@ WRONG_LANG = [False, False, False, False, True, False]
 HIT_CAP = [True, False, False, True, False, False]
 GUARD_ID = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
 RULES = labels.rules_tag()                        # the labelling rules of configs/project.yaml
-# The cell's variant as P03 registers it in configs/variants.yaml: a cell is read only under its entry.
-ADAPTER = {"name": "adapter", "method": "adapter", "adapter": "adapter-aya-std-s1", "seed": 1}
+# The cell's variant as P03 registers it in configs/variants.yaml: a cell is read only under its entry, which
+# for an adapter variant pins the adapter's hash (lift register-adapter writes artifacts.adapter: META's).
+ADAPTER = {"name": "adapter", "method": "adapter", "adapter": "adapter-aya-std-s1", "seed": 1,
+           "artifacts": {"adapter": "b" * 64}}
 INTERVENTION = intervention_digest(VariantSpec.model_validate(ADAPTER))
 META = {"run_config": "rc0", "model_rev": "c" * 40, "harness": 1, "template": "9" * 16, "decoding": "d" * 16,
         "torch": "2.15.0", "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB",

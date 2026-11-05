@@ -58,7 +58,8 @@ same-text check -> GlotLID -> the file, its excluded file and its report.
   that file, never replaced by English. A frozen pid (fit, dev or final) left out so, unless by an
   error a rerun translates, leaves its cell short of the frozen split until a reader's verdict on the
   failures sheet: the report lists it (``awaiting_review``), the summary names the cell
-  (``short_cells``), and load_prompts refuses the cell meanwhile. TranslationBlocked stops all Google
+  (``short_cells``), and load_prompts refuses a read of that split meanwhile (``ShortCellError``,
+  whose remedy ``reader_remedy`` words). TranslationBlocked stops all Google
   translation for the rest of the run: every file that still needs one is skipped (never a partial
   file), everything else is built, and the summary says blocked, with ``blocked_kind`` "http_429"
   (Google refused this IP: wait 30 minutes or more) or "streak" (ten items in a row failed every
@@ -142,9 +143,11 @@ carry run_timestamp, wall_clock_seconds, created_at and provenance timestamps.
     sft/...                              the candidates and sft/report.json (lift.data.sft)
 ``load_prompts`` reads the prompt files for every later stage (lift.prompts.load wraps it) and checks
 every record's split stamp against the committed split first: data/prompts travels through the runs
-repo, data/splits through git. It also refuses a cell short of its frozen split, so nothing is
-generated, judged or reported on fewer prompts than the frozen split holds. Logs, reports and
-exception messages carry counts, pids, labels and hashes, never prompt text.
+repo, data/splits through git. A read of one split also refuses a cell short of its frozen split
+(``ShortCellError``), so nothing is generated or reported on fewer prompts than the frozen split holds:
+every stage that makes or reports a cell reads its split. A read of every split, whose callers only
+look texts up by pid, checks the stamps alone. Logs, reports and exception messages carry counts,
+pids, labels and hashes, never prompt text.
 """
 
 from __future__ import annotations
@@ -182,7 +185,7 @@ from lift.data.translate import (
 from lift.io import append_jsonl, read_jsonl, sha256_file, sha256_text, write_jsonl
 from lift.lang import LangIdentifier, lid_info
 from lift.paths import REPO_ROOT, interim_dir, prompts_dir, sft_dir, validation_dir
-from lift.schemas import PromptRecord, TranslationInfo
+from lift.schemas import LANGS, PromptRecord, TranslationInfo
 
 log = logging.getLogger(__name__)
 
@@ -213,6 +216,40 @@ class SheetError(ValueError):
     def __init__(self, message: str, problems: Sequence[str] = ()) -> None:
         super().__init__(message)
         self.problems = list(problems)
+
+
+class ShortCellError(ValueError):
+    """A read of one split of a prompt file that is short of its frozen split (``_check_frozen``): most
+    often translation failures that await a reader's verdict on the failures sheet. ``set_name`` and
+    ``lang`` name the file, ``missing`` the frozen pids it lacks by split (those its report does not list
+    as excluded), ``remedy`` what completes the cell, on the laptop (a reader's verdict: ``reader_remedy``;
+    a rerun; a rebuild), ending with lift sync push; the message names them all. lift generate and lift
+    run-dev skip such a cell and list it with ``remedy`` (lift.commands.run)."""
+
+    def __init__(self, message: str, *, set_name: str, lang: str, missing: Mapping[str, Sequence[str]],
+                 remedy: str) -> None:
+        super().__init__(message)
+        self.set_name, self.lang = set_name, lang
+        self.missing = {split: list(pids) for split, pids in missing.items()}
+        self.remedy = remedy
+
+
+def reader_remedy(langs: Iterable[str]) -> str:
+    """What completes a cell whose translation failures in ``langs`` await a reader's verdict: the
+    language's failures sheet filled in, or made first (``write_spotcheck_sheets`` never overwrites a sheet
+    without --overwrite, and a reader may be filling it already), applied, then pushed. Languages in
+    lift.schemas.LANGS order; --langs names each, as the default sheets cover hi zh es only."""
+    langs = sorted(dict.fromkeys(langs), key=lambda x: (LANGS.index(x) if x in LANGS else len(LANGS), x))
+    if len(langs) == 1:
+        return (f"fill in its failures sheet, validation/sheets/spotcheck_{langs[0]}_failures.csv, if it "
+                "exists (lift data spotcheck-sheets does not overwrite it without --overwrite), else make it "
+                f"with `lift data spotcheck-sheets --langs {langs[0]}`; then `lift data apply-spotchecks "
+                "--file <the filled sheet>`, then `lift sync push`")
+    sheets = ", ".join(f"{lang} validation/sheets/spotcheck_{lang}_failures.csv (`lift data "
+                       f"spotcheck-sheets --langs {lang}`)" for lang in langs)
+    return ("fill in each language's failures sheet if it exists (lift data spotcheck-sheets does not "
+            f"overwrite a sheet without --overwrite), else make it: {sheets}; then `lift data "
+            "apply-spotchecks --file <each filled sheet>`, then `lift sync push`")
 
 
 class _OnFirstCall:
@@ -1184,8 +1221,8 @@ def build_state(summary: Mapping[str, Any]) -> str:
     "INCOMPLETE: rerun to resume from the cache" when ``rerun_needed`` (a build.json older than that
     key: when not ``complete``); else "built; " and what keeps it from complete, "N files left out by
     --skip-translation (run without it to translate them)" when every skip was requested and "N
-    fit/dev/final items await a reader's verdict (failures sheet: ...)" for the ``short_cells``; else
-    "complete"."""
+    fit/dev/final items await a reader's verdict on the failures sheet (...)" for the ``short_cells``,
+    with ``reader_remedy`` of their languages; else "complete"."""
     rerun = summary.get("rerun_needed")
     if rerun is None:                                     # a build.json from before rerun_needed
         rerun = not summary.get("complete")
@@ -1198,8 +1235,9 @@ def build_state(summary: Mapping[str, Any]) -> str:
     short = summary.get("short_cells") or {}              # a build.json from before short_cells: none
     awaiting = sum(len(pids) for cells in short.values() for pids in cells.values())
     if awaiting:
-        parts.append(f"{awaiting} fit/dev/final items await a reader's verdict (failures sheet: lift data "
-                     "spotcheck-sheets, then lift data apply-spotchecks)")
+        langs = [name.rsplit("_", 1)[1] for name, cells in short.items() if any(cells.values())]
+        parts.append(f"{awaiting} fit/dev/final items await a reader's verdict on the failures sheet "
+                     f"({reader_remedy(langs)})")
     return "built; " + "; ".join(parts) if parts else "complete"
 
 
@@ -1263,13 +1301,18 @@ def load_prompts(set_name: str, lang: str, split: str | None = None, *, allow_sh
     file, raises ValueError, never FileNotFoundError: that means "no prompt file" to the callers that
     go on without the language (judge.pipeline.second_judge_pids, Gate 0's all_prompts).
 
-    Then every frozen pid of each split the call returns (fit, dev and final: the split file's; all of
-    them when ``split`` is None) must be in the file unless its report lists it among its exclusions
-    (a reader's spot-check bad, a fit record whose text a dev/final record has): ValueError naming the
-    remedy otherwise (``_check_frozen``), so no stage runs a cell short of its frozen split. A
-    translation failure leaves its pid out until a reader's verdict on the failures sheet resolves it.
-    ``allow_short`` skips this check, for the spot checks, which read the files as they stand: their
-    failures sheet is how a short cell is completed."""
+    Then a read of one split (``split`` given) needs every frozen pid of it (fit, dev or final: the split
+    file's) in the file unless its report lists it among its exclusions (a reader's spot-check bad, a fit
+    record whose text a dev/final record has): ShortCellError (a ValueError) naming the remedy otherwise
+    (``_check_frozen``), so no stage makes or reports a cell short of its frozen split. Every one reads its
+    cell's split: lift generate's and run-dev's prompts, the reported read (lift.judge.pipeline._check_cell),
+    lift.audit. A translation failure leaves its pid out until a reader's verdict on the failures sheet
+    resolves it. A read of every split (``split`` None) checks the stamps only: its callers look texts up
+    by pid (lift.prompts.texts_by_pid, which judge_file and Gate 0's precision pairs read; Gate 0's
+    all_prompts), so a short final never stops judging the set's complete dev cell. ``allow_short`` skips
+    the check, for the spot checks, which read the files as they stand (their failures sheet is how a short
+    cell is completed), and for second_judge_pids, which reads one split per language only to pool its
+    pids."""
     if set_name not in SETS or set_name == "sft":
         raise ValueError(f"unknown prompt set {set_name!r}; choose from {[s for s in SETS if s != 'sft']}")
     if split is not None and split not in _SPLIT_NAMES:
@@ -1284,8 +1327,8 @@ def load_prompts(set_name: str, lang: str, split: str | None = None, *, allow_sh
     present = {x["pid"] if set_name == "belebele" else x.pid for x in items}
     if split is not None:
         items = [x for x in items if (x["split"] if set_name == "belebele" else x.split) == split]
-    if mapping is not None and not allow_short:
-        _check_frozen(set_name, lang, path, mapping, present, split)
+        if mapping is not None and not allow_short:
+            _check_frozen(set_name, lang, path, mapping, present, split)
     return items
 
 
@@ -1333,15 +1376,15 @@ def _stamp_of(set_name: str, pid: str, mapping: Mapping[str, str] | None) -> tup
 
 
 def _check_frozen(set_name: str, lang: str, path: Path, mapping: Mapping[str, str], present: set[str],
-                  split: str | None) -> None:
-    """ValueError unless the prompt file at ``path`` (``present``: its pids) holds every frozen pid of
-    ``split`` (None: of every split ``mapping`` freezes) but those its report lists among its exclusions
-    (a reader's spot-check bad; a fit record the same-text rule left out). The message gives per split
-    the count missing, and the remedy by the report's open translation failures: a reader's verdict on
-    the failures sheet, or a rerun for an item that failed with an error. A report that is missing or
-    from another build of the file (its sha256 differs) explains nothing: rebuild."""
+                  split: str) -> None:
+    """ShortCellError unless the prompt file at ``path`` (``present``: its pids) holds every frozen pid of
+    ``split`` (``mapping``: the split file's) but those its report lists among its exclusions (a reader's
+    spot-check bad; a fit record the same-text rule left out). The message gives the count missing, and the
+    remedy (the error's ``remedy``) by the report's open translation failures: a reader's verdict on the
+    failures sheet (``reader_remedy``), or a rerun for an item that failed with an error. A report that is
+    missing or from another build of the file (its sha256 differs) explains nothing: rebuild."""
     short = {s: [p for p, of in sorted(mapping.items()) if of == s and p not in present]
-             for s in sorted(set(mapping.values())) if split in (None, s)}
+             for s in sorted(set(mapping.values())) if s == split}
     if not any(short.values()):
         return
     report = _read_report(set_name, lang)
@@ -1358,20 +1401,22 @@ def _check_frozen(set_name: str, lang: str, path: Path, mapping: Mapping[str, st
     rerun = [p for p in missing if rules.get(p) == "error"]
     other = [p for p in missing if p not in rules]
     total = Counter(mapping.values())
-    parts = [", ".join(f"{s} misses {len(pids)} of its {total[s]} frozen pids" for s, pids in short.items())]
+    counts = ", ".join(f"{s} misses {len(pids)} of its {total[s]} frozen pids" for s, pids in short.items())
+    remedies = []
     if review:
-        parts.append(f"{len(review)} translation failures await a reader's verdict on the failures sheet, "
-                     f"e.g. {review[:5]}: `lift data spotcheck-sheets --langs {lang}`, then `lift data "
-                     "apply-spotchecks --file <the filled sheet>`, then `lift sync push`")
+        remedies.append(f"{len(review)} translation failures await a reader's verdict on the failures sheet, "
+                        f"e.g. {review[:5]}: {reader_remedy([lang])}")
     if rerun:
-        parts.append(f"{len(rerun)} failed with an error a rerun translates, e.g. {rerun[:5]}: `lift data "
-                     f"build --only {set_name} --langs {lang}`, then `lift sync push`")
+        remedies.append(f"{len(rerun)} failed with an error a rerun translates, e.g. {rerun[:5]}: `lift data "
+                        f"build --only {set_name} --langs {lang}`, then `lift sync push`")
     if other:
         why = ("its report is missing" if report is None else "its report is from another build of the file"
                if not trusted else "its report lists them neither as failed nor as excluded")
-        parts.append(f"{len(other)} are not explained ({why}), e.g. {other[:5]}: rebuild it (`lift data "
-                     f"build --only {set_name}`), then `lift sync push`")
-    raise ValueError(f"{set_name}_{lang}: {path.name} is short of its frozen split: " + "; ".join(parts))
+        remedies.append(f"{len(other)} are not explained ({why}), e.g. {other[:5]}: rebuild it (`lift data "
+                        f"build --only {set_name}`), then `lift sync push`")
+    remedy = "; ".join(remedies)
+    raise ShortCellError(f"{set_name}_{lang}: {path.name} is short of its frozen split: {counts}; {remedy}",
+                         set_name=set_name, lang=lang, missing=short, remedy=remedy)
 
 
 # ---------------------------------------------------------------------------- spot checks
@@ -1978,8 +2023,14 @@ def stats(*, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
     rejections, translation failures by rule, exclusions by reason type: duplicate_of,
     near_duplicate_of, same_text_as, spotcheck; cross-split duplicates and the frozen pids awaiting a
     reader's verdict of PromptRecord files; spot-check counts), the SFT row decision (sft/report.json)
-    and the last build's state (complete, rerun_needed, blocked and blocked_kind, skipped, incomplete,
-    short_cells). Counts and pids only."""
+    and the last build's state (build.json: complete, rerun_needed, blocked and blocked_kind, skipped,
+    incomplete, short_cells). Counts and pids only.
+
+    ``short_cells`` (file -> split -> pids) is the cells short of their frozen split now: derived from the
+    current prompt files' reports (their ``awaiting_review``), not from build.json, which only lift data
+    build writes. So a cell that lift data apply-spotchecks completed since (it rewrites the reports of
+    the files it rebuilds) is no longer listed, and ``format_stats`` states the last build with these in
+    place of its own (``build.short_cells`` keeps build.json's)."""
     cfg = cfg if cfg is not None else config.load("project")
     files: dict[str, dict[str, Any]] = {}
     missing: list[str] = []
@@ -2013,7 +2064,9 @@ def stats(*, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
                 if "awaiting_review" in report:                   # PromptRecord files of a newer build
                     entry["awaiting_review"] = report["awaiting_review"]
             files[name] = entry
-    out: dict[str, Any] = {"files": files, "missing": missing, "sft": None, "build": None}
+    short = {name: entry["awaiting_review"] for name, entry in files.items() if entry.get("awaiting_review")}
+    out: dict[str, Any] = {"files": files, "missing": missing, "short_cells": short, "sft": None,
+                           "build": None}
     sft_report = sft_dir() / "report.json"
     if sft_report.exists():
         report = json.loads(sft_report.read_text(encoding="utf-8"))
@@ -2079,7 +2132,8 @@ def format_stats(st: Mapping[str, Any]) -> str:
     else:
         lines.append("sft: not built")
     if st.get("build"):
-        b = st["build"]
+        now = st["short_cells"] if "short_cells" in st else st["build"].get("short_cells")
+        b = {**st["build"], "short_cells": now}              # the cells short now (stats), not at the build
         lines.append(f"last build {b['run_id']}: {build_state(b)}")
         if b.get("blocked"):
             lines.append("  " + blocked_advice(b.get("blocked_kind")))

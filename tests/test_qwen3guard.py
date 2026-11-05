@@ -134,10 +134,12 @@ class StubModel:
 
 class CannedGreedy:
     """Stands in for greedy_batch: finds the item marker ``#i#`` in each input row and returns item
-    i's canned guard output, encoded with the tiny tokenizer. Records every call."""
+    i's canned guard output, encoded with the tiny tokenizer. Records every call. The items in
+    ``nonfinite`` decoded non-finite (as greedy_batch marks an fp16 overflow): marked, and never stopped."""
 
-    def __init__(self, tok, outputs, *, stopped=True, oom_above=None):
+    def __init__(self, tok, outputs, *, stopped=True, oom_above=None, nonfinite=()):
         self.tok, self.outputs, self.stopped, self.oom_above = tok, outputs, stopped, oom_above
+        self.nonfinite = set(nonfinite)
         self.calls, self.kwargs, self.handling = [], [], []
 
     def __call__(self, model, rows, **kwargs):
@@ -149,8 +151,11 @@ class CannedGreedy:
             raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 1.00 GiB (mock)")
         outs = []
         for row in rows:
-            ids = self.tok(self.outputs[item_of(self.tok, row)], add_special_tokens=False)["input_ids"]
-            outs.append(GreedyOutput(ids=ids, stopped=self.stopped, n_generated=len(ids) + self.stopped))
+            item = item_of(self.tok, row)
+            ids = self.tok(self.outputs[item], add_special_tokens=False)["input_ids"]
+            stopped = self.stopped and item not in self.nonfinite
+            outs.append(GreedyOutput(ids=ids, stopped=stopped, n_generated=len(ids) + stopped,
+                                     nonfinite=item in self.nonfinite))
         return outs
 
 
@@ -283,6 +288,23 @@ def test_an_output_that_never_stops_is_a_failure_even_if_it_parses(tok, monkeypa
     judge = make_judge(tok)
     assert judge.judge(*make_pairs(1)) == [failure("no end-of-turn token within 128 new tokens", raw=CARD)]
     assert judge.stats["cap_hits"] == 1
+
+
+@pytest.mark.torch
+def test_an_output_whose_decoding_went_non_finite_is_a_failure_with_that_reason(tok, monkeypatch):
+    # W2-02 (R1-25 follow-up): greedy_batch marks a row whose scores held a NaN or +inf before it stopped (an
+    # fp16 overflow): from then on it decodes garbage (argmax over NaN picks id 0), and it never stops. That
+    # surfaced as a cap hit or a parse failure, or as a label when its text happened to parse. It is a judge
+    # failure that says why now.
+    fake = CannedGreedy(tok, [CARD, "<PAD><PAD><PAD>", CARD], nonfinite={1, 2})
+    monkeypatch.setattr(qg, "greedy_batch", fake)
+    judge = make_judge(tok)
+    got = judge.judge(*make_pairs(3))
+    reason = "decoding went non-finite (a NaN or +inf score before the end-of-turn token)"
+    assert got[0]["error"] is None and got[0]["safety"] == "Safe"
+    assert got[1] == failure(reason, raw="<PAD><PAD><PAD>") and got[2] == failure(reason, raw=CARD)
+    assert (judge.stats["nonfinite"], judge.stats["cap_hits"], judge.stats["unparseable"]) == (2, 0, 0)
+    assert qg.NONFINITE_ERROR == reason
 
 
 @pytest.mark.torch

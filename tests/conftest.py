@@ -79,11 +79,13 @@ def fake_prompt_files(monkeypatch):
     """Install an in-memory prompt store behind lift.data.build.load_prompts.
 
     Returns a dict {(set, lang): [PromptRecord, ...]} that tests fill in; load_prompts filters it
-    by split exactly like the real reader.
+    by split exactly like the real reader, and takes its ``allow_short`` (the store has no frozen split
+    to be short of).
     """
     store: dict[tuple[str, str], list[PromptRecord]] = {}
 
-    def load_prompts(set_name: str, lang: str, split: str | None = None) -> list:
+    def load_prompts(set_name: str, lang: str, split: str | None = None, *,
+                     allow_short: bool = False) -> list:
         if (set_name, lang) not in store:
             raise FileNotFoundError(f"no prompts for {set_name}_{lang}")
         return [r for r in store[(set_name, lang)] if split is None or r.split == split]

@@ -37,6 +37,13 @@ def test_load_accepts_dict_rows(fake_prompt_files):
     assert prompts.load("harmful", "es")[0].lang == "es"
 
 
+def test_load_passes_allow_short_on(fake_prompt_files):
+    # W2-01: second_judge_pids reads one split per language only to pool its pids, so it reads it as it stands
+    # (allow_short); the in-memory store the tests install takes the keyword like the real reader
+    fake_prompt_files[("harmful", "en")] = [make_prompt("a"), make_prompt("b", split="final")]
+    assert [r.pid for r in prompts.load("harmful", "en", "final", allow_short=True)] == ["b"]
+
+
 def test_mixed_sample_is_even_deterministic_and_dev_only(fake_prompt_files):
     fill(fake_prompt_files)
     sets, langs = ("harmful", "easy_benign"), ("en", "hi")
@@ -123,6 +130,40 @@ def test_load_checks_every_stamp_by_the_pid_scheme_before_the_split_filter(commi
     write_prompt_file("redteam", "hi", {"art-hi-0000": "final", "art-hi-0001": "dev"})
     with pytest.raises(ValueError, match=r"e.g. art-hi-0001 dev \(redteam is final\)"):
         prompts.load("redteam", "hi", "final")
+
+
+def test_only_a_read_of_one_split_refuses_a_cell_short_of_its_frozen_split(committed_split):
+    # W2-01: a short cell (here hi final: its frozen pid is missing, and no report says why) is refused by a
+    # read of that split, the one every stage that makes or reports the cell does (lift generate's prompts,
+    # the reported read, AuditKIT). A read of every split only looks texts up by pid (judge_file through
+    # texts_by_pid, Gate 0's all_prompts and precision pairs): it checks the stamps (R1-19), not the frozen
+    # sizes, so a short final no longer stops judging the set and language, nor Gate 0. second_judge_pids
+    # pools one split's pids over the languages, so it reads that split as it stands.
+    from lift import gate0
+    from lift.data import build
+    from lift.judge import pipeline
+
+    write_prompt_file("harmful", "en", committed_split)
+    write_prompt_file("harmful", "hi", {"prh-test-0001": "dev"})              # prh-test-0000 (final) missing
+    assert [r.pid for r in prompts.load("harmful", "hi")] == ["prh-test-0001"]
+    assert set(prompts.texts_by_pid("harmful", "hi")) == {"prh-test-0001"}
+    assert sorted((p.lang, p.pid) for p in gate0.all_prompts(sets=("harmful",), langs=("en", "hi"))) == [
+        ("en", "prh-test-0000"), ("en", "prh-test-0001"), ("hi", "prh-test-0001")]
+    assert pipeline.second_judge_pids("harmful", "final", 1.0, 0) == {"prh-test-0000"}
+    assert [r.pid for r in prompts.load("harmful", "hi", "dev")] == ["prh-test-0001"]
+    assert prompts.load("harmful", "hi", "final", allow_short=True) == []
+    with pytest.raises(build.ShortCellError) as e:
+        prompts.load("harmful", "hi", "final")
+    assert isinstance(e.value, ValueError)
+    assert (e.value.set_name, e.value.lang) == ("harmful", "hi")
+    assert e.value.missing == {"final": ["prh-test-0000"]}
+    assert e.value.remedy == ("1 are not explained (its report is missing), e.g. ['prh-test-0000']: rebuild "
+                              "it (`lift data build --only harmful`), then `lift sync push`")
+    assert str(e.value) == ("harmful_hi: harmful_hi.jsonl is short of its frozen split: final misses 1 of "
+                            f"its 1 frozen pids; {e.value.remedy}")
+    write_prompt_file("harmful", "hi", {"prh-test-0000": "dev", "prh-test-0001": "final"})
+    with pytest.raises(ValueError, match="carry another split than the committed split gives them"):
+        prompts.load("harmful", "hi")                                  # every read still checks the stamps
 
 
 def test_a_missing_split_file_is_refused_never_read_as_a_missing_prompt_file(tmp_path, monkeypatch):

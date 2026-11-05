@@ -158,21 +158,40 @@ SKIPPED = {
     "precision": ("were made in another precision and left as they are (see the errors above): a restart "
                   "would discard them"),
     "judges": ("hold another judge's judgements and were left as they are (see the errors above): judges are "
-               "never mixed in one file. Judge each with the file's judge (its id names its precision and "
-               "Controversial mode), or judge it again with its line, run once as a job line right after "
-               "`lift sync pull`, followed by the line that failed"),
+               "never mixed in one file. Judge each again with its line (the role's lift restart --judge "
+               "line), run once as a job line right after `lift sync pull`, followed by the line that "
+               "failed; or finish it with the file's judge (its id names its revision, labelling rules, "
+               "precision and Controversial mode), unless its error says only the labelling rules differ: no "
+               "current judge applies those, so only its line remedies such a cell"),
+    "short": ("are short of their frozen split (see the errors above): they await a reader's verdict on "
+              "their translation failures (or a rerun or rebuild of their prompt files, as the line says), "
+              "and nothing was generated for them. Do what each line says on the laptop, which ends with "
+              "`lift sync push`; a later job's `lift sync pull` brings the completed prompt files, and the "
+              "line that skipped the cell makes it"),
+    "nonfinite": ("went non-finite in decoding (see the errors above), and nothing of that batch was "
+                  "written. A non-finite fp16 run is not reported (decisions item 27), so such a cell is "
+                  "made in bf16 on an A100 or L4: its line first, as a job line right after `lift sync "
+                  "pull`, when its file holds fp16 records to set aside, then the line that failed without "
+                  "--dtype. In bf16 or fp32 it is a fault to report (CLAUDE.md rule 9), never one to tune "
+                  "around"),
 }
 _SKIPPED_AS = {"stale": "stale", "precision": "made in another precision",
-               "judges": "judged by another judge"}
+               "judges": "judged by another judge", "short": "short of its frozen split",
+               "nonfinite": "decoding went non-finite"}
 REDRAW = "after P04 draws the key list again (lift validate second-judge-sample, then lift sync push)"
 
 
 def _kind(exc: Exception) -> str:
+    from lift.data.build import ShortCellError
     from lift.judge.pipeline import MixedJudgesError
-    from lift.models.generate import OtherPrecisionError
+    from lift.models.generate import NonFiniteOutputError, OtherPrecisionError
 
     if isinstance(exc, OtherPrecisionError):
         return "precision"
+    if isinstance(exc, ShortCellError):
+        return "short"
+    if isinstance(exc, NonFiniteOutputError):
+        return "nonfinite"
     return "judges" if isinstance(exc, MixedJudgesError) else "stale"
 
 
@@ -180,19 +199,29 @@ def _skip(skipped: dict[str, dict[str, str]], variant: str, set_name: str, lang:
           exc: Exception, *, judged: str | None, dtype: str, generates: bool = True,
           keys: bool = False) -> None:
     """Log a cell the command cannot go on with and keep its remedy under its kind (``SKIPPED``), so the
-    command goes on with the other cells and lists it at the end. A cell made in another precision than
-    the run's ``dtype`` is listed as such whatever refusal came first (an API judge has no precision for
-    judge_file to check): a restart line run here would discard it. A stale cell's whole-cell restart
-    gets the lines its job needs under it (``_after_restart``)."""
+    command goes on with the other cells and lists it at the end. A cell short of its frozen split (a
+    ShortCellError, when its prompts are loaded) gets the error's ``remedy``: its prompt file's, done on the
+    laptop, which discards nothing. Any other cell made in another precision than the run's ``dtype`` is
+    listed as such whatever refusal came first (an API judge has no precision for judge_file to check): a
+    restart line run here would discard it. A stale cell's whole-cell restart gets the lines its job needs
+    under it (``_after_restart``); so does a non-finite fp16 cell's (NonFiniteOutputError: its line sets
+    its fp16 records aside, and the cell and the refills are made in generation.dtype); one with nothing
+    to set aside is made there directly, and a non-finite cell of any other precision is a fault to
+    report."""
+    from lift import config
     from lift.models.generate import made_in
 
     found = _kind(exc)
+    cell = f"{set_name}_{lang}_{split}"
+    if found == "short":
+        log.error("%s %s: %s, skipped: %s", variant, cell, _SKIPPED_AS[found], exc)
+        skipped.setdefault(found, {})[cell] = exc.remedy
+        return
     if found == "precision":
         made = exc.dtype
     else:
         made = "/".join(sorted(made_in(variant, set_name, lang, split) - {dtype}))
     kind = "precision" if made else found
-    cell = f"{set_name}_{lang}_{split}"
     if kind == found:
         log.error("%s %s: %s, skipped: %s", variant, cell, _SKIPPED_AS[kind], exc)
     else:                                      # its error's remedy is for a run in the cell's precision
@@ -200,9 +229,19 @@ def _skip(skipped: dict[str, dict[str, str]], variant: str, set_name: str, lang:
                   "is %s. It was also found %s, which a run in %s settles: a restart from here would discard "
                   "its %s outputs", variant, cell, made, dtype, _SKIPPED_AS[found], made, made)
     command = getattr(exc, "command", None)
+    default = str(config.get("generation.dtype"))
     if kind == "precision":
         remedy = (f"made in {made}: run it with --dtype {made} where {made} runs, or leave it out with "
                   "--sets/--langs")
+    elif kind == "nonfinite" and exc.dtype != "fp16":
+        remedy = (f"a fault in {exc.dtype}, no fp16 overflow: report it (CLAUDE.md rule 9), never tune "
+                  "around it")
+    elif kind == "nonfinite" and command is None:
+        remedy = (f"nothing to set aside: run the line that failed in {default} on an A100 or L4 (without "
+                  "--dtype)")
+    elif kind == "nonfinite":                  # decisions item 27: the fp16 cell is made in bf16 instead
+        remedy = command + _after_restart(variant, set_name, lang, split, judged=judged, dtype=default,
+                                          generates=generates, keys=keys, redraw=True)
     elif command is None:
         remedy = "no lift restart line covers it (see its error above)"
     elif " --judge " in command:
@@ -306,6 +345,7 @@ def _generate(args: argparse.Namespace) -> int:
     langs = _names(args.langs, LANGS, LANGS)
     dtype = _dtype(args.dtype)
     _refuse_other_dtype(dtype, args.device)
+    from lift.data.build import ShortCellError
     from lift.models.generate import StaleOutputError, generate, generations_path
     from lift.models.variants import build_variant, get_spec
     from lift.prompts import load
@@ -315,7 +355,11 @@ def _generate(args: argparse.Namespace) -> int:
     skipped: dict[str, dict[str, str]] = {}
     for set_name in sets:
         for lang in langs:
-            prompts = load(set_name, lang, args.split)
+            try:
+                prompts = load(set_name, lang, args.split)
+            except ShortCellError as exc:      # awaits a reader's verdict: listed, the other cells go on
+                _skip(skipped, spec.name, set_name, lang, args.split, exc, judged=None, dtype=dtype)
+                continue
             if args.limit:
                 prompts = prompts[: args.limit]
             if not prompts:
@@ -519,11 +563,13 @@ def run_cells(holder: dict[str, Any], make_judge: Callable[[], Any], cells: Sequ
     after it is generated (both models loaded); without, every file is generated first, the
     generator is dropped and its memory released, then the judge is loaded and judges them all.
     A cell whose generations or judgements file is refused (StaleOutputError: stale, made in another
-    precision, judged by another judge) is logged and skipped, and the other cells go on: a cut-short
-    session must not block the rest. Its remedy goes into ``skipped[kind]`` (``SKIPPED``) under
-    "{set}_{lang}_{split}"; without ``skipped``, one StaleOutputError listing them is raised once every
-    other cell is done.
+    precision, judged by another judge, decoding went non-finite), or whose prompts are short of the
+    frozen split (ShortCellError, when they are loaded: nothing is generated), is logged and skipped, and
+    the other cells go on: a cut-short session must not block the rest. Its remedy goes into
+    ``skipped[kind]`` (``SKIPPED``) under "{set}_{lang}_{split}"; without ``skipped``, one
+    StaleOutputError listing them is raised once every other cell is done.
     """
+    from lift.data.build import ShortCellError
     from lift.judge.pipeline import judge_file
     from lift.models.generate import StaleOutputError, generate, generations_path
     from lift.prompts import load
@@ -541,7 +587,12 @@ def run_cells(holder: dict[str, Any], make_judge: Callable[[], Any], cells: Sequ
         _skip(left, name, set_name, lang, split, exc, judged="primary", dtype=dtype)
 
     def gen(set_name: str, lang: str) -> Path | None:
-        prompts = load(set_name, lang, split)[:limit] if limit else load(set_name, lang, split)
+        try:
+            prompts = load(set_name, lang, split)
+        except ShortCellError as exc:          # awaits a reader's verdict: listed, the other cells go on
+            skip(set_name, lang, exc)
+            return None
+        prompts = prompts[:limit] if limit else prompts
         if not prompts:
             log.warning("%s_%s has no %s prompts", set_name, lang, split)
             return None
@@ -688,11 +739,13 @@ Start cells over that lift generate, judge or run-dev skipped as stale (begun un
 made from other inputs; the error names the exact line). For each --sets x --langs cell, the
 generations file, every judgements file and every AuditKIT record of the cell (with --judge, only that
 judge's judgements file and records) is copied to outputs/.aside/<UTC stamp>/, which is never synced,
-and left EMPTY: the next lift sync push replaces the runs repo's copies (an empty record is retired),
-and run-dev (or generate, then judge) fills the cell again. The log names the line that refills any
-other judge's judgements it set aside, a judge run-dev never runs: the second judge's, over P04's key
-list (drawn again first when the cell's generation keys changed: a fixed prompt text or another
-configuration), or with --sample 0.10 while P04 has drawn none.
+and left EMPTY: the next lift sync push replaces the runs repo's copies (an empty record is retired;
+a copy there that changed since this machine's last sync is reported as an emptied-file conflict
+instead, which lift sync push --force settles: R1-08), and run-dev (or generate, then judge) fills the
+cell again. The log names the line that refills any other judge's judgements it set aside, a judge
+run-dev never runs: the second judge's, over P04's key list (drawn again first when the cell's
+generation keys changed: a fixed prompt text or another configuration), or with --sample 0.10 while
+P04 has drawn none.
 
 --dtype is the precision this job makes the cells in (default: generation.dtype; the T4 passes
 --dtype fp16, as its restart lines say). A cell made in another precision is refused, and nothing is
@@ -784,7 +837,9 @@ def _restart(args: argparse.Namespace) -> int:
                   f"{precision}) fills the generations, the primary judge's judgements and its AuditKIT "
                   "record again")
     log.info("%d file(s) emptied and %d AuditKIT record(s) retired: the next lift sync push replaces the "
-             "runs repo's copies (an empty record is retired there too), and %s", emptied, retired, refill)
+             "runs repo's copies (an empty record is retired there too; a copy there that changed since this "
+             "machine's last sync is reported as an emptied-file conflict instead, which lift sync push "
+             "--force settles), and %s", emptied, retired, refill)
     if refills:
         redraw = ("; when its generation keys changed (a fixed prompt text or another configuration, as the "
                   f"listing that named this restart says), run a --keys line only {REDRAW}")
