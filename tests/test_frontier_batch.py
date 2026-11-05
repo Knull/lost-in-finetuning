@@ -1,7 +1,9 @@
 """The frontier judge's bulk pre-fill through the Message Batches API: prefill_pairwise / prefill_safety
 put a whole run's first turns into the call cache, so the synchronous pass that follows makes no call for
 them and returns what a synchronous run returns. Covers the capability gate, the batch state file and
-resume, the spend reservation, costing from usage, failures, and the real anthropic SDK path.
+resume, what a 404 for an earlier batch means and LIFT_ABANDON_BATCHES, synchronous runs that never pay twice
+for a request an earlier batch holds, the spend reservation, costing from usage, failures, and the real
+anthropic SDK path.
 
 Offline only: FakeBatchProvider, or a real anthropic client on an in-process transport. Placeholder
 texts only.
@@ -12,6 +14,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -44,7 +47,7 @@ SPEND_LIMIT = ("You have reached your specified API usage limits. You will regai
 def offline(monkeypatch):
     """No key, no spend cap, no reachable endpoint, no real sleeping. Returns the recorded sleeps."""
     for var in ("LIFT_JUDGE_MAX_USD", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-                "OPENAI_LOG", "ANTHROPIC_LOG"):
+                "OPENAI_LOG", "ANTHROPIC_LOG", "LIFT_ABANDON_BATCHES"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
@@ -118,6 +121,42 @@ def state_rows(judge):
 
 def cache_rows(judge):
     return [json.loads(line) for line in judge.cache_path.read_text(encoding="utf-8").splitlines()]
+
+
+def open_batch(n=3, *, polls=5):
+    """A batch of the first ``n`` pairs that an earlier process submitted and left running (a pre-fill with
+    wait=False): its provider and id. It reads in_progress for ``polls`` looks, the submitter's included."""
+    fake = FakeBatchProvider(verdicts, polls=polls)
+    with pytest.raises(FrontierBatchPending):
+        batch_judge(fake).prefill_pairwise(*pairs(n), wait=False)
+    [batch_id] = fake.batches
+    return fake, batch_id
+
+
+def days_ago(days):
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
+
+
+def recorded_batch(judge, batch_id, created, n=3):
+    """Record in ``judge``'s state file a batch of the first ``n`` pairs that an earlier process of this judge
+    submitted at ``created`` (None: no time recorded). A fresh provider's API does not know it (a 404)."""
+    keys = [judge._key(judge.render_pair(*p), ()) for p in zip(*pairs(n), strict=True)]
+    row = {"key": f"batch:{batch_id}:submitted", "event": "submitted", "batch_id": batch_id,
+           "judge": judge.judge_id, "api_version": judge.api_version, "keys": keys, "n": n}
+    append_jsonl(judge.batch_state_path, [row if created is None else {**row, "created": created}])
+
+
+def status_looks(fake):
+    """The batch ids ``fake.batch_status`` is asked about from now on, a 404 included."""
+    looked: list[str] = []
+    status = fake.batch_status
+
+    def spy(batch_id):
+        looked.append(batch_id)
+        return status(batch_id)
+
+    fake.batch_status = spy
+    return looked
 
 
 # --------------------------------------------------------------------------------- the main path --
@@ -333,10 +372,12 @@ def test_a_rerun_after_a_crash_collects_the_batch_instead_of_submitting_again():
     rerun = batch_judge(fake)                                           # a new process
     summary = rerun.prefill_pairwise(*pairs(5))
     assert (summary["n_submitted"], summary["n_collected"], summary["batch_ids"]) == (0, 5, [batch_id])
-    assert len(fake.batches) == 1 and [c["preflight"] for c in fake.calls] == [True]
+    assert len(fake.batches) == 1
+    assert [c["preflight"] for c in fake.calls] == [True, True]          # the rerun's own, before it looks
     collected = state_rows(rerun)[-1]
     assert collected["event"] == "collected" and collected["n_cached"] == 5 and collected["usd"] > 0
-    assert rerun.stats["usd"] == pytest.approx(collected["usd"], abs=1e-6)   # reserved by the crashed process
+    # the batch was reserved by the crashed process; the rerun pays its preflight and counts the batch
+    assert rerun.stats["usd"] == pytest.approx(preflight_usd() + collected["usd"], abs=1e-6)
     assert rerun.pairwise(*pairs(5)) == sync_reference(verdicts).pairwise(*pairs(5))
     assert item_calls(fake) == []
 
@@ -378,18 +419,80 @@ def test_the_wait_gives_up_after_batch_wait_s(monkeypatch):
     assert fake.polled[batch_id] == 4 and clock == [90.0]               # looks at 0, 30, 60 and 90 s
 
 
-def test_a_batch_the_api_no_longer_knows_is_abandoned_and_its_requests_submitted_again(caplog):
-    first = FakeBatchProvider(verdicts, polls=5)
-    with pytest.raises(FrontierBatchPending):
-        batch_judge(first).prefill_pairwise(*pairs(3), wait=False)
-    [lost] = first.batches
+def test_a_404_for_a_young_batch_stops_the_run_and_records_nothing():
+    first, lost = open_batch()
+    other = FakeBatchProvider(verdicts)                                 # another workspace's key: a 404
+    judge = batch_judge(other)
+    [submitted] = state_rows(judge)
+    before = judge.batch_state_path.read_bytes()
+    with pytest.raises(FrontierConfigError) as excinfo:
+        judge.prefill_pairwise(*pairs(3))
+    message = str(excinfo.value)
+    for part in (f"batch {lost}", f"submitted on {submitted['created']}", "NotFoundError 404",
+                 "another workspace or organisation", "ANTHROPIC_BASE_URL",
+                 "rerun with the key that submitted it", f"LIFT_ABANDON_BATCHES={lost}"):
+        assert part in message
+    assert judge.batch_state_path.read_bytes() == before                # no row, so none syncs anywhere
+    assert other.batches == {} and [c["preflight"] for c in other.calls] == [True]   # the key itself works
+    with pytest.raises(FrontierConfigError):
+        judge.pairwise(*pairs(3))                                       # the judge stays stopped
+    assert item_calls(other) == []
+    assert batch_judge(first).prefill_pairwise(*pairs(3))["n_collected"] == 3   # the submitting key does
+
+
+@pytest.mark.parametrize("created", [days_ago(28), None, "not a time"],
+                         ids=["28 days", "no time", "unreadable"])
+def test_a_404_stops_the_run_unless_the_batch_is_past_the_results_window(created):
+    judge = batch_judge(FakeBatchProvider(verdicts))
+    recorded_batch(judge, "msgbatch_young", created)
+    before = judge.batch_state_path.read_bytes()
+    with pytest.raises(FrontierConfigError, match="batch msgbatch_young, recorded in .* unknown to the API"):
+        judge.prefill_pairwise(*pairs(3))
+    assert judge.batch_state_path.read_bytes() == before
+
+
+def test_a_404_for_a_batch_past_the_results_window_abandons_it_and_submits_again(caplog):
     caplog.set_level(logging.WARNING, logger=frontier.__name__)
-    other = FakeBatchProvider(verdicts)                                 # another workspace: 404 for it
+    judge = batch_judge(FakeBatchProvider(verdicts))
+    recorded_batch(judge, "msgbatch_old", days_ago(30))                 # its results are no longer kept
+    summary = judge.prefill_pairwise(*pairs(3))
+    assert (summary["n_submitted"], summary["n_collected"]) == (3, 3)
+    assert "msgbatch_old" not in summary["batch_ids"]
+    rows = state_rows(judge)
+    assert [r["event"] for r in rows] == ["submitted", "abandoned", "submitted", "collected"]
+    assert rows[1]["batch_id"] == "msgbatch_old" and rows[1]["reason"].startswith("NotFoundError 404")
+    assert any("batch msgbatch_old" in r.getMessage() and "abandoned" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_with_every_call_a_404_the_preflight_stops_the_run_before_any_batch_is_looked_up():
+    _, lost = open_batch()
+    not_found = FakeProvider.error(404, message="placeholder: no such path")
+    gateway = FakeBatchProvider(verdicts, preflight=not_found)          # ANTHROPIC_BASE_URL elsewhere
+    looked = status_looks(gateway)
+    judge = batch_judge(gateway)
+    before = judge.batch_state_path.read_bytes()
+    with pytest.raises(FrontierConfigError, match="preflight call failed: NotFoundError 404"):
+        judge.prefill_pairwise(*pairs(3))
+    assert looked == [] and gateway.batches == {} and judge.batch_state_path.read_bytes() == before
+
+
+def test_lift_abandon_batches_gives_up_a_batch_by_hand_before_the_prefill(monkeypatch, caplog):
+    _, lost = open_batch()
+    monkeypatch.setenv("LIFT_ABANDON_BATCHES", f" {lost}, msgbatch_never_recorded ")
+    caplog.set_level(logging.INFO, logger=frontier.__name__)
+    other = FakeBatchProvider(verdicts)                                 # the batch was deleted: a 404 for it
+    looked = status_looks(other)
     judge = batch_judge(other)
     summary = judge.prefill_pairwise(*pairs(3))
-    assert summary["n_submitted"] == 3 and summary["n_collected"] == 3 and lost not in summary["batch_ids"]
+    assert (summary["n_submitted"], summary["n_collected"]) == (3, 3) and lost not in looked
+    rows = state_rows(judge)
+    assert [r["event"] for r in rows] == ["submitted", "abandoned", "submitted", "collected"]
+    assert (rows[1]["batch_id"], rows[1]["reason"]) == (lost, "abandoned by hand")
+    assert any("msgbatch_never_recorded" in r.getMessage() and "nothing to abandon" in r.getMessage()
+               for r in caplog.records)
+    batch_judge(FakeBatchProvider(verdicts)).pairwise(*pairs(4))       # still set: nothing more to abandon
     assert [r["event"] for r in state_rows(judge)] == ["submitted", "abandoned", "submitted", "collected"]
-    assert any(f"batch {lost}" in r.getMessage() and "abandoned" in r.getMessage() for r in caplog.records)
 
 
 def test_a_batch_recorded_by_another_judge_is_never_collected():
@@ -402,6 +505,70 @@ def test_a_batch_recorded_by_another_judge_is_never_collected():
     with pytest.raises(FrontierConfigError, match="submitted by 'anthropic/another-judge'"):
         judge.prefill_pairwise(*pairs(3))
     assert fake.batches == {} and fake.calls == []
+
+
+# ---------------------------------------------------------- a synchronous run never pays twice --
+# `lift utility --sync` calls pairwise() with no pre-fill; judges.<entry>.bulk: sync makes the pre-fill a
+# synchronous one. Either way the requests an earlier batch holds are already paid for.
+SYNC_RUNS = ["pairwise without a pre-fill", "pre-fill with bulk sync"]
+
+
+@pytest.mark.parametrize("run", SYNC_RUNS)
+def test_a_synchronous_run_collects_an_ended_earlier_batch_instead_of_paying_again(run, utility_entry):
+    fake, batch_id = open_batch(5, polls=1)                             # ended by its next look
+    if run == "pre-fill with bulk sync":
+        utility_entry(bulk="sync")
+    judge = batch_judge(fake)
+    if run == "pre-fill with bulk sync":
+        summary = judge.prefill_pairwise(*pairs(5))
+        assert (summary["mode"], summary["reason"]) == ("sync", "the bulk mode is sync")
+        assert (summary["n_submitted"], summary["n_collected"], summary["batch_ids"]) == (0, 5, [batch_id])
+    out = judge.pairwise(*pairs(5))
+    assert item_calls(fake) == [] and len(fake.batches) == 1            # nothing paid twice or submitted
+    assert out == sync_reference(verdicts).pairwise(*pairs(5))
+    assert [r["event"] for r in state_rows(judge)] == ["submitted", "collected"]
+
+
+@pytest.mark.parametrize("run", SYNC_RUNS)
+def test_a_synchronous_run_stops_rather_than_pay_again_for_a_running_batch(run, utility_entry):
+    fake, batch_id = open_batch(3, polls=5)
+    if run == "pre-fill with bulk sync":
+        utility_entry(bulk="sync")
+    judge = batch_judge(fake)
+    before = judge.batch_state_path.read_bytes()
+    call = judge.prefill_pairwise if run == "pre-fill with bulk sync" else judge.pairwise
+    with pytest.raises(FrontierBatchPending,
+                       match=f"3 of this run's requests sit in batch {batch_id}, still running") as excinfo:
+        call(*pairs(5))                                                 # pairs 3 and 4 are in no batch
+    pending = excinfo.value
+    assert (pending.batch_ids, pending.n_pending, pending.summary["mode"]) == ([batch_id], 3, "sync")
+    assert "cancel it in the Console" in str(pending) and f"LIFT_ABANDON_BATCHES={batch_id}" in str(pending)
+    assert item_calls(fake) == [] and len(fake.batches) == 1            # nothing sent at all or submitted
+    assert judge.batch_state_path.read_bytes() == before
+
+    fake.polls = 0                                                      # ended now: the same line collects it
+    assert judge.pairwise(*pairs(5)) == sync_reference(verdicts).pairwise(*pairs(5))
+    assert sorted(index(c) for c in item_calls(fake)) == [3, 4]         # only the two it does not hold
+
+
+def test_a_judge_without_the_batch_api_stops_rather_than_pay_again(monkeypatch):
+    _, batch_id = open_batch()
+    held = f"3 of this run's requests sit in batch {batch_id}"
+    for method in ("prefill_pairwise", "pairwise"):
+        plain = FakeProvider(verdicts)                                  # the same judge, no batch API
+        judge = batch_judge(plain)
+        with pytest.raises(FrontierConfigError, match=held) as exc:
+            getattr(judge, method)(*pairs(3))
+        assert "FakeProvider has no Message Batches API" in str(exc.value)
+        assert f"LIFT_ABANDON_BATCHES={batch_id}" in str(exc.value) and plain.calls == []   # no preflight
+        if method == "pairwise":
+            assert exc.value.partial == [None] * 3
+    monkeypatch.setenv("LIFT_ABANDON_BATCHES", batch_id)                # the person gives it up, paying again
+    plain = FakeProvider(verdicts)
+    judge = batch_judge(plain)
+    assert judge.pairwise(*pairs(3)) == sync_reference(verdicts).pairwise(*pairs(3))
+    assert len(item_calls(plain)) == 3
+    assert [r["event"] for r in state_rows(judge)] == ["submitted", "abandoned"]
 
 
 # --------------------------------------------------------------------------------- the create call --
@@ -547,14 +714,14 @@ def test_batch_costs(model, price, result, expected):
 
 
 # ---------------------------------------------------------------------------------- state file --
-def test_every_state_row_has_a_unique_string_key_and_lift_sync_keeps_them_all():
+def test_every_state_row_has_a_unique_string_key_and_lift_sync_keeps_them_all(monkeypatch):
     from lift.sync import merge_jsonl_by_key, merge_kind
 
     with pytest.raises(FrontierUnavailable):                            # create_unknown
         batch_judge(FakeBatchProvider(verdicts, submit_errors=[FakeProvider.error(None)])).prefill_pairwise(
             *pairs(3))
-    with pytest.raises(FrontierBatchPending):                           # submitted
-        batch_judge(FakeBatchProvider(verdicts, polls=1)).prefill_pairwise(*pairs(3), wait=False)
+    _, given_up = open_batch(polls=1)                                   # submitted
+    monkeypatch.setenv("LIFT_ABANDON_BATCHES", given_up)
     judge = batch_judge(FakeBatchProvider(verdicts))                    # abandoned, submitted, collected
     judge.prefill_pairwise(*pairs(3))
     rows = state_rows(judge)
@@ -575,13 +742,12 @@ def test_the_state_file_sits_beside_its_cache():
 
 
 def test_a_cut_state_line_is_repaired_before_the_next_append():
-    with pytest.raises(FrontierBatchPending):
-        batch_judge(FakeBatchProvider(verdicts, polls=1)).prefill_pairwise(*pairs(3), wait=False)
-    judge = batch_judge(FakeBatchProvider(verdicts))
+    fake, _ = open_batch(polls=1)
+    judge = batch_judge(fake)                                           # a rerun collects the batch
     path = judge.batch_state_path
     path.write_bytes(path.read_bytes() + b'{"key": "batch:cut')         # a kill mid-append
     judge.prefill_pairwise(*pairs(3))
-    assert [r["event"] for r in state_rows(judge)] == ["submitted", "abandoned", "submitted", "collected"]
+    assert [r["event"] for r in state_rows(judge)] == ["submitted", "collected"]
 
 
 # --------------------------------------------------------------------------- the real anthropic SDK --
