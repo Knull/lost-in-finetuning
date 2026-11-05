@@ -1635,9 +1635,10 @@ def test_a_restart_is_never_undone_by_its_own_next_push(tmp_path, monkeypatch, j
 @RESTARTS
 def test_a_restart_is_never_undone_by_its_own_next_pull(tmp_path, monkeypatch, judge_dir):
     """R1-08, with a pull after the restart: it keeps the empty files and records no sync state for them, so
-    the next push conflicts too instead of sending the Hub's records back here. `pull --force` takes the
-    Hub's copies instead, keeping the empty ones under outputs/.sync-backup."""
+    the next push conflicts too and the Hub keeps its copies. `pull --force` takes the Hub's copies
+    instead, keeping the empty ones under outputs/.sync-backup."""
     hub, emptied = restarted_meanwhile(tmp_path, monkeypatch, judge_dir)
+    on_hub = {p: hub.files[p] for p in emptied}
     synced = json.loads(state_file().read_text())["files"]
     pulled = sync.pull(api=hub)
     assert {p: keys_of(local(p)) for p in emptied} == {p: [] for p in emptied}, pulled.files
@@ -1648,6 +1649,11 @@ def test_a_restart_is_never_undone_by_its_own_next_pull(tmp_path, monkeypatch, j
     assert f"  CONFLICT {first} (not merged: emptied here by lift restart)" in pulled.summary()
     assert says(pulled, "1 file(s) emptied here by lift restart",
                 "lift sync push --force completes the restart", "lift sync pull --force takes the Hub's copy")
+    pushed = sync.push(api=hub)
+    assert not pushed.ok and pushed.emptied == {first: "here"}
+    assert {p: pushed.files[p] for p in emptied} == {p: "conflict" for p in emptied}
+    assert {p: hub.files[p] for p in emptied} == on_hub
+    assert {p: keys_of(local(p)) for p in emptied} == {p: [] for p in emptied}
     forced = sync.pull(api=hub, force=True)
     assert forced.ok and {p: forced.files[p] for p in emptied} == {p: "force" for p in emptied}
     assert all(local(p).read_bytes() == hub.files[p] != b"" for p in emptied)
@@ -2760,6 +2766,9 @@ def test_cli_help(argv, capsys):
         assert all(word in out for word in ("push", "pull", "status", "check"))
     else:
         assert "--only" in out and ("--force" in out) == (argv[1] != "status")
+    if argv[1] in ("push", "pull"):                 # every merge refusal, R1-08's emptied file included
+        refusals = ("two records of one key", "readers enforce", "lift restart emptied")
+        assert all(words in out for words in refusals), argv
     assert "exit codes: 0 done; 3 done, but some files conflicted" in out
     assert "a lift sync push that sends the copies here" in out and "a pull could not check them" in out
     assert "1 a transient or unknown error" in out and "2 a problem no rerun fixes" in out

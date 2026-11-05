@@ -1476,14 +1476,15 @@ def pull(subdirs: Sequence[str] = (), *, force: bool = False, api: Any = None) -
     """Download new and changed files of the runs repo, pinned to its current commit, without ever
     overwriting a local edit (rules in the module docstring). Generations come first: the judgements
     and AuditKIT records of a cell whose generations conflict are not taken, and a merge of judgements
-    that would not pair with the generations here is not written, nor one that would undo a lift restart
-    (``report.emptied``). Conflicts, and files of a changed cell that no longer pair (``report.unpaired``),
-    leave ``report.ok`` False; ``force`` lets the remote copy win conflicts instead, keeping each replaced
-    local copy under outputs/.sync-backup/<utc-timestamp>/<path> (``report.backups``). A cell the pull
-    changes stays in the sync state until a pull has reported it, so a retry after an error still checks
-    it. A judgements file or record the pull left out (--only), or whose generations (or judgements) it
-    left out, while that file differs here and on the Hub is neither checked nor merged
-    (``report.unchecked``, which leaves ``report.ok`` False too)."""
+    that would not pair with the generations here is not written, nor a merge of generations or
+    judgements that would undo a lift restart (one side holds no records: ``report.emptied``).
+    Conflicts, and files of a changed cell that no longer pair (``report.unpaired``), leave ``report.ok``
+    False; ``force`` lets the remote copy win conflicts instead, keeping each replaced local copy under
+    outputs/.sync-backup/<utc-timestamp>/<path> (``report.backups``). A cell the pull changes stays in
+    the sync state until a pull has reported it, so a retry after an error still checks it. A judgements
+    file or record the pull left out (--only), or whose generations (or judgements) it left out, while
+    that file differs here and on the Hub is neither checked nor merged (``report.unchecked``, which
+    leaves ``report.ok`` False too)."""
     selected = select(subdirs)
     remote = _connect(api)
     tree = _remote_tree(remote)
