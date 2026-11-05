@@ -20,9 +20,13 @@ OUTPUT_TEXT = re.compile(r"\b(?:refusal|output|response|completion|answer|genera
 NEGATED = re.compile(r"\bno\s+(?:other\s+)?$", re.I)  # "no output text", "no other output text"
 ANY_LABEL = re.compile(r"\bwhatever (?:its|their) label\b", re.I)
 # The judges' own text, judge logs that CLAUDE.md rule 6 gates like the outputs: a judgement's raw reply
-# (Qwen3Guard's, or a frontier judge's JSON) and a frontier judge's reason.
-JUDGE_TEXT = ("JudgementRecord.raw", "native.reason")
+# (Qwen3Guard's, or a frontier judge's JSON), a frontier judge's reason, and a judge failure's text, which
+# quotes the judge (a frontier refusal: up to 200 characters of the provider's text; a Qwen3Guard parse
+# error: up to 40 of the guard's reply).
+JUDGE_TEXT = ("JudgementRecord.raw", "native.reason", "native.judge_failure")
 KEPT_OUT = re.compile(r"\bstays?\s+out\b", re.I)
+# Of a judge failure, only that the judge failed and the failure's kind go in.
+FAILURE_KIND = re.compile(r"\bonly that (?:its|the) judge failed\b[^.]*\bkind\b", re.I)
 
 
 def flat(text: str) -> str:
@@ -80,8 +84,10 @@ def test_hf_readme_public_artifacts_hold_no_output_text():
     assert leaks == {}, f"hf/README.md puts per-output text in a public artifact: {leaks}"
     logs = rows["Logs dataset"][1]
     assert "no output text" in logs.lower() and "output hashes" in logs
-    # R1-14 follow-up: nor the judges' text, which the judgements files hold beside each label.
+    # R1-14 follow-up: nor the judges' text, which the judgements files hold beside each label, a judge
+    # failure's included (W3-08c): a failed judgement keeps only that its judge failed, and how.
     assert keeps_judge_text_out(logs), "hf/README.md's logs dataset does not keep JUDGE_TEXT out"
+    assert FAILURE_KIND.search(flat(logs)), "hf/README.md's logs dataset does not keep a failure's kind alone"
     access, contents = rows["Raw completions"]
     assert "gated" in access and "manual approval" in access
     assert "every judged output" in contents.lower() and "refusals" in contents
@@ -101,7 +107,8 @@ def test_p08_publishes_no_output_text_and_guards_public_files_by_content():
     assert "no output text" in logs.lower() and "output hashes" in logs
     logs_item = next(item for item in items if "logs dataset" in item.split(" (", 1)[0].lower())
     assert keeps_judge_text_out(logs_item), "P08's logs dataset does not keep JUDGE_TEXT out"
-    gated =[item for item in items if "(gated, manual approval)" in item]
+    assert FAILURE_KIND.search(logs_item), "P08's logs dataset does not keep a failure's kind alone"
+    gated = [item for item in items if "(gated, manual approval)" in item]
     assert len(gated) == 1 and "every judged output" in gated[0].lower() and "refusals" in gated[0]
     # The guard reads the content, never a label (most labels are one judge's call).
     assert not any("harmful label" in item for item in items)
