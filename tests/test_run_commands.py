@@ -338,6 +338,29 @@ def test_restart_sets_exactly_the_cells_files_aside_and_leaves_them_empty(judge,
     assert "har-0001" not in caplog.text and "har-0000" not in caplog.text
 
 
+def test_restart_says_the_next_push_may_report_an_emptied_conflict_instead(caplog):
+    # W2-04 (R1-08): the next lift sync push replaces the runs repo's copies only when the Hub's copy has not
+    # changed since this machine's last sync; otherwise the push reports the emptied file as a conflict (a
+    # merge would fill it again), which lift sync push --force settles. The help and the log said it always
+    # replaced them.
+    caplog.set_level(logging.INFO, logger="lift.run")
+    restart_tree()
+    assert main([*RESTART, "--sets", "harmful", "--langs", "hi"]) == 0
+    [done] = [r.getMessage() for r in caplog.records if "the next lift sync push" in r.getMessage()]
+    for text in (done, " ".join(run_cmd.RESTART_HELP.split())):
+        assert "changed since this machine's last sync" in text and "lift sync push --force" in text, text
+        assert "emptied-file conflict" in text, text
+
+
+def test_skipped_judges_cells_name_the_restart_line_when_only_the_labelling_rules_differ():
+    # W2-04 (R1-12 follow-up): a judge id names its labelling rules too, and judgements made under other rules
+    # can never be finished with the file's judge, as no current judge applies them: only the role's lift
+    # restart --judge line remedies such a cell
+    head = " ".join(run_cmd.SKIPPED["judges"].split())
+    assert "labelling rules" in head and "--judge" in head and "the file's judge" in head
+    assert "its id names its precision and Controversial mode" not in head
+
+
 def test_restart_skips_files_that_are_not_here_and_a_second_run_finds_them_empty(caplog):
     from lift.models.generate import generations_path
 

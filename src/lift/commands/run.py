@@ -158,9 +158,11 @@ SKIPPED = {
     "precision": ("were made in another precision and left as they are (see the errors above): a restart "
                   "would discard them"),
     "judges": ("hold another judge's judgements and were left as they are (see the errors above): judges are "
-               "never mixed in one file. Judge each with the file's judge (its id names its precision and "
-               "Controversial mode), or judge it again with its line, run once as a job line right after "
-               "`lift sync pull`, followed by the line that failed"),
+               "never mixed in one file. Judge each again with its line (the role's lift restart --judge "
+               "line), run once as a job line right after `lift sync pull`, followed by the line that "
+               "failed; or finish it with the file's judge (its id names its revision, labelling rules, "
+               "precision and Controversial mode), unless its error says only the labelling rules differ: no "
+               "current judge applies those, so only its line remedies such a cell"),
     "short": ("are short of their frozen split (see the errors above): they await a reader's verdict on "
               "their translation failures (or a rerun or rebuild of their prompt files, as the line says), "
               "and nothing was generated for them. Do what each line says on the laptop, which ends with "
@@ -737,7 +739,9 @@ Start cells over that lift generate, judge or run-dev skipped as stale (begun un
 made from other inputs; the error names the exact line). For each --sets x --langs cell, the
 generations file, every judgements file and every AuditKIT record of the cell (with --judge, only that
 judge's judgements file and records) is copied to outputs/.aside/<UTC stamp>/, which is never synced,
-and left EMPTY: the next lift sync push replaces the runs repo's copies (an empty record is retired),
+and left EMPTY: the next lift sync push replaces the runs repo's copies (an empty record is retired;
+a copy there that changed since this machine's last sync is reported as an emptied-file conflict
+instead, which lift sync push --force settles: R1-08),
 and run-dev (or generate, then judge) fills the cell again. The log names the line that refills any
 other judge's judgements it set aside, a judge run-dev never runs: the second judge's, over P04's key
 list (drawn again first when the cell's generation keys changed: a fixed prompt text or another
@@ -833,7 +837,9 @@ def _restart(args: argparse.Namespace) -> int:
                   f"{precision}) fills the generations, the primary judge's judgements and its AuditKIT "
                   "record again")
     log.info("%d file(s) emptied and %d AuditKIT record(s) retired: the next lift sync push replaces the "
-             "runs repo's copies (an empty record is retired there too), and %s", emptied, retired, refill)
+             "runs repo's copies (an empty record is retired there too; a copy there that changed since this "
+             "machine's last sync is reported as an emptied-file conflict instead, which lift sync push "
+             "--force settles), and %s", emptied, retired, refill)
     if refills:
         redraw = ("; when its generation keys changed (a fixed prompt text or another configuration, as the "
                   f"listing that named this restart says), run a --keys line only {REDRAW}")
