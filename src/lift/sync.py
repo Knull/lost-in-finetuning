@@ -150,6 +150,7 @@ IGNORE_PATTERNS = (
 # other than generation.dtype, then .full for the private record that keeps the outputs.
 _RECORD_NAME = re.compile(r"(?P<cell>.+_[^_.-]+)(?:-[^_.-]+)?(?:\.full)?\.json")
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+_EMPTY_GIT = hashlib.sha1(b"blob 0\0", usedforsecurity=False).hexdigest()     # an empty file's git blob sha1
 _NOT_SHOWN = "its value is not shown, in case a token was pasted there"
 
 # What happened to a file (for status: what would happen).
@@ -1821,7 +1822,10 @@ def status(subdirs: Sequence[str] = (), *, api: Any = None) -> dict[str, SyncRep
     nothing: merges are planned, not tried (a planned merge counts as going up when push decides which
     judgements and AuditKIT records to hold back, and its judgements are checked as they stand here),
     and the Hub's own judgements and records that a push replacing generations would leave unpaired,
-    which takes their contents, are not looked at."""
+    which takes their contents, are not looked at. The one merge planned as refused, seen without a
+    download, is that of a file lift restart emptied on one side (``_plan_emptied``): it is the conflict
+    push and pull report, planned in each direction's order (generations first, then the judgements
+    that do not wait for them)."""
     selected = select(subdirs)
     remote = _connect(api)
     tree = _remote_tree(remote)
@@ -1832,11 +1836,37 @@ def status(subdirs: Sequence[str] = (), *, api: Any = None) -> dict[str, SyncRep
     for direction, plan in (("pull", _plan_pull), ("push", _plan_push)):
         items = plan(selected, tree, state, force=False, digest=digest)
         report = SyncReport(direction, remote.repo, remote.sha, prefixes, dry_run=True)
-        if direction == "push":                                 # in push's order
+        _plan_emptied(items, report, "generations")
+        if direction == "pull":                                 # in pull's order
+            report.held = _wait_for_generations(items)
+            _plan_emptied(items, report, "judgements")
+        else:                                                   # in push's order
             report.held = _hold_back(items, tree, digest, _judged_from)
             _hold_unpaired(items, report, records=False)
+            _plan_emptied(items, report, "judgements")
             report.held |= _hold_back(items, tree, digest, _recorded_from)
             _hold_unpaired(items, report, records=True)
         report.files = {i.path: i.action for i in items}
         reports[direction] = report
     return reports
+
+
+def _plan_emptied(items: list[_Item], report: SyncReport, kind: str) -> None:
+    """status: a merge of a ``kind`` file ("generations" or "judgements") one side of which holds no records
+    while the other does is planned as the conflict push and pull report (``_emptied``,
+    ``report.emptied``). Both sides are seen without a download: the local file has no line but blank
+    ones, or the Hub's copy is empty, as lift restart leaves a file (its tree entry hashes as b"" does).
+    A Hub copy of blank lines alone, which no lift command writes, counts as one that holds records."""
+    empty = Digest(_EMPTY_SHA256, _EMPTY_GIT)
+    for item in items:
+        if item.action != MERGE or merge_kind(item.path) != kind:
+            continue
+        try:
+            with open(item.local, "rb") as f:
+                here = any(line.strip() for line in f)
+        except OSError:                  # gone since planning: the real sync leaves it as busy
+            continue
+        hub = not empty.matches(item.entry)
+        if here != hub:
+            item.action = CONFLICT
+            report.emptied[item.path] = "hub" if here else "here"
