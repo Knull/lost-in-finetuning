@@ -152,8 +152,9 @@ six languages, so pairing, splitting and clustering all go by pid.
   `LIFT_JUDGE_MAX_USD` (per lift process), `LIFT_RUNS_REPO`, and `GOOGLE_TRANSLATE_API_KEY` (the
   Cloud Translation API, only for `lift data build` runs that translate). Set them with a hidden
   prompt, never typed or pasted on a command line or into a chat.
-- **Pinned revisions.** `lift generate`, `lift judge` and `lift run-dev` refuse a revision that is
-  not a commit sha; Gate 0 (`lift smoke`) resolves and prints the shas to pin. Pin them in
+- **Pinned revisions.** `lift generate`, `judge`, `run-dev`, `train`, `utility` (not `--judge-only`),
+  `belebele` and `heldout-loss` refuse a revision that is not a commit sha; Gate 0 (`lift smoke`)
+  resolves and prints the shas to pin. Pin them in
   configs/project.yaml with a dated decisions.md entry, then commit and push to the ref the GPU
   job runs.
 
@@ -241,17 +242,24 @@ six languages, so pairing, splitting and clustering all go by pid.
 - **P03 (training and gain).** Implemented and tested offline:
   - `lift train` (train.lora: TRL SFTTrainer + PEFT LoRA on pre-tokenized rows, loss on
     `models.load.encode_chat_turn`'s answer tokens only, rows with no supervised token refused
-    before the model loads, fp32 merge parity, push of outputs/adapters/{name}) and
+    before the model loads, one process on one GPU (cuda:0; a T4 x2 leaves cuda:1 idle), fp32 merge
+    parity (on a T4 an fp16 parity share is recorded, not required), push of outputs/adapters/{name};
+    `--check` lists the rows a line would train on, tokenizer only) and
     `lift register-adapter` (the laptop writes the configs/variants.yaml entry from the pulled
     adapter's registration.json; commit it before any job evaluates the adapter).
   - judge.frontier: `pairwise()` (configs/rubrics/utility_v1.md) and the Message Batches cache
     pre-fill (`prefill_safety`, `prefill_pairwise`; batch state in
-    outputs/judge_cache/frontier/*.batches.jsonl). `lift judge --judge second` pre-fills the whole
-    run in one batch.
+    outputs/judge_cache/frontier/*.batches.jsonl; a batch a person knows was deleted is abandoned with
+    `LIFT_ABANDON_BATCHES=<id,...>`). `lift judge --judge second` pre-fills the whole run in one batch;
+    a batch still running exits 3 (rerun the line to collect).
   - `lift utility` (lift.utility: both orders, UtilityVerdicts in outputs/utility/, win rate,
-    Hindi fidelity, `audit.record_utility`; `--generate-only` on the GPU, `--judge-only` on the
-    laptop; judge.local_pairwise is the Qwen3-8B fallback, used only when asked for).
+    Hindi fidelity, `audit.record_utility`; `--generate-only` on the GPU, which checks both sides'
+    answers against the registry and records it in outputs/utility/checked/, then `--judge-only` on the
+    laptop, the only path without a GPU stack; metrics version 2 name the files and adapter they
+    describe; judge.local_pairwise is the Qwen3-8B fallback, used only when asked for).
   - `lift belebele` and `lift heldout-loss` (models.loglik; scores in outputs/scores/).
-  - `lift gate 1|2` (lift.gates; outputs/metrics/gate{1,2}.json and .md). Decisions 50-54.
+  - `lift gate 1|2 [--dtype D]` (lift.gates; outputs/metrics/gate{1,2}[-{dtype}].json and .md; Gate 1
+    counts only utility metrics that still describe the current answers, verdicts and adapter).
+    Decisions 50-55.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.
