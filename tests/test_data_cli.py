@@ -380,6 +380,9 @@ def test_apply_exits_1_and_names_the_rebuild_when_it_stops_after_the_verdicts_ar
     rebuild = "`lift data build --only harmful --langs hi --cache-only`"
     assert "2 new verdicts are stored" in logged and "fake: the rebuild stops" in logged
     assert "Once the cause is fixed, apply the sheet again" in logged
+    # W3 (VERIFY-4): the named line can exit 3, unlike the apply's own rebuild
+    assert ("(a --cache-only build exits 3 when a file holds an error or empty translation failure, which "
+            'the cache never holds: it reports the item as "error: not cached"') in logged
     assert rebuild in logged and "Traceback" not in logged and capsys.readouterr().out == ""
     stored = dirs.data / "interim" / "translations" / "spotchecks.jsonl"
     assert len(stored.read_text(encoding="utf-8").splitlines()) == 2

@@ -115,7 +115,8 @@ verdicts its build applied (spotchecks.verdicts_sha), so every apply also rebuil
 file whose report does not hold the digest of the verdicts stored on it now: a rebuild that stopped
 after the verdicts were stored (a kill, Ctrl+C, an error) is finished by applying the sheet again.
 Such a stop says so, and names that remedy and the ``lift data build --only <sets> --langs <lang>
---cache-only`` line that also rebuilds the files from them. Every
+--cache-only`` line that also rebuilds the files from them (it exits 3 when a file holds an error or
+empty translation failure, which the cache never holds). Every
 build applies the latest verdict per (lang, pid): fixed replaces the text (checked; edited when it
 differs) if the English is unchanged; ok marks it checked and bad moves it to prompts/excluded/ if
 the reader saw the engine output the build has; a verdict on a failed item builds the record from
@@ -230,7 +231,9 @@ class ShortCellError(ValueError):
     ``lang`` name the file, ``missing`` the frozen pids it lacks by split (those its report does not list
     as excluded), ``remedy`` what completes the cell, on the laptop (a reader's verdict: ``reader_remedy``;
     a rerun; a rebuild), ending with lift sync push; the message names them all. lift generate and lift
-    run-dev skip such a cell and list it with ``remedy`` (lift.commands.run)."""
+    run-dev skip such a cell and list it with ``remedy``; lift judge, which reads prompt texts by pid,
+    judges the generations a short cell already has (made before the check) and refuses its AuditKIT
+    record with ``remedy`` (exit 3) (lift.commands.run)."""
 
     def __init__(self, message: str, *, set_name: str, lang: str, missing: Mapping[str, Sequence[str]],
                  remedy: str) -> None:
@@ -243,10 +246,11 @@ class ShortCellError(ValueError):
 class SplitStampError(ValueError):
     """A prompt file whose records carry another split than the committed split gives them (a stale or
     foreign copy, stamped from another split assignment), or whose set's committed split file is missing,
-    so its stamps cannot be checked (``_check_stamps``). A ValueError, so the callers that go on without a
-    language on one (judge.pipeline.second_judge_pids, Gate 0's all_prompts) are unchanged; P04's scores,
-    which go on without a prompt file that is missing here, stop on it (lift.validation.outputs.Prompts
-    makes it a PromptFileError): the file is here, and wrong."""
+    so its stamps cannot be checked (``_check_stamps``). A ValueError, never a FileNotFoundError: the
+    callers that go on without a language whose prompt file is missing catch FileNotFoundError only
+    (judge.pipeline.second_judge_pids; Gate 0's all_prompts, for redteam and utility), so they stop on
+    it, as on any ValueError; P04's scores, which go on without a prompt file that is missing here, stop
+    on it too (lift.validation.outputs.Prompts makes it a PromptFileError): the file is here, and wrong."""
 
 
 def reader_remedy(langs: Iterable[str]) -> str:
@@ -1314,10 +1318,10 @@ def load_prompts(set_name: str, lang: str, split: str | None = None, *, allow_sh
     committed split's, never the stamp a synced file carries: every record, before the split filter,
     must carry the split ``_check_stamps`` gives it (data/splits/{set}.json for a pid it covers, a
     PolyRefuse train/val pid its own segment, redteam "final"). A wrong stamp, or a missing split
-    file, raises SplitStampError (a ValueError), never FileNotFoundError: a ValueError means "no prompt
-    file" to the callers that go on without the language (judge.pipeline.second_judge_pids, Gate 0's
-    all_prompts), while P04's scores, which go on without a prompt file that is missing, stop on it
-    (lift.validation.outputs.PromptFileError).
+    file, raises SplitStampError (a ValueError), never FileNotFoundError: FileNotFoundError means "no
+    prompt file" to the callers that go on without the language (judge.pipeline.second_judge_pids,
+    Gate 0's all_prompts for redteam and utility), which stop on a ValueError, and so do P04's scores,
+    which go on without a prompt file that is missing (lift.validation.outputs.PromptFileError).
 
     Then a read of one split (``split`` given) needs every frozen pid of it (fit, dev or final: the split
     file's) in the file unless its report lists it among its exclusions (a reader's spot-check bad, a fit
@@ -1994,7 +1998,9 @@ def _stored_note(sheet: Path, n: int, pairs: Sequence[tuple[str, str]], cfg: Map
 def _rebuild_note(pairs: Sequence[tuple[str, str]], cfg: Mapping[str, Any]) -> str:
     """The remedy for ``_stored_note``: any later apply rebuilds the files whose reports do not hold the
     stored verdicts yet (``_owed``); every build applies them too, and --cache-only rebuilds from the
-    cache as apply_spotchecks does (no engine called), one line per language."""
+    cache as apply_spotchecks does (no engine called), one line per language. Unlike the apply's own
+    rebuild (run.previous_failures), such a build reports an error or empty translation failure, which is
+    never cached, as "error: not cached" and exits 3 (items a rerun can translate are missing)."""
     sets: dict[str, list[str]] = {}
     for set_name, lang in _in_order(pairs, cfg):
         sets.setdefault(lang, []).append(set_name)
@@ -2002,8 +2008,10 @@ def _rebuild_note(pairs: Sequence[tuple[str, str]], cfg: Mapping[str, Any]) -> s
                          for lang, names in sorted(sets.items(),
                                                    key=lambda x: cfg["languages"]["all"].index(x[0])))
     return ("Once the cause is fixed, apply the sheet again: any apply-spotchecks rebuilds the files whose "
-            f"reports do not hold the stored verdicts yet. Or rebuild them with {lines}, then "
-            "`lift sync push`")
+            f"reports do not hold the stored verdicts yet. Or rebuild them with {lines} (a --cache-only "
+            "build exits 3 when a file holds an error or empty translation failure, which the cache never "
+            'holds: it reports the item as "error: not cached", and a build without --cache-only translates '
+            "it again), then `lift sync push`")
 
 
 def _lossy(cell: str, current: str) -> bool:
