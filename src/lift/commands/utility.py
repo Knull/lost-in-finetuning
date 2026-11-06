@@ -37,6 +37,7 @@ from lift.commands.run import (
     _skip,
     require_pinned,
 )
+from lift.final import guard_split
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +115,7 @@ def _answer(args: argparse.Namespace, prompts: Sequence[Any], dtype: str,
     from lift import utility
 
     require_pinned("models.global")
+    guard_split(args.variant, args.split)
     _refuse_other_dtype(dtype, args.device)
     from lift.models.generate import OtherPrecisionError, StaleOutputError, generate, generations_path
     from lift.models.variants import build_variant, get_spec

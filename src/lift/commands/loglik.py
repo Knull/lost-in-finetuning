@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from lift.commands import run
+from lift.final import guard_split
 from lift.schemas import LANGS
 
 log = logging.getLogger("lift.loglik")
@@ -208,6 +209,7 @@ def _exit(skipped: dict[str, dict[str, str]]) -> int:
 def _belebele(args: argparse.Namespace) -> int:
     run._logging()
     run.require_pinned("models.global")
+    guard_split(args.variant, args.split)
     langs = run._names(args.langs, LANGS, ())
     dtype = run._dtype(args.dtype)
     run._refuse_other_dtype(dtype, args.device)
@@ -252,6 +254,7 @@ def _report_belebele(written: Any, variant: str, split: str) -> None:
 def _heldout(args: argparse.Namespace) -> int:
     run._logging()
     run.require_pinned("models.global")
+    guard_split(args.variant, args.split)
     dtype = run._dtype(args.dtype)
     run._refuse_other_dtype(dtype, args.device)
     spec = _spec(args.variant)

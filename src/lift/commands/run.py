@@ -38,6 +38,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from lift.final import guard_split
 from lift.prompts import SAFETY_SETS
 from lift.schemas import LANGS
 
@@ -310,6 +311,7 @@ def _smoke(args: argparse.Namespace) -> int:
 def _generate(args: argparse.Namespace) -> int:
     _logging()
     require_pinned("models.global")
+    guard_split(args.variant, args.split)
     sets = _names(args.sets, ALL_SETS, SAFETY_SETS)
     langs = _names(args.langs, LANGS, LANGS)
     dtype = _dtype(args.dtype)
