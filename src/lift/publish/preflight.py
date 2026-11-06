@@ -119,7 +119,7 @@ def allowed_lines(text: str) -> set[str]:
     commit (written before it was marked) is allowed too."""
     out = set()
     for line in text.splitlines():
-        if ALLOW_MARK in line or line.strip() in allowed:
+        if ALLOW_MARK in line:
             out.add(line.split("#")[0].strip() if "#" in line else line.replace(ALLOW_MARK, "").strip())
     return out
 
