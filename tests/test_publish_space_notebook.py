@@ -157,7 +157,7 @@ def test_space_formats_cells_like_the_article(app):
     head, rows = app.table_rows(data["report"], "utility")
     assert rows[0][3] == "62.0% [55.0, 69.0]"
     _, rows = app.table_rows(data["report"], "belebele")
-    assert rows[0][1] == "50.0%"
+    assert rows[0][1:3] == ["700", "50.0%"]  # P07 writes the Items column before the levels
     for value, kind in [
         (0.123, "pct"),
         (-0.04, "pp"),

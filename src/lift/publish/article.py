@@ -197,31 +197,49 @@ def backtranslation(facts: Facts) -> dict[str, str]:
 LANG_NAMES = ("English", "Hindi", "Chinese", "Spanish", "Arabic", "Thai")
 
 
+# The benign sets P07's cells table names, as the note says them (stock's final cells are the reference).
+BENIGN_SETS = {"easy_benign": "easy benign", "hard_benign": "hard benign"}
+
+
 def counts_note(facts: Facts) -> str:
-    """Whether the final harmful prompts evaluated (P07's per-language table, ``n``: stock's final cell)
-    match the design count from configs/ (review XB-15), naming each language that differs with both
-    numbers sourced, with a leading space; "" while the table is not there (it is pending itself)."""
+    """Whether the final counts evaluated match the design counts from configs/ (review XB-15): the
+    harmful prompts per language (P07's per-language table, ``n``: stock's final cell), the easy and hard
+    benign prompts per language (stock's rows of the cells table), the utility pairs (each variant's row
+    of the utility table) and the Belebele items per language (the belebele table, stock's). Each count
+    that differs is named, with both numbers sourced; a count not there (an arm not run, a table not
+    written) is not checked. With a leading space; "" while no table is there (each is pending itself)."""
+    checks = []  # (pointer of the count, what it is, how its row is named, configs size)
     rows = facts.table_rows("per_language")
-    if rows is None:
+    for i, r in enumerate(rows or []):
+        if r.get("lang") in LANG_NAMES:
+            checks.append((f"/tables/per_language/rows/{i}", "harmful prompts in", "lang", "harmful"))
+    for i, r in enumerate(facts.table_rows("cells") or []):
+        if r.get("variant") == "stock" and r.get("set") in BENIGN_SETS:
+            what = f"{BENIGN_SETS[r['set']]} prompts in"
+            checks.append((f"/tables/cells/rows/{i}", what, "lang", r["set"]))
+    for i, _ in enumerate(facts.table_rows("utility") or []):
+        checks.append((f"/tables/utility/rows/{i}", "utility pairs of", "variant", "utility"))
+    for i, _ in enumerate(facts.table_rows("belebele") or []):
+        checks.append((f"/tables/belebele/rows/{i}", "Belebele items in", "lang", "belebele"))
+    if not checks:
         return ""
-    design = config.get("sizes.harmful.final")
-    differ = [
-        i
-        for i, r in enumerate(rows)
-        if r.get("lang") in LANG_NAMES and r.get("n") is not None and r.get("n") != design
-    ]
+    differ = []
+    for at, what, label, size in checks:
+        n = facts.raw(report_path(), f"{at}/n")
+        if n is None or n == config.get(f"sizes.{size}.final"):
+            continue
+        named = facts.report_value(f"{at}/{label}", "text", what="the row a count belongs to")
+        count = facts.report_value(f"{at}/n", "int", what="a count evaluated")
+        designed = facts.config("project", f"sizes.{size}.final", "int")
+        differ.append(f"{what} {named} ({count}) against {designed} designed")
     if not differ:
-        return " The final harmful prompts per language match this design in the per-language results."
-    at = "/tables/per_language/rows"
-    shown_rows = [
-        f"{facts.report_value(f'{at}/{i}/lang', 'text', what='a language label')} "
-        f"({facts.report_value(f'{at}/{i}/n', 'int', what='the prompts evaluated')})"
-        for i in differ
-    ]
-    designed = facts.config("project", "sizes.harmful.final", "int")
+        return (
+            " The final counts evaluated match this design in the results tables (harmful, easy and hard "
+            "benign prompts per language, utility pairs, Belebele items)."
+        )
     return (
-        f" The final harmful prompts evaluated differ from this design in {', '.join(shown_rows)}, against "
-        f"{designed} designed: the per-language results count what was evaluated."
+        f" The final counts evaluated differ from this design: {'; '.join(differ)}. The results count what "
+        "was evaluated."
     )
 
 

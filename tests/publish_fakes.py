@@ -262,6 +262,7 @@ def _p07_tables() -> dict:
         "belebele": table(
             [
                 ("lang", "Language", "text"),
+                ("n", "Items", "int"),
                 ("stock", "Stock", "pct"),
                 ("adapter", "Adapter", "pct"),
                 ("repair", "Frozen repair", "pct"),
@@ -270,6 +271,7 @@ def _p07_tables() -> dict:
             [
                 {
                     "lang": "Hindi",
+                    "n": 700,
                     "stock": 0.5,
                     "adapter": 0.49,
                     "repair": 0.49,

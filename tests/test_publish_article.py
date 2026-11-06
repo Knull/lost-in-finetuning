@@ -434,14 +434,46 @@ def test_the_design_counts_are_checked_against_the_evaluated_ones(out):
 
     write_inputs()
     text = " ".join(article.build()[0].read_text(encoding="utf-8").split())
-    assert "final harmful prompts per language match this design" in text
+    assert "The final counts evaluated match this design in the results" in text
     doc = report()
     doc["tables"]["per_language"]["rows"][0]["n"] = 380  # Hindi
     write_report(doc)
     path, facts = article.build()
     text = " ".join(path.read_text(encoding="utf-8").split())
-    assert "Hindi (380)" in text and "400 designed" in text and "match this design" not in text
+    assert "harmful prompts in Hindi (380) against 400 designed" in text and "match this design" not in text
     assert any(s["pointer"] == "/tables/per_language/rows/0/n" and s["shown"] == "380" for s in facts.sources)
+
+
+def test_the_design_counts_are_checked_for_every_set(out):
+    """XB-15(c): easy and hard benign (stock's final cells), the utility pairs (each variant's row) and
+    Belebele (stock's items per language) are checked against the design too; each count that differs
+    is named with both numbers sourced, and a matching one is not."""
+    from publish_fakes import WINNER, report
+
+    doc = report()
+    cells = doc["tables"]["cells"]["rows"]
+    cells += [
+        {"variant": "stock", "set": "easy_benign", "lang": "hi", "n": 30},
+        {"variant": "stock", "set": "hard_benign", "lang": "hi", "n": 30},
+        {"variant": "stock", "set": "hard_benign", "lang": "en", "n": 200},
+        {"variant": WINNER, "set": "easy_benign", "lang": "hi", "n": 29},  # stock is the reference
+    ]
+    doc["tables"]["utility"]["rows"][0]["n"] = 40
+    doc["tables"]["belebele"]["rows"][0]["n"] = 40
+    write_report(doc)
+    path, facts = article.build()
+    text = " ".join(path.read_text(encoding="utf-8").split())
+    assert "easy benign prompts in hi (30) against 300 designed" in text
+    assert "hard benign prompts in hi (30) against 200 designed" in text
+    assert "utility pairs of adapter-aya-std-s1 (40) against 200 designed" in text
+    assert "Belebele items in Hindi (40) against 700 designed" in text
+    assert "in en (" not in text and "(29)" not in text and "match this design" not in text
+    shown = {(s["pointer"], s["shown"]) for s in facts.sources}
+    assert ("/tables/cells/rows/1/n", "30") in shown and ("/tables/utility/rows/0/n", "40") in shown
+    assert ("/tables/belebele/rows/0/n", "40") in shown
+    sourced = {(s["file"], s["pointer"]) for s in facts.sources}
+    for name in ("easy_benign", "hard_benign", "utility", "belebele"):
+        assert ("configs/project.yaml", f"/sizes/{name}/final") in sourced
 
 
 def test_p07s_repair_vs_wiseft_table_renders_with_its_label(out):
