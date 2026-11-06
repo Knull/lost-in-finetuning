@@ -531,3 +531,21 @@ def test_utility_verdicts_of_two_judges_are_never_mixed():
         analysis.compute(TwoJudges(), SELECTION, use_file=False)
     stats = analysis.compute(FakeSource(), SELECTION, use_file=False)
     assert stats["utility"]["retained"]["wiseft"]["est"] == pytest.approx(2 / 3)
+
+
+def test_a_cell_made_under_a_replaced_registry_entry_is_not_read(fake_prompt_files):
+    """P05's stale-input rule (meta.intervention) holds on the final split too: a cell whose records name
+    another registry entry than the variant's now is not run (with its restart line), never reported."""
+    pids = PIDS["harmful"]
+    fake_prompt_files[("harmful", "hi")] = [
+        make_prompt(p, "hi", "harmful", "final", text=f"prompt {p}") for p in pids
+    ]
+    write_cell("stock", pids, 2, meta={"intervention": "f" * 64})
+    write_cell(A.format(1), pids, 8)
+    doc = analysis.compute(analysis.Source(), SELECTION, use_file=False)
+    cell = next(
+        c for c in doc["cells"] if c["variant"] == "stock" and c["set"] == "harmful" and c["lang"] == "hi"
+    )
+    assert cell["status"] == "not run" and "registry entry" in cell["why"] and "lift restart" in cell["why"]
+    assert doc["primary"]["drift"]["pooled"] is None
+    assert "registry entry" in doc["primary"]["drift"]["not_run"][1]

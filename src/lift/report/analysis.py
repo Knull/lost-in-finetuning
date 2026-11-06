@@ -4,6 +4,9 @@ What it reads, always through the checked readers (a paired comparison only thro
 ``lift.judge.pipeline.paired_labels``, which refuses a pair whose judge, precision, model revision,
 harness, template or decoding differ, so pairs are built only from records of one dtype and one judge):
 
+- every safety cell and Belebele file only while its records were made under the variant's registry entry
+  as it is now (``meta.intervention``, ``lift.repair.select._stale``, P05's rule); otherwise not run, with
+  its restart line;
 - the final safety cells of the core variants (``lift.final.core_plan``: stock, the adapter seeds, the
   overall winner and the other two frozen families on seeds 1-3), primary judge, every prompt (rule 3);
 - the utility verdicts of the final split (``lift.utility``: current verdicts on checked answers);
@@ -109,7 +112,16 @@ class Source:
 
     def records(self, variant: str, set_name: str, lang: str, *, judge: str = "primary") -> list[Any]:
         from lift.judge import pipeline
+        from lift.models.generate import generations_path, restart_command
+        from lift.repair.select import _stale
 
+        stale = _stale(variant, generations_path(variant, set_name, lang, SPLIT))
+        if stale:
+            raise Missing(
+                f"{set_name}_{lang}_{SPLIT}: {stale}; start the cell over: "
+                f"`{restart_command(variant, set_name, lang, SPLIT, dtype=self.dtype)}` as a job line right "
+                f"after `lift sync pull`, then `lift final --variant {variant}`"
+            )
         try:
             return pipeline.load_records(
                 variant, set_name, lang, SPLIT, judge=judge, complete=judge == "primary", dtype=self.dtype
@@ -147,6 +159,14 @@ class Source:
         path = loglik.belebele_scores_path(variant, lang, SPLIT, dtype=self.dtype)
         if not path.is_file():
             raise Missing(f"no Belebele scores for {variant} {lang} (lift belebele --split final)")
+        from lift.repair.select import _dtype_flag, _stale
+
+        stale = _stale(variant, path)
+        if stale:
+            raise Missing(
+                f"Belebele {lang} final: {stale}; start it over: `lift belebele --variant {variant} --split "
+                f"final --langs {lang} --restart{_dtype_flag(self.dtype)}` (GPU)"
+            )
         try:
             records, why = loglik._readable(path, "belebele")
             items: list[Mapping[str, Any]] = []
