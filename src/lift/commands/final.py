@@ -84,7 +84,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--variant", default=None, help="a frozen variant from configs/variants.yaml")
-    p.add_argument("--all", action="store_true", help="the 13 core variants, primary endpoint first")
+    p.add_argument("--all", action="store_true", help="the 13 core variants (16 when stress), primary first")
     p.add_argument(
         "--stages",
         nargs="+",

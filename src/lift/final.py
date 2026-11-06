@@ -158,7 +158,10 @@ def _remote_env(git: Callable[..., str | None]) -> dict[str, str] | None:
 
 
 def recipe_file() -> Path:
-    return REPO_ROOT / RECIPE
+    """configs/frozen_recipe.json in this checkout (``lift.paths.frozen_recipe_path``, P05's writer's)."""
+    from lift import paths
+
+    return paths.frozen_recipe_path()
 
 
 def _text(raw: str | bytes | None) -> str | None:

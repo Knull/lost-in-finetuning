@@ -271,12 +271,13 @@ six languages, so pairing, splitting and clustering all go by pid.
   .md, overall and per family, then the freeze steps). A sweep line goes last in its job: the runners do
   not go past its partial exit. Decisions 67-69.
 - **P07 (final evaluation, statistics, report).** Implemented and tested offline on synthetic records:
-  `lift final --variant V | --all` (lift.final: refused unless a `recipe-frozen-*` tag exists and the variant
-  is frozen; the same guard in generate, utility, belebele and heldout-loss on `--split final`; safety cells
-  through run-dev's path, utility, Belebele x 6, the ar/th back-translation sample; resumable, GPU-hours in
-  each manifest; `--judge-only` on the laptop for the second judge's 10% and utility), `lift stats`
+  `lift final --variant V | --all` (lift.final: refused unless a `recipe-frozen-*` tag exists, the committed
+  configs/frozen_recipe.json is the tag's and pins selection.json's sha256, and the variant is frozen; the
+  same guard in generate, utility, belebele and heldout-loss on `--split final`; safety cells through
+  run-dev's path, utility, Belebele x 6, the ar/th back-translation sample; resumable, GPU-hours in each
+  manifest; `--judge-only` on the laptop for the second judge's 10% and utility), `lift stats`
   (report.analysis -> outputs/metrics/final_stats.json) and `lift report` (report.tables, figures, cost ->
   outputs/metrics/final_report.json for P08, tables in outputs/metrics/report/, figures in outputs/figures/).
-  Decisions 70-73.
+  Decisions 70-73 and 76-78.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

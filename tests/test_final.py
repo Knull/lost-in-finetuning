@@ -234,16 +234,20 @@ class FakeGit:
 
 
 @pytest.fixture
-def frozen_recipe(tmp_path, monkeypatch):
-    """selection.json on disk and configs/frozen_recipe.json naming its sha, in a tmp checkout."""
+def frozen_recipe():
+    """selection.json on disk and configs/frozen_recipe.json naming its sha, written as P05's lift select
+    writes it (select.recipe_text) at lift.paths.frozen_recipe_path(), which conftest moves to tmp."""
+    from lift import paths
+    from lift.repair.select import recipe_text
+
     write_selection()
     digest = final.sha256_file(final.selection_path())
     doc = {**RECIPE, "selection_sha256": digest}
-    path = tmp_path / "configs" / "frozen_recipe.json"
-    path.parent.mkdir()
-    text = json.dumps(doc, indent=1) + "\n"
+    path = paths.frozen_recipe_path()
+    assert final.recipe_file() == path and "lift-tree" in str(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = recipe_text(doc)
     path.write_text(text, encoding="utf-8")
-    monkeypatch.setattr(final, "recipe_file", lambda: path)
     return doc, text, path
 
 
@@ -266,6 +270,21 @@ def test_the_guard_binds_the_final_split_to_the_committed_frozen_recipe(frozen_r
     path.unlink()
     with pytest.raises(final.Refused, match="frozen_recipe.json does not exist"):
         final.verified_recipe(TAG[0], git=FakeGit(text, text))
+
+
+def test_the_reader_accepts_exactly_what_p05s_writer_writes():
+    """select.selection_text / recipe_doc / write_recipe (origin/p05-repairs) against verified_recipe."""
+    from lift.repair import select
+
+    doc = {**SELECTION, "kind": "selection", "version": 1}
+    text = select.selection_text(doc)
+    path = final.selection_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="\n")
+    recipe = select.recipe_doc(doc, text)
+    written = select.write_recipe(recipe).read_text(encoding="utf-8")
+    assert final.verified_recipe(TAG[0], git=FakeGit(written, written)) == recipe
+    assert final.check_final(WINNER.format(3), selection=doc, tags=TAG, recipe=recipe) == TAG[0]
 
 
 def test_lift_select_run_again_after_the_tag_is_refused_at_final_time(frozen_recipe, monkeypatch):
@@ -306,9 +325,8 @@ def test_a_shallow_clone_fetches_the_tag_with_the_token_kept_out_of_argv(frozen_
         final.verified_recipe(TAG[0], git=FakeGit(text, text, shallow=True))
 
 
-def test_every_final_line_refuses_without_the_frozen_recipe(monkeypatch, tmp_path):
+def test_every_final_line_refuses_without_the_frozen_recipe(monkeypatch):
     monkeypatch.setattr(final, "frozen_tags", lambda git=None: TAG)
-    monkeypatch.setattr(final, "recipe_file", lambda: tmp_path / "frozen_recipe.json")
     write_selection()
     with pytest.raises(SystemExit, match="frozen_recipe.json does not exist"):
         final.guard_split("stock", "final")
