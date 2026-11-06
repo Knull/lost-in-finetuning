@@ -229,3 +229,17 @@ def test_sweep_refuses_cast_without_its_artifact(registry, capsys):
     view["models"]["global"]["revision"] = "e" * 40
     assert cli.main(["sweep", "--adapter", ADAPTER, "--repairs", "cast"]) == 2
     assert "lift fit-cast" in capsys.readouterr().err
+
+
+def test_read_scores_names_every_missing_input_with_its_remedy(registry):
+    scores, missing, _ = select.read_scores(f"wiseft-l0.50-{ADAPTER}", "wiseft", "bf16")
+    assert scores is None and len(missing) == 1 and "register-repairs" in missing[0]   # not registered
+    doc = config.load("variants")
+    doc["variants"].append(rs.entry(rs.specs_for(ADAPTER, [rs.Setting("wiseft", 0.5)])[0]))
+    scores, missing, _ = select.read_scores(f"wiseft-l0.50-{ADAPTER}", "wiseft", "bf16")
+    assert scores is None and [m.split(":")[0] for m in missing] == ["harmful_hi", "overrefusal_hard_hi",
+                                                                      "win_rate", "belebele_hi"]
+    assert "lift run-dev" in missing[0] and "--judge-only" in missing[2] and "lift belebele" in missing[3]
+    scores, missing, details = select.read_scores(ADAPTER, "adapter", "bf16")
+    assert [m.split(":")[0] for m in missing] == ["harmful_hi", "overrefusal_hard_hi", "win_rate"]
+    assert "note" in details["belebele_hi"]           # the adapter's Belebele is not required
