@@ -109,3 +109,64 @@ def test_shown_paths_never_leak_home_dirs():
 
     assert shown(paths.metrics_dir() / "x.json") == "outputs/metrics/x.json"
     assert shown(paths.REPO_ROOT / "configs" / "a.yaml") == "configs/a.yaml"
+
+
+# ------------------------------------------------------------------ selection.json as P05 writes it (R1-06)
+
+
+def test_selection_is_read_in_p05s_shape():
+    from publish_fakes import selection
+
+    from lift.publish.inputs import frozen_family_winners, frozen_variants, frozen_winner, selection_verdict
+
+    write_inputs()
+    facts = Facts()
+    assert frozen_winner(facts) == "wiseft-l0.50-adapter-aya-std-s1"
+    assert selection_verdict(facts) == "repair"
+    assert frozen_family_winners(facts) == selection()["frozen"]
+    names = frozen_variants(facts)
+    assert len(names) == 9 and "wiseft" not in names and "cast" not in names
+    assert "resta-a0.25-adapter-aya-std-s3" in names and "cast-m1.0-adapter-aya-std-s2" in names
+
+
+def test_incomplete_selection_freezes_nothing():
+    from publish_fakes import selection
+
+    from lift.publish.inputs import frozen_family_winners, frozen_variants, frozen_winner, selection_problem
+
+    write_inputs(selection_doc=selection(incomplete=True))
+    facts = Facts()
+    assert (
+        frozen_winner(facts) is None and frozen_family_winners(facts) == {} and frozen_variants(facts) == []
+    )
+    assert "incomplete" in selection_problem(facts)
+
+
+def test_selection_in_another_shape_is_refused():
+    from lift.publish.inputs import frozen_winner, selection_path
+
+    write_json(selection_path(), {"status": "decided", "winner": "x", "frozen": ["x"]})
+    with pytest.raises(PublishError, match="overall"):
+        frozen_winner(Facts())
+
+
+# ------------------------------------------------------------------ free text reaches the sources (R1-24)
+
+
+def test_table_text_cells_and_notes_are_recorded():
+    doc = {
+        "version": 1,
+        "tables": {
+            "cost": {
+                "columns": [{"key": "x", "label": "X", "format": "text"}],
+                "rows": [{"x": "a note with 12.5 inside"}],
+                "note": "Pooled over 3 seeds.",
+            }
+        },
+    }
+    write_json(report_path(), doc)
+    facts = Facts()
+    facts.table("cost")
+    pointers = {s["pointer"]: s["shown"] for s in facts.sources}
+    assert pointers["/tables/cost/rows/0/x"] == "a note with 12.5 inside"
+    assert pointers["/tables/cost/note"] == "Pooled over 3 seeds."

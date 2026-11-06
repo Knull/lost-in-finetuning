@@ -1,0 +1,6 @@
+This is a research model from a safety study, gated like the unrepaired adapters. Its card says
+why: either its weights are the fine-tuned adapter merged into Tiny Aya Global, with the repair
+applied only by a wrapper at generation time, or no repair met every selection constraint. Without
+the wrapper it can answer harmful requests that Tiny Aya Global refuses. Do not deploy it. By
+requesting access you agree to use it for research only, under CC-BY-NC-4.0 and Cohere Labs'
+acceptable-use policy.

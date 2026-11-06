@@ -2,6 +2,23 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 6, 2026: P08 publishing, after review P08-R1 (before any result existed)
+
+74. **Which repaired model goes up gated** (`lift publish model`; configs/publish.yaml `model_gated`).
+    **Pending team confirmation:** the orchestrator set this safe default until the team decides.
+    - Only the overall frozen winner (selection.json `overall.winner`, seed 1) is published as "the
+      repaired model": its card shows the winner's repair effect.
+    - Its repo is gated with automatic approval, exactly like the unrepaired adapters (item 14), when
+      the winner is CAST or plain steering (`cast`, `cast_always`): those weights are the
+      adapter-merged model, and the repair is applied only by the wrapper, so the weights alone are
+      the unrepaired adapter in merged form.
+    - It is also gated when the verdict is reject (selection.json `overall.verdict`, or a final
+      verdict in final_report.json): the frozen setting is then the best one anyway, not a repair.
+    - Otherwise (a WiSE-FT or ReSta winner with the verdict repair) it is public, as item 14 says.
+    - This conflicts with prompts/P08_publish.md, which lists "CAST: the adapter-merged model plus its
+      CAST artifacts" as part of the public repaired model. Item 14 (adapters gated) wins: publishing
+      the same weights merged would undo it. Reason: review finding P08-R1-04.
+
 ## Nov 4-5, 2026 (night): P03 training, utility, Belebele and gate details, before any adapter was trained
 
 Pinned while writing and reviewing P03 (branch p03-train). No adapter, utility verdict or Belebele

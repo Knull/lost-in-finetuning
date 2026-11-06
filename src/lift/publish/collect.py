@@ -1,9 +1,11 @@
 """``lift publish collections``: the two HF collections the article links to.
 
 "models" lists the repaired model, the repair parameters, the gated adapters and the Space; "data"
-lists the logs dataset, the gated raw completions and the translated prompt sets. With ``--yes`` the
-collections are created (or reused: ``exists_ok``) under the team namespace and every item is added,
-and their urls are written to outputs/publish/collections.json, which the article reads for its links.
+lists the logs dataset, the gated raw completions and the translated prompt sets. With ``--yes`` every
+listed repo is first checked to exist on the Hub (nothing is created while one is missing, so no
+collection is left half-built), then the collections are created (or reused: ``exists_ok``) under the
+team namespace and every item is added, and their urls are written to outputs/publish/collections.json,
+which the article reads for its links.
 """
 
 from __future__ import annotations
@@ -30,11 +32,11 @@ def read_links() -> dict[str, str]:
 
 
 def plan(facts: Facts | None = None) -> dict[str, list[settings.RepoSpec]]:
-    from lift.publish.model import registered_adapters
+    from lift.publish.model import _spec, model_repo, registered_adapters
 
     facts = facts or Facts()
     winner = frozen_winner(facts)
-    models = [settings.repo("model", variant=winner or "pending-winner"), settings.repo("repair_params")]
+    models = [model_repo(facts, winner, _spec(winner) if winner else None), settings.repo("repair_params")]
     models += [
         settings.repo("adapter", adapter=name)
         for name in sorted(registered_adapters())
@@ -71,6 +73,17 @@ def execute(
             "not creating collections: no namespace or no frozen winner yet for " + ", ".join(problems)
         )
     api = (api_factory or hub.default_api)()
+    absent = [
+        f"{r.repo_type} {r.repo_id}"
+        for items in p.values()
+        for r in items
+        if not api.repo_exists(r.repo_id, repo_type=r.repo_type)
+    ]
+    if absent:
+        raise PublishError(
+            "not creating collections: these repos are not on the Hub yet (upload them first): "
+            + ", ".join(absent)
+        )
     cfg = settings.load()["collections"]
     out: dict[str, dict[str, str]] = {}
     for key, items in p.items():

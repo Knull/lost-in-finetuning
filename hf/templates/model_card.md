@@ -1,5 +1,6 @@
 # {{ variant }}
 
+{{ access_note }}
 A Hindi LoRA adapter of Tiny Aya Global with a cheap post-hoc safety repair applied. No gradient
 step was taken on the adapter to repair it. Built for the Lexsi AI Safety and Alignment
 Hackathon, Track 2b, statement 6 (repairing safety drift without retraining).

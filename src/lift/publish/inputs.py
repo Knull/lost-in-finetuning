@@ -7,36 +7,50 @@ beside each rendered file (``*.sources.json``) for the claims audit (R3). An inp
 yet renders as ``[PENDING: <what> from <file> (<stage>)]``; ``lift publish ... --yes`` refuses to upload
 a text that still holds one.
 
-Inputs (paths under ``outputs/metrics``; both are written by stages that come after P08's first draft,
-so the shapes below are the contract they must write):
+Inputs (paths under ``outputs/metrics``; both are written by later stages, and the shapes below were
+checked against their writers on origin/p05-repairs and origin/p07-final-report on Nov 6):
 
-``selection.json`` (P05, ``lift select``): ``lift.selection.Selection`` as JSON plus the families.
+``selection.json`` (P05, ``lift select``: ``lift.repair.select.run``).
 
-    {"adapter": "adapter-indicalign-std-s1", "winner": "<variant>", "verdict": "repair" | "reject",
-     "eligible": [...], "table": [<Selection.table rows>],
-     "families": {"wiseft": {"winner": "<variant>", "verdict": ...}, "resta": {...}, "cast": {...}},
-     "frozen": ["<every frozen variant name, seeds 1-3>"]}             # families and frozen optional
+    {"kind": "selection", "version": 1, "adapter": "adapter-indicalign-std-s1",
+     "status": "decided" | "incomplete",
+     "overall": {"winner": "<variant>", "verdict": "repair" | "reject", "eligible": [...]},
+     "families": {"wiseft": {"winner", "verdict", "eligible"}, "resta": {...}, "cast": {...}},
+     "frozen": {"wiseft": "<seed-1 setting name>", "resta": ..., "cast": ...},
+     "table": [...], "freeze": {...}, "missing": {...}, "problems": [...], ...}
 
-``final_report.json`` (P07, ``lift stats`` / ``lift report``), version 1:
+    While ``status`` is "incomplete" there is no ``overall`` or ``frozen`` and ``families`` is the list of
+    family names: nothing is frozen, and P08 publishes no model or parameters. ``frozen`` names each family's
+    setting on the seed-1 adapter; seeds 2 and 3 are the same setting on ``adapter-...-s2`` and ``-s3``
+    (P05's ``seed_name``), so every frozen variant is ``frozen_variants``. Only ``overall.winner`` is
+    published as "the repaired model": the card's repair effect is the winner's.
 
-    {"version": 1, "dtype": "bf16", "primary_judge": "<judge id>",
-     "verdicts": [{"adapter": "<seed-1 adapter or recipe>", "recipe": "standard" | "stress",
-                   "verdict": "retain" | "repair" | "reject", "reason": "<one sentence>"}],
+``final_report.json`` (P07, ``lift stats`` / ``lift report``: ``lift.report.tables.build``), version 1:
+
+    {"version": 1, "dtype": "bf16", "primary_judge": "<judge id of the final judgements>" | null,
+     "verdicts": [{"adapter": "<seed-1 adapter>", "recipe": "standard" | "stress",
+                   "verdict": "retain" | "repair" | "reject" | null, "reason": "<one sentence>"}],
      "primary": {"drift": <Effect>, "repair": <Effect>,
                  "redteam_drift": <Effect>, "redteam_repair": <Effect>},
      "headline": {"utility_retained": <Interval>, "belebele_hi_change": <Interval>,
-                  "overrefusal_hard_hi_change": <Interval>, "gpu_hours_per_checkup": <number>},
+                  "overrefusal_hard_hi_change": <Interval>,
+                  "gpu_hours_per_checkup": <number>,         # dev sweep + final battery of stock, the
+                                                              # seed-1 adapter and the seed-1 winner
+                  "gpu_hours_per_variant_final": <number>},   # mean final battery per variant
      "tables": {"<name>": {"title": str, "columns": [{"key": str, "label": str, "format": FORMAT}],
                            "rows": [{"<key>": value, ...}], "note": str}},
      "not_run": ["<arm that was not run>", ...]}
 
-    Effect   = {"pooled": {"est", "lo", "hi", "p"}, "per_seed": [{"seed", "est", "lo", "hi", "p", "n"}]}
-               (rates are fractions; est is the first variant minus the second: adapter - stock for drift,
-               repair - adapter for repair)
-    Interval = {"est", "lo", "hi"}
+    Effect   = {"pooled": {"est", "lo", "hi", "p", "n", "seeds"} | null,
+                "per_seed": [{"seed", "est", "lo", "hi", "p", "n"}]}
+               (rates are fractions; est is the second variant minus the first: adapter - stock for drift,
+               repair - adapter for repair; ``pooled`` null and ``per_seed`` empty when the arm was not run)
+    Interval = {"est", "lo", "hi"}; any value may be null: "not run".
 
-    TABLES names the tables P08 places (a missing one renders as pending). A cell is a number, a string,
-    an Interval (formats ending in ``_ci``) or null ("not run").
+    ``primary_judge`` is the judge id written in the final judgement records (it follows the
+    decide-judge rule; never assume which judge it is). TABLES names the tables P08 places (a missing one
+    renders as pending). A cell is a number, a string, an Interval (formats ending in ``_ci``) or null
+    ("not run"). Every rendered value, text cells and table notes included, is recorded in the sources.
 
 Formats: pct (0.123 -> 12.3%), pp (signed points), points (0.05 -> 5 points), pct_ci, pp_ci, p, int,
 f2, f3, hours, ms, text.
@@ -46,6 +60,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -266,19 +281,28 @@ class Facts:
             cells = [[fmt(row.get(c["key"]), c.get("format", "text")) for c in columns] for row in rows]
         except (KeyError, TypeError, ValueError) as exc:
             raise PublishError(f"{shown(report_path())}/tables/{name}: {exc}") from exc
+        # Every cell, text included: P07's free text goes public too, so a number inside it is audited.
         for i, row in enumerate(rows):
             for c, shown_cell in zip(columns, cells[i], strict=True):
-                if c.get("format", "text") != "text":
-                    self.sources.append(
-                        {
-                            "shown": shown_cell,
-                            "file": shown(report_path()),
-                            "pointer": f"/tables/{name}/rows/{i}/{c['key']}",
-                            "value": row.get(c["key"]),
-                        }
-                    )
+                self.sources.append(
+                    {
+                        "shown": shown_cell,
+                        "file": shown(report_path()),
+                        "pointer": f"/tables/{name}/rows/{i}/{c['key']}",
+                        "value": row.get(c["key"]),
+                    }
+                )
         out = markdown_table([c["label"] for c in columns], cells)
         note = spec.get("note")
+        if note:
+            self.sources.append(
+                {
+                    "shown": str(note),
+                    "file": shown(report_path()),
+                    "pointer": f"/tables/{name}/note",
+                    "value": note,
+                }
+            )
         return f"{out}\n\n{note}" if note else out
 
     def table_rows(self, name: str) -> list[dict] | None:
@@ -300,23 +324,75 @@ class Facts:
 # ---------------------------------------------------------------------------------------------- frozen
 
 
-def frozen_winner(facts: Facts) -> str | None:
-    """The overall frozen winner (seed 1), from selection.json."""
+SEEDS = (1, 2, 3)
+# A repaired variant's name (P05's lift.repair.settings): {setting tag}-{adapter}, adapter ending -s<seed>.
+_SETTING_NAME = re.compile(
+    r"^(?P<tag>(?:wiseft-l|resta-a|castalways-m|cast-m)\d+\.\d+)-(?P<stem>adapter-.+-s)(?P<seed>\d+)$"
+)
+
+
+def seed_variant(name: str, seed: int) -> str:
+    """The same frozen setting on another seed's adapter (P05's ``seed_name`` applied to the setting)."""
+    m = _SETTING_NAME.match(name)
+    if m is None:
+        raise PublishError(
+            f"{shown(selection_path())}: {name!r} is not a repair setting name (lift.repair.settings scheme)"
+        )
+    return f"{m.group('tag')}-{m.group('stem')}{seed}"
+
+
+def selection_problem(facts: Facts) -> str | None:
+    """Why selection.json freezes nothing yet (missing, or not decided), or None when it is decided."""
     sel = facts.selection()
-    return None if sel is None else sel.get("winner")
+    if sel is None:
+        return f"no {shown(selection_path())} yet ({P05})"
+    status = sel.get("status")
+    if status != "decided":
+        return (
+            f"{shown(selection_path())} is {status or 'without a status'!s}, not decided: nothing is frozen "
+            f"until every input of {P05} is there"
+        )
+    return None
+
+
+def _decided(facts: Facts) -> dict | None:
+    """selection.json when it is decided, checked to be in P05's shape; None otherwise."""
+    if selection_problem(facts) is not None:
+        return None
+    sel = facts.selection()
+    overall, frozen = sel.get("overall"), sel.get("frozen")
+    if not isinstance(overall, Mapping) or not overall.get("winner"):
+        raise PublishError(f"{shown(selection_path())} is decided but has no overall.winner (P05's shape)")
+    if not isinstance(frozen, Mapping) or not frozen:
+        raise PublishError(
+            f"{shown(selection_path())} is decided but frozen is not P05's {{family: seed-1 setting}} mapping"
+        )
+    return sel
+
+
+def frozen_winner(facts: Facts) -> str | None:
+    """The overall frozen winner (seed 1), from a decided selection.json; None until then."""
+    sel = _decided(facts)
+    return None if sel is None else str(sel["overall"]["winner"])
+
+
+def selection_verdict(facts: Facts) -> str | None:
+    """The selection's verdict ("repair", or "reject": nothing eligible, the best setting frozen anyway)."""
+    sel = _decided(facts)
+    return None if sel is None else sel["overall"].get("verdict")
 
 
 def frozen_family_winners(facts: Facts) -> dict[str, str]:
-    """{method: frozen variant} for every family selection.json lists (the overall winner at least)."""
-    sel = facts.selection() or {}
-    out = {
-        fam: entry["winner"]
-        for fam, entry in (sel.get("families") or {}).items()
-        if isinstance(entry, Mapping) and entry.get("winner")
-    }
-    if sel.get("winner") and sel["winner"] not in out.values():
-        out.setdefault("winner", sel["winner"])
-    return out
+    """{family: frozen seed-1 setting} of a decided selection.json ({} until then)."""
+    sel = _decided(facts)
+    return {} if sel is None else {str(k): str(v) for k, v in sel["frozen"].items()}
+
+
+def frozen_variants(facts: Facts) -> list[str]:
+    """Every frozen variant: each family's frozen setting on seeds 1-3 (the final eval's 9 repaired
+    variants), in family then seed order."""
+    out = [seed_variant(name, seed) for name in frozen_family_winners(facts).values() for seed in SEEDS]
+    return list(dict.fromkeys(out))
 
 
 def has_pending(text: str) -> bool:

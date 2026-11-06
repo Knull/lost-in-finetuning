@@ -1,12 +1,20 @@
 """``lift publish model``: the repaired model, the repair parameters and the gated adapters.
 
-- Repaired model (public): the frozen winner on seed 1 (selection.json). WiSE-FT and ReSta are saved
-  as merged weights; CAST as the adapter-merged model it wraps, plus its artifacts and
-  ``cast_generate.py``, a small wrapper around ``lift.repair.cast.make``. The weights come from
-  ``lift.models.variants.build_variant`` (the one code path), materialised by ``--build`` on a machine
-  with the GPU stack and room for the model (the Colab VM: WiSE-FT and ReSta hold two or three copies).
-- Repair parameters (public): every frozen setting's VariantSpec (lambda, alpha or strength, artifact
-  hashes) and the CAST artifacts from outputs/artifacts/cast/{adapter}/.
+- Repaired model: the overall frozen winner on seed 1 (selection.json ``overall.winner``), and only it:
+  the card prints the winner's repair effect. WiSE-FT and ReSta are saved as merged weights; CAST as the
+  adapter-merged model it wraps, plus its artifacts and ``cast_generate.py``, a small wrapper around
+  ``lift.repair.cast.make``. The weights come from ``lift.models.variants.build_variant`` (the one code
+  path), materialised by ``--build`` on a machine with the GPU stack and room for the model (the Colab
+  VM: WiSE-FT and ReSta hold two or three copies). ``--build`` clears the staging folder first; without
+  it, the weights already staged are uploaded only while their ``lift_variant.json`` names the variant's
+  registry entry as it is now (spec, adapter hash, Global revision), so ``--build`` once, check the dry
+  run, then ``--yes`` uploads the same weights without building them again.
+  Access (docs/decisions.md item 74, pending team confirmation): public for a WiSE-FT or ReSta winner
+  with the verdict repair; gated with automatic approval, like the adapters (item 14), for a CAST winner
+  (its weights are the unrepaired adapter, merged: the repair is only in the wrapper) and for a
+  "reject" verdict's best-anyway setting (not a repair).
+- Repair parameters (public): every frozen setting's VariantSpec on seeds 1-3 (lambda, alpha or
+  strength, artifact hashes) and the CAST artifacts from outputs/artifacts/cast/{adapter}/.
 - Adapters (gated, automatic approval): every registered adapter in outputs/adapters/, its weights
   and adapter_config.json only (registration.json stays private: it names the runs repo).
 """
@@ -25,10 +33,13 @@ from lift.publish.hub import Upload
 from lift.publish.inputs import (
     P05,
     Facts,
-    frozen_family_winners,
+    frozen_variants,
     frozen_winner,
     pending,
+    report_path,
     selection_path,
+    selection_problem,
+    selection_verdict,
     shown,
 )
 
@@ -59,8 +70,37 @@ def _spec(name: str) -> Any | None:
 
 
 def frozen_names(facts: Facts) -> set[str]:
-    sel = facts.selection() or {}
-    return {*frozen_family_winners(facts).values(), *(sel.get("frozen") or [])}
+    return set(frozen_variants(facts))
+
+
+def gate_reasons(facts: Facts, spec: Any | None) -> list[str]:
+    """Why the repaired model's repo is gated (docs/decisions.md item 74); [] when it is public. Fails
+    closed: an unknown method or verdict gates it."""
+    reasons = []
+    if spec is None or spec.method in CAST_METHODS or spec.method not in METHOD_TEXT:
+        reasons.append(
+            "it is a CAST repair: these weights are the unrepaired adapter, merged, and the repair is "
+            "applied only by the wrapper"
+            if spec is not None and spec.method in CAST_METHODS
+            else "its repair method is not known yet"
+        )
+    verdicts = [
+        str(v.get("verdict"))
+        for v in (facts.raw(report_path(), "/verdicts") or [])
+        if isinstance(v, dict) and v.get("verdict")
+    ]
+    if selection_verdict(facts) != "repair" or "reject" in verdicts:
+        reasons.append(
+            'the verdict is "reject": no setting met every selection constraint, so this is the best setting '
+            "frozen anyway, not a repair"
+        )
+    return reasons
+
+
+def model_repo(facts: Facts, variant: str | None, spec: Any | None) -> settings.RepoSpec:
+    """The repaired model's repo: ``model`` (public) or ``model_gated`` (configs/publish.yaml)."""
+    kind = "model_gated" if gate_reasons(facts, spec) else "model"
+    return settings.repo(kind, variant=variant or "pending-winner")
 
 
 def params_doc(spec: Any) -> dict[str, Any]:
@@ -98,6 +138,49 @@ def weights_present(folder: Path) -> bool:
     return any(folder.glob("*.safetensors")) and (folder / "config.json").is_file()
 
 
+VARIANT_FILE = "lift_variant.json"
+NOT_WEIGHTS = {"README.md", "cast_generate.py", VARIANT_FILE}  # staged by build_model, not by save_pretrained
+
+
+def _jsonable(obj: Any) -> Any:
+    return json.loads(json.dumps(obj))
+
+
+def weights_mismatch(folder: Path, spec: Any) -> str | None:
+    """Why the weights staged in ``folder`` are not this registry entry's (None when they are): the spec,
+    the adapter hash and the Global revision must match what ``materialise`` recorded."""
+    if not weights_present(folder):
+        return "no weights staged"
+    path = folder / VARIANT_FILE
+    if not path.is_file():
+        return f"no {VARIANT_FILE} records what the staged weights were built from"
+    try:
+        made = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return f"{VARIANT_FILE} is not valid JSON"
+    if made.get("spec") != _jsonable(spec.model_dump()):
+        return "they were built from another registry entry of this variant (re-frozen or re-registered)"
+    if spec.artifacts.get("adapter") and made.get("adapter_hash") != spec.artifacts["adapter"]:
+        return "they were built from another adapter (hash differs from configs/variants.yaml)"
+    rev = config.get("models.global.revision")
+    if made.get("model_rev") and rev and made["model_rev"] != rev:
+        return f"they were built on Global {str(made['model_rev'])[:12]}, not the pinned {str(rev)[:12]}"
+    return None
+
+
+def _clear(folder: Path, *, keep: set[str]) -> None:
+    """Empty the staging folder except the files named in ``keep`` (paths relative to it)."""
+    root = stage_root().resolve()
+    if root not in folder.resolve().parents:
+        raise PublishError(f"refusing to clear {folder}: not under {root}")
+    for f in sorted(folder.rglob("*"), reverse=True):
+        rel = f.relative_to(folder).as_posix()
+        if f.is_file() and rel not in keep:
+            f.unlink()
+        elif f.is_dir() and not any(f.iterdir()):
+            f.rmdir()
+
+
 def materialise(
     spec: Any,
     folder: Path,
@@ -117,15 +200,18 @@ def materialise(
     folder.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(folder, safe_serialization=True)
     lv.tokenizer.save_pretrained(folder)
+    files = sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file())
     render.write_text(
-        folder / "lift_variant.json",
+        folder / VARIANT_FILE,
         json.dumps(
             {
-                "spec": spec.model_dump(),
+                "spec": _jsonable(spec.model_dump()),
                 "model_rev": lv.model_rev,
                 "adapter_hash": lv.adapter_hash,
                 "template_hash": lv.template_hash,
                 "dtype": lv.dtype,
+                # what save_pretrained wrote (top level): kept across a later run without --build
+                "files": [f for f in files if "/" not in f and f not in NOT_WEIGHTS],
             },
             indent=1,
         ),
@@ -146,7 +232,7 @@ def _links() -> dict[str, str]:
     }
 
 
-def model_card(facts: Facts, variant: str | None, spec: Any | None) -> str:
+def model_card(facts: Facts, variant: str | None, spec: Any | None, gated: list[str] | None = None) -> str:
     from lift.publish.datasets import verdict_lines
 
     method = spec.method if spec else None
@@ -186,6 +272,7 @@ def model_card(facts: Facts, variant: str | None, spec: Any | None) -> str:
         "overrefusal": facts.table("overrefusal"),
         "belebele": facts.table("belebele"),
         "cast_usage": cast_note,
+        "access_note": _access_note(gated or []),
         "max_new_tokens": facts.config("project", "generation.max_new_tokens", "int"),
         **_links(),
     }
@@ -205,7 +292,25 @@ def model_card(facts: Facts, variant: str | None, spec: Any | None) -> str:
             *([method] if method else []),
         ],
     }
+    if gated:
+        meta.update(
+            {
+                "extra_gated_heading": "Research model: gated (see the model card)",
+                "extra_gated_prompt": render.template("gate_model.txt").strip(),
+                "extra_gated_fields": {"Intended use": "text", "I will not deploy this model": "checkbox"},
+            }
+        )
     return render.frontmatter(meta) + "\n" + render.fill(render.template("model_card.md"), context)
+
+
+def _access_note(gated: list[str]) -> str:
+    if not gated:
+        return ""
+    why = "; and ".join(gated)
+    return (
+        "**This repo is gated (automatic approval), like the unrepaired adapters, because " + why + ".** "
+        "It is shared so the evaluation can be reproduced (docs/decisions.md item 74).\n"
+    )
 
 
 def adapter_card(name: str, spec: Any) -> str:
@@ -214,8 +319,8 @@ def adapter_card(name: str, spec: Any) -> str:
         "base_model": config.get("models.global.id"),
         "library_name": "peft",
         "language": ["hi"],
-        "tags": ["lora", "hindi", "tiny-aya", "safety-drift", "research-only"],
-        "extra_gated_heading": "Unrepaired research adapter: it drifted on safety",
+        "tags": ["lora", "hindi", "tiny-aya", "safety-research", "research-only"],
+        "extra_gated_heading": "Unrepaired research adapter: fine-tuning may affect safety",
         "extra_gated_prompt": render.template("gate_adapter.txt").strip(),
         "extra_gated_fields": {"Intended use": "text", "I will not deploy this adapter": "checkbox"},
     }
@@ -241,27 +346,36 @@ def adapter_card(name: str, spec: Any) -> str:
 def build_model(
     facts: Facts, variant: str | None = None, *, build_weights: bool = False, device: str = "cuda:0"
 ) -> Upload:
+    """The overall winner's repo. Another variant is refused: the card's repair effect is the winner's."""
     winner = frozen_winner(facts)
-    variant = variant or winner
-    frozen = frozen_names(facts)
-    if variant and facts.selection() is not None and variant not in frozen:
+    if variant is not None and variant != winner:
         raise PublishError(
-            f"{variant} is not a frozen variant in {shown(selection_path())} "
-            f"(frozen: {', '.join(sorted(frozen)) or 'none'})"
+            f"only the overall winner of {shown(selection_path())} is published as the repaired model "
+            f"(overall.winner: {winner or 'none yet'}; {variant} is not it): its card shows the winner's "
+            "repair effect. Every frozen setting's parameters go to the repair-parameters repo."
         )
+    variant = winner
     spec = _spec(variant) if variant else None
-    repo = settings.repo("model", variant=variant or "pending-winner")
+    gated = gate_reasons(facts, spec) if variant else []
+    repo = model_repo(facts, variant, spec)
     folder = stage_root() / "model" / (variant or "pending-winner")
     folder.mkdir(parents=True, exist_ok=True)
     expected: list[str] = []
     notes: list[str] = []
-    if variant is None or facts.selection() is None:
-        expected.append(f"the frozen winner ({shown(selection_path())}, {P05})")
+    problem = selection_problem(facts)
+    if problem:
+        expected.append(f"the frozen winner: {problem}")
     if variant is not None and spec is None:
         expected.append(f"the configs/variants.yaml entry of {variant} (P05 freeze)")
-    elif spec is not None:
+    # Only the weights materialised for this very registry entry survive; everything else is staged anew.
+    keep: set[str] = set()
+    if spec is not None and not build_weights and weights_mismatch(folder, spec) is None:
+        made = json.loads((folder / VARIANT_FILE).read_text(encoding="utf-8"))
+        keep = {*made.get("files", []), VARIANT_FILE}
+    _clear(folder, keep=keep)
+    if spec is not None:
         if spec.seed not in (None, 1):
-            notes.append(f"{variant} is seed {spec.seed}; the model card describes the seed-1 winner")
+            raise PublishError(f"{variant} is seed {spec.seed}; the repaired model is the seed-1 winner")
         render.write_text(folder / "repair" / "params.json", json.dumps(params_doc(spec), indent=1))
         if spec.method in CAST_METHODS:
             copied = _copy_artifacts(cast_artifacts(spec.adapter), folder / "repair" / "cast")
@@ -270,9 +384,12 @@ def build_model(
             shutil.copyfile(render.templates_dir() / "cast_generate.py", folder / "cast_generate.py")
         if build_weights:
             materialise(spec, folder, device=device)
-        if not weights_present(folder):
-            expected.append("model weights (lift publish model --build, on the GPU VM)")
-    render.write_text(folder / "README.md", model_card(facts, variant, spec))
+        why = weights_mismatch(folder, spec)
+        if why:
+            expected.append(f"model weights ({why}: lift publish model --build, on the GPU VM)")
+        if gated:
+            notes.append("gated (automatic approval), docs/decisions.md item 74: " + "; ".join(gated))
+    render.write_text(folder / "README.md", model_card(facts, variant, spec, gated))
     return Upload(
         repo=repo,
         folder=folder,
@@ -310,7 +427,7 @@ def build_params(facts: Facts) -> Upload:
             ]
         )
     if not names:
-        expected.append(f"the frozen settings ({shown(selection_path())}, {P05})")
+        expected.append(f"the frozen settings: {selection_problem(facts) or 'none listed'}")
     table = (
         render.markdown_table(["variant", "method", "adapter", "seed", "parameters"], rows)
         if rows
