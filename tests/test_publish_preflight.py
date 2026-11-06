@@ -70,7 +70,7 @@ def test_allow_mark_skips_a_documented_fake(repo):
 def test_raw_completion_records_and_paths(repo):
     row = {"key": "k", "variant": "adapter-aya-std-s1", "pid": "p", "output": "some completion"}
     (repo / "dump.jsonl").write_text(json.dumps(row) + "\n")
-    audit = {"actual_output": "full text of an answer"}
+    audit = {"actual_output": "full text of an answer"}  # preflight: allow (fake)
     (repo / "record.json").write_text(json.dumps(audit, indent=1))
     (repo / "outputs").mkdir()
     (repo / "outputs" / "x.txt").write_text("hello\n")
@@ -102,3 +102,15 @@ def test_this_repo_passes_and_cli_prints_the_steps(capsys, monkeypatch):
     monkeypatch.setattr(preflight, "harmful_windows", lambda: set())
     assert cli.main(["publish", "preflight", "--no-history"]) == 0
     assert "gh repo edit" in capsys.readouterr().out
+
+
+def test_a_fake_marked_later_is_allowed_in_the_history_too(repo):
+    line = f'FAKE = "{FAKE_HF}"'
+    (repo / "t.py").write_text(line + "\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "fake")
+    assert kinds(preflight.run(repo, windows=set())) == ["Hugging Face token"]
+    (repo / "t.py").write_text(f"{line}  # {preflight.ALLOW_MARK}\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "mark")
+    assert preflight.run(repo, windows=set()) == []

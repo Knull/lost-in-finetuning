@@ -81,7 +81,7 @@ def outputs():
         json.dumps({"predictions": [{"actual_output": "[redacted sha256:ab]"}]})
     )
     (audit / f"{CELL}.full.json").write_text(
-        json.dumps({"predictions": [{"actual_output": "HARMFUL-TEXT-K2"}]})
+        json.dumps({"predictions": [{"actual_output": "HARMFUL-TEXT-K2"}]})  # preflight: allow (fake)
     )
     return primary
 

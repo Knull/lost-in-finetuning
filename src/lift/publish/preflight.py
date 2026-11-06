@@ -114,10 +114,22 @@ def _raw_record(line: str) -> bool:
     )
 
 
-def scan_text(text: str, path: str, where: str, windows: set[str]) -> list[Finding]:
+def allowed_lines(text: str) -> set[str]:
+    """The lines a file marks as documented fakes, without the mark, so the same line in an older
+    commit (written before it was marked) is allowed too."""
+    out = set()
+    for line in text.splitlines():
+        if ALLOW_MARK in line or line.strip() in allowed:
+            out.add(line.split("#")[0].strip() if "#" in line else line.replace(ALLOW_MARK, "").strip())
+    return out
+
+
+def scan_text(
+    text: str, path: str, where: str, windows: set[str], allowed: set[str] | frozenset = frozenset()
+) -> list[Finding]:
     found = []
     for i, line in enumerate(text.splitlines(), 1):
-        if ALLOW_MARK in line:
+        if ALLOW_MARK in line or line.strip() in allowed:
             continue
         for kind, pat in SECRETS.items():
             if pat.search(line):
@@ -179,6 +191,7 @@ def run(repo: Path | None = None, *, history: bool = True, windows: set[str] | N
     repo = Path(repo or paths.REPO_ROOT)
     windows = harmful_windows() if windows is None else windows
     found: list[Finding] = []
+    allowed: set[str] = set()
     for path in tracked_files(repo):
         if forbidden_path(path):
             found.append(Finding("tree", path, 0, "file that must never be committed"))
@@ -187,6 +200,7 @@ def run(repo: Path | None = None, *, history: bool = True, windows: set[str] | N
             text = _decode(f.read_bytes())
             if text is not None:
                 found += scan_text(text, path, "tree", windows)
+                allowed |= allowed_lines(text)
     if history:
         seen = {(x.path, x.kind) for x in found}
         blobs = _history_blobs(repo)
@@ -199,7 +213,7 @@ def run(repo: Path | None = None, *, history: bool = True, windows: set[str] | N
             text = _decode(body)
             if text is None:
                 continue
-            for x in scan_text(text, blobs[sha], f"history {sha[:10]}", windows):
+            for x in scan_text(text, blobs[sha], f"history {sha[:10]}", windows, allowed):
                 if (x.path, x.kind) not in seen:
                     found.append(x)
     return found
