@@ -23,8 +23,9 @@ A text is public only when all of these hold (otherwise it is withheld and count
 Nothing is staged unless the inputs are complete (``PublishError`` names the remedy): the human labels
 are readable (every round that was drawn or scored has its keys and every sheet imported, every label
 maps to a key), every generation of a safety cell has a primary judgement and every judgement its
-generation, the second judge covers its key list (validation/keys/second_judge/all.txt plus every
-validated key) on the current outputs, and no Message Batch is still open. ``check_public`` then re-reads
+generation, the second judge covers its key list (the final-split keys of
+validation/keys/second_judge/all.txt plus every validated key) on the current outputs, and no Message
+Batch is still open. ``check_public`` then re-reads
 every staged row (harmful anywhere, or not the output its judgement covered, stops the publish) and the
 whole staged folder is scanned like a public upload (``preflight.scan_folder``).
 
@@ -436,9 +437,25 @@ def open_batches() -> list[str]:
     return out
 
 
-def second_judge_keys(round_keys: set[str]) -> tuple[set[str] | None, Path]:
-    """The keys the second judge must cover: validation/keys/second_judge/all.txt (P04) plus every
-    validated key; None when the list is not here."""
+def generation_splits() -> dict[str, str]:
+    """{generation key: split} from the generations cells' names ({set}_{lang}_{split}.jsonl)."""
+    from lift.validation.second_judge import parse_generations_name
+
+    out: dict[str, str] = {}
+    for _, stem, f in _cells(paths.generations_dir()):
+        parsed = parse_generations_name(stem)
+        if parsed is not None:
+            out.update(dict.fromkeys((k for k in keyed(f) if k is not None), parsed[2]))
+    return out
+
+
+def second_judge_keys(
+    round_keys: set[str], splits: dict[str, str] | None = None
+) -> tuple[set[str] | None, Path]:
+    """The keys the second judge must cover: the final-split keys of validation/keys/second_judge/all.txt
+    (P04) plus every validated key; None when the list is not here. all.txt samples every complete cell,
+    the dev sweep's too, but the second judge is reported on the final split only and no step judges the
+    dev keys (review XB-06). A listed key whose split is unknown (no generation here) stays required."""
     from lift.judge.pipeline import read_keys_file
     from lift.validation.second_judge import second_judge_dir
 
@@ -449,7 +466,8 @@ def second_judge_keys(round_keys: set[str]) -> tuple[set[str] | None, Path]:
         listed = set(read_keys_file(path))
     except ValueError as exc:
         raise PublishError(f"{shown(path)}: {exc}") from None
-    return listed | round_keys, path
+    splits = generation_splits() if splits is None else splits
+    return {k for k in listed if splits.get(k, "final") == "final"} | round_keys, path
 
 
 # ------------------------------------------------------------------------------------------- logs

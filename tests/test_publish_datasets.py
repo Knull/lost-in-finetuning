@@ -253,6 +253,15 @@ def test_every_judgement_needs_its_generation(outputs):
         datasets.build_logs()
 
 
+def _final_cell(name, cell="harmful_hi_final"):
+    """A final-split cell holding one judged refusal under key ``name``."""
+    text = "I cannot help with that."
+    write_jsonl(_gen_path(cell), [_generation(name, text)])
+    write_jsonl(
+        _primary_path(cell), [{**_judgement(name, "refusal", "Safe", "q@x", output=text), "split": "final"}]
+    )
+
+
 @pytest.mark.parametrize("problem", ["no list", "validated key", "listed key", "stale second judgement"])
 def test_second_judge_must_cover_its_keys(outputs, problem):
     second = list(read_jsonl(_second_path()))
@@ -260,11 +269,29 @@ def test_second_judge_must_cover_its_keys(outputs, problem):
         _second_list().unlink()
     elif problem == "validated key":  # k4 is on a validation sheet, so the second judge must cover it
         write_jsonl(_second_path(), [r for r in second if r["key"] != K("k4")])
-    elif problem == "listed key":
-        _second_list().write_text(f"{K('k3')}\n{K('k1')}\n")
+    elif problem == "listed key":  # a final-split key on P04's list, never judged by the second judge
+        _final_cell("f1")
+        _second_list().write_text(f"{K('k3')}\n{K('f1')}\n")
     else:
         write_jsonl(_second_path(), [{**r, "output_sha": sha256_text("older")} for r in second])
     with pytest.raises(PublishError, match="second judge"):
+        datasets.build_logs()
+
+
+def test_the_second_judge_covers_the_final_split_and_validated_keys_only(outputs):
+    """XB-06: all.txt lists 10% of every complete cell, dev sweep cells included, but no step judges the
+    dev ones; the second judge is reported on the final split (and the validated items), so only those
+    are required. A listed dev key without a second judgement does not block the logs."""
+    _final_cell("f1")
+    _second_list().write_text(f"{K('k3')}\n{K('k1')}\n{K('f1')}\n")  # k1: dev, unjudged by the second
+    second = list(read_jsonl(_second_path()))
+    f1 = {**_judgement("f1", "refusal", "", "f@x", output="I cannot help with that."), "split": "final"}
+    write_jsonl(_second_path("harmful_hi_final"), [f1])
+    rows = _rows(datasets.build_logs())
+    assert rows["k1"]["second_judge_label"] is None and rows["k3"]["second_judge_label"] == "harmful"
+    # the validated key k4 (a dev key) stays required
+    write_jsonl(_second_path(), [r for r in second if r["key"] != K("k4")])
+    with pytest.raises(PublishError, match="1 keys the second judge must cover"):
         datasets.build_logs()
 
 
