@@ -5,8 +5,10 @@ so no literal one is in this file (the preflight itself would flag it)."""
 
 from __future__ import annotations
 
+import html
 import json
 import subprocess
+import unicodedata
 
 import pytest
 
@@ -300,3 +302,175 @@ def test_a_failed_fetch_refuses(tmp_path, repo):
 
 def test_no_remote_means_nothing_to_fetch(repo):
     assert preflight.fetch_public_refs(repo) is False
+
+
+# ------------------------------------------------------- P08-R2-04 unicode forms, case and format characters
+
+
+def _spanish():
+    text = " ".join(f"señal{i:02d} acción según añadió" for i in range(8))  # made-up, accented
+    return unicodedata.normalize("NFD", text), unicodedata.normalize("NFC", text)
+
+
+def _nukta():
+    # Precomposed nukta letters (U+0958, U+095E): NFC decomposes them (composition exclusions).
+    text = " ".join(f"क़फ़क{i:02d} हिंदी" for i in range(14))
+    return text, unicodedata.normalize("NFC", text)
+
+
+def _zwsp_spaces():
+    return HARMFUL, HARMFUL.replace(" ", "​")
+
+
+def _zwsp_inside():
+    return HARMFUL, "".join(c + ("​" if i % 5 == 4 else "") for i, c in enumerate(HARMFUL))
+
+
+def _format_chars():
+    return HARMFUL, "".join(c + ("­" if i % 7 == 3 else "") for i, c in enumerate(HARMFUL)).replace(
+        "fake", "fa‍ke"
+    )
+
+
+def _upper():
+    return HARMFUL, HARMFUL.upper()
+
+
+def _fullwidth():
+    return HARMFUL, "".join(chr(ord(c) + 0xFEE0) if c.isalnum() else c for c in HARMFUL)
+
+
+def _html():
+    text = " ".join(f'it\'s step{i:02d} & "mix" <b>' for i in range(8))
+    return text, html.escape(text)
+
+
+UNICODE_CASES = {
+    "nfc copy of nfd": _spanish,
+    "nfc copy of precomposed nukta": _nukta,
+    "zero-width spaces for spaces": _zwsp_spaces,
+    "zero-width spaces inside words": _zwsp_inside,
+    "soft hyphens and joiners": _format_chars,
+    "upper case": _upper,
+    "fullwidth": _fullwidth,
+    "html entities": _html,
+}
+
+
+@pytest.mark.parametrize("case", sorted(UNICODE_CASES))
+def test_a_normalised_copy_of_a_harmful_output_is_found(case):
+    output, copy = UNICODE_CASES[case]()
+    assert output != copy
+    windows = preflight.windows_of([output])
+    found = preflight.scan_text("pasted from an editor:\n" + copy + "\n", "notes.html", "tree", windows)
+    assert kinds(found) == [preflight.HARMFUL_TEXT]
+
+
+@pytest.mark.parametrize("case", sorted(UNICODE_CASES))
+def test_the_normalised_copies_are_found_across_every_chunk_cut(case, monkeypatch):
+    output, copy = UNICODE_CASES[case]()
+    windows = preflight.windows_of([output])
+    text = "x  y\n" * 5 + copy + " z" * 9
+    for size in (1, 7, 60, 61, 200):
+        monkeypatch.setattr(preflight, "CHUNK_CHARS", size)
+        for start in range(0, len(text), 11):
+            piece = text[start:]
+            assert preflight.windows_in(piece, windows) == preflight.has_window(piece, windows)
+        assert preflight.windows_in(text, windows) or case == "html entities"  # html: scan_text unescapes
+
+
+def test_normalising_never_makes_a_different_text_match():
+    windows = preflight.windows_of([HARMFUL])
+    other = HARMFUL.replace("fake", "real")
+    assert not preflight.has_window(other.upper(), windows)
+
+
+# ----------------------------------------------- P08-R2-03 a harmful output that repeats its prompt
+
+
+PROMPT = " ".join(f"promptfake{i:02d}" for i in range(11))  # a made-up prompt, about 130 characters
+PROMPT_EN = " ".join(f"englishsource{i:02d}" for i in range(8))
+
+
+def _prompt_set():
+    row = {
+        "pid": "prh-test-0001",
+        "lang": "hi",
+        "set": "harmful",
+        "split": "dev",
+        "text": PROMPT,
+        "text_en": PROMPT_EN,
+        "source": "polyrefuse",
+        "translation": {"engine": "google-cloud-v2"},
+    }
+    write_jsonl(paths.prompts_dir() / "harmful_hi.jsonl", [row])
+    return row
+
+
+def test_a_harmful_output_that_repeats_its_prompt_does_not_flag_the_prompt():
+    _prompt_set()
+    harmful_tree("Sure. " + PROMPT + ": " + HARMFUL + " In English: " + PROMPT_EN.upper())
+    windows, n = preflight.load_windows()
+    assert n == 1
+    for text in (PROMPT, PROMPT_EN, json.dumps({"text": PROMPT, "text_en": PROMPT_EN})):
+        assert preflight.scan_text(text, "harmful/hi.jsonl", "staged", windows) == []
+    # the completion's own text is still caught: its continuation, and a run across the echo
+    assert kinds(preflight.scan_text(HARMFUL[:95], "a.md", "staged", windows)) == [preflight.HARMFUL_TEXT]
+    across = PROMPT[-40:] + ": " + HARMFUL[:55]
+    assert kinds(preflight.scan_text(across, "b.md", "staged", windows)) == [preflight.HARMFUL_TEXT]
+
+
+def test_without_the_prompt_files_every_window_stays():
+    harmful_tree("Sure. " + PROMPT + ": " + HARMFUL)
+    windows, _ = preflight.load_windows()
+    assert kinds(preflight.scan_text(PROMPT, "p.md", "staged", windows)) == [preflight.HARMFUL_TEXT]
+
+
+# ---------------------------------------------------- P08-R2-13 judgement and utility records are raw
+
+
+def test_judgement_and_utility_records_are_raw_records(repo):
+    judgement = {
+        "key": "k",
+        "variant": "v",
+        "judge": "anthropic/m@x",
+        "judge_label": "harmful",
+        "label": "harmful",
+    }
+    utility = {"pid": "p", "variant": "v", "judge": "j", "order_ab": "A", "order_ba": "B", "score": 1.0}
+    (repo / "judged.jsonl").write_text(
+        json.dumps({**judgement, "raw": "a judge's reasoning, quoting"}) + "\n"
+    )
+    (repo / "utility.jsonl").write_text(json.dumps(utility) + "\n")
+    (repo / "labels.jsonl").write_text(json.dumps({**judgement, "raw": ""}) + "\n")  # a public label row
+    git(repo, "add", "-A")
+    found = preflight.run(repo, history=False, windows=set())
+    assert {(f.path, f.kind) for f in found} == {
+        ("judged.jsonl", "raw completion record"),
+        ("utility.jsonl", "raw completion record"),
+    }
+
+
+# ------------------------------------------------------------------- P08-R2-16 blobs are streamed
+
+
+def test_history_blobs_are_streamed_not_buffered(repo, monkeypatch):
+    for i in range(5):
+        (repo / f"f{i}.txt").write_text(f"version {i}\n" + ("token = " + FAKE_HF if i == 2 else "") + "\n")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", f"c{i}")
+    for i in range(5):
+        (repo / f"f{i}.txt").write_text("clean\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "clean")
+    real = preflight._git
+
+    def no_buffered_cat_file(*args, **kwargs):
+        assert "cat-file" not in args, "the blobs were read into one buffer"
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(preflight, "_git", no_buffered_cat_file)
+    found = preflight.run(repo, windows=set())
+    assert [(f.path, f.kind) for f in found] == [("f2.txt", "Hugging Face token")]
+    blobs = preflight._history_blobs(repo)
+    assert {sha for sha, _kind, _body in preflight._cat_blobs(repo, blobs)} == set(blobs)

@@ -6,6 +6,7 @@ that fails the public-text scan. huggingface_hub is never reached."""
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from publish_fakes import FakeApi, write_inputs
@@ -30,6 +31,42 @@ def no_hub(monkeypatch):
         raise AssertionError("an HfApi was built")
 
     monkeypatch.setattr(hub, "default_api", refuse)
+
+
+class HubApi(FakeApi):
+    """FakeApi that also keeps each repo's visibility and gating, as ``repo_info`` reads them back.
+    ``ignored`` settings are accepted but never applied (a Hub that did not take them)."""
+
+    def __init__(self, repos: dict | None = None, *, ignored: tuple[str, ...] = ()):
+        super().__init__()
+        self.repos = {k: dict(v) for k, v in (repos or {}).items()}
+        self.ignored = set(ignored)
+
+    def __getattr__(self, name):
+        record = super().__getattr__(name)
+
+        def call(*args, **kwargs):
+            record(*args, **kwargs)
+            rid = args[0] if args else kwargs.get("repo_id")
+            if name == "create_repo" and rid not in self.repos:
+                self.repos[rid] = {"private": kwargs.get("private", False), "gated": False}
+            elif name == "update_repo_settings":
+                for k in ("private", "gated"):
+                    if kwargs.get(k) is not None and k not in self.ignored:
+                        self.repos[rid][k] = kwargs[k]
+            elif name == "repo_exists":
+                return rid in self.repos
+            elif name == "repo_info":
+                if rid not in self.repos:
+                    raise AssertionError(f"repo_info of a repo that does not exist: {rid}")
+                return SimpleNamespace(id=rid, **self.repos[rid])
+            return None
+
+        return call
+
+    def sent(self) -> list[str]:
+        """The calls that change something on the Hub."""
+        return [n for n in self.names() if n not in ("repo_exists", "repo_info")]
 
 
 # A made-up "harmful completion", assembled at run time.
@@ -67,38 +104,41 @@ def _staged(name: str, text: str = "# card\n", gated: str | None = None) -> Uplo
 
 
 def test_gated_repo_is_gated_before_upload_and_public_after(namespace):
-    api = FakeApi()
+    api = HubApi()
     up = _staged("raw", "---\nextra_gated_prompt: terms\n---\n# raw\n", gated="manual")
     hub.execute([up], message="m", api_factory=lambda: api, log=lambda _: None)
     assert api.names() == [
         "create_repo",
         "update_repo_settings",
         "update_repo_settings",
+        "repo_info",  # P08-R2-12: the gate is read back before any file goes up
         "upload_folder",
         "update_repo_settings",
+        "repo_info",  # and the final state after
     ]
-    create, private, gate, upload, public = api.calls
+    create, private, gate, _, upload, public, _ = api.calls
     assert create[2]["private"] is True and create[2]["repo_type"] == "dataset"
     assert private[2] == {"repo_type": "dataset", "private": True}
     assert gate[2] == {"repo_type": "dataset", "gated": "manual"}
     assert upload[2]["repo_id"] == "test-org/lift-raw-completions"
     assert public[2] == {"repo_type": "dataset", "private": False}
+    assert api.repos["test-org/lift-raw-completions"] == {"private": False, "gated": "manual"}
 
 
 def test_public_repo_is_created_public_and_uploaded(namespace, outputs):
-    api = FakeApi()
+    api = HubApi()
     hub.execute([_staged("logs")], message="m", api_factory=lambda: api, log=lambda _: None)
-    assert api.names() == ["create_repo", "upload_folder", "update_repo_settings"]
-    assert api.calls[0][2]["private"] is False and api.calls[2][2] == {
-        "repo_type": "dataset",
-        "private": False,
-    }
+    assert api.sent() == ["create_repo", "update_repo_settings", "upload_folder", "update_repo_settings"]
+    calls = [c for c in api.calls if c[0] not in ("repo_info", "repo_exists")]
+    assert calls[0][2]["private"] is False
+    assert calls[1][2] == {"repo_type": "dataset", "gated": False}  # P08-R2-12: never left gated
+    assert calls[3][2] == {"repo_type": "dataset", "private": False}
 
 
 @pytest.mark.parametrize("gated", [None, "manual"])
 def test_every_upload_mirrors_its_staged_folder(namespace, outputs, gated):
     """P08-R1-17: a file withdrawn from the staging folder is deleted at HEAD too."""
-    api = FakeApi()
+    api = HubApi()
     text = "---\nextra_gated_prompt: terms\n---\n" if gated else "# card\n"
     hub.execute([_staged("x", text, gated=gated)], message="m", api_factory=lambda: api, log=lambda _: None)
     upload = [c for c in api.calls if c[0] == "upload_folder"]
@@ -121,13 +161,15 @@ def test_check_ready_refuses(problem, monkeypatch, outputs):
 
 def test_allow_pending_uploads_a_private_draft(namespace, outputs):
     """P08-R1-20: placeholders never go public, not even with --allow-pending."""
-    api = FakeApi()
+    api = HubApi()
     up = _staged("x", "[PENDING: x from y (z)]")
     hub.execute([up], message="m", api_factory=lambda: api, allow_pending=True, log=lambda _: None)
-    assert api.names() == ["create_repo", "update_repo_settings", "upload_folder"]
-    assert api.calls[0][2]["private"] is True
-    assert api.calls[1][2] == {"repo_type": "dataset", "private": True}  # an existing public repo too
+    assert api.sent() == ["create_repo", "update_repo_settings", "update_repo_settings", "upload_folder"]
+    calls = [c for c in api.calls if c[0] not in ("repo_info", "repo_exists")]
+    assert calls[0][2]["private"] is True
+    assert calls[1][2] == {"repo_type": "dataset", "private": True}  # an existing private draft too
     assert all(c[2].get("private") is not False for c in api.calls)
+    assert api.repos["test-org/lift-eval-logs"]["private"] is True
 
 
 # --------------------------------------------------------------- P08-R1-11 the public-text scan
@@ -159,7 +201,7 @@ def test_an_unredacted_auditkit_record_is_refused(namespace, outputs):
 
 
 def test_the_raw_completions_are_not_scanned(namespace, outputs):
-    api = FakeApi()
+    api = HubApi()
     up = _staged("raw", f"---\nextra_gated_prompt: terms\n---\n{HARMFUL}\n", gated="manual")
     hub.execute([up], message="m", api_factory=lambda: api, log=lambda _: None)
     assert "upload_folder" in api.names()
@@ -197,7 +239,7 @@ def test_cli_yes_refuses_without_namespace(no_hub, capsys):
 
 
 def test_cli_yes_uploads_with_a_fake_api(namespace, monkeypatch, outputs):
-    api = FakeApi()
+    api = HubApi()
     monkeypatch.setattr(hub, "default_api", lambda: api)
     write_jsonl(
         paths.prompts_dir() / "harmful_hi.jsonl",
@@ -249,3 +291,93 @@ def test_github_url_never_carries_credentials(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: Done())
     assert settings.github_repo() == "https://github.com/o/r"
+
+
+# ---------------------------------------------------------- P08-R2-12 the Hub state is read back
+
+
+LOGS = "test-org/lift-eval-logs"
+
+
+def test_a_draft_never_takes_over_a_live_public_repo(namespace, outputs):
+    """--allow-pending over a repo that is already public would make it private and delete its files."""
+    api = HubApi({LOGS: {"private": False, "gated": False}})
+    up = _staged("x", "[PENDING: x from y (z)]")
+    with pytest.raises(PublishError, match="already public"):
+        hub.execute([up], message="m", api_factory=lambda: api, allow_pending=True, log=lambda _: None)
+    assert api.sent() == []
+    assert api.repos[LOGS] == {"private": False, "gated": False}
+
+
+def test_a_draft_checks_every_repo_before_sending_anything(namespace, outputs):
+    api = HubApi({LOGS: {"private": False, "gated": False}})
+    first = _staged("raw", "---\nextra_gated_prompt: terms\n---\n# raw\n", gated="manual")
+    draft = _staged("x", "[PENDING: x from y (z)]")
+    with pytest.raises(PublishError, match="already public"):
+        hub.execute([first, draft], message="m", api_factory=lambda: api, allow_pending=True)
+    assert api.sent() == []
+
+
+def test_a_public_repo_gated_earlier_is_ungated(namespace, outputs):
+    api = HubApi({LOGS: {"private": False, "gated": "auto"}})
+    hub.execute([_staged("logs")], message="m", api_factory=lambda: api, log=lambda _: None)
+    assert api.repos[LOGS] == {"private": False, "gated": False}
+    sent = api.sent()
+    assert sent.index("update_repo_settings") < sent.index("upload_folder")
+
+
+@pytest.mark.parametrize("ignored", ["gated", "private"])
+def test_a_gate_the_hub_did_not_take_is_never_made_public(namespace, ignored):
+    """The gate and the privacy are read back before any file goes up: a gated repo whose gate did not
+    take (or that stayed public) gets no file and is never made public."""
+    api = HubApi({"test-org/lift-raw-completions": {"private": False, "gated": False}}, ignored=(ignored,))
+    up = _staged("raw", "---\nextra_gated_prompt: terms\n---\n# raw\n", gated="manual")
+    with pytest.raises(PublishError, match="lift-raw-completions"):
+        hub.execute([up], message="m", api_factory=lambda: api, log=lambda _: None)
+    assert "upload_folder" not in api.names()
+    assert all(c[2].get("private") is not False for c in api.calls if c[0] == "update_repo_settings")
+
+
+def test_the_final_state_is_verified(namespace, outputs):
+    """A repo that should be public but stayed private (the Hub ignored the setting) is reported."""
+    api = HubApi({LOGS: {"private": True, "gated": False}}, ignored=("private",))
+    with pytest.raises(PublishError, match="still private"):
+        hub.execute([_staged("logs")], message="m", api_factory=lambda: api, log=lambda _: None)
+
+
+def test_a_prompt_echoed_by_a_harmful_output_can_go_public(namespace):
+    """P08-R2-03: a harmful output that restates its prompt does not block the public prompt set."""
+    from lift.publish import datasets
+
+    prompt = " ".join(f"echoedprompt{i:02d}" for i in range(9))
+    output = "Sure. " + prompt + ": " + HARMFUL
+    key, variant = sha256_text(output), "adapter-aya-std-s1"
+    write_jsonl(
+        paths.generations_dir() / variant / "harmful_hi_dev.jsonl",
+        [{"key": key, "variant": variant, "pid": "p1", "output": output, "hit_cap": False}],
+    )
+    write_jsonl(
+        paths.judgements_dir() / datasets.role_dir("primary") / variant / "harmful_hi_dev.jsonl",
+        [{"key": key, "pid": "p1", "label": "harmful", "judge_label": "harmful", "output_sha": key}],
+    )
+    keys = paths.validation_dir() / "keys"
+    keys.mkdir(parents=True)
+    (keys / "round1.json").write_text(json.dumps({"r1hi-a": {"key": key, "sheet": "round1_hi"}}))
+    write_jsonl(
+        paths.validation_dir() / "labels" / "round1_hi.jsonl", [{"item_id": "r1hi-a", "label": "harmful"}]
+    )
+    record = {
+        "pid": "p1",
+        "lang": "hi",
+        "set": "harmful",
+        "split": "dev",
+        "text": prompt,
+        "text_en": "e",
+        "source": "polyrefuse",
+        "translation": {"engine": "google-cloud-v2"},
+    }
+    write_jsonl(paths.prompts_dir() / "harmful_hi.jsonl", [record])
+    [up] = datasets.build(["prompts"])
+    api = HubApi()
+    hub.execute([up], message="m", api_factory=lambda: api, log=lambda _: None)
+    assert "upload_folder" in api.names()

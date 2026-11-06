@@ -9,9 +9,13 @@ and while any file of an upload that is not gated with manual approval fails the
 of an output labelled harmful on this machine, unredacted AuditKIT records). That scan needs this
 machine's outputs: without them (``lift sync pull``) nothing public is uploaded.
 
-For a gated repo the order is: create it private, set the gating, upload, and only then make it public,
-so its files are never public without the gate. With ``allow_pending``, an upload that still holds a
-placeholder goes up as a PRIVATE draft and stays private. Each upload mirrors its staged folder
+For a gated repo the order is: create it private, set the gating, read the gating and privacy back
+from the Hub, upload, and only then make it public, so its files are never public without the gate. A
+public repo is sent ``gated=False`` (one gated earlier is ungated). With ``allow_pending``, an upload that
+still holds a placeholder goes up as a PRIVATE draft and stays private; a draft never replaces a repo
+that is already public (that would make the live repo private and delete its files), and every draft is
+checked before anything is sent. After each upload the final state is read back again
+(``repo_info``): what the Hub reports, not what was asked, decides. Each upload mirrors its staged folder
 (``delete_patterns="*"``: a file no longer staged is deleted at HEAD). The token comes from
 huggingface_hub's own lookup (HF_TOKEN or the saved login) and is never printed.
 
@@ -128,6 +132,30 @@ def default_api() -> Any:
     return HfApi()
 
 
+def _state(api: Any, r: RepoSpec) -> tuple[object, object]:
+    """(private, gated) as the Hub reports them (``repo_info``; gated None read as False)."""
+    info = api.repo_info(r.repo_id, repo_type=r.repo_type)
+    missing = object()
+    private, gated = getattr(info, "private", missing), getattr(info, "gated", missing)
+    if private is missing or gated is missing:
+        raise PublishError(
+            f"{r.url}: the Hub did not report its visibility and gating; nothing more was sent"
+        )
+    return private, (gated or False)
+
+
+def _expect(api: Any, r: RepoSpec, *, gated: object, private: bool | None, when: str) -> None:
+    """Refuse (PublishError) unless the Hub reports ``gated`` (and ``private`` unless None)."""
+    is_private, is_gated = _state(api, r)
+    problems = []
+    if is_gated != gated:
+        problems.append(f"gated is {is_gated!r}, not {gated!r}")
+    if private is not None and is_private is not private:
+        problems.append("it is still private" if is_private else "it is public")
+    if problems:
+        raise PublishError(f"{r.url} {when}: {'; '.join(problems)} (read back from the Hub); stopped there")
+
+
 def execute(
     uploads: Sequence[Upload],
     *,
@@ -141,6 +169,18 @@ def execute(
     check_ready(uploads, allow_pending=allow_pending, windows=windows)
     drafts = {id(u) for u in uploads if pending_files([u])}  # only reachable with allow_pending
     api = (api_factory or default_api)()
+    live = []
+    for u in uploads:
+        r = u.repo
+        if id(u) in drafts and api.repo_exists(r.repo_id, repo_type=r.repo_type):
+            if _state(api, r)[0] is not True:
+                live.append(r.url)
+    if live:
+        raise PublishError(
+            "not uploading: a draft (it still holds placeholders) would make a repo that is already public "
+            "private and delete its files: " + ", ".join(live) + ". Fill the placeholders and upload without "
+            "--allow-pending"
+        )
     done = []
     for u in uploads:
         r = u.repo
@@ -150,12 +190,15 @@ def execute(
         if r.repo_type == "space":
             kwargs["space_sdk"] = r.sdk or "gradio"
         api.create_repo(r.repo_id, **kwargs)
-        if r.gated or draft:
+        if private:
             # Private first (the repo may already exist, public): a gated repo's files are never public
             # ungated, and a draft's placeholders never public at all.
             api.update_repo_settings(r.repo_id, repo_type=r.repo_type, private=True)
         if r.gated:
             api.update_repo_settings(r.repo_id, repo_type=r.repo_type, gated=r.gated)
+        elif r.repo_type != "space":  # a Space has no access gate
+            api.update_repo_settings(r.repo_id, repo_type=r.repo_type, gated=False)
+        _expect(api, r, gated=r.gated or False, private=True if private else None, when="before the upload")
         api.upload_folder(
             repo_id=r.repo_id,
             repo_type=r.repo_type,
@@ -164,9 +207,16 @@ def execute(
             delete_patterns="*",  # mirror the staged folder: withdrawn or renamed files leave HEAD
         )
         if draft:
+            _expect(api, r, gated=r.gated or False, private=True, when="after the upload")
             log(f"uploaded {u.title} as a PRIVATE draft (it still holds placeholders): {r.url}")
         else:
             api.update_repo_settings(r.repo_id, repo_type=r.repo_type, private=False)
+            try:
+                _expect(api, r, gated=r.gated or False, private=False, when="after the upload")
+            except PublishError:
+                if r.gated:  # public without its gate: make it private again before saying so
+                    api.update_repo_settings(r.repo_id, repo_type=r.repo_type, private=True)
+                raise
             log(f"uploaded {u.title}: {r.url}")
         done.append(r.url)
     return done

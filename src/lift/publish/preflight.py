@@ -7,15 +7,23 @@ since making a repo public publishes its history too), holds:
 - a secret or token (HF, GitHub, Anthropic, OpenAI-style, Google API and OAuth, AWS, Kaggle, a private
   key);
 - a raw completion: a JSON line shaped like a GenerationRecord (key, variant, output) or an AuditKIT
-  record that keeps outputs, or any 60-character window (taken every 30 characters, so any run of 90
-  characters or more is caught) of an output that a judge or human labelled harmful in this machine's
-  outputs/ (whitespace-normalised; JSON, JSONL, notebook and CSV files are also scanned as their decoded
-  string values, so an escaped text is found too);
+  record that keeps outputs, a JudgementRecord line that keeps the judge's raw output, or a
+  UtilityVerdict line; or any 60-character window (taken every 30 characters, so any run of 90 characters
+  or more is caught) of an output that a judge or human labelled harmful in this machine's outputs/.
+  Both sides are normalised the same way (``_norm``: NFKC, format characters such as zero-width spaces,
+  joiners and soft hyphens removed, case folded, whitespace collapsed), so an editor's Unicode form, a
+  change of case or an inserted zero-width character does not hide a copy. JSON, JSONL, notebook and CSV
+  files are also scanned as their decoded string values, and any text with HTML entities also unescaped,
+  so an escaped text is found too. A window that is also a run of a prompt text (``data/prompts``, any
+  language, the English source too) is dropped: prompts are public by design, and a harmful output
+  that restates its prompt must not block the prompt set. Only the echoed run goes: a window that
+  reaches into the completion's own text stays;
 - a notebook committed with outputs or execution counts (a Colab run saved with its results);
 - a path that must never be committed: outputs/, data/ outside data/splits/, validation sheets, labels
   and keys, model weights, .env, *.token, kaggle.json.
 
-Every text blob is scanned, however large (a big one in chunks); only binary blobs are path-checked.
+Every text blob is scanned, however large (a big one in chunks, the blobs streamed one at a time from
+``git cat-file``); only binary blobs are path-checked.
 The text check needs this machine's outputs: ``load_windows`` refuses when there are no judgements here,
 or no output labelled harmful whose text is here (``lift sync pull`` first), so the check is never a
 silent no-op. GitHub publishes every branch, tag and pull-request ref of the remote, not only the local
@@ -29,10 +37,15 @@ is skipped (for a documented fake in a test). When it passes it prints the steps
 from __future__ import annotations
 
 import csv
+import functools
+import html
 import io
 import json
 import re
 import subprocess
+import sys
+import threading
+import unicodedata
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatch
@@ -90,26 +103,80 @@ class Finding:
         return f"{self.kind}: {loc} ({self.where})"
 
 
-def _norm(text: str) -> str:
-    return " ".join(text.split())
+# Zero-width characters that stand for a space (they may replace one, or sit inside a word).
+ZERO_WIDTH_SPACES = "\u200b\u2060\ufeff\u180e"
+_ZW_SPACE = re.compile(f"[{ZERO_WIDTH_SPACES}]")
+MODES = ("space", "drop")  # a zero-width space read as a space, or dropped like every other format char
+
+
+@functools.cache
+def _format_chars() -> re.Pattern[str]:
+    """Every character of Unicode category Cf (format: zero-width joiners, soft hyphen, bidi marks...)."""
+    cf = [chr(c) for c in range(sys.maxunicode + 1) if unicodedata.category(chr(c)) == "Cf"]
+    return re.compile("[" + "".join(re.escape(c) for c in cf) + "]")
+
+
+def _prenorm(text: str, mode: str = "space") -> str:
+    """``text`` with its format characters dropped (zero-width spaces made spaces in mode "space"), NFKC
+    normalised and case folded; whitespace still as it was (``_norm`` collapses it)."""
+    if mode == "space":
+        text = _ZW_SPACE.sub(" ", text)
+    text = _format_chars().sub("", text)
+    return unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", text).casefold())
+
+
+def _norm(text: str, mode: str = "space") -> str:
+    """The form both sides of the window scan are compared in: ``_prenorm``, whitespace collapsed."""
+    return " ".join(_prenorm(text, mode).split())
+
+
+def _modes(text: str) -> tuple[str, ...]:
+    """A text holding a zero-width space is read both ways: as a space (one put in place of a space) and
+    dropped (one put inside a word)."""
+    return MODES if _ZW_SPACE.search(text) else MODES[:1]
 
 
 def windows_of(texts: Iterable[str]) -> set[str]:
-    """The WINDOW-character windows of each text (whitespace-normalised) starting every STRIDE characters,
+    """The WINDOW-character windows of each text (normalised, ``_norm``) starting every STRIDE characters,
     plus its last window: a copy of any WINDOW + STRIDE characters of a text holds one of them whole."""
     out: set[str] = set()
     for t in texts:
-        n = _norm(t)
-        if len(n) < WINDOW:
-            continue
-        out.update(n[s : s + WINDOW] for s in range(0, len(n) - WINDOW + 1, STRIDE))
-        out.add(n[-WINDOW:])
+        for mode in _modes(t):
+            n = _norm(t, mode)
+            if len(n) < WINDOW:
+                continue
+            out.update(n[s : s + WINDOW] for s in range(0, len(n) - WINDOW + 1, STRIDE))
+            out.add(n[-WINDOW:])
     return out
 
 
 def has_window(text: str, windows: set[str] | frozenset) -> bool:
-    """Whether ``text`` (whitespace-normalised) holds one of ``windows`` anywhere."""
-    return _in_flat(_norm(text), windows)
+    """Whether ``text`` (normalised, ``_norm``) holds one of ``windows`` anywhere."""
+    return any(_in_flat(_norm(text, mode), windows) for mode in _modes(text))
+
+
+def windows_in_texts(texts: Iterable[str], windows: set[str]) -> set[str]:
+    """The windows that occur anywhere in ``texts`` (normalised like the scan)."""
+    hit: set[str] = set()
+    if not windows:
+        return hit
+    for t in texts:
+        for mode in _modes(t):
+            flat = _norm(t, mode)
+            hit.update(w for s in range(0, len(flat) - WINDOW + 1) if (w := flat[s : s + WINDOW]) in windows)
+    return hit
+
+
+def prompt_texts() -> Iterator[str]:
+    """Every prompt text on this machine (``data/prompts/*.jsonl``: the text and its English source)."""
+    from lift.io import read_jsonl
+
+    src = paths.prompts_dir()
+    for f in sorted(src.glob("*.jsonl")) if src.is_dir() else []:
+        for row in read_jsonl(f):
+            for field in ("text", "text_en"):
+                if isinstance(row.get(field), str):
+                    yield row[field]
 
 
 def _in_flat(flat: str, windows: set[str] | frozenset) -> bool:
@@ -145,10 +212,14 @@ def load_windows() -> tuple[set[str], int]:
             f"their text cannot be checked: {pull}"
         )
     windows = windows_of(texts)
+    # P08-R2-03: a run the output copied from a prompt is public anyway (the prompt sets); a window that
+    # reaches into the completion's own text is never a run of a prompt, so it stays.
+    windows -= windows_in_texts(prompt_texts(), windows)
     if not windows:
         raise PublishError(
             f"no harmful outputs found on this machine ({len(files)} judgement files, but no output labelled "
-            f"harmful of {WINDOW} characters or more), so the text check would be empty: {pull}"
+            f"harmful of {WINDOW} characters or more beyond what it repeats of a prompt), so the text check "
+            f"would be empty: {pull}"
         )
     return windows, len(texts)
 
@@ -163,21 +234,29 @@ def forbidden_path(path: str) -> bool:
 _KEPT_OUTPUT = re.compile(r'"actual_output"\s*:\s*"(?!\[redacted)[^"]')
 
 
+_RECORD_FIELDS = ('"output"', '"raw"', '"order_ab"')
+
+
 def _raw_record(line: str) -> bool:
+    """A line that is (or keeps) a raw completion: an AuditKIT record keeping an output, a
+    GenerationRecord with its output, a JudgementRecord with the judge's raw output (a frontier judge's
+    reasoning can quote the completion), or a UtilityVerdict (its reasons quote both answers)."""
     s = line.strip()
     if _KEPT_OUTPUT.search(s):
         return True
-    if not (s.startswith("{") and '"output"' in s):
+    if not (s.startswith("{") and any(f in s for f in _RECORD_FIELDS)):
         return False
     try:
         row = json.loads(s)
     except json.JSONDecodeError:
         return False
-    return (
-        isinstance(row, dict)
-        and {"key", "variant", "output"} <= row.keys()
-        and bool(str(row.get("output") or "").strip())
-    )
+    if not isinstance(row, dict):
+        return False
+    if {"key", "variant", "output"} <= row.keys() and bool(str(row.get("output") or "").strip()):
+        return True
+    if {"key", "judge", "label"} <= row.keys() and bool(str(row.get("raw") or "").strip()):
+        return True
+    return {"pid", "variant", "judge", "order_ab", "order_ba"} <= row.keys()
 
 
 def allowed_lines(text: str) -> set[str]:
@@ -225,26 +304,61 @@ def decoded_text(text: str, path: str) -> str | None:
     return None
 
 
+SAFE_CUT_SEARCH = 4096  # how far past a chunk's end to look for a character a cut may go before
+
+
+def _safe_cut(ch: str) -> bool:
+    """Whether a chunk may end right before ``ch``: the normal form of the text on each side then does
+    not depend on the other (no combining mark, no Hangul jamo, no entity character)."""
+    if ch.isspace():
+        return True
+    if unicodedata.combining(ch) or ch in "&#;" or "\u1100" <= ch <= "\u11ff":
+        return False
+    return unicodedata.category(ch)[0] in "LNPS" and not (
+        "\ua960" <= ch <= "\ua97f" or "\ud7b0" <= ch <= "\ud7ff"
+    )
+
+
+def _chunks(text: str) -> Iterator[str]:
+    """``text`` in pieces of about CHUNK_CHARS, each cut right before a character ``_safe_cut`` allows
+    (within SAFE_CUT_SEARCH characters; past that the cut is forced)."""
+    start = 0
+    while start < len(text):
+        end = start + CHUNK_CHARS
+        limit = min(len(text), end + SAFE_CUT_SEARCH)
+        while end < limit and not _safe_cut(text[end]):
+            end += 1
+        yield text[start:end]
+        start = end
+
+
 def windows_in(text: str, windows: set[str] | frozenset) -> bool:
     """``has_window`` for a text of any size: one longer than CHUNK_CHARS is normalised and scanned a
-    chunk at a time, each chunk led by the last WINDOW - 1 normalised characters before it, so a window
-    across a cut is still found (the result equals ``has_window`` on the whole text)."""
+    chunk at a time (cut where normalising each side alone gives the same text), each chunk led by the
+    last WINDOW - 1 normalised characters before it, so a window across a cut is still found (the result
+    equals ``has_window`` on the whole text)."""
     if len(text) <= CHUNK_CHARS:
         return has_window(text, windows)
     if not windows:
         return False
+    return any(_windows_in_chunks(text, windows, mode) for mode in _modes(text))
+
+
+def _windows_in_chunks(text: str, windows: set[str] | frozenset, mode: str) -> bool:
     carry, space_before = "", False
-    for start in range(0, len(text), CHUNK_CHARS):
-        chunk = text[start : start + CHUNK_CHARS]
-        flat = _norm(chunk)
+    for chunk in _chunks(text):
+        pre = _prenorm(chunk, mode)
+        if not pre:
+            continue  # only format characters: nothing between the neighbours
+        flat = " ".join(pre.split())
         if not flat:
             space_before = True
             continue
-        sep = " " if carry and (space_before or chunk[0].isspace()) else ""
+        sep = " " if carry and (space_before or pre[0].isspace()) else ""
         joined = carry + sep + flat
         if _in_flat(joined, windows):
             return True
-        carry, space_before = joined[-(WINDOW - 1) :], chunk[-1].isspace()
+        carry, space_before = joined[-(WINDOW - 1) :], pre[-1].isspace()
     return False
 
 
@@ -276,11 +390,23 @@ def scan_text(
         found.append(Finding(where, path, 0, NOTEBOOK_OUTPUTS))
     if windows:
         decoded = decoded_text(text, path)
-        for body in (text, decoded) if decoded is not None else (text,):
+        for body in _bodies(text, decoded):
             if windows_in(body, windows):
                 found.append(Finding(where, path, 0, HARMFUL_TEXT))
                 break
     return found
+
+
+def _bodies(text: str, decoded: str | None) -> Iterator[str]:
+    """The text as it is, its decoded string values, and each of those with HTML entities unescaped."""
+    for body in (text, decoded):
+        if body is None:
+            continue
+        yield body
+        if "&" in body:
+            unescaped = html.unescape(body)
+            if unescaped != body:
+                yield unescaped
 
 
 def auditkit_problem(doc: object) -> str | None:
@@ -351,21 +477,47 @@ def _history_blobs(repo: Path) -> dict[str, str]:
 
 
 def _cat_blobs(repo: Path, shas: Iterable[str]) -> Iterator[tuple[str, str, bytes | None]]:
+    """(sha, kind, body for a blob) for each object, streamed one at a time from ``git cat-file --batch``
+    (the history is never held in one buffer: P08-R2-16). The shas are written from a thread, so neither
+    pipe can fill up while the other waits."""
     shas = list(shas)
     if not shas:
         return
-    data = _git("cat-file", "--batch", cwd=repo, input=("\n".join(shas) + "\n").encode())
-    pos = 0
-    while pos < len(data):
-        end = data.index(b"\n", pos)
-        sha, kind, *rest = data[pos:end].decode().split()
-        if kind == "missing":
-            pos = end + 1
-            continue
-        size = int(rest[0])
-        body = data[end + 1 : end + 1 + size]
-        pos = end + 1 + size + 1
-        yield sha, kind, (body if kind == "blob" else None)
+    proc = subprocess.Popen(
+        ["git", "cat-file", "--batch"], cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+
+    def feed() -> None:
+        try:
+            for sha in shas:
+                proc.stdin.write(sha.encode() + b"\n")
+            proc.stdin.close()
+        except (BrokenPipeError, ValueError, OSError):
+            pass  # the reader stopped early (or git died): the read side reports it
+
+    writer = threading.Thread(target=feed, daemon=True)
+    writer.start()
+    try:
+        for _ in shas:
+            header = proc.stdout.readline()
+            if not header:
+                raise PublishError("git cat-file stopped before every blob of the history was read")
+            sha, kind, *rest = header.decode().split()
+            if kind == "missing":
+                continue
+            size = int(rest[0])
+            body = proc.stdout.read(size)
+            proc.stdout.read(1)  # the newline after each object
+            if len(body) != size:
+                raise PublishError("git cat-file stopped in the middle of a blob of the history")
+            yield sha, kind, (body if kind == "blob" else None)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.stdout.close()
+        proc.wait()
+        writer.join(timeout=5)
 
 
 def _decode(body: bytes) -> str | None:
