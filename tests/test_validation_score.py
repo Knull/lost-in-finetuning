@@ -750,8 +750,8 @@ def test_gate1_meets_the_bar_on_agreement_alone_from_85_percent(case):
     human, judge = [h for h, _ in pairs], [j for _, j in pairs]
     assert exact_kappa(human, judge) < Fraction(3, 5)             # kappa alone never carries the bar here
     assert preregistered_bar(human, judge) is (status == "pass")
-    rows = [({"round": 1, "lang": "hi", "item_id": f"r1hi-{i:06d}", "group": "stock", "set": "harmful"}, h,
-             dict.fromkeys(VIEWS, j)) for i, (h, j) in enumerate(pairs)]
+    rows = [({"round": 1, "lang": "hi", "item_id": f"r1hi-{i:06d}", "key": f"{i:064x}", "group": "stock",
+              "set": "harmful"}, h, dict.fromkeys(VIEWS, j)) for i, (h, j) in enumerate(pairs)]
     col = Collected(rounds=[1], langs=["hi"], rows=rows, unlabelled=[], superseded=[], main_items={"hi": 60},
                     sheets={"round1_hi": {"round": 1, "lang": "hi", "slot": "a", "n": 60, "imported": True,
                                           "labelled": 60}},
