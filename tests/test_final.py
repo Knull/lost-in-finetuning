@@ -29,6 +29,15 @@ SELECTION = {
     "overall": {"winner": RESTA.format(1), "verdict": "repair"},
     "frozen": {"wiseft": WINNER.format(1), "resta": RESTA.format(1), "cast": CAST.format(1)},
 }
+# configs/frozen_recipe.json as P05's lift select writes it and the tag freezes it (its sha is checked
+# against selection.json's bytes by verified_recipe; the tests that pass it in skip that read).
+RECIPE = {
+    "version": 1,
+    "adapter": A.format(1),
+    "selection_sha256": "0" * 64,
+    "overall_winner": RESTA.format(1),
+    "frozen": dict(SELECTION["frozen"]),
+}
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +90,7 @@ def write_selection(doc=SELECTION):
 
 @pytest.mark.parametrize("name", ["stock", A.format(2), WINNER.format(3), CAST.format(2), RESTA.format(1)])
 def test_the_guard_opens_the_final_split_to_frozen_variants_with_the_tag(name):
-    assert final.check_final(name, selection=SELECTION, tags=TAG) == TAG[0]
+    assert final.check_final(name, selection=SELECTION, tags=TAG, recipe=RECIPE) == TAG[0]
 
 
 def test_the_guard_refuses_without_the_tag():
@@ -102,7 +111,7 @@ def test_the_guard_refuses_without_the_tag():
 )
 def test_the_guard_refuses_an_unfrozen_variant(name, selection, why):
     with pytest.raises(final.Refused, match=why):
-        final.check_final(name, selection=selection, tags=TAG, use_file=False)
+        final.check_final(name, selection=selection, tags=TAG, use_file=False, recipe=RECIPE)
 
 
 def test_the_frozen_list_in_p08s_list_form_is_read_too():
@@ -179,10 +188,130 @@ def test_every_command_that_makes_final_outputs_refuses_without_the_tag(
 
 def test_lift_final_refuses_an_unfrozen_variant_even_with_the_tag(monkeypatch, capsys):
     monkeypatch.setattr(final, "frozen_tags", lambda git=None: TAG)
+    monkeypatch.setattr(final, "verified_recipe", lambda tag, **kw: RECIPE)
     write_selection()
     assert cli.main(["final", "--variant", "wiseft-l0.25-adapter-aya-std-s1"]) == 2
     assert "not a frozen variant" in capsys.readouterr().err
     assert not manifests_dir().exists() or not list(manifests_dir().glob("final_variant-*.json"))
+
+
+# XB-01: lift select named an overall winner (wiseft-l0.25) its family did not freeze (wiseft-l0.50).
+UNFROZEN_WINNER = {
+    **SELECTION,
+    "overall": {"winner": "wiseft-l0.25-adapter-aya-std-s1", "verdict": "repair"},
+}
+
+
+def test_a_selection_whose_overall_winner_is_not_frozen_is_refused():
+    with pytest.raises(final.Refused, match="not one of the frozen settings.*lift select"):
+        final.core_plan(UNFROZEN_WINNER)
+    for name in ("stock", WINNER.format(1)):
+        with pytest.raises(final.Refused, match="not one of the frozen settings"):
+            final.check_final(name, selection=UNFROZEN_WINNER, tags=TAG, recipe=RECIPE)
+    with pytest.raises(final.Refused, match="not one of the frozen settings"):
+        final.run_all(final.Options(), selection=UNFROZEN_WINNER, tags=TAG, recipe=RECIPE, devices=1)
+
+
+class FakeGit:
+    """git show HEAD:/<tag>: of configs/frozen_recipe.json; a shallow clone has no tag until it fetches it."""
+
+    def __init__(self, head, tagged, *, shallow=False):
+        self.head, self.tagged, self.shallow, self.calls = head, tagged, shallow, []
+
+    def __call__(self, argv, env=None):
+        self.calls.append((list(argv), env))
+        if argv[:1] == ["show"]:
+            rev = argv[1].split(":", 1)[0]
+            if rev == "HEAD":
+                return self.head
+            return None if self.shallow else self.tagged
+        if argv[:2] == ["remote", "get-url"]:
+            return "https://github.com/owner/repo.git\n"
+        if argv[:1] == ["fetch"]:
+            self.shallow = False
+            return ""
+        return None
+
+
+@pytest.fixture
+def frozen_recipe(tmp_path, monkeypatch):
+    """selection.json on disk and configs/frozen_recipe.json naming its sha, in a tmp checkout."""
+    write_selection()
+    digest = final.sha256_file(final.selection_path())
+    doc = {**RECIPE, "selection_sha256": digest}
+    path = tmp_path / "configs" / "frozen_recipe.json"
+    path.parent.mkdir()
+    text = json.dumps(doc, indent=1) + "\n"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(final, "recipe_file", lambda: path)
+    return doc, text, path
+
+
+def test_the_guard_binds_the_final_split_to_the_committed_frozen_recipe(frozen_recipe, monkeypatch):
+    doc, text, path = frozen_recipe
+    assert final.verified_recipe(TAG[0], git=FakeGit(text, text)) == doc
+    # Through check_final: the tag's recipe opens the split to its frozen settings.
+    monkeypatch.setattr(final, "_git", FakeGit(text, text))
+    assert final.check_final(WINNER.format(2), tags=TAG) == TAG[0]
+    # The recipe was edited after the tag (committed, or not even committed).
+    other = text.replace(WINNER.format(1), "wiseft-l0.25-adapter-aya-std-s1")
+    with pytest.raises(final.Refused, match="changed since the tag"):
+        final.verified_recipe(TAG[0], git=FakeGit(other, text))
+    with pytest.raises(final.Refused, match="differs from HEAD"):
+        final.verified_recipe(TAG[0], git=FakeGit(text.replace("1", "2", 1), text.replace("1", "2", 1)))
+    with pytest.raises(final.Refused, match="not committed"):
+        final.verified_recipe(TAG[0], git=FakeGit(None, text))
+    with pytest.raises(final.Refused, match="cannot be read at the tag"):
+        final.verified_recipe(TAG[0], git=FakeGit(text, None))
+    path.unlink()
+    with pytest.raises(final.Refused, match="frozen_recipe.json does not exist"):
+        final.verified_recipe(TAG[0], git=FakeGit(text, text))
+
+
+def test_lift_select_run_again_after_the_tag_is_refused_at_final_time(frozen_recipe, monkeypatch):
+    """XB-02: a later lift select rewrites selection.json (another frozen set): its sha no longer matches the
+    recipe the tag froze, so the guard refuses every variant, the new set's above all."""
+    doc, text, _path = frozen_recipe
+    moved = {**SELECTION, "frozen": {**SELECTION["frozen"], "wiseft": "wiseft-l0.25-adapter-aya-std-s1"}}
+    write_selection(moved)
+    with pytest.raises(final.Refused, match="selection.json is not the one the recipe froze"):
+        final.verified_recipe(TAG[0], git=FakeGit(text, text))
+    monkeypatch.setattr(final, "_git", FakeGit(text, text))
+    for name in ("stock", "wiseft-l0.25-adapter-aya-std-s1"):
+        with pytest.raises(final.Refused, match="not the one the recipe froze"):
+            final.check_final(name, tags=TAG)
+    # Even with the recipe read, a variant outside its frozen map is not frozen, whatever selection.json says.
+    with pytest.raises(final.Refused, match="not a frozen variant"):
+        final.check_final("wiseft-l0.25-adapter-aya-std-s1", selection=moved, tags=TAG, recipe=RECIPE)
+    with pytest.raises(final.Refused, match="differs from the frozen recipe"):
+        final.check_final("stock", selection=moved, tags=TAG, recipe=RECIPE)
+    rc, summary = final.run_all(final.Options(), selection=moved, tags=TAG, devices=1, stage_fn=lambda *a: 0)
+    assert summary["results"] == {} and all("recipe froze" in why for why in summary["not_run"].values())
+
+
+def test_a_shallow_clone_fetches_the_tag_with_the_token_kept_out_of_argv(frozen_recipe, monkeypatch):
+    doc, text, _path = frozen_recipe
+    monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
+    git = FakeGit(text, text, shallow=True)
+    assert final.verified_recipe(TAG[0], git=git) == doc
+    fetch = [(argv, env) for argv, env in git.calls if argv[:1] == ["fetch"]]
+    assert len(fetch) == 1 and f"refs/tags/{TAG[0]}:refs/tags/{TAG[0]}" in fetch[0][0][-1]
+    basic = base64.b64encode(b"x-access-token:secret-token").decode("ascii")
+    for argv, _env in git.calls:
+        assert not any("secret-token" in a or basic in a for a in argv)
+    env = fetch[0][1]
+    assert env[f"GIT_CONFIG_VALUE_{int(env['GIT_CONFIG_COUNT']) - 1}"] == f"AUTHORIZATION: basic {basic}"
+    monkeypatch.delenv("GITHUB_TOKEN")
+    with pytest.raises(final.Refused, match="cannot be read at the tag"):
+        final.verified_recipe(TAG[0], git=FakeGit(text, text, shallow=True))
+
+
+def test_every_final_line_refuses_without_the_frozen_recipe(monkeypatch, tmp_path):
+    monkeypatch.setattr(final, "frozen_tags", lambda git=None: TAG)
+    monkeypatch.setattr(final, "recipe_file", lambda: tmp_path / "frozen_recipe.json")
+    write_selection()
+    with pytest.raises(SystemExit, match="frozen_recipe.json does not exist"):
+        final.guard_split("stock", "final")
 
 
 def test_the_dev_split_is_not_guarded():
@@ -252,6 +381,7 @@ def test_run_all_goes_in_order_and_lists_what_it_could_not_run():
         final.Options(),
         selection=SELECTION,
         tags=TAG,
+        recipe=RECIPE,
         devices=1,
         stage_fn=lambda s, n, o: seen.append(n) or 0,
     )

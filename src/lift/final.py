@@ -6,10 +6,18 @@ The final split is touched only here (CLAUDE.md rule 1), so every final line pas
   VM whose shallow fetch of the job's ref carries no tags, by ``git ls-remote --tags origin`` with the
   GITHUB_TOKEN the job hands to lift lines (sent as an http header through that git process's GIT_CONFIG_*
   variables, as kaggle/runner.ipynb fetches: never in a URL, on a command line or in a log);
+- the tag froze a concrete recipe (``verified_recipe``, docs/decisions.md 77): configs/frozen_recipe.json,
+  written by P05's ``lift select`` and committed before the tag, exists, is the same at HEAD (and in the
+  working tree) as in the commit the newest tag points to (``git show <tag>:configs/frozen_recipe.json``; a
+  shallow VM clone fetches that one tag first, the token again only in GIT_CONFIG_* variables), and its
+  ``selection_sha256`` is the sha256 of outputs/metrics/selection.json's bytes now. So a ``lift select`` run
+  after the tag (another frozen set, or the same set from other dev records) is refused at final time;
+- the selection is coherent (XB-01): its ``overall.winner`` is one of its frozen settings, and its frozen
+  map and winner are the recipe's;
 - the variant is frozen: stock, a registered adapter (method "adapter": an adapter seed), or a repaired
-  variant outputs/metrics/selection.json froze ("frozen", one setting per family on the seed-1 adapter,
-  applied to seeds 1-3: ``frozen_variants``) and configs/variants.yaml registers. A selection that is not
-  "decided" freezes nothing.
+  variant the recipe's ``frozen`` map names (one setting per family on the seed-1 adapter, applied to seeds
+  1-3: ``frozen_variants``) and configs/variants.yaml registers. A selection that is not "decided" freezes
+  nothing.
 
 The same guard runs in every command that makes final outputs (``lift generate``, ``lift utility`` but
 --judge-only, ``lift belebele``, ``lift heldout-loss`` with ``--split final``), so no side line can reach the
@@ -63,6 +71,7 @@ from pathlib import Path
 from typing import Any
 
 from lift import config
+from lift.io import sha256_file
 from lift.paths import REPO_ROOT, metrics_dir, output_dir
 from lift.schemas import LANGS
 
@@ -70,6 +79,8 @@ log = logging.getLogger("lift.final")
 
 SPLIT = "final"
 TAG_GLOB = "recipe-frozen-*"
+RECIPE = "configs/frozen_recipe.json"  # P05's lift select writes it; committed before the tag
+RECIPE_VERSION = 1
 SAFETY = ("harmful", "easy_benign", "hard_benign")
 REDTEAM = ("redteam", "hi")
 STAGES = ("safety", "utility", "belebele", "backtranslation")
@@ -116,10 +127,19 @@ def frozen_tags(git: Callable[..., str | None] = _git) -> list[str]:
     local = _tag_names(git(["tag", "--list", TAG_GLOB]))
     if local:
         return local
+    env = _remote_env(git)
+    if env is None:
+        return []
+    return _tag_names(git(["ls-remote", "--tags", "origin", f"refs/tags/{TAG_GLOB}"], env=env))
+
+
+def _remote_env(git: Callable[..., str | None]) -> dict[str, str] | None:
+    """The environment of one git process that talks to origin with the job's GITHUB_TOKEN (module
+    docstring), or None when there is no token or origin is not a github.com https remote."""
     token = os.environ.get("GITHUB_TOKEN")
     url = (git(["remote", "get-url", "origin"]) or "").strip()
     if not token or not url.startswith("https://github.com/"):
-        return []
+        return None
     basic = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_TRACE") and k != "GIT_CURL_VERBOSE"}
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -132,7 +152,94 @@ def frozen_tags(git: Callable[..., str | None] = _git) -> list[str]:
     env["GIT_CONFIG_COUNT"] = str(n + 1)
     env[f"GIT_CONFIG_KEY_{n}"] = "http.https://github.com/.extraheader"
     env[f"GIT_CONFIG_VALUE_{n}"] = f"AUTHORIZATION: basic {basic}"
-    return _tag_names(git(["ls-remote", "--tags", "origin", f"refs/tags/{TAG_GLOB}"], env=env))
+    return env
+
+
+def recipe_file() -> Path:
+    return REPO_ROOT / RECIPE
+
+
+def _text(raw: str | bytes | None) -> str | None:
+    if raw is None:
+        return None
+    text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    return text.replace("\r\n", "\n")
+
+
+def _tagged_recipe(tag: str, git: Callable[..., str | None]) -> str | None:
+    """configs/frozen_recipe.json in the commit ``tag`` points to; a shallow clone (a GPU job's fetch of
+    its ref carries no tags) fetches that one tag first, with the token kept out of argv."""
+    text = git(["show", f"{tag}:{RECIPE}"])
+    if text is None:
+        env = _remote_env(git)
+        if env is not None:
+            ref = f"refs/tags/{tag}"
+            git(["fetch", "--quiet", "--depth=1", "--no-tags", "origin", f"+{ref}:{ref}"], env=env)
+            text = git(["show", f"{tag}:{RECIPE}"])
+    return _text(text)
+
+
+def verified_recipe(
+    tag: str, *, git: Callable[..., str | None] | None = None, selection_file: Path | None = None
+) -> dict[str, Any]:
+    """configs/frozen_recipe.json as the tag froze it, or ``Refused`` naming what does not hold (module
+    docstring): {"version": 1, "adapter", "selection_sha256", "overall_winner",
+    "frozen": {family: setting}}."""
+    git = git or _git
+    path = recipe_file()
+    remedy = (
+        "the recipe is frozen by `lift select` (which writes it), a commit of it, then the tag it prints "
+        "(git tag recipe-frozen-YYYYMMDD && git push --tags)"
+    )
+    if not path.is_file():
+        raise Refused(f"{RECIPE} does not exist: {remedy}")
+    work = _text(path.read_bytes())
+    head = _text(git(["show", f"HEAD:{RECIPE}"]))
+    problems = []
+    if head is None:
+        problems.append(f"{RECIPE} is not committed at HEAD: {remedy}")
+    elif head != work:
+        problems.append(
+            f"{RECIPE} differs from HEAD's (an edit not committed): the frozen recipe is never edited"
+        )
+    tagged = _tagged_recipe(tag, git)
+    if tagged is None:
+        problems.append(
+            f"{RECIPE} cannot be read at the tag {tag}: the tag must point to the commit that holds it "
+            "(on a GPU job, GITHUB_TOKEN lets the shallow clone fetch the tag)"
+        )
+    elif head is not None and tagged != head:
+        problems.append(
+            f"{RECIPE} changed since the tag {tag}: the recipe the tag froze is the one evaluated; a new "
+            "freeze needs a new dated tag, made only with a decisions.md entry (Gate 3 is passed once)"
+        )
+    if problems:
+        raise Refused("; ".join(problems))
+    try:
+        recipe = json.loads(work or "")
+    except ValueError as exc:
+        raise Refused(f"{RECIPE} is not JSON ({exc})") from None
+    if (
+        not isinstance(recipe, dict)
+        or recipe.get("version") != RECIPE_VERSION
+        or not isinstance(recipe.get("frozen"), Mapping)
+        or not recipe.get("selection_sha256")
+    ):
+        raise Refused(f"{RECIPE} is not version {RECIPE_VERSION} with frozen and selection_sha256")
+    sel = selection_file or selection_path()
+    digest = sha256_file(sel) if sel.is_file() else None
+    if digest != recipe["selection_sha256"]:
+        why = "is missing" if digest is None else f"has sha256 {digest[:12]}"
+        raise Refused(
+            f"outputs/metrics/selection.json is not the one the recipe froze (it {why}; the recipe names "
+            f"{str(recipe['selection_sha256'])[:12]}): `lift select` ran after the tag, or the pull brought "
+            "another. Restore the frozen selection.json (lift sync pull of the frozen run); selecting again "
+            "after the freeze is not allowed (rule 1)"
+        )
+    problem = _winner_problem(recipe.get("overall_winner"), recipe["frozen"])
+    if problem:
+        raise Refused(f"{RECIPE}: {problem}")
+    return recipe
 
 
 def selection_path() -> Path:
@@ -180,15 +287,39 @@ def frozen_variants(selection: Mapping[str, Any] | None) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def overall_winner(selection: Mapping[str, Any] | None) -> str | None:
+    if not selection:
+        return None
+    winner = (selection.get("overall") or {}).get("winner") or selection.get("winner")
+    return str(winner) if winner else None
+
+
+def _winner_problem(winner: Any, frozen: Mapping[str, Any]) -> str | None:
+    """XB-01: the overall winner must be the setting its family froze, or the primary endpoint's repair arm
+    is a variant nothing evaluates (and P08 would publish it)."""
+    if not winner:
+        return "it names no overall winner"
+    if str(winner) in {str(v) for v in frozen.values()}:
+        return None
+    names = ", ".join(map(str, frozen.values()))
+    return (
+        f"the overall winner {winner} is not one of the frozen settings ({names})"
+        ": rerun `lift select` on the fixed p05-repairs (it freezes the overall winner as its family's "
+        "setting), commit configs/frozen_recipe.json and tag again"
+    )
+
+
 def check_final(
     variant: str,
     *,
     selection: Mapping[str, Any] | None = None,
     tags: Sequence[str] | None = None,
     use_file: bool = True,
+    recipe: Mapping[str, Any] | None = None,
 ) -> str:
     """Refuse (``Refused``) unless the final split is open to ``variant`` (module docstring); returns the
-    tag that opened it."""
+    tag that opened it. ``recipe``: the frozen recipe already verified (``verified_recipe``); None reads and
+    verifies it against the newest tag."""
     from lift.models.variants import get_spec
 
     tags = list(frozen_tags() if tags is None else tags)
@@ -201,6 +332,24 @@ def check_final(
             "tag it prints (git tag recipe-frozen-YYYYMMDD && git push --tags), and only then is "
             "the final split opened"
         )
+    elif recipe is None:
+        try:
+            recipe = verified_recipe(tags[-1])
+        except Refused as exc:
+            problems.append(str(exc))
+    settings = frozen_settings(selection)
+    if settings:
+        problem = _winner_problem(overall_winner(selection), settings)
+        if problem:
+            problems.append(f"outputs/metrics/selection.json: {problem}")
+        if recipe is not None and (
+            settings != {str(k): str(v) for k, v in recipe["frozen"].items()}
+            or overall_winner(selection) != recipe.get("overall_winner")
+        ):
+            problems.append(
+                f"selection.json's frozen map or winner differs from the frozen recipe ({RECIPE}): only "
+                "the recipe the tag froze is evaluated"
+            )
     try:
         spec = get_spec(variant)
     except KeyError:
@@ -208,13 +357,16 @@ def check_final(
         problems.append(f"{variant} is not registered in configs/variants.yaml")
     if spec is not None and spec.method not in ("stock", "adapter"):
         frozen = frozen_variants(selection)
+        if recipe is not None:
+            mine = set(frozen_variants({"frozen": dict(recipe["frozen"])}))
+            frozen = [v for v in frozen if v in mine]
         if variant not in frozen:
             if not selection:
                 why = "outputs/metrics/selection.json is missing (lift select, after lift sync pull)"
             elif selection.get("status", "decided") != "decided":
                 why = f"outputs/metrics/selection.json is {selection.get('status')!r}, so nothing is frozen"
             else:
-                why = f"selection.json froze {frozen or 'nothing'}"
+                why = f"the frozen recipe froze {frozen or 'nothing'}"
             problems.append(
                 f"{variant} is not a frozen variant: {why}. Only stock, the adapter seeds and the "
                 "frozen settings on seeds 1-3 are evaluated on the final split (rule 1)"
@@ -257,9 +409,10 @@ def core_plan(selection: Mapping[str, Any]) -> list[Planned]:
             "frozen variants it names (lift select)"
         )
     adapter = str(selection["adapter"])
-    winner = (selection.get("overall") or {}).get("winner") or selection.get("winner")
-    if not winner:
-        raise Refused("selection.json names no overall winner")
+    winner = overall_winner(selection)
+    problem = _winner_problem(winner, frozen)
+    if problem:
+        raise Refused(f"outputs/metrics/selection.json: {problem}")
     win_setting, _ = rs.parse_name(str(winner))
     plan = [Planned("stock", "stock", None, None)]
     plan += [Planned(seed_name(adapter, s), "adapter", None, s) for s in SEEDS]
@@ -467,19 +620,31 @@ def run_all(
     stage_fn: Callable[[str, str, Options], int] = run_stage,
     devices: int | None = None,
     only: Sequence[str] | None = None,
+    recipe: Mapping[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """``lift final --all``: every core variant in order (``core_plan``); one that the guard refuses (not
-    registered yet, say) is listed as not run with the refusal, and the rest go on."""
+    registered yet, say) is listed as not run with the refusal, and the rest go on. The frozen recipe is
+    verified once (``recipe``: already verified)."""
     selection = selection if selection is not None else read_selection()
     plan = core_plan(selection or {})
     tags = list(frozen_tags() if tags is None else tags)
+    recipe_refused = None
+    if tags and recipe is None:
+        try:
+            recipe = verified_recipe(tags[-1])
+        except Refused as exc:
+            recipe_refused = str(exc)
     results: dict[str, dict[str, int]] = {}
     not_run: dict[str, str] = {}
     for item in plan:
         if only and item.name not in only:
             continue
+        if recipe_refused:
+            not_run[item.name] = f"the final split is closed to {item.name}: {recipe_refused}"
+            log.error("%s: not run: %s", item.name, recipe_refused)
+            continue
         try:
-            tag = check_final(item.name, selection=selection, tags=tags)
+            tag = check_final(item.name, selection=selection, tags=tags, recipe=recipe)
         except Refused as exc:
             not_run[item.name] = str(exc)
             log.error("%s: not run: %s", item.name, exc)
