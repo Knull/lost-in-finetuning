@@ -28,6 +28,14 @@ from lift.publish.inputs import NOT_RUN, PENDING, Facts, fmt, report_path
         (1.5, "hours", "1.50 h"),
         (None, "pct", NOT_RUN),
         ("WiSE-FT", "text", "WiSE-FT"),
+        # decisions.md 73: a value computed but undefined is P07's text, shown as it is in any format
+        (
+            "undefined: the adapter shows no utility gain over parity",
+            "pct_ci",
+            "undefined: the adapter shows no utility gain over parity",
+        ),
+        ("undefined", "f2", "undefined"),
+        ("undefined", "p_stmt", "undefined"),
     ],
 )
 def test_formats(value, kind, shown):
@@ -36,7 +44,15 @@ def test_formats(value, kind, shown):
 
 @pytest.mark.parametrize(
     "value,kind",
-    [("x", "pct"), (float("nan"), "pct"), (True, "pct"), (1.5, "int"), ({"est": 1}, "pct_ci"), (1, "nope")],
+    [
+        ("x", "pct"),
+        ("not undefined", "pct_ci"),
+        (float("nan"), "pct"),
+        (True, "pct"),
+        (1.5, "int"),
+        ({"est": 1}, "pct_ci"),
+        (1, "nope"),
+    ],
 )
 def test_bad_values_are_refused(value, kind):
     with pytest.raises((ValueError, KeyError)):

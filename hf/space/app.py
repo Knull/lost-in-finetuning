@@ -41,6 +41,8 @@ def _interval(value: Any) -> tuple[float, float, float]:
 def fmt(value: Any, kind: str) -> str:
     if value is None:
         return NOT_RUN
+    if isinstance(value, str) and (value == "undefined" or value.startswith("undefined:")):
+        return value  # computed but undefined, as the report says it (never a number or "not run")
     if kind == "text":
         return str(value)
     if kind == "pct":

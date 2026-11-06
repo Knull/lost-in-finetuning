@@ -168,6 +168,8 @@ def test_space_formats_cells_like_the_article(app):
         (None, "pct"),
         ("x", "text"),
         (0.05, "points"),
+        ("undefined: the adapter shows no utility gain over parity", "pct_ci"),
+        ("undefined", "f2"),
     ]:
         assert app.fmt(value, kind) == fmt(value, kind)
 

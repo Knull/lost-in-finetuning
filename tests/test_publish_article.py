@@ -376,10 +376,14 @@ def test_the_repair_vs_wiseft_table_is_shown_only_when_p07_writes_it(out):
     sentence read from its intervals, and shows nothing (no placeholder) while it is absent."""
     from publish_fakes import report
 
-    write_inputs()
+    doc = report()
+    del doc["tables"]["repair_vs_wiseft"]
+    write_report(doc)
     text = article.build()[0].read_text(encoding="utf-8")
     assert "not pre-registered" not in text and text.count("simply scaling the adapter down") == 1
-    doc = report()
+    assert not article.placeholders(text) or all(
+        "wiseft" not in p.lower() for p in article.placeholders(text)
+    )
     doc["tables"]["repair_vs_wiseft"] = _vs_wiseft_table()
     write_report(doc)
     path, facts = article.build()
@@ -436,3 +440,47 @@ def test_the_design_counts_are_checked_against_the_evaluated_ones(out):
     text = " ".join(path.read_text(encoding="utf-8").split())
     assert "Hindi (380)" in text and "400 designed" in text and "match this design" not in text
     assert any(s["pointer"] == "/tables/per_language/rows/0/n" and s["shown"] == "380" for s in facts.sources)
+
+
+def test_p07s_repair_vs_wiseft_table_renders_with_its_label(out):
+    """The table as P07 writes it (origin/p07-final-report @ 4e4f007), labelled "not pre-registered,
+    descriptive", with an undefined gain kept shown as P07 says it."""
+    from publish_fakes import UNDEFINED_GAIN
+
+    write_inputs()
+    text = article.build()[0].read_text(encoding="utf-8")
+    section = _section(text, "Each repair against WiSE-FT attenuation")
+    assert "(not pre-registered, descriptive)" in section.splitlines()[0]
+    assert UNDEFINED_GAIN in section and "| resta | resta-a0.25-adapter-aya-std-s1 |" in section
+    sentence = " ".join(section.split())
+    assert '"Harmful rate - WiSE-FT" lies wholly below zero for resta; includes zero for cast' in sentence
+
+
+def test_an_undefined_utility_share_is_shown_as_p07_says_it(out):
+    """decisions.md 73: headline.utility_retained may be P07's "undefined: ..." string (no adapter gain);
+    it renders as it is, recorded in the sources, never as a number or "not run"."""
+    from publish_fakes import UNDEFINED_GAIN, report
+
+    doc = report()
+    doc["headline"]["utility_retained"] = UNDEFINED_GAIN
+    card, _ = _card_from(doc)
+    line = next(x for x in card.splitlines() if x.startswith("- **Utility kept**"))
+    assert line.endswith(UNDEFINED_GAIN)
+
+
+def _card_from(doc):
+    from lift.publish import model
+    from lift.publish.inputs import Facts
+    from lift.schemas import VariantSpec
+
+    write_report(doc)
+    spec = VariantSpec(
+        name="wiseft-l0.50-adapter-aya-std-s1",
+        method="wiseft",
+        adapter="adapter-aya-std-s1",
+        seed=1,
+        params={"lambda": 0.5},
+        artifacts={"adapter": "a" * 64},
+    )
+    facts = Facts()
+    return model.model_card(facts, spec.name, spec), facts

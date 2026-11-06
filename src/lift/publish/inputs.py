@@ -34,7 +34,7 @@ checked against their writers on origin/p05-repairs and origin/p07-final-report 
                    "verdict": "retain" | "repair" | "reject" | null, "reason": "<one sentence>"}],
      "primary": {"drift": <Effect>, "repair": <Effect>,
                  "redteam_drift": <Effect>, "redteam_repair": <Effect>},
-     "headline": {"utility_retained": <Interval>, "belebele_hi_change": <Interval>,
+     "headline": {"utility_retained": <Interval> | "undefined: <reason>", "belebele_hi_change": <Interval>,
                   "overrefusal_hard_hi_change": <Interval>,
                   "gpu_hours_per_checkup": <number>,         # dev sweep + final battery of stock, the
                                                               # seed-1 adapter and the seed-1 winner
@@ -67,8 +67,10 @@ stats``, a stale pull, a report made before the block existed) refuses everythin
 
 Formats: pct (0.123 -> 12.3%), pp (signed points), points (0.05 -> 5 points), pct_ci, pp_ci, p, int,
 f2, f3, hours, ms, text, list ([1, 2] -> "1, 2"), and P08's own p_stmt for running text ("p < 0.001",
-"p = 0.031", "p not run"). A null anywhere on a value's path (``pooled`` of an arm
-not run) renders as "not run"; only a missing key renders as pending.
+"p = 0.031", "p not run"). In any format, P07's "undefined" or "undefined: <reason>" (a value computed
+but undefined, decisions.md 73, e.g. ``headline.utility_retained`` when the adapter shows no gain) is
+shown as it is; any other text where a number belongs is refused. A null anywhere on a value's path
+(``pooled`` of an arm not run) renders as "not run"; only a missing key renders as pending.
 """
 
 from __future__ import annotations
@@ -108,6 +110,7 @@ TABLES = {
 # P06 (the exploratory diagnosis) may never be built; P08 invents no contract for it.
 OPTIONAL = {"signatures": "the exploratory diagnosis (P06) put no signatures in final_report.json"}
 NOT_RUN = "not run"
+UNDEFINED = "undefined"  # P07's text for a value computed but undefined ("undefined: <reason>")
 P07_FIGURES = "P07 lift report"
 # The figures P07's ``lift report`` draws into outputs/figures/ (lift.report.figures.draw_all), with the
 # alt text P08 gives them. The logs dataset carries the PNGs; the article and the logs card embed them.
@@ -129,8 +132,10 @@ def report_path() -> Path:
 
 
 def frozen_recipe_path() -> Path:
-    """P05's committed record of the frozen recipe (review XB-02), once ``lift select`` froze it."""
-    return paths.CONFIG_DIR / "frozen_recipe.json"
+    """P05's committed record of the frozen recipe (review XB-02), once ``lift select`` froze it:
+    ``lift.paths.frozen_recipe_path`` where P05's paths module has it, the same file otherwise."""
+    shared = getattr(paths, "frozen_recipe_path", None)
+    return shared() if callable(shared) else paths.CONFIG_DIR / "frozen_recipe.json"
 
 
 RECIPE_VERSION = 1
@@ -174,6 +179,8 @@ def fmt(value: Any, kind: str) -> str:
     """One value as the public text shows it. None is "not run" (an arm never estimated)."""
     if value is None:
         return f"p {NOT_RUN}" if kind == "p_stmt" else NOT_RUN
+    if isinstance(value, str) and (value == UNDEFINED or value.startswith(UNDEFINED + ":")):
+        return value  # computed but undefined, as P07 says it (decisions.md 73): never a number or "not run"
     if kind == "text":
         return str(value)
     if kind == "pct":

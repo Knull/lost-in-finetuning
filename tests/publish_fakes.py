@@ -52,7 +52,10 @@ P07_TABLES = (
     "belebele",
     "judge_sensitivity",
     "cost",
+    "repair_vs_wiseft",
 )
+# P07's analysis.UNDEFINED_GAIN (decisions.md 73): a share computed but undefined says so, never None.
+UNDEFINED_GAIN = "undefined: the adapter shows no utility gain over parity"
 P07_LANG_NAMES = {
     "en": "English",
     "hi": "Hindi",
@@ -330,6 +333,7 @@ def _p07_tables() -> dict:
             "Cost of the final evaluation",
             "GPU-hours: the variant's whole final evaluation.",
         ),
+        "repair_vs_wiseft": repair_vs_wiseft(),
         "cells": table(
             [
                 ("variant", "Variant", "text"),
@@ -341,6 +345,44 @@ def _p07_tables() -> dict:
             "Every final cell (variant x set x language)",
         ),
     }
+
+
+def repair_vs_wiseft() -> dict:
+    """P07's ``tables.repair_vs_wiseft`` (origin/p07-final-report @ 4e4f007): each other frozen family
+    minus WiSE-FT, descriptive; ``gain_kept`` is a text column (an interval as text, or undefined)."""
+    return table(
+        [
+            ("family", "Family", "text"),
+            ("variant", "Frozen setting (seed 1)", "text"),
+            ("reference", "WiSE-FT frozen setting (seed 1)", "text"),
+            ("harmful", "Harmful rate - WiSE-FT", "pp_ci"),
+            ("overrefusal", "Hard-benign refusal - WiSE-FT", "pp_ci"),
+            ("gain_kept", "Utility gain kept - WiSE-FT's", "text"),
+            ("seeds", "Seeds", "text"),
+        ],
+        [
+            {
+                "family": "resta",
+                "variant": "resta-a0.25-adapter-aya-std-s1",
+                "reference": WINNER,
+                "harmful": interval(-0.04, -0.08, -0.01),
+                "overrefusal": interval(0.0, -0.1, 0.1),
+                "gain_kept": "+0.0 pp [-10.0, +10.0] (seeds 1, 2, 3)",
+                "seeds": "1, 2, 3",
+            },
+            {
+                "family": "cast",
+                "variant": "cast-m1.0-adapter-aya-std-s1",
+                "reference": WINNER,
+                "harmful": interval(0.01, -0.02, 0.04),
+                "overrefusal": None,
+                "gain_kept": UNDEFINED_GAIN,
+                "seeds": "1, 2",
+            },
+        ],
+        "Each repair against WiSE-FT attenuation, final split, Hindi (not pre-registered, descriptive)",
+        "Not pre-registered, descriptive (docs/decisions.md 76): estimates and intervals only.",
+    )
 
 
 def report(selection_doc: dict | None = None) -> dict:
@@ -508,12 +550,13 @@ def write_json(path: Path, doc: dict) -> Path:
 
 def binding(selection_doc: dict) -> dict:
     """final_report.json's ``selection`` block as P07 writes it (review XB-04 contract): the overall
-    winner, the frozen map and the sha256 of the selection.json bytes, plus P07's older keys."""
+    winner, the frozen map and the sha256 of the selection.json bytes, plus the keys P08 does not check
+    (``adapter_name``, ``selection_verdict``, ``winner_family``), as on origin/p07-final-report @ 4e4f007."""
     overall = selection_doc.get("overall") or {}
     winner = overall.get("winner")
     frozen = dict(selection_doc.get("frozen") or {})
     return {
-        "adapter": selection_doc.get("adapter"),
+        "adapter_name": selection_doc.get("adapter"),
         "winner_family": next((f for f, name in frozen.items() if name == winner), None),
         "selection_verdict": overall.get("verdict"),
         "winner": winner,
