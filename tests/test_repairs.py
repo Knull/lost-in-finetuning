@@ -386,3 +386,60 @@ def test_settings_follow_the_config():
     with pytest.raises(ValueError, match="unknown"):
         rs.settings(["dare"])
     assert json.loads(json.dumps(rs.entry(all_specs()[1][0])))["note"]
+
+
+# --- lift fit-cast --------------------------------------------------------------------------------------
+
+
+def fit_store(store, n=4, salt=""):
+    for lang in ("en", "hi", "zh", "es", "ar", "th"):
+        store[("harmful", lang)] = [make_prompt(f"prh-train-{i:04d}", lang, "harmful", "train",
+                                                HARMFUL[i] + salt) for i in range(n)]
+        store[("easy_benign", lang)] = [make_prompt(f"prb-train-{i:04d}", lang, "easy_benign", "train",
+                                                    BENIGN[i]) for i in range(n)]
+        store[("hard_benign", lang)] = [make_prompt(f"orb-{i:04d}", lang, "hard_benign", "fit", TEXTS[i])
+                                        for i in range(n)]
+
+
+def test_lift_fit_cast(fake_prompt_files, tiny_lora_adapter, tiny_model_dir, monkeypatch, capsys):
+    from lift import cli
+
+    install(tiny_lora_adapter)
+    cast_registry(monkeypatch, tiny_lora_adapter, None)
+    view = config.load("project")
+    monkeypatch.setitem(view["models"]["global"], "id", str(tiny_model_dir))
+    monkeypatch.setitem(view["models"]["global"], "revision", "a" * 40)
+    fit_store(fake_prompt_files)
+    line = ["fit-cast", "--adapter", ADAPTER, "--device", "cpu", "--dtype", "fp32"]
+    assert cli.main(line) == 0
+    out = capsys.readouterr().out
+    assert "held-out F1" in out and "  hi: harmful" in out
+    path = cast.artifact_path(ADAPTER)
+    info = rs.read_cast_info(path)
+    assert info["adapter_hash"] == merge.adapter_hash(tiny_lora_adapter) and info["dtype"] == "fp32"
+    assert info["n_harmful"] == 24 and info["n_benign"] == 48
+    report = json.loads((path.parent / cast.REPORT).read_text(encoding="utf-8"))
+    assert report["sha256"] == cast.artifact_hash(path)
+    firing = report["firing_heldout"]
+    assert sorted(firing["harmful"]) == sorted(firing["benign"]) == sorted(config.get("languages.all"))
+    held = sum(c["n"] for lang in firing["harmful"].values() for c in lang.values())
+    assert held == 12                                                         # the held-out half
+    assert set(firing["benign"]["hi"]) == {"easy_benign", "hard_benign"}
+    assert report["counts"]["harmful"]["harmful_hi_train"] == 4
+    assert report["safetune_config"]["legacy_cast_gate"] is False
+    digest = cast.artifact_hash(path)
+    assert cli.main(line) == 0 and "kept" in capsys.readouterr().out          # a rerun keeps it
+    fit_store(fake_prompt_files, salt=" now")                                 # other prompts: refused
+    assert cli.main(line) == 2
+    assert cast.artifact_hash(path) == digest
+    assert cli.main([*line, "--refit"]) == 0 and cast.artifact_hash(path) != digest
+
+
+def test_hidden_states_only_leaves_the_model_as_it_was(fitted):
+    model, tok, _ = fitted
+    ids = torch.tensor([encode(tok, "hello")])
+    full = model(input_ids=ids).logits
+    with cast._hidden_states_only(model):
+        assert model(input_ids=ids).logits.shape[1] == 1
+    assert "forward" not in vars(model)
+    assert torch.equal(model(input_ids=ids).logits, full)
