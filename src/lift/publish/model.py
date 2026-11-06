@@ -255,11 +255,11 @@ def build_model(
     folder.mkdir(parents=True, exist_ok=True)
     expected: list[str] = []
     notes: list[str] = []
-    if variant is None:
+    if variant is None or facts.selection() is None:
         expected.append(f"the frozen winner ({shown(selection_path())}, {P05})")
-    elif spec is None:
+    if variant is not None and spec is None:
         expected.append(f"the configs/variants.yaml entry of {variant} (P05 freeze)")
-    else:
+    elif spec is not None:
         if spec.seed not in (None, 1):
             notes.append(f"{variant} is seed {spec.seed}; the model card describes the seed-1 winner")
         render.write_text(folder / "repair" / "params.json", json.dumps(params_doc(spec), indent=1))
