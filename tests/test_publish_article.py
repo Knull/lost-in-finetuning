@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from publish_fakes import no_committed_recipe, write_inputs, write_json, write_report  # noqa: F401
 
-from lift.publish import article, settings
+from lift.publish import PublishError, article, settings
 from lift.publish.collect import links_path
 from lift.publish.inputs import PENDING
 
@@ -392,8 +393,9 @@ def test_the_repair_vs_wiseft_table_is_shown_only_when_p07_writes_it(out):
     assert "| resta | -4.0 pp [-8.0, -1.0] | +0.0 pp [-10.0, +10.0] |" in section
     assert "not pre-registered" in section
     sentence = " ".join(section.split())
-    assert "wholly below zero for resta" in sentence and "includes zero for cast" in sentence
-    assert "Hindi harmful rate: family - WiSE-FT" in sentence
+    assert 'For resta: better than WiSE-FT on "Hindi harmful rate" (lower)' in sentence
+    assert 'no clear difference on "Gain kept"' in sentence
+    assert 'For cast: no clear difference on "Hindi harmful rate"; "Gain kept" not run' in sentence
     assert text.index("### Repair comparison") < text.index("### Each repair against")
     assert any(s["pointer"] == "/tables/repair_vs_wiseft/rows/0/harmful" for s in facts.sources)
     assert any(s["pointer"] == "/tables/repair_vs_wiseft/title" for s in facts.sources)
@@ -453,7 +455,47 @@ def test_p07s_repair_vs_wiseft_table_renders_with_its_label(out):
     assert "(not pre-registered, descriptive)" in section.splitlines()[0]
     assert UNDEFINED_GAIN in section and "| resta | resta-a0.25-adapter-aya-std-s1 |" in section
     sentence = " ".join(section.split())
-    assert '"Harmful rate - WiSE-FT" lies wholly below zero for resta; includes zero for cast' in sentence
+    assert (
+        'For resta (seeds 1, 2, 3): better than WiSE-FT on "Harmful rate" (lower); no clear difference on '
+        '"Hard-benign refusal" and "Utility gain kept".' in sentence
+    )
+    assert (
+        'For cast (seeds 1, 2): no clear difference on "Harmful rate"; "Hard-benign refusal" not run; '
+        '"Utility gain kept" undefined.' in sentence
+    )
+
+
+def test_the_wiseft_answer_reads_every_column_and_says_which_way(out):
+    """XB2-06: the answer names, per family and with its seeds, every column whose interval excludes
+    zero and whether that is better or worse than WiSE-FT (a higher harmful or refusal rate is worse, a
+    higher gain kept is better), and repeats no number but the seeds (the table holds them)."""
+    from publish_fakes import interval, report
+
+    doc = report()
+    cast = doc["tables"]["repair_vs_wiseft"]["rows"][1]
+    cast["overrefusal"] = interval(0.167, 0.033, 0.30)
+    cast["gain_kept"] = "-40.0 pp [-100.0, -8.3] (seeds 1, 2)"
+    resta = doc["tables"]["repair_vs_wiseft"]["rows"][0]
+    resta["harmful"] = interval(0.05, 0.01, 0.09)
+    resta["gain_kept"] = "+12.0 pp [+2.0, +22.0] (seeds 1, 2, 3)"
+    write_report(doc)
+    text = article.build()[0].read_text(encoding="utf-8")
+    section = _section(text, "Each repair against WiSE-FT attenuation")
+    sentence = " ".join(section.split("\n|")[0].split())
+    assert (
+        'For resta (seeds 1, 2, 3): better than WiSE-FT on "Utility gain kept" (higher); worse than '
+        'WiSE-FT on "Harmful rate" (higher); no clear difference on "Hard-benign refusal".' in sentence
+    )
+    assert (
+        'For cast (seeds 1, 2): worse than WiSE-FT on "Hard-benign refusal" (higher) and "Utility gain '
+        'kept" (lower); no clear difference on "Harmful rate".' in sentence
+    )
+    assert set(re.findall(r"\d+(?:\.\d+)?", sentence)) <= {"95", "1", "2", "3"}
+    assert "zero" in sentence and "minus WiSE-FT" in sentence
+    doc["tables"]["repair_vs_wiseft"]["rows"][0]["gain_kept"] = "about ten points"
+    write_report(doc)
+    with pytest.raises(PublishError, match="repair_vs_wiseft"):
+        article.build()
 
 
 def test_an_undefined_utility_share_is_shown_as_p07_says_it(out):

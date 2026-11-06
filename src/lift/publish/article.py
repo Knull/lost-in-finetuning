@@ -28,6 +28,7 @@ from lift.publish.inputs import (
     P07,
     RECIPE_IN_GIT,
     TABLES,
+    UNDEFINED,
     Facts,
     _interval,
     pending,
@@ -233,45 +234,117 @@ def _is_vs_wiseft(name: str, spec: dict) -> bool:
     return "wiseft" in words
 
 
+# An interval P07 wrote as text (a ``text`` column, as repair_vs_wiseft's gain kept): "+1.0 pp [-2.0, +4.0]".
+_TEXT_INTERVAL = re.compile(
+    r"^\s*[+-]?\d+(?:\.\d+)?\s*pp\s*\[\s*(?P<lo>[+-]?\d+(?:\.\d+)?)\s*,\s*(?P<hi>[+-]?\d+(?:\.\d+)?)\s*\]"
+)
+# Which way is better for a "repair - WiSE-FT" column, read from its key and label: a higher harmful or
+# refusal rate is worse; a higher gain kept, utility or accuracy is better. None: no direction is claimed.
+_WORSE_IF_HIGHER = ("harm", "refus")
+_BETTER_IF_HIGHER = ("gain", "kept", "retain", "utility", "win", "belebele", "accuracy")
+_NOT_A_CONTRAST = {"seeds", "variant", "reference"}
+
+
+def _column_name(column: dict) -> str:
+    """A contrast column as the sentence names it: its label without the " - WiSE-FT..." part."""
+    label = str(column.get("label") or column["key"])
+    return '"' + re.split(r" - |: ", label)[0].strip() + '"'
+
+
+def _higher_is_better(column: dict) -> bool | None:
+    words = f"{column['key']} {column.get('label', '')}".lower()
+    if any(w in words for w in _WORSE_IF_HIGHER):
+        return False
+    if any(w in words for w in _BETTER_IF_HIGHER):
+        return True
+    return None
+
+
+def _bounds(value: object) -> tuple[float, float] | str:
+    """(lo, hi) of an interval cell (an Interval, or P07's interval text), or "not run" / "undefined"."""
+    if value is None:
+        return "not run"
+    if isinstance(value, str):
+        if value == UNDEFINED or value.startswith(UNDEFINED + ":"):
+            return "undefined"
+        m = _TEXT_INTERVAL.match(value)
+        if m is None:
+            raise ValueError(f"not an interval: {value!r}")
+        return float(m["lo"]), float(m["hi"])
+    _, lo, hi = _interval(value)
+    return lo, hi
+
+
+def _is_contrast(column: dict, rows: list[dict], who: dict) -> bool:
+    """An interval column: a ``*_ci`` format, or a text column whose cells are P07's interval text."""
+    if column is who or column["key"] in _NOT_A_CONTRAST:
+        return False
+    if str(column.get("format", "")).endswith("_ci"):
+        return True
+    cells = [r.get(column["key"]) for r in rows]
+    return any(isinstance(c, str) and _TEXT_INTERVAL.match(c) for c in cells)
+
+
+def _and(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
 def vs_wiseft_sentence(name: str, spec: dict) -> str:
-    """One sentence answering "does any repair beat simply scaling the adapter down?" from P07's
-    descriptive table (review XB-07): where each row's first interval column lies against zero. It
-    repeats no number (the table below holds them, recorded in the sources); "" when the table has no
-    text column and no interval column to read."""
+    """The answer to "does any repair beat simply scaling the adapter down?" from P07's descriptive table
+    (review XB-07, XB2-06): for each family, with the seeds its row names, every interval column read
+    against zero, the direction said (better or worse than WiSE-FT, by the column's meaning, or no clear
+    difference where the interval includes zero), and a cell not run or undefined said so. It repeats no
+    number but the seeds (the table below holds them, recorded in the sources) and gives no verdict: the
+    contrast is descriptive. "" when the table has no text column and no interval column to read."""
     columns = spec.get("columns") or []
+    rows = list(spec.get("rows") or [])
     who = next((c for c in columns if c.get("format", "text") == "text"), None)
-    ci = next((c for c in columns if str(c.get("format", "")).endswith("_ci")), None)
-    if who is None or ci is None:
+    if who is None:
         return ""
-    where: dict[str, list[str]] = {}
-    for row in spec.get("rows") or []:
-        value = row.get(ci["key"])
-        if value is None:
-            place = NOT_RUN_PLACE
-        else:
+    contrasts = [c for c in columns if _is_contrast(c, rows, who)]
+    seeds_col = next((c for c in columns if c["key"] == "seeds"), None)
+    if not contrasts or not rows:
+        return ""
+    sentences = []
+    for row in rows:
+        groups: dict[str, list[str]] = {}
+        for c in contrasts:
             try:
-                _, lo, hi = _interval(value)
+                bounds = _bounds(row.get(c["key"]))
             except (KeyError, TypeError, ValueError) as exc:
                 raise PublishError(f"{shown(report_path())}/tables/{name}: {exc}") from exc
-            place = (
-                "lies wholly below zero"
-                if hi < 0
-                else "lies wholly above zero"
-                if lo > 0
-                else "includes zero"
-            )
-        where.setdefault(place, []).append(str(row.get(who["key"])))
-    if not where:
-        return ""
-    order = ("lies wholly below zero", "lies wholly above zero", "includes zero", NOT_RUN_PLACE)
-    parts = [f"{place} for {', '.join(where[place])}" for place in order if place in where]
+            col = _column_name(c)
+            if isinstance(bounds, str):
+                groups.setdefault(bounds, []).append(col)
+                continue
+            lo, hi = bounds
+            if lo <= 0 <= hi:
+                groups.setdefault("same", []).append(col)
+                continue
+            higher = lo > 0
+            better = _higher_is_better(c)
+            way = "higher" if higher else "lower"
+            if better is None:
+                groups.setdefault(way, []).append(col)
+            else:
+                groups.setdefault("better" if better == higher else "worse", []).append(f"{col} ({way})")
+        parts = [
+            f"better than WiSE-FT on {_and(groups['better'])}" if "better" in groups else "",
+            f"worse than WiSE-FT on {_and(groups['worse'])}" if "worse" in groups else "",
+            f"higher than WiSE-FT on {_and(groups['higher'])}" if "higher" in groups else "",
+            f"lower than WiSE-FT on {_and(groups['lower'])}" if "lower" in groups else "",
+            f"no clear difference on {_and(groups['same'])}" if "same" in groups else "",
+            f"{_and(groups['not run'])} not run" if "not run" in groups else "",
+            f"{_and(groups['undefined'])} undefined" if "undefined" in groups else "",
+        ]
+        seeds = row.get(seeds_col["key"]) if seeds_col else None
+        family = str(row.get(who["key"])) + (f" (seeds {seeds})" if seeds not in (None, "") else "")
+        sentences.append(f"For {family}: {'; '.join(p for p in parts if p)}.")
     return (
         "Does any repair beat simply scaling the adapter down? Descriptively (paired, unadjusted, not "
-        f'pre-registered), the 95% interval of "{ci.get("label", ci["key"])}" {"; ".join(parts)}.\n\n'
+        "pre-registered; each column of the table below is the repair minus WiSE-FT, and a difference counts "
+        "only where its 95% interval excludes zero): " + " ".join(sentences) + "\n\n"
     )
-
-
-NOT_RUN_PLACE = "was not estimated (not run)"
 
 
 def extra_tables(facts: Facts) -> str:
