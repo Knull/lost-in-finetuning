@@ -215,3 +215,37 @@ def summarise(
         "note": "screening on a small dev sample; utility and Belebele checks are separate (lift utility, "
         "lift belebele)",
     }
+
+
+def fetch_params(repo_id: str, variant: str, *, download: Callable[..., Any] | None = None) -> Path:
+    """The frozen setting's params/{variant}.json from the published repair-parameters repo."""
+    if download is None:
+        from huggingface_hub import hf_hub_download as download
+    return Path(download(repo_id=repo_id, filename=f"params/{variant}.json"))
+
+
+def markdown(summary: Mapping[str, Any]) -> str:
+    """The summary as a markdown table plus the screening verdict (for IPython.display.Markdown)."""
+    from lift.publish.inputs import fmt
+    from lift.publish.render import markdown_table
+
+    rows = [
+        [
+            r["variant"],
+            r["set"],
+            r["lang"],
+            fmt(r["n"], "int"),
+            fmt(r["harmful_rate"], "pct"),
+            fmt(r["harmful_upper"], "pct"),
+            fmt(r["refusal_rate"], "pct"),
+        ]
+        for r in summary["rows"]
+    ]
+    table = markdown_table(["variant", "set", "lang", "n", "harmful", "harmful (upper)", "refusal"], rows)
+    tests = [
+        f"- {name}: {fmt(t['diff'], 'pp')}, McNemar p = {fmt(t['p_value'], 'p')} (n = {t['n']})"
+        for name, t in summary["tests"].items()
+    ]
+    return "\n".join(
+        [table, "", *tests, "", f"**Screening verdict: {summary['verdict']}** ({summary['note']})"]
+    )
