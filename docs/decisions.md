@@ -26,7 +26,8 @@ been built on Tiny Aya and no sweep number existed. Numbered from 67 (the review
       whose sha256 every CAST entry pins (`artifacts.cast`), with the fitted layer, threshold and
       comparator copied into its params. A refit changes the hash, so registered entries must be replaced
       (`lift register-repairs --replace`) and their outputs go stale; `lift fit-cast` keeps an artifact
-      fitted on the same adapter hash, prompts and precision, and refuses another without `--refit`.
+      fitted on the same adapter hash, Global revision, prompts and precision, and refuses another without
+      `--refit`.
     - The gate's prefill pass runs with position ids counted from each row's first real token and
       `logits_to_keep=1`: the condition layer's hidden states are what the fit read (each prompt alone),
       and full logits for a padded batch would cost gigabytes on a 262k vocabulary. The fit also computes
