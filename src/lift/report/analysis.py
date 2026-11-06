@@ -12,7 +12,8 @@ harness, template or decoding differ, so pairs are built only from records of on
   back-translation sample (``lift.final.read_bt``).
 
 A cell that cannot be read is an arm not run: its numbers are None ("not run"), the reason is kept, and it is
-never estimated. A pooled effect pools the seeds that were run, and names them.
+never estimated. Two cells that were both run but cannot be paired (``Unpairable``) stop lift stats instead.
+A pooled effect pools the seeds that were run, and names them.
 
 What it computes (README: Endpoints, Statistics, Verdict; docs/decisions.md 71-73 pin what the README left
 open):
@@ -73,6 +74,12 @@ class Missing(ValueError):
     """An input that cannot be read: the arm is "not run" (never estimated)."""
 
 
+class Unpairable(RuntimeError):
+    """Both cells of a pair were run and read, but ``paired_labels`` refuses to pair them (another judge,
+    precision, model revision, harness, template or decoding, or other pids). Not an arm "not run": lift stats
+    stops with the refusal (P07: refuse a mixed pair loudly)."""
+
+
 def stats_path() -> Path:
     return metrics_dir() / "final_stats.json"
 
@@ -88,12 +95,16 @@ class Source:
         self.dtype = dtype or str(config.get("generation.dtype"))
 
     def pair(self, a: str, b: str, set_name: str, lang: str) -> tuple[dict[str, str], dict[str, str]]:
+        """Both sides through ``paired_labels``. A side that cannot be read on its own is ``Missing`` (not
+        run); two readable sides it refuses to pair raise ``Unpairable``, never "not run"."""
         from lift.judge import pipeline
 
+        for variant in (a, b):
+            self.records(variant, set_name, lang)
         try:
             return pipeline.paired_labels(a, b, set_name, lang, SPLIT, judge="primary", dtype=self.dtype)
         except (OSError, ValueError) as exc:
-            raise Missing(_short(exc)) from None
+            raise Unpairable(str(exc)) from None
 
     def records(self, variant: str, set_name: str, lang: str, *, judge: str = "primary") -> list[Any]:
         from lift.judge import pipeline

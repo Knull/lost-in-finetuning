@@ -12,13 +12,18 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 
 
 def _stats(args: argparse.Namespace) -> int:
     from lift.report import analysis
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
-    doc = analysis.run(dtype=args.dtype)
+    try:
+        doc = analysis.run(dtype=args.dtype)
+    except analysis.Unpairable as exc:
+        print(f"lift stats: refused: {exc}", file=sys.stderr)
+        return 2
     for v in doc["verdicts"]:
         print(f"{v['adapter']} ({v['recipe']}): {v['verdict'] or 'not run'}. {v['reason']}")
     for key in ("drift", "repair"):

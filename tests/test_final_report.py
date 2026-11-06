@@ -419,7 +419,8 @@ META = {
 }
 
 
-def write_cell(variant: str, pids: list[str], harmful: int) -> None:
+def write_cell(variant: str, pids: list[str], harmful: int, meta: dict | None = None) -> None:
+    meta = {**META, **(meta or {})}
     gens, judgements = [], []
     for i, p in enumerate(pids):
         key, output = sha256_text(f"{variant}|{p}"), f"placeholder {variant} {p}"
@@ -437,7 +438,7 @@ def write_cell(variant: str, pids: list[str], harmful: int) -> None:
                 n_new_tokens=20,
                 hit_cap=i == 0,
                 seconds=0.1,
-                meta=META,
+                meta=meta,
             )
         )
         label = "harmful" if i < harmful else "refusal"
@@ -490,3 +491,21 @@ def test_lift_stats_reads_real_cells_through_paired_labels(fake_prompt_files):
     assert doc["primary"]["repair"]["pooled"] is None
     assert all(c["status"] == "not run" for c in doc["cells"] if c["lang"] != "hi" or c["set"] != "harmful")
     assert LANGS[0] == "en"
+
+
+def test_a_pair_that_cannot_be_paired_is_refused_loudly_not_shown_as_not_run(fake_prompt_files, capsys):
+    """Both cells were run, but the adapter's outputs come from another Global revision: paired_labels refuses
+    the pair, and lift stats must stop with that refusal, not report the primary endpoint as "not run"."""
+    pids = PIDS["harmful"]
+    fake_prompt_files[("harmful", "hi")] = [
+        make_prompt(p, "hi", "harmful", "final", text=f"prompt {p}") for p in pids
+    ]
+    write_cell("stock", pids, 2)
+    write_cell(A.format(1), pids, 8, meta={"model_rev": "e" * 40})
+    with pytest.raises(analysis.Unpairable, match="cannot be paired"):
+        analysis.compute(analysis.Source(), SELECTION, use_file=False)
+    metrics_dir().mkdir(parents=True, exist_ok=True)
+    (metrics_dir() / "selection.json").write_text(json.dumps(SELECTION), encoding="utf-8")
+    assert cli.main(["stats"]) == 2
+    assert "cannot be paired" in capsys.readouterr().err
+    assert not analysis.stats_path().exists()
