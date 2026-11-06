@@ -93,20 +93,25 @@ def forbidden_path(path: str) -> bool:
     return any(fnmatch(path, pat) for pat in FORBIDDEN_PATHS)
 
 
+# An AuditKIT record line that keeps an output (a redacted record stores "[redacted sha256:...]").
+_KEPT_OUTPUT = re.compile(r'"actual_output"\s*:\s*"(?!\[redacted)[^"]')
+
+
 def _raw_record(line: str) -> bool:
     s = line.strip()
-    if not ((s.startswith("{") and '"output"' in s) or '"actual_output"' in s):
+    if _KEPT_OUTPUT.search(s):
+        return True
+    if not (s.startswith("{") and '"output"' in s):
         return False
     try:
-        row = json.loads(s.rstrip(","))
+        row = json.loads(s)
     except json.JSONDecodeError:
-        return '"actual_output"' in s and "[redacted" not in s and '"actual_output": ""' not in s
-    if not isinstance(row, dict):
         return False
-    if {"key", "variant", "output"} <= row.keys() and str(row.get("output") or "").strip():
-        return True
-    out = row.get("actual_output")
-    return isinstance(out, str) and bool(out.strip()) and not out.startswith("[redacted")
+    return (
+        isinstance(row, dict)
+        and {"key", "variant", "output"} <= row.keys()
+        and bool(str(row.get("output") or "").strip())
+    )
 
 
 def scan_text(text: str, path: str, where: str, windows: set[str]) -> list[Finding]:

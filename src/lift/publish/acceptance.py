@@ -30,7 +30,12 @@ def adapter_name(seed: int = 1) -> str:
 
 
 def fetch_adapter(
-    repo_id: str, *, revision: str | None = None, seed: int = 1, download: Callable[..., Any] | None = None
+    repo_id: str,
+    *,
+    revision: str | None = None,
+    seed: int = 1,
+    download: Callable[..., Any] | None = None,
+    registry: Path | None = None,
 ) -> str:
     """Download a LoRA adapter of Tiny Aya Global from the Hub into outputs/adapters/{name} and register
     it in this checkout's configs/variants.yaml (adapter name ``adapter-notebook-std-s{seed}``)."""
@@ -56,6 +61,7 @@ def fetch_adapter(
         seed=seed,
         location=f"hf:{repo_id}@{revision or 'main'}",
         note="registered by the acceptance-test notebook",
+        registry=registry,
         replace=True,
     )
     return name
@@ -91,7 +97,7 @@ def _entry_lines(entry: Mapping[str, Any]) -> list[str]:
 def register_repair(adapter: str, frozen: Mapping[str, Any], *, registry: Path | None = None) -> str:
     """Register the frozen repair applied to ``adapter`` (WiSE-FT or ReSta: same parameters, this adapter's
     hash). CAST needs its own fit on the adapter first (``lift fit-cast``, P05), which writes the entry."""
-    from lift.models.variants import get_spec, load_registry
+    from lift.models.variants import get_spec
 
     method = frozen["method"]
     if method in CAST_METHODS:
@@ -116,19 +122,34 @@ def register_repair(adapter: str, frozen: Mapping[str, Any], *, registry: Path |
         "note": "the frozen repair, applied by the acceptance-test notebook",
     }
     path = Path(registry) if registry is not None else paths.CONFIG_DIR / "variants.yaml"
-    before = load_registry()
+    text = path.read_text(encoding="utf-8")
+    before = _names(text)
     if name in before:
         return name
-    text = path.read_text(encoding="utf-8")
     new = text + ("" if text.endswith("\n") else "\n") + "\n".join(_entry_lines(entry)) + "\n"
-    path.write_text(new, encoding="utf-8", newline="\n")
-    config.load.cache_clear()
-    after = load_registry()
-    if set(after) != set(before) | {name}:
-        path.write_text(text, encoding="utf-8", newline="\n")
-        config.load.cache_clear()
+    try:
+        after = _names(new)
+    except Exception:  # any parse failure means the text edit is unsafe
+        after = []
+    if sorted(after) != sorted([*before, name]):
         raise PublishError(f"could not add {name} to {path} as text; add it by hand: {json.dumps(entry)}")
+    path.write_text(new, encoding="utf-8", newline="\n")
+    clear = getattr(config.load, "cache_clear", None)
+    if clear is not None:
+        clear()  # this process reads the new registry from now
     return name
+
+
+def _names(text: str) -> list[str]:
+    import yaml
+
+    from lift.schemas import VariantSpec
+
+    out = []
+    for entry in (yaml.safe_load(text) or {}).get("variants") or []:
+        fields = {k: v for k, v in dict(entry).items() if k not in ("location", "note")}
+        out.append(VariantSpec.model_validate(fields).name)
+    return out
 
 
 def run_check(

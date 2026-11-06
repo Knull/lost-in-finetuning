@@ -83,7 +83,8 @@ def heatmap_matrix(report: dict | None, metric: str = "harmful_rate", set_name: 
     """(row labels, column labels, matrix) of ``metric`` per variant role and language."""
     rows = (((report or {}).get("tables") or {}).get("per_language") or {}).get("rows") or []
     rows = [r for r in rows if r.get("set", set_name) == set_name and metric in r]
-    langs = sorted({r["lang"] for r in rows}, key=lambda x: (x not in ("hi", "en"), x))
+    order = ["hi", "en", "zh", "es", "ar", "th"]
+    langs = sorted({r["lang"] for r in rows}, key=lambda x: (order.index(x) if x in order else len(order), x))
     names = list(dict.fromkeys(str(r.get("role") or r.get("variant")) for r in rows))
     matrix = [[None] * len(langs) for _ in names]
     for r in rows:

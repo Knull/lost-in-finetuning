@@ -96,12 +96,12 @@ def execute(
     *,
     message: str,
     allow_pending: bool = False,
-    api_factory: Callable[[], Any] = default_api,
+    api_factory: Callable[[], Any] | None = None,
     log: Callable[[str], None] = print,
 ) -> list[str]:
     """Upload every plan (checked first, all of them, before anything is sent). Returns the repo urls."""
     check_ready(uploads, allow_pending=allow_pending)
-    api = api_factory()
+    api = (api_factory or default_api)()
     done = []
     for u in uploads:
         r = u.repo

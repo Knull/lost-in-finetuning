@@ -14,8 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from lift import paths
-from lift.publish import PublishError, render, settings
-from lift.publish.hub import default_api
+from lift.publish import PublishError, hub, render, settings
 from lift.publish.inputs import Facts, frozen_winner
 
 
@@ -58,7 +57,7 @@ def describe(p: dict[str, list[settings.RepoSpec]]) -> list[str]:
 def execute(
     p: dict[str, list[settings.RepoSpec]],
     *,
-    api_factory: Callable[[], Any] = default_api,
+    api_factory: Callable[[], Any] | None = None,
     log: Callable[[str], None] = print,
 ) -> dict[str, dict[str, str]]:
     problems = [
@@ -71,7 +70,7 @@ def execute(
         raise PublishError(
             "not creating collections: no namespace or no frozen winner yet for " + ", ".join(problems)
         )
-    api = api_factory()
+    api = (api_factory or hub.default_api)()
     cfg = settings.load()["collections"]
     out: dict[str, dict[str, str]] = {}
     for key, items in p.items():

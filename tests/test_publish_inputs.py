@@ -1,0 +1,111 @@
+"""lift.publish.inputs and render: formats, placeholders, provenance, templates without typed numbers."""
+
+from __future__ import annotations
+
+import json
+import re
+
+import pytest
+from publish_fakes import write_inputs, write_json
+
+from lift import paths
+from lift.publish import PublishError, render
+from lift.publish.inputs import NOT_RUN, PENDING, Facts, fmt, report_path
+
+
+@pytest.mark.parametrize(
+    "value,kind,shown",
+    [
+        (0.1234, "pct", "12.3%"),
+        (0.041, "pp", "+4.1 pp"),
+        (-0.14, "pp", "-14.0 pp"),
+        ({"est": 0.2, "lo": 0.1, "hi": 0.3}, "pct_ci", "20.0% [10.0, 30.0]"),
+        ([-0.1, -0.15, -0.05], "pp_ci", "-10.0 pp [-15.0, -5.0]"),
+        (0.0004, "p", "<0.001"),
+        (0.0312, "p", "0.031"),
+        (1234, "int", "1,234"),
+        (0.05, "points", "5 points"),
+        (1.5, "hours", "1.50 h"),
+        (None, "pct", NOT_RUN),
+        ("WiSE-FT", "text", "WiSE-FT"),
+    ],
+)
+def test_formats(value, kind, shown):
+    assert fmt(value, kind) == shown
+
+
+@pytest.mark.parametrize(
+    "value,kind",
+    [("x", "pct"), (float("nan"), "pct"), (True, "pct"), (1.5, "int"), ({"est": 1}, "pct_ci"), (1, "nope")],
+)
+def test_bad_values_are_refused(value, kind):
+    with pytest.raises((ValueError, KeyError)):
+        fmt(value, kind)
+
+
+def test_missing_report_renders_pending_and_records_it():
+    facts = Facts()
+    out = facts.report_value("/primary/drift/pooled", "pp_ci", what="the drift")
+    assert out.startswith(PENDING) and "outputs/metrics/final_report.json" in out and "P07" in out
+    assert facts.missing and not facts.sources
+    assert facts.table("per_language").startswith("_" + PENDING)
+
+
+def test_values_and_tables_record_their_source(tmp_path):
+    write_inputs()
+    facts = Facts()
+    assert facts.report_value("/primary/drift/pooled", "pp_ci", what="d") == "+16.0 pp [+11.0, +21.0]"
+    table = facts.table("utility")
+    assert "| Variant | Win rate |" in table and "62.0% [55.0, 69.0]" in table and "not run" in table
+    pointers = {s["pointer"] for s in facts.sources}
+    assert "/primary/drift/pooled" in pointers and "/tables/utility/rows/0/win" in pointers
+    assert {s["file"] for s in facts.sources} == {"outputs/metrics/final_report.json"}
+    out = facts.write_sources(tmp_path / "x.sources.json")
+    assert json.loads(out.read_text())["pending"] == []
+
+
+def test_config_values_are_recorded():
+    facts = Facts()
+    assert facts.config("project", "sizes.harmful.dev", "int") == "172"
+    assert facts.sources[-1]["file"] == "configs/project.yaml"
+
+
+def test_report_version_is_checked():
+    write_json(report_path(), {"version": 99})
+    with pytest.raises(PublishError, match="version"):
+        Facts().report()
+
+
+def test_bad_table_cell_names_the_table():
+    doc = {
+        "version": 1,
+        "tables": {
+            "cost": {"columns": [{"key": "x", "label": "X", "format": "pct"}], "rows": [{"x": "lots"}]}
+        },
+    }
+    write_json(report_path(), doc)
+    with pytest.raises(PublishError, match="tables/cost"):
+        Facts().table("cost")
+
+
+def test_fill_refuses_unknown_slots():
+    assert render.fill("a {{ x }} b", {"x": "1"}) == "a 1 b"
+    with pytest.raises(PublishError, match="y"):
+        render.fill("{{ x }} {{ y }}", {"x": "1"})
+
+
+def test_templates_type_no_result_numbers():
+    """Rule: no number is typed by hand. Templates may name years, versions and the 95% interval
+    convention, but no rate, difference or decimal."""
+    bad = re.compile(r"\d+\.\d+|\d+\s*(?:%|pp\b|points\b)")
+    for path in sorted(render.templates_dir().glob("*.md")) + sorted(render.templates_dir().glob("*.txt")):
+        text = path.read_text(encoding="utf-8").replace("95% interval", "")
+        text = re.sub(r"[A-Za-z]-\d+\.\d+", "", text)  # licence names: CC-BY-4.0, Apache-2.0
+        assert not bad.findall(text), f"{path.name}: {bad.findall(text)}"
+
+
+def test_shown_paths_never_leak_home_dirs():
+    from lift.publish.inputs import shown
+
+    assert shown(paths.metrics_dir() / "x.json") == "outputs/metrics/x.json"
+    assert shown(paths.REPO_ROOT / "configs" / "a.yaml") == "configs/a.yaml"
