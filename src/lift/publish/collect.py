@@ -37,11 +37,8 @@ def plan(facts: Facts | None = None) -> dict[str, list[settings.RepoSpec]]:
     facts = facts or Facts()
     winner = frozen_winner(facts)
     models = [model_repo(facts, winner, _spec(winner) if winner else None), settings.repo("repair_params")]
-    models += [
-        settings.repo("adapter", adapter=name)
-        for name in sorted(registered_adapters())
-        if (paths.adapters_dir() / name).is_dir()
-    ]
+    # every registered adapter, pulled here or not (review XB-05): execute checks each repo is on the Hub
+    models += [settings.repo("adapter", adapter=name) for name in sorted(registered_adapters())]
     models.append(settings.repo("space"))
     data = [settings.repo("logs"), settings.repo("raw"), settings.repo("prompts")]
     return {"models": models, "data": data}

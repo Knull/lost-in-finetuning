@@ -370,3 +370,27 @@ def test_a_winner_changed_after_lift_stats_publishes_nothing(registry):
         model.build_all()
     assert cli.main(["publish", "model"]) == 1
     assert not (model.stage_root() / "model" / "cast-m1.0-adapter-aya-std-s1" / "README.md").exists()
+
+
+def test_an_adapter_not_pulled_is_listed_as_missing_and_blocks_yes(registry, monkeypatch):
+    """XB-05: every registered adapter goes to HF (decisions item 14). One not pulled locally is in the
+    plan with its files missing, so the dry run shows it and --yes refuses; the collections list it."""
+    from lift.publish import collect, hub
+
+    monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
+    absent = VariantSpec(
+        name="adapter-aya-std-s2", method="adapter", adapter="adapter-aya-std-s2", seed=2, artifacts={}
+    )
+    monkeypatch.setattr(variants, "load_registry", lambda: {**SPECS, absent.name: absent})
+    write_inputs()
+    ups = model.build_adapters(Facts())
+    by = {u.repo.repo_id.rsplit("/", 1)[1]: u for u in ups}
+    assert set(by) == {"lift-adapter-aya-std-s1", "lift-adapter-aya-std-s2"}
+    s2 = by["lift-adapter-aya-std-s2"]
+    assert s2.expected and all("lift sync pull" in e for e in s2.expected)
+    assert {e.split()[0].rsplit("/", 1)[1] for e in s2.expected} == set(model.ADAPTER_FILES)
+    assert any("missing until built" in line for line in s2.describe())
+    with pytest.raises(PublishError, match="adapter adapter-aya-std-s2.*not built yet"):
+        hub.check_ready([s2], windows=set())
+    repos = [r.repo_id for r in collect.plan()["models"]]
+    assert "test-org/lift-adapter-aya-std-s2" in repos and "test-org/lift-adapter-aya-std-s1" in repos

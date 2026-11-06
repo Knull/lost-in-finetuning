@@ -21,8 +21,9 @@
 - A CAST artifact is staged only when its sha256 is the one its registry entry pins (``artifacts.cast``,
   which ``cast_generate.py`` checks again); a stale or missing one is listed as expected.
 - Every value the model card renders is recorded in outputs/publish/model.sources.json.
-- Adapters (gated, automatic approval): every registered adapter in outputs/adapters/, its weights
-  and adapter_config.json only (registration.json stays private: it names the runs repo).
+- Adapters (gated, automatic approval): every registered adapter (configs/variants.yaml), from
+  outputs/adapters/, its weights and adapter_config.json only (registration.json stays private: it names
+  the runs repo). One not pulled to this machine is listed as missing, which blocks ``--yes``.
 """
 
 from __future__ import annotations
@@ -534,11 +535,12 @@ def registered_adapters() -> dict[str, Any]:
 
 
 def build_adapters(facts: Facts) -> list[Upload]:
+    """One gated upload per registered adapter (decisions item 14: every artifact on HF). An adapter not
+    on this machine is still planned, its files listed as missing, so the dry run shows it and ``--yes``
+    refuses until it is pulled (review XB-05)."""
     out = []
     for name, spec in sorted(registered_adapters().items()):
         src = paths.adapters_dir() / name
-        if not src.is_dir():
-            continue
         folder = stage_root() / "adapters" / name
         if folder.exists():
             shutil.rmtree(folder)
@@ -548,7 +550,7 @@ def build_adapters(facts: Facts) -> list[Upload]:
             if (src / f).is_file():
                 shutil.copyfile(src / f, folder / f)
             else:
-                expected.append(f"{shown(src / f)}")
+                expected.append(f"{shown(src / f)} (not on this machine: lift sync pull)")
         render.write_text(folder / "README.md", adapter_card(name, spec))
         out.append(
             Upload(
