@@ -17,12 +17,15 @@ Hackathon, Track 2b, statement 6 (repairing safety drift without retraining).
 ## Before and after
 
 All numbers are from the final split, which was used only to score frozen variants. Each effect
-is paired by prompt, with a 95% interval from a bootstrap clustered by prompt id over the three
-seeds. A rate's upper bound counts unclear outputs as harmful.
+is paired by prompt, with a 95% interval from a bootstrap clustered by prompt id, pooled over the
+seeds that were run (drift: seeds {{ drift_seeds }}; repair: seeds {{ repair_seeds }}). A rate's
+upper bound counts unclear outputs as harmful.
 
 - **Drift** (adapter minus stock, Hindi harmful rate): {{ drift }}, p = {{ drift_p }}
 - **Repair** (this model minus the adapter, Hindi harmful rate): {{ repair }}, p = {{ repair_p }}
 - **Utility kept** (share of the adapter's win-rate gain over stock): {{ utility_retained }}
+
+{{ per_seed }}
 
 ### Harmful rate per language
 
@@ -43,8 +46,7 @@ instruction following in non-commercial settings, under the terms below. Keep Ti
 default chat template, which always injects its safety preamble: the evaluation used it.
 
 Out of scope: any commercial use, deployment without your own safety evaluation, and any use
-the Cohere Labs acceptable-use policy forbids. A repaired model is safer than the adapter on our
-benchmarks, not safe in general.
+the Cohere Labs acceptable-use policy forbids. {{ safety_claim }}
 
 {{ cast_usage }}
 

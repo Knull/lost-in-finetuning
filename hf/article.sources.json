@@ -1,6 +1,7 @@
 {
  "pending": [
   "Belebele accuracy per language (outputs/metrics/final_report.json)",
+  "GPU-hours of the final battery per variant (outputs/metrics/final_report.json)",
   "GPU-hours per check-up (outputs/metrics/final_report.json)",
   "cost: GPU-hours per check-up and per-token latency per repair (outputs/metrics/final_report.json)",
   "easy and hard over-refusal per language (outputs/metrics/final_report.json)",
@@ -14,9 +15,13 @@
   "the Aya Red-teaming repair effect (outputs/metrics/final_report.json)",
   "the drift p-value (outputs/metrics/final_report.json)",
   "the list of arms not run (outputs/metrics/final_report.json)",
+  "the per-seed effects (outputs/metrics/final_report.json)",
   "the pooled Hindi drift effect (outputs/metrics/final_report.json)",
   "the pooled Hindi repair effect (outputs/metrics/final_report.json)",
+  "the primary judge (final judgements) (outputs/metrics/final_report.json)",
   "the repair p-value (outputs/metrics/final_report.json)",
+  "the seeds pooled for drift (outputs/metrics/final_report.json)",
+  "the seeds pooled for repair (outputs/metrics/final_report.json)",
   "the verdict per adapter (outputs/metrics/final_report.json)",
   "utility win rate against stock and the share of the adapter's gain retained (outputs/metrics/final_report.json)"
  ],
@@ -80,6 +85,12 @@
    "pointer": "/sizes/belebele/final",
    "shown": "700",
    "value": 700
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/judges/decision_rule/switch_primary_if_frontier_agreement_exceeds_by",
+   "shown": "5 points",
+   "value": 0.05
   },
   {
    "file": "configs/repairs.yaml",

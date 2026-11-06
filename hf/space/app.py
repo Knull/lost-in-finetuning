@@ -3,12 +3,15 @@ retain / repair / reject test, read only from the public aggregate logs dataset 
 
 Data: ``aggregates/final_report.json`` and ``examples/refusals.jsonl`` of the logs dataset named in
 ``space_config.json`` (``lift publish space`` writes it), or a local folder with the same layout in
-``LIFT_SPACE_DATA`` (for testing). Every number shown comes from final_report.json.
+``LIFT_SPACE_DATA`` (for testing). Every number shown comes from final_report.json, formatted by each
+column's ``format`` exactly as the article does (``fmt`` is a copy of the project's formatter in
+src/lift/publish/inputs.py: the Space imports nothing from the project).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -17,6 +20,62 @@ HERE = Path(__file__).resolve().parent
 REPORT = "aggregates/final_report.json"
 EXAMPLES = "examples/refusals.jsonl"
 MAX_WORDS = 10
+NOT_RUN = "not run"
+
+
+# A copy of the project's fmt (src/lift/publish/inputs.py); tests/test_publish_space_notebook.py checks it.
+def _num(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"not a finite number: {value!r}")
+    return float(value)
+
+
+def _interval(value: Any) -> tuple[float, float, float]:
+    if isinstance(value, dict):
+        return _num(value["est"]), _num(value["lo"]), _num(value["hi"])
+    if isinstance(value, (list, tuple)) and len(value) == 3:
+        return _num(value[0]), _num(value[1]), _num(value[2])
+    raise ValueError(f"not an interval {{est, lo, hi}}: {value!r}")
+
+
+def fmt(value: Any, kind: str) -> str:
+    if value is None:
+        return NOT_RUN
+    if kind == "text":
+        return str(value)
+    if kind == "pct":
+        return f"{_num(value) * 100:.1f}%"
+    if kind == "pp":
+        return f"{_num(value) * 100:+.1f} pp"
+    if kind == "pct_ci":
+        est, lo, hi = _interval(value)
+        return f"{est * 100:.1f}% [{lo * 100:.1f}, {hi * 100:.1f}]"
+    if kind == "pp_ci":
+        est, lo, hi = _interval(value)
+        return f"{est * 100:+.1f} pp [{lo * 100:+.1f}, {hi * 100:+.1f}]"
+    if kind == "points":
+        return f"{_num(value) * 100:g} points"
+    if kind == "p":
+        p = _num(value)
+        return "<0.001" if p < 0.001 else f"{p:.3f}"
+    if kind == "int":
+        n = _num(value)
+        if n != int(n):
+            raise ValueError(f"not an integer: {value!r}")
+        return f"{int(n):,}"
+    if kind == "f2":
+        return f"{_num(value):.2f}"
+    if kind == "f3":
+        return f"{_num(value):.3f}"
+    if kind == "hours":
+        return f"{_num(value):.2f} h"
+    if kind == "ms":
+        return f"{_num(value):.1f} ms"
+    if kind == "list":
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"not a list: {value!r}")
+        return ", ".join(str(x) for x in value) or NOT_RUN
+    raise ValueError(f"unknown format {kind!r}")
 
 
 def _fetch(name: str) -> Path | None:
@@ -119,19 +178,7 @@ def heatmap_figure(report: dict | None, metric: str = "harmful_rate", set_name: 
 def table_rows(report: dict | None, name: str) -> tuple[list[str], list[list[str]]]:
     spec = (((report or {}).get("tables") or {}).get(name)) or {}
     cols = spec.get("columns") or []
-    out = []
-    for r in spec.get("rows") or []:
-        cells = []
-        for c in cols:
-            v = r.get(c["key"])
-            est = _est(v)
-            if v is None:
-                cells.append("not run")
-            elif isinstance(v, dict) and {"lo", "hi"} <= v.keys():
-                cells.append(f"{est * 100:.1f} [{v['lo'] * 100:.1f}, {v['hi'] * 100:.1f}]")
-            else:
-                cells.append(str(v))
-        out.append(cells)
+    out = [[fmt(r.get(c["key"]), c.get("format", "text")) for c in cols] for r in spec.get("rows") or []]
     return [c["label"] for c in cols], out
 
 

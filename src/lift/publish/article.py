@@ -4,7 +4,12 @@ The organisers' sections, in their order (prompts/P08_publish.md). Results come 
 final_report.json (P07) and selection.json (P05), the design numbers (set sizes, selection rule,
 validation bar) from configs/, and the links from configs/publish.yaml and the collections file.
 ``hf/article.sources.json`` lists every rendered value with its file and JSON pointer. The article is
-posted by hand (HF community articles have no upload API); ``lift publish article`` only writes it.
+posted by hand (HF community articles have no upload API); ``lift publish article`` only writes it, and
+stamps the notebook's links (``acceptance.stamp_notebook``) from the same settings.
+
+Judges are named by their configs/project.yaml entry's kind (Qwen3Guard or a frontier model), never by
+role: which one is primary comes from final_report.json ``primary_judge`` (the judge id of the final
+judgements, after the pre-registered decide-judge rule); an id that is neither entry is refused.
 """
 
 from __future__ import annotations
@@ -13,10 +18,10 @@ import re
 from pathlib import Path
 
 from lift import config, paths
-from lift.publish import render, settings
+from lift.publish import PublishError, render, settings
 from lift.publish.collect import links_path, read_links
 from lift.publish.datasets import verdict_lines
-from lift.publish.inputs import Facts, pending, shown
+from lift.publish.inputs import Facts, pending, report_path, shown
 
 SECTIONS = (
     "Problem and approach",
@@ -85,6 +90,62 @@ def _not_run(facts: Facts) -> str:
     return "\n".join(f"- {item}" for item in items) if items else "Every pre-registered arm was run."
 
 
+PRIMARY_EFFECTS = [
+    ("Drift", "drift"),
+    ("Repair", "repair"),
+    ("Red-teaming drift", "redteam_drift"),
+    ("Red-teaming repair", "redteam_repair"),
+]
+
+
+def _judge_entries() -> tuple[dict, dict]:
+    """(the Qwen3Guard entry, the frontier entry) among judges.safety_primary and safety_second."""
+    entries = [config.get(f"judges.{k}") for k in ("safety_primary", "safety_second")]
+    qwen = [e for e in entries if "provider" not in e and "Qwen3Guard" in str(e.get("id"))]
+    frontier = [e for e in entries if "provider" in e]
+    if len(qwen) != 1 or len(frontier) != 1:
+        raise PublishError(
+            "configs/project.yaml judges: expected one Qwen3Guard and one frontier safety judge"
+        )
+    return qwen[0], frontier[0]
+
+
+def judges(facts: Facts) -> dict[str, str]:
+    """The judges by kind, and which one was primary according to final_report.json."""
+    qwen, frontier = _judge_entries()
+    names = {
+        "qwen": str(qwen["id"]).split("/")[-1],
+        "frontier": str(frontier["model"]),
+    }
+    shown_id = facts.report_value("/primary_judge", "text", what="the primary judge (final judgements)")
+    judge_id = facts.raw(report_path(), "/primary_judge")
+    if judge_id is None:
+        role = f"The primary safety judge, behind every reported number: {shown_id}."
+    else:
+        prefixes = {"qwen": f"{qwen['id']}@", "frontier": f"{frontier['provider']}/{frontier['model']}@"}
+        kind = next((k for k, pre in prefixes.items() if str(judge_id).startswith(pre)), None)
+        if kind is None:
+            raise PublishError(
+                f"{shown(report_path())} primary_judge {str(judge_id)[:80]!r} is neither safety judge in "
+                "configs/project.yaml"
+            )
+        role = (
+            f"The primary safety judge, behind every reported number, was **{names[kind]}** "
+            f"(judge id `{shown_id}` in the final judgements); the other judged a random sample of outputs "
+            "and the validation items."
+        )
+    utility = config.get("judges.utility")
+    return {
+        "qwen_judge": f"{names['qwen']}** (`{qwen['id']}`, revision `{qwen.get('revision')}`)",
+        "frontier_judge": f"{names['frontier']}** ({frontier['provider']} API)",
+        "utility_judge": f"{utility.get('model')} ({utility.get('provider')} API)",
+        "judge_roles": role,
+        "judge_rule": facts.config(
+            "project", "judges.decision_rule.switch_primary_if_frontier_agreement_exceeds_by", "points"
+        ),
+    }
+
+
 def context(facts: Facts) -> dict[str, str]:
     cfg = settings.load()
     links = read_links()
@@ -102,7 +163,6 @@ def context(facts: Facts) -> dict[str, str]:
         )
         for split in ("dev", "final")
     }
-    second = config.get("judges.safety_second")
     ctx = {
         "authors": authors,
         "team": team,
@@ -111,10 +171,7 @@ def context(facts: Facts) -> dict[str, str]:
         "global_rev": config.get("models.global.revision"),
         "base_id": config.get("models.base.id"),
         "base_rev": config.get("models.base.revision"),
-        "judge_id": "{}@{}".format(
-            config.get("judges.safety_primary.id"), config.get("judges.safety_primary.revision")
-        ),
-        "second_judge": f"{second.get('model')} ({second.get('provider')})",
+        **judges(facts),
         **sizes,
         "rule_overrefusal": facts.config("repairs", "selection.max_overrefusal_increase", "points"),
         "rule_gain": facts.config("repairs", "selection.min_gain_retained", "pct"),
@@ -127,6 +184,9 @@ def context(facts: Facts) -> dict[str, str]:
         "drift_p": rv("/primary/drift/pooled/p", "p", what="the drift p-value"),
         "repair": rv("/primary/repair/pooled", "pp_ci", what="the pooled Hindi repair effect"),
         "repair_p": rv("/primary/repair/pooled/p", "p", what="the repair p-value"),
+        "drift_seeds": rv("/primary/drift/pooled/seeds", "list", what="the seeds pooled for drift"),
+        "repair_seeds": rv("/primary/repair/pooled/seeds", "list", what="the seeds pooled for repair"),
+        "table_per_seed": facts.per_seed_table(PRIMARY_EFFECTS),
         "redteam_drift": rv(
             "/primary/redteam_drift/pooled", "pp_ci", what="the Aya Red-teaming drift effect"
         ),
@@ -134,6 +194,11 @@ def context(facts: Facts) -> dict[str, str]:
             "/primary/redteam_repair/pooled", "pp_ci", what="the Aya Red-teaming repair effect"
         ),
         "gpu_hours": rv("/headline/gpu_hours_per_checkup", "hours", what="GPU-hours per check-up"),
+        "gpu_hours_variant": rv(
+            "/headline/gpu_hours_per_variant_final",
+            "hours",
+            what="GPU-hours of the final battery per variant",
+        ),
         "not_run": _not_run(facts),
         "prompts_repo": settings.repo("prompts").url,
         "models_collection": links.get("models")
@@ -173,8 +238,11 @@ def context(facts: Facts) -> dict[str, str]:
 
 
 def build(facts: Facts | None = None) -> tuple[Path, Facts]:
+    from lift.publish import acceptance
+
     facts = facts or Facts()
     text = render.fill(render.template("article.md"), context(facts))
     render.write_text(article_path(), text)
     facts.write_sources(sources_path())
+    acceptance.stamp_notebook()
     return article_path(), facts

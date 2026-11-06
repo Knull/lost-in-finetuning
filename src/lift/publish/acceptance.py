@@ -5,12 +5,18 @@ Generation and judging go through the lift CLI's own commands (``lift run-dev`` 
 so the notebook runs the study's code path; the summary reads the judged labels with
 ``lift.judge.pipeline.load_records`` and counts them with ``lift.stats``. It is a screening on a few
 dozen dev prompts per language, not the pre-registered test: its thresholds are the README's, its
-sample is small, and it never touches the final split.
+sample is small, and it never touches the final split. Its verdict covers safety and over-refusal only
+(utility and Belebele are separate checks), and it says so. A prompt one variant has no label for stops
+the summary (rule 3) unless the caller allows it, and then it is counted and shown.
+
+``stamp_notebook`` writes the notebook's links (the GitHub repo, the repair-parameters repo, the frozen
+winner) from configs/publish.yaml and selection.json; ``lift publish article`` runs it.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -19,6 +25,7 @@ from lift import config, paths
 from lift.publish import PublishError
 
 NOTEBOOK_CANDIDATE = "notebook"
+SCOPED_REPAIR = "repair (safety and over-refusal only)"
 SETS = ("harmful", "hard_benign")
 CAST_METHODS = ("cast", "cast_always")
 
@@ -184,16 +191,24 @@ def summarise(
     *,
     langs: Sequence[str] = ("hi", "en"),
     labels: Callable[[str, str, str], dict[str, str]] = _labels,
+    allow_dropped: bool = False,
 ) -> dict[str, Any]:
     """Rates per variant, set and language on the prompts every variant answered, McNemar for drift and
-    repair on the harmful set, and a screening verdict for the target language (README thresholds)."""
+    repair on the harmful set, and a screening verdict for the target language (README thresholds).
+    A prompt that some variant lacks a label for stops it (PublishError naming the counts; rerun
+    ``run_check``), unless ``allow_dropped``: then the counts are in ``dropped`` and the markdown."""
     from lift.stats.paired import mcnemar_exact, rates
 
     names = [v for v in (stock, adapter, repaired) if v]
     rows, tests = [], {}
+    dropped: dict[str, dict[str, int]] = {}
     for set_name in SETS:
         for lang in langs:
             by = {v: labels(v, set_name, lang) for v in names}
+            union = set().union(*(set(b) for b in by.values()))
+            lacking = {v: len(union - set(b)) for v, b in by.items() if union - set(b)}
+            if lacking:
+                dropped[f"{set_name}_{lang}"] = lacking
             pids = sorted(set.intersection(*(set(b) for b in by.values())))
             if not pids:
                 continue
@@ -205,6 +220,16 @@ def summarise(
                 tests[("drift", lang)] = mcnemar_exact(flag[adapter], flag[stock])
                 if repaired:
                     tests[("repair", lang)] = mcnemar_exact(flag[repaired], flag[adapter])
+    if dropped and not allow_dropped:
+        raise PublishError(
+            "every prompt stays in the denominator: "
+            + "; ".join(
+                f"{cell}: " + ", ".join(f"{v} lacks {n} prompts" for v, n in by.items())
+                for cell, by in dropped.items()
+            )
+            + " the others answered. Rerun run_check (exit 3 means cells to rerun), or pass "
+            "allow_dropped=True to compare only the shared prompts and show the counts."
+        )
     target = config.get("languages.target")
     max_over = config.get("selection.max_overrefusal_increase", name="repairs")
 
@@ -226,13 +251,14 @@ def summarise(
                 rate(stock, "hard_benign", "refusal_rate"),
             )
             over_ok = over_r is not None and over_s is not None and over_r - over_s <= max_over + 1e-12
-            verdict = "repair" if rep.diff < 0 and over_ok else "reject"
+            verdict = SCOPED_REPAIR if rep.diff < 0 and over_ok else "reject"
         else:
             verdict = "repair needed"
     return {
         "rows": rows,
         "tests": {f"{k[0]}_{k[1]}": vars(t) for k, t in tests.items()},
         "verdict": verdict,
+        "dropped": dropped,
         "note": "screening on a small dev sample; utility and Belebele checks are separate (lift utility, "
         "lift belebele)",
     }
@@ -267,6 +293,59 @@ def markdown(summary: Mapping[str, Any]) -> str:
         f"- {name}: {fmt(t['diff'], 'pp')}, McNemar p = {fmt(t['p_value'], 'p')} (n = {t['n']})"
         for name, t in summary["tests"].items()
     ]
+    dropped = [
+        f"- {cell}: {v} lacks {n} prompts the others answered (compared on the shared prompts only)"
+        for cell, by in (summary.get("dropped") or {}).items()
+        for v, n in by.items()
+    ]
     return "\n".join(
-        [table, "", *tests, "", f"**Screening verdict: {summary['verdict']}** ({summary['note']})"]
+        [
+            table,
+            "",
+            *tests,
+            *([""] + dropped if dropped else []),
+            "",
+            f"**Screening verdict: {summary['verdict']}** ({summary['note']})",
+        ]
     )
+
+
+STAMPED = ("REPO_URL", "PARAMS_REPO", "WINNER")
+
+
+def notebook_path() -> Path:
+    return paths.REPO_ROOT / "notebooks" / "acceptance_test.ipynb"
+
+
+def stamp_notebook(path: str | Path | None = None) -> dict[str, str]:
+    """Write the notebook's links from the settings, not by hand: REPO_URL (configs/publish.yaml
+    github_repo, else the origin remote), PARAMS_REPO (the repair-parameters repo) and WINNER (the
+    overall frozen winner, once selection.json is decided). A value not known yet is left as it is.
+    Returns what was written."""
+    from lift.publish import settings
+    from lift.publish.inputs import Facts, frozen_winner
+
+    path = Path(path) if path is not None else notebook_path()
+    values = {"PARAMS_REPO": settings.repo("repair_params").repo_id}
+    gh = settings.github_repo()
+    if gh:
+        values["REPO_URL"] = gh
+    winner = frozen_winner(Facts())
+    if winner:
+        values["WINNER"] = winner
+    text = path.read_text(encoding="utf-8")
+    nb = json.loads(text)
+    pattern = re.compile(r"^(?P<name>" + "|".join(STAMPED) + r') = "[^"\n]*"(?P<rest>.*)$', re.DOTALL)
+    for cell in nb["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        for i, line in enumerate(cell["source"]):
+            m = pattern.match(line)
+            if m and m.group("name") in values:
+                cell["source"][i] = (
+                    f"{m.group('name')} = {json.dumps(values[m.group('name')])}{m.group('rest')}"
+                )
+    new = json.dumps(nb, indent=1, ensure_ascii=False) + "\n"
+    if new != text:
+        path.write_text(new, encoding="utf-8", newline="\n")
+    return values

@@ -53,7 +53,8 @@ checked against their writers on origin/p05-repairs and origin/p07-final-report 
     ("not run"). Every rendered value, text cells and table notes included, is recorded in the sources.
 
 Formats: pct (0.123 -> 12.3%), pp (signed points), points (0.05 -> 5 points), pct_ci, pp_ci, p, int,
-f2, f3, hours, ms, text.
+f2, f3, hours, ms, text, list ([1, 2] -> "1, 2"). A null anywhere on a value's path (``pooled`` of an arm
+not run) renders as "not run"; only a missing key renders as pending.
 """
 
 from __future__ import annotations
@@ -161,13 +162,20 @@ def fmt(value: Any, kind: str) -> str:
         return f"{_num(value):.2f} h"
     if kind == "ms":
         return f"{_num(value):.1f} ms"
+    if kind == "list":
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"not a list: {value!r}")
+        return ", ".join(str(x) for x in value) or NOT_RUN
     raise ValueError(f"unknown format {kind!r}")
 
 
 def resolve(doc: Any, pointer: str) -> Any:
-    """``/a/b/0/c`` in ``doc``; KeyError when any step is missing."""
+    """``/a/b/0/c`` in ``doc``; KeyError when any step is missing. A null on the way (an arm not run, whose
+    ``pooled`` P07 writes as null) resolves to None: everything under it is "not run"."""
     node = doc
     for part in [p for p in pointer.split("/") if p]:
+        if node is None:
+            return None
         if isinstance(node, Mapping) and part in node:
             node = node[part]
         elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
@@ -304,6 +312,36 @@ class Facts:
                 }
             )
         return f"{out}\n\n{note}" if note else out
+
+    def per_seed_table(self, effects: list[tuple[str, str]]) -> str:
+        """Each seed of the primary effects (``[(label, key of primary)]``) as a markdown table: the
+        estimate with its interval, McNemar's p and n, every value recorded; an arm not run says so."""
+        from lift.publish.render import markdown_table
+
+        if self.report() is None:
+            return f"_{self._missing('the per-seed effects', report_path(), P07)}_"
+        rows = []
+        for label, key in effects:
+            seeds = self.raw(report_path(), f"/primary/{key}/per_seed")
+            if not seeds:
+                if self.raw(report_path(), f"/primary/{key}") is None:
+                    rows.append([label, self._missing(f"the per-seed {key} effect", report_path(), P07)])
+                    continue
+                rows.append([label, NOT_RUN, NOT_RUN, NOT_RUN, NOT_RUN])
+                continue
+            for i in range(len(seeds)):
+                at = f"/primary/{key}/per_seed/{i}"
+                rows.append(
+                    [
+                        label,
+                        self.report_value(f"{at}/seed", "int", what=f"the seed of a {key} row"),
+                        self.report_value(at, "pp_ci", what=f"a per-seed {key} effect"),
+                        self.report_value(f"{at}/p", "p", what=f"a per-seed {key} p-value"),
+                        self.report_value(f"{at}/n", "int", what=f"a per-seed {key} n"),
+                    ]
+                )
+        rows = [r + [""] * (5 - len(r)) for r in rows]
+        return markdown_table(["Effect", "Seed", "Estimate [95% interval]", "McNemar p", "n"], rows)
 
     def table_rows(self, name: str) -> list[dict] | None:
         report = self.report()

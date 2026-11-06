@@ -16,10 +16,11 @@ def interval(est: float, lo: float, hi: float) -> dict:
     return {"est": est, "lo": lo, "hi": hi}
 
 
-def effect(est: float, lo: float, hi: float, p: float) -> dict:
+def effect(est: float, lo: float, hi: float, p: float, seeds: tuple[int, ...] = (1, 2, 3)) -> dict:
+    """An Effect as P07's lift.report.tables.effect_out writes it."""
     return {
-        "pooled": {"est": est, "lo": lo, "hi": hi, "p": p},
-        "per_seed": [{"seed": s, "est": est, "lo": lo, "hi": hi, "p": p, "n": 400} for s in (1, 2, 3)],
+        "pooled": {"est": est, "lo": lo, "hi": hi, "p": p, "n": 400 * len(seeds), "seeds": list(seeds)},
+        "per_seed": [{"seed": s, "est": est + s / 1000, "lo": lo, "hi": hi, "p": p, "n": 400} for s in seeds],
     }
 
 
@@ -29,6 +30,10 @@ def table(columns: list[tuple[str, str, str]], rows: list[dict], title: str = "t
         "columns": [{"key": k, "label": label, "format": f} for k, label, f in columns],
         "rows": rows,
     }
+
+
+QWEN_ID = "Qwen/Qwen3Guard-Gen-4B@main#bf16#strict"
+FRONTIER_ID = "anthropic/claude-sonnet-5-5@safety_v1:0123456789ab+t0+max1024+api2026-10-21"
 
 
 def report() -> dict:
@@ -53,10 +58,12 @@ def report() -> dict:
         ],
     )
     simple = table([("name", "Name", "text"), ("value", "Value", "pct")], [{"name": "a", "value": 0.5}])
+    simple["note"] = "A note."
     return {
         "version": 1,
         "dtype": "bf16",
-        "primary_judge": "qwen3guard",
+        # the judge id of the final judgement records (Qwen3GuardJudge.judge_id, revision "main" in tests)
+        "primary_judge": QWEN_ID,
         "verdicts": [
             {
                 "adapter": "adapter-aya-std",
@@ -71,7 +78,13 @@ def report() -> dict:
             "redteam_drift": effect(0.1, 0.03, 0.17, 0.01),
             "redteam_repair": effect(-0.08, -0.15, -0.01, 0.03),
         },
-        "headline": {"utility_retained": interval(0.8, 0.6, 1.0), "gpu_hours_per_checkup": 1.25},
+        "headline": {
+            "utility_retained": interval(0.8, 0.6, 1.0),
+            "belebele_hi_change": interval(-0.01, -0.03, 0.01),
+            "overrefusal_hard_hi_change": interval(0.02, 0.0, 0.04),
+            "gpu_hours_per_checkup": 1.25,
+            "gpu_hours_per_variant_final": 0.4,
+        },
         "tables": {
             "per_language": per_language,
             "repair_comparison": simple,

@@ -46,10 +46,14 @@ final split was touched once, to score the frozen variants.
 - **Tiny Aya Global** (`CohereLabs/tiny-aya-global`, revision `af89d219b53ed9b13b8a4645f9c8028973510324`): the model we adapt and
   repair. CC-BY-NC-4.0 plus Cohere Labs' acceptable-use policy.
 - **Tiny Aya Base** (`CohereLabs/tiny-aya-base`, revision `d62ac17e241c871fc52e9a95d7b0e2615189d7d5`): only the ReSta reference.
-- **Qwen3Guard-Gen-4B** (`Qwen/Qwen3Guard-Gen-4B@6ec42827da0c1ff11e7a49dc269d2e810d27e108`): the primary safety judge, run on the native text.
-  Its "Controversial" label counts as harmful; the loose reading is a sensitivity analysis.
-- **claude-sonnet-5-5 (anthropic)**: the second safety judge on a random sample and the validation items,
-  and the pairwise utility judge.
+- **Qwen3Guard-Gen-4B** (`Qwen/Qwen3Guard-Gen-4B`, revision `6ec42827da0c1ff11e7a49dc269d2e810d27e108`): a safety classifier, run on the native text. Its "Controversial" label
+  counts as harmful; the loose reading is a sensitivity analysis.
+- **claude-sonnet-5-5** (anthropic API): a frontier model prompted with our safety rubric
+  (`configs/rubrics/safety_v1.md`). claude-sonnet-5-5 (anthropic API) is also the pairwise utility judge.
+- The primary safety judge, behind every reported number: [PENDING: the primary judge (final judgements) from outputs/metrics/final_report.json (P07 lift stats / lift report)].
+- Which judge is primary was settled on the first validation round, before any final-split
+  number existed: the frontier judge would become primary only if it agreed with the native
+  readers at least 5 points more often than Qwen3Guard.
 - **GlotLID** for language identification and **NLLB-200-distilled-600M** (CC-BY-NC-4.0) for the
   Arabic and Thai back-translation check.
 
@@ -97,11 +101,15 @@ the cheaper repair. Human labels are the ground truth for the judge: it had to r
 
 ### Primary endpoint: Hindi harmful rate, final split
 
-Paired by prompt, with each seed shown and a bootstrap clustered by prompt id pooled over seeds.
+Paired by prompt. The pooled effects use a bootstrap clustered by prompt id over the seeds that
+were run (drift: seeds [PENDING: the seeds pooled for drift from outputs/metrics/final_report.json (P07 lift stats / lift report)]; repair: seeds [PENDING: the seeds pooled for repair from outputs/metrics/final_report.json (P07 lift stats / lift report)]); each seed is shown
+below with McNemar's exact test.
 
 - **Drift** (adapter minus stock): [PENDING: the pooled Hindi drift effect from outputs/metrics/final_report.json (P07 lift stats / lift report)], p = [PENDING: the drift p-value from outputs/metrics/final_report.json (P07 lift stats / lift report)]
 - **Repair** (frozen repair minus adapter): [PENDING: the pooled Hindi repair effect from outputs/metrics/final_report.json (P07 lift stats / lift report)], p = [PENDING: the repair p-value from outputs/metrics/final_report.json (P07 lift stats / lift report)]
 - **Aya Red-teaming check**, drift: [PENDING: the Aya Red-teaming drift effect from outputs/metrics/final_report.json (P07 lift stats / lift report)]; repair: [PENDING: the Aya Red-teaming repair effect from outputs/metrics/final_report.json (P07 lift stats / lift report)]
+
+_[PENDING: the per-seed effects from outputs/metrics/final_report.json (P07 lift stats / lift report)]_
 
 ### Per language
 
@@ -149,7 +157,8 @@ _[PENDING: exploratory diagnostic signatures (P06) from outputs/metrics/final_re
 ### Limitations
 
 - Most prompts are machine translations. Native readers checked samples in Hindi, Chinese and
-  Spanish; Arabic and Thai were checked by back-translation only.
+  Spanish only; the Arabic and Thai prompts had no native check. For Arabic and Thai, a sample
+  of the outputs was also judged after back-translation into English (judge sensitivity table).
 - One adapter of one model. The study cannot establish a general policy for which repair fits
   which kind of drift.
 - The automatic judge's precision differs by language. Hindi claims rest on its validation
@@ -159,7 +168,9 @@ _[PENDING: exploratory diagnostic signatures (P06) from outputs/metrics/final_re
 
 _[PENDING: cost: GPU-hours per check-up and per-token latency per repair from outputs/metrics/final_report.json (P07 lift stats / lift report)]_
 
-A full check-up of one adapter (dev sweep included) took [PENDING: GPU-hours per check-up from outputs/metrics/final_report.json (P07 lift stats / lift report)] of GPU time. Re-running
+A full check-up of one adapter (the seed-1 dev sweep, then the final battery of stock, the seed-1
+adapter and its seed-1 frozen repair) took [PENDING: GPU-hours per check-up from outputs/metrics/final_report.json (P07 lift stats / lift report)] of GPU time; the final battery took
+[PENDING: GPU-hours of the final battery per variant from outputs/metrics/final_report.json (P07 lift stats / lift report)] per variant on average. Re-running
 safety fine-tuning would need a safety dataset in every language and a training run per
 adapter; the repairs here need no gradient step. Tiny Aya derivatives are non-commercial, so we
 make no commercial claims.

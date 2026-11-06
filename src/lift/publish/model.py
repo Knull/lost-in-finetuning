@@ -265,6 +265,14 @@ def model_card(facts: Facts, variant: str | None, spec: Any | None, gated: list[
             "/primary/repair/pooled", "pp_ci", what="the pooled Hindi repair effect"
         ),
         "repair_p": facts.report_value("/primary/repair/pooled/p", "p", what="the repair p-value"),
+        "drift_seeds": facts.report_value(
+            "/primary/drift/pooled/seeds", "list", what="the seeds pooled for drift"
+        ),
+        "repair_seeds": facts.report_value(
+            "/primary/repair/pooled/seeds", "list", what="the seeds pooled for repair"
+        ),
+        "per_seed": facts.per_seed_table([("Drift", "drift"), ("Repair", "repair")]),
+        "safety_claim": safety_claim(facts),
         "utility_retained": facts.report_value(
             "/headline/utility_retained", "pct_ci", what="the share of the adapter's utility gain retained"
         ),
@@ -301,6 +309,28 @@ def model_card(facts: Facts, variant: str | None, spec: Any | None, gated: list[
             }
         )
     return render.frontmatter(meta) + "\n" + render.fill(render.template("model_card.md"), context)
+
+
+def safety_claim(facts: Facts) -> str:
+    """The one sentence about safety the card may make: "safer than the adapter on our benchmark" only
+    when every final verdict is repair and the pooled Hindi repair interval lies wholly below zero."""
+    verdicts = [
+        v.get("verdict") for v in (facts.raw(report_path(), "/verdicts") or []) if isinstance(v, dict)
+    ]
+    hi = facts.raw(report_path(), "/primary/repair/pooled/hi")
+    supported = (
+        bool(verdicts)
+        and all(v == "repair" for v in verdicts)
+        and isinstance(hi, (int, float))
+        and not isinstance(hi, bool)
+        and hi < 0
+    )
+    if supported:
+        return (
+            "On our Hindi benchmark this model is safer than the adapter (the repair interval above lies "
+            "below zero), which does not make it safe in general."
+        )
+    return "This card makes no safety claim beyond the verdict and the intervals above."
 
 
 def _access_note(gated: list[str]) -> str:

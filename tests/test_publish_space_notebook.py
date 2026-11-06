@@ -101,3 +101,100 @@ def test_notebook_structure():
         assert all(not o.get("outputs") for o in nb["cells"] if o["cell_type"] == "code")
     assert imported <= {"lift", "huggingface_hub", "IPython"}
     assert called and all(hasattr(acceptance, name) for name in called), called - set(dir(acceptance))
+
+
+# ---------------------------------------------------------------- Space: pins and formats (R1-21)
+
+
+def test_space_formats_cells_like_the_article(app):
+    from lift.publish.inputs import fmt
+
+    data = app.load_data()
+    head, rows = app.table_rows(data["report"], "utility")
+    assert rows[0][1] == "62.0% [55.0, 69.0]"
+    _, rows = app.table_rows(data["report"], "belebele")
+    assert rows[0][1] == "50.0%"
+    for value, kind in [
+        (0.123, "pct"),
+        (-0.04, "pp"),
+        ([0.2, 0.1, 0.3], "pct_ci"),
+        (0.0004, "p"),
+        (1234, "int"),
+        (1.5, "hours"),
+        (None, "pct"),
+        ("x", "text"),
+        (0.05, "points"),
+    ]:
+        assert app.fmt(value, kind) == fmt(value, kind)
+
+
+def test_space_requirements_are_pinned():
+    lines = [x for x in (paths.REPO_ROOT / "hf" / "space" / "requirements.txt").read_text().splitlines() if x]
+    assert lines and all("==" in x for x in lines)
+    readme = (paths.REPO_ROOT / "hf" / "space" / "README.md").read_text()
+    gradio = next(x for x in lines if x.startswith("gradio=="))
+    assert f"sdk_version: {gradio.split('==')[1]}" in readme
+
+
+# ---------------------------------------------------------------- CAST wrapper (R1-09)
+
+
+def test_cast_generate_loads_the_artifact_file_as_the_evaluation(tmp_path, monkeypatch):
+    import hashlib
+    import sys
+    import types
+
+    repo = tmp_path / "repo"
+    (repo / "repair" / "cast").mkdir(parents=True)
+    artifact = repo / "repair" / "cast" / "cast.safetensors"
+    artifact.write_bytes(b"cast artifact")
+    params = {
+        "method": "cast",
+        "params": {"strength": 1.0},
+        "artifacts": {"cast": hashlib.sha256(b"cast artifact").hexdigest()},
+    }
+    (repo / "repair" / "params.json").write_text(json.dumps(params))
+    tok = types.SimpleNamespace(pad_token_id=7)
+    model = types.SimpleNamespace(to=lambda device: model)
+    fake_tf = types.SimpleNamespace(
+        AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda d: tok),
+        AutoModelForCausalLM=types.SimpleNamespace(from_pretrained=lambda d, **k: model),
+    )
+    monkeypatch.setitem(sys.modules, "transformers", fake_tf)
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(bfloat16="bf16"))
+    spec = importlib.util.spec_from_file_location(
+        "cast_generate", paths.REPO_ROOT / "hf/templates/cast_generate.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    seen = {}
+
+    def make(m, path, strength, *, gate=True, pad_id=0):
+        seen.update(path=path, strength=strength, gate=gate, pad_id=pad_id)
+        return "wrapped"
+
+    assert mod.load(repo, device="cpu", make=make) == ("wrapped", tok)
+    assert seen == {"path": artifact, "strength": 1.0, "gate": True, "pad_id": 7}
+    artifact.write_bytes(b"another artifact")
+    with pytest.raises(ValueError, match="sha256"):
+        mod.load(repo, device="cpu", make=make)
+
+
+# ---------------------------------------------------------------- notebook: the repo url (R1-26)
+
+
+def test_notebook_links_are_stamped_from_publish_settings(tmp_path, monkeypatch):
+    from lift.publish import settings
+
+    nb = tmp_path / "nb.ipynb"
+    nb.write_text(NOTEBOOK.read_text(encoding="utf-8"), encoding="utf-8")
+    cfg = {**settings.load(), "github_repo": "https://github.com/o/r"}
+    monkeypatch.setattr(settings, "load", lambda: cfg)
+    monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
+    acceptance.stamp_notebook(nb)
+    code = "".join(
+        "".join(c["source"]) for c in json.loads(nb.read_text())["cells"] if c["cell_type"] == "code"
+    )
+    assert 'REPO_URL = "https://github.com/o/r"' in code
+    assert 'PARAMS_REPO = "test-org/lift-repair-params"' in code
+    assert "Knull" not in code

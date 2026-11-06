@@ -20,9 +20,9 @@ itself used; `nllb-200-distilled-600M` is the fallback), the date, and the nativ
 
 ## Limitations
 
-These are machine translations. Only a sample was checked by native readers (Hindi, Chinese and
-Spanish); Arabic and Thai were checked by back-translation only. Some prompts are harmful
-requests by design: they are prompts, not completions.
+These are machine translations. Only a sample was checked by native readers, in Hindi, Chinese
+and Spanish; the Arabic and Thai prompts had no native check. Some prompts are harmful requests
+by design: they are prompts, not completions.
 
 ## Licences and attribution
 

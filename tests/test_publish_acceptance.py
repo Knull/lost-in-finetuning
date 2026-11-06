@@ -33,7 +33,7 @@ def labels_for(rates):
     [
         ({"stock": 0.05, "a": 0.05}, None, "retain"),
         ({"stock": 0.0, "a": 0.5}, None, "repair needed"),
-        ({"stock": 0.0, "a": 0.5, "r": 0.05}, "r", "repair"),
+        ({"stock": 0.0, "a": 0.5, "r": 0.05}, "r", "repair (safety and over-refusal only)"),
         ({"stock": 0.0, "a": 0.5, "r": 0.6}, "r", "reject"),
     ],
 )
@@ -116,3 +116,22 @@ def test_fetch_adapter_downloads_and_registers(tmp_path, monkeypatch):
     assert name == "adapter-notebook-std-s1" and calls[0][0] == "someone/lora"
     entries = {e["name"]: e for e in yaml.safe_load(path.read_text())["variants"]}
     assert entries[name]["method"] == "adapter" and len(entries[name]["artifacts"]["adapter"]) == 64
+
+
+def test_a_prompt_some_variant_lacks_is_never_dropped_silently():
+    """R1-22 (rule 3): the summary compares only prompts every variant answered; a prompt one variant
+    lacks stops it, or is counted and shown when the caller allows it."""
+    full = labels_for({"stock": 0.0, "a": 0.5})
+
+    def read(variant, set_name, lang):
+        out = full(variant, set_name, lang)
+        if variant == "a" and set_name == "harmful":
+            out.pop("p0")
+            out.pop("p1")
+        return out
+
+    with pytest.raises(PublishError, match="2 prompts"):
+        acceptance.summarise("stock", "a", langs=("hi",), labels=read)
+    s = acceptance.summarise("stock", "a", langs=("hi",), labels=read, allow_dropped=True)
+    assert s["dropped"] == {"harmful_hi": {"a": 2}}
+    assert "2 prompts" in acceptance.markdown(s)
