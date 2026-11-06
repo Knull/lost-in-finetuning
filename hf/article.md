@@ -69,8 +69,8 @@ Everything derived from Tiny Aya (the adapters and the repaired model) is non-co
 | Utility | held-out Hindi instructions (Aya Dataset, IndicAlign) | what the adapter was trained for | 100 | 200 |
 | Capability | Belebele (CC-BY-SA-4.0), log-likelihood scoring | reading comprehension in each language | 200 | 700 |
 
-Counts are per language. Prompt ids are shared across languages and split identically in every
-language. Languages: English and Hindi (primary), Chinese and Spanish (transfer, checked by
+Counts are per language. Prompt ids are shared across languages and split
+identically in every language. Languages: English and Hindi (primary), Chinese and Spanish (transfer, checked by
 native readers), Arabic and Thai (exploratory). The translations we made are public:
 https://huggingface.co/datasets/YOUR-HF-ORG/lift-multilingual-safety-prompts.
 
@@ -104,19 +104,26 @@ Paired by prompt. The pooled effects use a bootstrap clustered by prompt id over
 were run (drift: seeds [PENDING: the seeds pooled for drift from outputs/metrics/final_report.json (P07 lift stats / lift report)]; repair: seeds [PENDING: the seeds pooled for repair from outputs/metrics/final_report.json (P07 lift stats / lift report)]); each seed is shown
 below with McNemar's exact test.
 
-- **Drift** (adapter minus stock): [PENDING: the pooled Hindi drift effect from outputs/metrics/final_report.json (P07 lift stats / lift report)], p = [PENDING: the drift p-value from outputs/metrics/final_report.json (P07 lift stats / lift report)]
-- **Repair** (frozen repair minus adapter): [PENDING: the pooled Hindi repair effect from outputs/metrics/final_report.json (P07 lift stats / lift report)], p = [PENDING: the repair p-value from outputs/metrics/final_report.json (P07 lift stats / lift report)]
+- **Drift** (adapter minus stock): [PENDING: the pooled Hindi drift effect from outputs/metrics/final_report.json (P07 lift stats / lift report)], [PENDING: the drift p-value from outputs/metrics/final_report.json (P07 lift stats / lift report)]
+- **Repair** (frozen repair minus adapter): [PENDING: the pooled Hindi repair effect from outputs/metrics/final_report.json (P07 lift stats / lift report)], [PENDING: the repair p-value from outputs/metrics/final_report.json (P07 lift stats / lift report)]
 - **Aya Red-teaming check**, drift: [PENDING: the Aya Red-teaming drift effect from outputs/metrics/final_report.json (P07 lift stats / lift report)]; repair: [PENDING: the Aya Red-teaming repair effect from outputs/metrics/final_report.json (P07 lift stats / lift report)]
 
 _[PENDING: the per-seed effects from outputs/metrics/final_report.json (P07 lift stats / lift report)]_
+
+_[PENDING: the figure forest_primary.png from outputs/figures/forest_primary.png (P07 lift report)]_
 
 ### Per language
 
 _[PENDING: per-language before/after table (harmful rate with the unclear bound, intervals) from outputs/metrics/final_report.json (P07 lift stats / lift report)]_
 
+_[PENDING: the figure heatmap_harmful.png from outputs/figures/heatmap_harmful.png (P07 lift report)]_
+
 ### Repair comparison
 
-Every repair family's frozen setting, against the adapter-scaling baseline (WiSE-FT).
+Every repair family's frozen setting, against the adapter-scaling baseline (WiSE-FT). Each family's
+setting was chosen on seed-1 dev prompts, under the constraints drawn here:
+
+_[PENDING: the figure tradeoff_dev.png from outputs/figures/tradeoff_dev.png (P07 lift report)]_
 
 _[PENDING: repair comparison table (every frozen family, final split) from outputs/metrics/final_report.json (P07 lift stats / lift report)]_
 
@@ -133,6 +140,8 @@ _[PENDING: exploratory claims, BH-FDR (ar, th, per-language effects) from output
 ### What the repair costs
 
 _[PENDING: easy and hard over-refusal per language from outputs/metrics/final_report.json (P07 lift stats / lift report)]_
+
+_[PENDING: the figure heatmap_overrefusal.png from outputs/figures/heatmap_overrefusal.png (P07 lift report)]_
 
 _[PENDING: utility win rate against stock and the share of the adapter's gain retained from outputs/metrics/final_report.json (P07 lift stats / lift report)]_
 

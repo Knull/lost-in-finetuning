@@ -186,7 +186,7 @@ LANG_NAMES = ("English", "Hindi", "Chinese", "Spanish", "Arabic", "Thai")
 def counts_note(facts: Facts) -> str:
     """Whether the final harmful prompts evaluated (P07's per-language table, ``n``: stock's final cell)
     match the design count from configs/ (review XB-15), naming each language that differs with both
-    numbers sourced; "" while the table is not there (it is pending itself)."""
+    numbers sourced, with a leading space; "" while the table is not there (it is pending itself)."""
     rows = facts.table_rows("per_language")
     if rows is None:
         return ""
@@ -197,7 +197,7 @@ def counts_note(facts: Facts) -> str:
         if r.get("lang") in LANG_NAMES and r.get("n") is not None and r.get("n") != design
     ]
     if not differ:
-        return "The final harmful prompts per language match this design in the per-language results."
+        return " The final harmful prompts per language match this design in the per-language results."
     at = "/tables/per_language/rows"
     shown_rows = [
         f"{facts.report_value(f'{at}/{i}/lang', 'text', what='a language label')} "
@@ -206,7 +206,7 @@ def counts_note(facts: Facts) -> str:
     ]
     designed = facts.config("project", "sizes.harmful.final", "int")
     return (
-        f"The final harmful prompts evaluated differ from this design in {', '.join(shown_rows)}, against "
+        f" The final harmful prompts evaluated differ from this design in {', '.join(shown_rows)}, against "
         f"{designed} designed: the per-language results count what was evaluated."
     )
 

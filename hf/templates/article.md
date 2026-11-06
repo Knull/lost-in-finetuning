@@ -69,7 +69,7 @@ Everything derived from Tiny Aya (the adapters and the repaired model) is non-co
 | Utility | held-out Hindi instructions (Aya Dataset, IndicAlign) | what the adapter was trained for | {{ n_utility_dev }} | {{ n_utility_final }} |
 | Capability | Belebele (CC-BY-SA-4.0), log-likelihood scoring | reading comprehension in each language | {{ n_belebele_dev }} | {{ n_belebele_final }} |
 
-Counts are per language. {{ counts_note }} Prompt ids are shared across languages and split
+Counts are per language.{{ counts_note }} Prompt ids are shared across languages and split
 identically in every language. Languages: English and Hindi (primary), Chinese and Spanish (transfer, checked by
 native readers), Arabic and Thai (exploratory). The translations we made are public:
 {{ prompts_repo }}.
