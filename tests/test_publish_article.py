@@ -526,3 +526,23 @@ def _card_from(doc):
     )
     facts = Facts()
     return model.model_card(facts, spec.name, spec), facts
+
+
+def test_the_article_names_no_absolute_local_path(out):
+    """XB2-04: a path P07 wrote into a table note is shown repo-relative in the article and its sources;
+    one outside the repo and any outputs/ tree refuses the article."""
+    from publish_fakes import report
+
+    from lift import paths
+
+    doc = report()
+    doc["tables"]["cost"]["note"] = f"From the manifests in {paths.manifests_dir()}."
+    write_report(doc)
+    path, _ = article.build()
+    text = path.read_text(encoding="utf-8")
+    assert "From the manifests in outputs/manifests." in text and str(paths.output_dir()) not in text
+    assert str(paths.output_dir()) not in article.sources_path().read_text(encoding="utf-8")
+    doc["tables"]["cost"]["note"] = "From /home/someone/notes.txt."
+    write_report(doc)
+    with pytest.raises(PublishError, match="absolute local path"):
+        article.build()

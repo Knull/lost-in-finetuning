@@ -719,3 +719,53 @@ def test_the_figures_go_into_the_logs_and_its_card(outputs):
     card = (up.folder / "README.md").read_text()
     assert "[PENDING" in card and "heatmap_harmful.png" in card
     assert not (up.folder / "figures" / "heatmap_harmful.png").exists()
+
+
+# ---------------------------------------------------- no absolute local path goes public (review XB2-04)
+
+
+def test_absolute_local_paths_are_staged_repo_relative(outputs):
+    """XB2-04: P05's freeze plan names a pending CAST artifact by its absolute path, and run manifests
+    carry ``out_path``: the staged copies hold them relative to the repo (outputs/..., a GPU VM's
+    .../outputs/... too), and nothing staged still names a home dir, /tmp or a drive."""
+    from publish_fakes import selection
+
+    from lift.publish import preflight
+
+    sel = selection()
+    cast = paths.output_dir() / "artifacts" / "cast" / "adapter-aya-std-s2" / "cast.safetensors"
+    sel["freeze"]["variants"][1]["pending"] = f"{cast} not found: run `lift fit-cast`"
+    write_inputs(selection_doc=sel)
+    out = paths.output_dir() / "utility" / "j" / VARIANT / "utility_hi_final.jsonl"
+    manifest = {
+        "run_id": "utility-1",
+        "out_path": str(out),
+        "on_the_vm": "/content/lift/outputs/scores/belebele/x.jsonl",
+        "config": str(paths.REPO_ROOT / "configs" / "project.yaml"),
+    }
+    write_json(paths.output_dir() / "manifests" / "utility-1.json", manifest)
+    up = datasets.build_logs()
+    staged = json.loads((up.folder / "aggregates" / "selection.json").read_text(encoding="utf-8"))
+    assert staged["freeze"]["variants"][1]["pending"] == (
+        "outputs/artifacts/cast/adapter-aya-std-s2/cast.safetensors not found: run `lift fit-cast`"
+    )
+    man = json.loads((up.folder / "manifests" / "utility-1.json").read_text(encoding="utf-8"))
+    assert man["out_path"] == f"outputs/utility/j/{VARIANT}/utility_hi_final.jsonl"
+    assert man["on_the_vm"] == "outputs/scores/belebele/x.jsonl"
+    assert man["config"] == "configs/project.yaml"
+    text = _texts(up.folder)
+    assert str(paths.output_dir()) not in text and str(paths.REPO_ROOT) not in text
+    assert not preflight.local_paths(text)
+    assert not [f for f in preflight.scan_folder(up.folder, set()) if f.kind == preflight.LOCAL_PATH_KIND]
+    note = next(n for n in up.notes if "absolute local path" in n)
+    assert "aggregates/selection.json" in note and "manifests/utility-1.json" in note
+
+
+@pytest.mark.parametrize(
+    "where", ["/home/someone/.cache/lift/x.json", "C:\\Users\\someone\\lift\\x.json", "/tmp/elsewhere/x"]
+)
+def test_a_local_path_that_cannot_be_made_relative_is_withheld(outputs, where):
+    write_inputs()
+    write_json(paths.output_dir() / "manifests" / "generate-2.json", {"run_id": "generate-2", "cache": where})
+    with pytest.raises(PublishError, match="manifests/generate-2.json.*absolute local path"):
+        datasets.build_logs()

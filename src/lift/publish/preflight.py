@@ -32,6 +32,15 @@ read by hand (PR and issue text, Actions logs).
 
 A finding names the file, line and kind, never the matched text. A line holding ``preflight: allow``
 is skipped (for a documented fake in a test). When it passes it prints the steps to make the repo public.
+
+Absolute local paths (review XB2-04). A staged public file must name no home dir (``/home/<user>``,
+``/Users/<user>``, ``/root``), temp dir (``/tmp``, ``/var/folders``...), GPU VM dir (``/content``,
+``/kaggle``) or drive letter (``C:``): the public-text scan (``scan_folder``) finds them, a tokenizer's
+vocabulary aside (``VOCAB_FILES``). The staging rewrites them first (``relativise_folder``): a path under
+this machine's output, validation or data dir or the repo becomes repo-relative (``outputs/...``,
+``configs/...``), one under another machine's ``outputs/`` tree (a GPU VM's) is cut to it, a Hugging Face
+cache snapshot becomes its repo id; any other is withheld, and the upload refused (``PublishError``).
+The tracked files are not checked for them (docs name /tmp and drive letters by design).
 """
 
 from __future__ import annotations
@@ -89,6 +98,167 @@ CHUNK_CHARS = 8 << 20  # a longer text is scanned a chunk at a time (windows_in)
 HARMFUL_TEXT = "text of an output labelled harmful"
 NOTEBOOK_OUTPUTS = "notebook with outputs or execution counts"
 JSON_SUFFIXES = (".json", ".jsonl", ".ipynb")
+
+
+LOCAL_PATH_KIND = "absolute local path (a home dir, /tmp, a VM dir or a drive)"
+_LOCAL_PATH = re.compile(
+    r"(?<![\w.~$%/\\:-])"
+    r"(?:/(?:home|Users|root)/"
+    r"|/(?:tmp|var/tmp|var/folders|private/var|private/tmp|content|kaggle)(?=[/\\\s\"'`]|$)"
+    r"|[A-Za-z]:[\\/])"
+    r"[^\s\"'`<>|]*"
+)
+_TRAILING = ".,;:)]}"
+# A tokenizer's vocabulary may hold tokens such as "C:\\" or "/home/": not paths, and never rewritten.
+VOCAB_FILES = frozenset(
+    {"tokenizer.json", "vocab.json", "merges.txt", "vocab.txt", "tokenizer.model", "spiece.model"}
+)
+_HF_SNAPSHOT = re.compile(r"models--(?P<org>[^/\\]+)--(?P<name>[^/\\]+)[/\\]snapshots[/\\][0-9a-f]+")
+
+
+def local_paths(text: str) -> list[str]:
+    """The absolute local paths in ``text`` (module docstring), trailing punctuation left out."""
+    return [m.group(0).rstrip(_TRAILING) for m in _LOCAL_PATH.finditer(text)]
+
+
+def _roots() -> list[tuple[str, str]]:
+    """(a root as text, what it becomes), longest first: this machine's trees and the repo."""
+    forms = set()
+    for root, label in (
+        (paths.output_dir(), "outputs"),
+        (paths.validation_dir(), "validation"),
+        (paths.data_dir(), "data"),
+        (paths.REPO_ROOT, ""),
+    ):
+        for form in {str(root), root.as_posix(), str(root.resolve()), root.resolve().as_posix()}:
+            form = form.rstrip("/\\")
+            if len(form) > 3:  # never "/" or "C:"
+                forms.add((form, label))
+    return sorted(forms, key=lambda f: -len(f[0]))
+
+
+def relative_text(text: str) -> tuple[str, int, list[str]]:
+    """``text`` with its absolute local paths made repo-relative (module docstring): (the text, how many
+    were rewritten, the ones that cannot be)."""
+    n = 0
+    for form, label in _roots():
+        if form not in text:
+            continue
+        pattern = re.compile(re.escape(form) + r"(?:(?P<sep>[\\/])|(?=[\s\"'`<>|),;:\]}]|$))")
+
+        def root(m: re.Match[str], label: str = label) -> str:
+            nonlocal n
+            n += 1
+            if m.group("sep"):
+                return f"{label}/" if label else ""
+            return label or "."
+
+        text = pattern.sub(root, text)
+    unresolved: list[str] = []
+
+    def other(m: re.Match[str]) -> str:
+        nonlocal n
+        token = m.group(0)
+        core = token.rstrip(_TRAILING)
+        tail = token[len(core) :]
+        snap = _HF_SNAPSHOT.search(core)
+        if snap:
+            n += 1
+            return f"{snap['org']}/{snap['name']}{tail}"
+        parts = [p for p in re.split(r"[\\/]+", core) if p]
+        if "outputs" in parts[1:]:
+            n += 1
+            i = len(parts) - 1 - parts[::-1].index("outputs")
+            return "/".join(parts[i:]) + tail
+        unresolved.append(core)
+        return token
+
+    return _LOCAL_PATH.sub(other, text), n, unresolved
+
+
+def _relative_json(value: object, count: list[int], unresolved: list[str]) -> object:
+    if isinstance(value, str):
+        text, n, bad = relative_text(value)
+        count[0] += n
+        unresolved += bad
+        return text
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            out[_relative_json(k, count, unresolved)] = _relative_json(v, count, unresolved)
+        return out
+    if isinstance(value, list):
+        return [_relative_json(v, count, unresolved) for v in value]
+    return value
+
+
+def relativise_file(path: Path) -> tuple[int, list[str]]:
+    """Rewrite one text file's absolute local paths in place (JSON and JSONL by their string values, so
+    an escaped path is read as it is): (how many were rewritten, the ones that cannot be). A binary file,
+    a tokenizer's vocabulary or a file with none is left as it is."""
+    path = Path(path)
+    if path.name in VOCAB_FILES:
+        return 0, []
+    raw = path.read_bytes()
+    if _binary(raw[:8192]):
+        return 0, []
+    text = raw.decode("utf-8", "replace")
+    if not _LOCAL_PATH.search(text) and not any(form in text for form, _ in _roots()):
+        return 0, []
+    count, unresolved = [0], []
+    new = None
+    try:
+        if path.suffix in (".json", ".ipynb"):
+            doc = _relative_json(json.loads(text), count, unresolved)
+            new = json.dumps(doc, indent=1, ensure_ascii=False) + "\n"
+        elif path.suffix == ".jsonl":
+            lines = []
+            for line in text.splitlines():
+                if line.strip():
+                    row = _relative_json(json.loads(line), count, unresolved)
+                    lines.append(json.dumps(row, ensure_ascii=False))
+            new = "".join(f"{line}\n" for line in lines)
+    except json.JSONDecodeError:
+        count, unresolved, new = [0], [], None
+    if new is None:
+        new, count[0], unresolved = relative_text(text)
+    if count[0]:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(new)
+    return count[0], unresolved
+
+
+def relativise_folder(folder: Path) -> dict[str, int]:
+    """Make every absolute local path in a staged upload repo-relative (module docstring): {file: paths
+    rewritten}. PublishError, naming each file, when one cannot be (withheld: nothing is published)."""
+    done: dict[str, int] = {}
+    bad: dict[str, int] = {}
+    for f in sorted(p for p in Path(folder).rglob("*") if p.is_file()):
+        n, unresolved = relativise_file(f)
+        rel = f.relative_to(folder).as_posix()
+        if n:
+            done[rel] = n
+        if unresolved:
+            bad[rel] = len(unresolved)
+    if bad:
+        raise PublishError(
+            "withheld, nothing was published: "
+            + "; ".join(f"{rel} holds {k} absolute local path(s)" for rel, k in bad.items())
+            + " outside the repo and any outputs/ tree (a home dir, /tmp, a VM dir or a drive): have the "
+            "stage that writes it record the path relative to the repo"
+        )
+    return done
+
+
+def relativised_note(done: dict[str, int]) -> list[str]:
+    """The plan's note on what ``relativise_folder`` rewrote ([] when nothing)."""
+    if not done:
+        return []
+    return [
+        f"{sum(done.values())} absolute local path(s) staged repo-relative in {', '.join(sorted(done))}"
+        + (" (selection.json's bytes then differ from the sha256 the recipe pins)"
+           if any(f.endswith("selection.json") for f in done) else "")
+    ]
 
 
 @dataclass(frozen=True)
@@ -439,8 +609,9 @@ def _binary(head: bytes) -> bool:
 
 def scan_folder(folder: Path, windows: set[str], *, where: str = "staged") -> list[Finding]:
     """Scan every text file of a staged upload as the preflight scans a tracked file (secrets, raw
-    completion records, notebooks with outputs, harmful-output windows), and every AuditKIT record
-    (a .json under an ``auditkit`` folder) for redaction. Binary files (weights) are skipped."""
+    completion records, notebooks with outputs, harmful-output windows) and for absolute local paths
+    (``LOCAL_PATH_KIND``, a tokenizer's vocabulary aside), and every AuditKIT record (a .json under an
+    ``auditkit`` folder) for redaction. Binary files (weights) are skipped."""
     found: list[Finding] = []
     for f in sorted(p for p in Path(folder).rglob("*") if p.is_file()):
         rel = f.relative_to(folder).as_posix()
@@ -449,6 +620,12 @@ def scan_folder(folder: Path, windows: set[str], *, where: str = "staged") -> li
                 continue
         text = f.read_bytes().decode("utf-8", "replace")
         found += scan_text(text, rel, where, windows)
+        if f.name not in VOCAB_FILES:
+            found += [
+                Finding(where, rel, i, LOCAL_PATH_KIND)
+                for i, line in enumerate(text.splitlines(), 1)
+                if ALLOW_MARK not in line and _LOCAL_PATH.search(line)
+            ]
         if "auditkit" in rel.split("/")[:-1] and rel.endswith(".json"):
             try:
                 problem = auditkit_problem(json.loads(text))

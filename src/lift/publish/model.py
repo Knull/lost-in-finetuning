@@ -24,6 +24,8 @@
 - Adapters (gated, automatic approval): every registered adapter (configs/variants.yaml), from
   outputs/adapters/, its weights and adapter_config.json only (registration.json stays private: it names
   the runs repo). One not pulled to this machine is listed as missing, which blocks ``--yes``.
+- Every staged file names no absolute local path: each is made repo-relative (a Hugging Face cache
+  snapshot, its repo id) or the build refused (``lift.publish.preflight.relativise_folder``, XB2-04).
 - The repaired model and the parameters name the frozen recipe, so both are blocked (``--yes`` refuses
   them; the dry run still stages and prints them) until configs/frozen_recipe.json is the one the newest
   ``recipe-frozen-*`` tag froze (``lift.publish.inputs.recipe_block``, review XB2-02).
@@ -39,7 +41,7 @@ from typing import Any
 
 from lift import config, paths
 from lift.io import sha256_file
-from lift.publish import PublishError, render, settings
+from lift.publish import PublishError, preflight, render, settings
 from lift.publish.hub import Upload
 from lift.publish.inputs import (
     NOT_RUN,
@@ -497,6 +499,7 @@ def build_model(
     notes.append("gated (automatic approval), docs/decisions.md item 74: " + "; ".join(gated))
     render.write_text(folder / "README.md", model_card(facts, variant, spec, gated))
     facts.write_sources(stage_root() / "model.sources.json")
+    notes += preflight.relativised_note(preflight.relativise_folder(folder))
     return Upload(
         repo=repo,
         folder=folder,
@@ -551,8 +554,11 @@ def build_params(facts: Facts) -> Upload:
     }
     body = render.fill(render.template("params_card.md"), {"table": table, **_links()})
     render.write_text(folder / "README.md", render.frontmatter(meta) + "\n" + body)
+    notes = preflight.relativised_note(preflight.relativise_folder(folder))
     blocked = [block] if block else []
-    return Upload(repo=repo, folder=folder, title="repair parameters", expected=expected, blocked=blocked)
+    return Upload(
+        repo=repo, folder=folder, title="repair parameters", expected=expected, blocked=blocked, notes=notes
+    )
 
 
 def registered_adapters() -> dict[str, Any]:
@@ -585,6 +591,7 @@ def build_adapters(facts: Facts) -> list[Upload]:
                 folder=folder,
                 title=f"adapter {name} (gated, automatic approval)",
                 expected=expected,
+                notes=preflight.relativised_note(preflight.relativise_folder(folder)),
             )
         )
     return out

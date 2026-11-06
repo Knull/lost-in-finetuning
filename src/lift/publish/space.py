@@ -10,7 +10,7 @@ import shutil
 from pathlib import Path
 
 from lift import paths
-from lift.publish import render, settings
+from lift.publish import preflight, render, settings
 from lift.publish.hub import Upload
 
 FILES = ("app.py", "README.md", "requirements.txt")
@@ -33,5 +33,5 @@ def build() -> Upload:
         repo=settings.repo("space"),
         folder=folder,
         title="Space (Gradio, no model loading)",
-        notes=[f"reads only {logs.url}"],
+        notes=[f"reads only {logs.url}", *preflight.relativised_note(preflight.relativise_folder(folder))],
     )

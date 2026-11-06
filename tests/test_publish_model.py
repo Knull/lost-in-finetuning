@@ -522,3 +522,19 @@ def test_without_a_tagged_recipe_the_plans_are_printed_blocked_and_yes_refuses(
     assert "WINNER" in acceptance.stamp_notebook(nb)
     assert cli.main(["publish", "article"]) == 0
     assert "BLOCKED" not in article.article_path().read_text(encoding="utf-8")
+
+
+def test_staged_model_files_name_no_absolute_local_path(registry):
+    """XB2-04: an adapter_config.json that names the base model by its Hugging Face cache snapshot goes up
+    with the repo id; one under a home dir that is no such snapshot is withheld (the build refuses)."""
+    write_inputs()
+    config = paths.adapters_dir() / "adapter-aya-std-s1" / "adapter_config.json"
+    snapshot = "/root/.cache/huggingface/hub/models--CohereLabs--tiny-aya-global/snapshots/" + "ab12" * 10
+    config.write_text(json.dumps({"base_model_name_or_path": snapshot, "r": 16}))
+    (a,) = model.build_adapters(Facts())
+    staged = json.loads((a.folder / "adapter_config.json").read_text())
+    assert staged == {"base_model_name_or_path": "CohereLabs/tiny-aya-global", "r": 16}
+    assert any("adapter_config.json" in n for n in a.notes)
+    config.write_text(json.dumps({"base_model_name_or_path": "/home/someone/models/aya"}))
+    with pytest.raises(PublishError, match="adapter_config.json holds 1 absolute local path"):
+        model.build_adapters(Facts())

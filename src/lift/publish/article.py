@@ -20,7 +20,7 @@ import re
 from pathlib import Path
 
 from lift import config, paths
-from lift.publish import PublishError, render, settings
+from lift.publish import PublishError, preflight, render, settings
 from lift.publish.collect import links_path, read_links
 from lift.publish.datasets import verdict_lines
 from lift.publish.inputs import (
@@ -488,7 +488,15 @@ def build(facts: Facts | None = None) -> tuple[Path, Facts]:
         head, sep, rest = text.partition("\n# ")
         title, nl, body = rest.partition("\n")
         text = f"{head}{sep}{title}\n\n{mark}\n{nl}{body}" if sep else f"{mark}\n\n{text}"
+    text, _, unresolved = preflight.relative_text(text)  # no absolute local path goes public (XB2-04)
+    if unresolved:
+        raise PublishError(
+            f"the article would name {len(unresolved)} absolute local path(s) outside the repo and any "
+            "outputs/ tree (from the inputs it reads); nothing was written"
+        )
     render.write_text(article_path(), text)
     facts.write_sources(sources_path())
+    if preflight.relativise_file(sources_path())[1]:
+        raise PublishError(f"{sources_path().name} would name an absolute local path outside the repo")
     acceptance.stamp_notebook()
     return article_path(), facts

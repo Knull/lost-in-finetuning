@@ -27,7 +27,8 @@ generation, the second judge covers its key list (the final-split keys of
 validation/keys/second_judge/all.txt plus every validated key) on the current outputs, and no Message
 Batch is still open. ``check_public`` then re-reads
 every staged row (harmful anywhere, or not the output its judgement covered, stops the publish) and the
-whole staged folder is scanned like a public upload (``preflight.scan_folder``).
+whole staged folder is scanned like a public upload (``preflight.scan_folder``), after every absolute
+local path in it is made repo-relative or the build refused (``preflight.relativise_folder``, XB2-04).
 
 Back-translation (P08-R1-12, P07's contract): P07 judges NLLB back-translations of a sample of ar and th
 final outputs and writes one row per output to
@@ -840,6 +841,7 @@ def build_logs(facts: Facts | None = None) -> Upload:
     )
     render.write_text(folder / "README.md", card)
     facts.write_sources(stage_root() / "logs.sources.json")
+    relativised = preflight.relativise_folder(folder)  # no absolute local path goes public (XB2-04)
     found = preflight.scan_folder(folder, preflight.windows_of(texts))
     if found:
         raise PublishError(
@@ -862,6 +864,7 @@ def build_logs(facts: Facts | None = None) -> Upload:
         )
     if not rows:
         notes.append("no judgements in outputs/judgements yet: only the card and aggregates are staged")
+    notes += preflight.relativised_note(relativised)
     blocked = [block] if block else []
     return Upload(repo=repo, folder=folder, title="logs dataset", notes=notes, blocked=blocked)
 
@@ -1068,12 +1071,9 @@ def build_prompts(facts: Facts | None = None) -> Upload:
     )
     render.write_text(folder / "README.md", render.frontmatter(meta) + "\n" + body)
     sources.write_sources(stage_root() / "prompts.sources.json")
-    return Upload(
-        repo=repo,
-        folder=folder,
-        title="translated prompt sets",
-        notes=[f"{len(table)} files"] if table else ["no translated prompt files yet (lift data build)"],
-    )
+    notes = [f"{len(table)} files"] if table else ["no translated prompt files yet (lift data build)"]
+    notes += preflight.relativised_note(preflight.relativise_folder(folder))
+    return Upload(repo=repo, folder=folder, title="translated prompt sets", notes=notes)
 
 
 BUILDERS = {"logs": build_logs, "raw": build_raw, "prompts": build_prompts}

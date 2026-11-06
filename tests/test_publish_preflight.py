@@ -474,3 +474,27 @@ def test_history_blobs_are_streamed_not_buffered(repo, monkeypatch):
     assert [(f.path, f.kind) for f in found] == [("f2.txt", "Hugging Face token")]
     blobs = preflight._history_blobs(repo)
     assert {sha for sha, _kind, _body in preflight._cat_blobs(repo, blobs)} == set(blobs)
+
+
+@pytest.mark.parametrize(
+    "line,flagged",
+    [
+        ('"out_path": "/home/ana/lexsi/outputs/x.jsonl"', True),
+        ('"out_path": "/Users/ana/x"', True),
+        ('"cache": "/root/.cache/huggingface"', True),
+        ("written under /tmp/claude-1000/xbranch2/repo/outputs", True),
+        ('"out_path": "C:\\\\Users\\\\ana\\\\lift\\\\x.jsonl"', True),
+        ("D:/runs/lift/outputs", True),
+        ("see https://huggingface.co/datasets/org/x and file:x", False),
+        ("outputs/metrics/selection.json and configs/project.yaml", False),
+        ("a/home/b, ratio 1:2, 10:30", False),
+    ],
+)
+def test_the_public_text_scan_flags_absolute_local_paths(tmp_path, line, flagged):
+    """XB2-04: a home dir, /tmp or a drive letter in a staged public file is a finding (the staging
+    rewrites what it can to repo-relative paths first); a tokenizer's vocabulary is not read for them."""
+    (tmp_path / "f.json").write_text(line + "\n", encoding="utf-8")
+    (tmp_path / "tokenizer.json").write_text('{"vocab": {"C:\\\\": 1, "/home/": 2, "/tmp/": 3}}')
+    found = preflight.scan_folder(tmp_path, set())
+    assert any(f.path == "f.json" and f.kind == preflight.LOCAL_PATH_KIND for f in found) is flagged
+    assert not any(f.path == "tokenizer.json" for f in found)
