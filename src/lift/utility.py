@@ -1052,6 +1052,7 @@ def _judge_into(path: Path, pairing: Pairing, judge: Any, *, judge_dir: str, pre
     judge's counters; a local judge's ``info`` and ``stack``), also when the run stops: "pending" for batches
     still running, else "failed"."""
     from lift.manifest import finish_run, start_run
+    from lift.train.lora import _shown  # records name paths relative to the repo, not the machine's
 
     pending: tuple[type[BaseException], ...] = ()
     if judge_dir == "frontier":
@@ -1063,7 +1064,7 @@ def _judge_into(path: Path, pairing: Pairing, judge: Any, *, judge_dir: str, pre
     n = len(pairing.pairs)
     run = start_run("utility", variant=pairing.variant, reference=REFERENCE, set=SET, lang=LANG,
                     split=pairing.split, dtype=pairing.dtype, judge=judge.judge_id, judge_dir=judge_dir,
-                    n_pairs=n, n_requests=2 * n, out_path=str(path), prefill=prefill, wait=wait,
+                    n_pairs=n, n_requests=2 * n, out_path=_shown(path), prefill=prefill, wait=wait,
                     device=getattr(judge, "device", None), devices=0 if judge_dir == "frontier" else 1,
                     judge_info=getattr(judge, "info", None), judge_stack=getattr(judge, "stack", None))
     log.info("%s vs %s, %s_%s_%s: judging %d pairs in both orders (%d requests) with %s", pairing.variant,

@@ -22,6 +22,7 @@ from lift.cachekey import generation_key, intervention_digest  # noqa: E402
 from lift.models import generate as gen  # noqa: E402
 from lift.models import variants  # noqa: E402
 from lift.models.load import load_model, load_tokenizer, resolved_revision  # noqa: E402
+from lift.paths import manifests_dir  # noqa: E402
 from lift.repair import cast, resta, wiseft  # noqa: E402
 from lift.repair import settings as rs  # noqa: E402
 from lift.schemas import VariantSpec  # noqa: E402
@@ -468,6 +469,9 @@ def test_lift_fit_cast(fake_prompt_files, tiny_lora_adapter, tiny_model_dir, mon
     assert set(firing["benign"]["hi"]) == {"easy_benign", "hard_benign"}
     assert report["counts"]["harmful"]["harmful_hi_train"] == 4
     assert report["safetune_config"]["legacy_cast_gate"] is False
+    (manifest,) = manifests_dir().glob("fit_cast-*.json")             # XB2-04: no absolute local path
+    assert json.loads(manifest.read_text(encoding="utf-8"))["artifact"] == (
+        f"outputs/artifacts/cast/{ADAPTER}/{cast.ARTIFACT}")
     digest = cast.artifact_hash(path)
     assert cli.main(line) == 0 and "kept" in capsys.readouterr().out          # a rerun keeps it
     # One fitted on another Global revision (which the CAST builder refuses) is not kept either.
