@@ -98,6 +98,9 @@ def test_records_carry_hashes_counts_and_meta(stock, tmp_path, isolated_dirs):
     for field in provenance:
         assert r.meta[field]
     assert r.meta["model_rev"] == stock.model_rev and r.meta["harness"] == gen.HARNESS_VERSION
+    from lift.cachekey import intervention_digest
+
+    assert r.meta["intervention"] == intervention_digest(stock.spec)       # lift select checks the entry
     manifests = sorted((isolated_dirs / "outputs" / "manifests").glob("generate-*.json"))
     assert len(manifests) == 1
     doc = json.loads(manifests[0].read_text(encoding="utf-8"))
