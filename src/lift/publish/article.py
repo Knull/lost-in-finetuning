@@ -3,7 +3,9 @@
 The organisers' sections, in their order (prompts/P08_publish.md). Results come from
 final_report.json (P07) and selection.json (P05), the design numbers (set sizes, selection rule,
 validation bar) from configs/, and the links from configs/publish.yaml and the collections file.
-``hf/article.sources.json`` lists every rendered value with its file and JSON pointer. The article is
+``hf/article.sources.json`` lists every rendered value with its file and JSON pointer. While the recipe
+is not frozen at its ``recipe-frozen-*`` tag (``inputs.recipe_block``), the article is a draft marked
+blocked under its title (a placeholder: not for posting). The article is
 posted by hand (HF community articles have no upload API); ``lift publish article`` only writes it, and
 stamps the notebook's links (``acceptance.stamp_notebook``) from the same settings.
 
@@ -21,7 +23,18 @@ from lift import config, paths
 from lift.publish import PublishError, render, settings
 from lift.publish.collect import links_path, read_links
 from lift.publish.datasets import verdict_lines
-from lift.publish.inputs import FIGURES, P07, TABLES, Facts, _interval, pending, report_path, shown
+from lift.publish.inputs import (
+    FIGURES,
+    P07,
+    RECIPE_IN_GIT,
+    TABLES,
+    Facts,
+    _interval,
+    pending,
+    recipe_block,
+    report_path,
+    shown,
+)
 
 SECTIONS = (
     "Problem and approach",
@@ -381,11 +394,27 @@ def context(facts: Facts) -> dict[str, str]:
     return ctx
 
 
+def blocked_line(facts: Facts) -> str:
+    """The line that marks a draft whose recipe is not frozen at its tag (review XB2-02), "" when it is: a
+    placeholder, so the article is not posted while it holds it."""
+    block = recipe_block(facts)
+    if not block:
+        return ""
+    facts.missing.append(f"the recipe frozen at its tag ({RECIPE_IN_GIT})")
+    what = f"BLOCKED, a draft not for posting: {block}"
+    return f"> **{pending(what, RECIPE_IN_GIT, 'P05 lift select, then a commit and the tag')}**"
+
+
 def build(facts: Facts | None = None) -> tuple[Path, Facts]:
     from lift.publish import acceptance
 
     facts = facts or Facts()
     text = render.fill(render.template("article.md"), context(facts))
+    mark = blocked_line(facts)
+    if mark:  # right under the title
+        head, sep, rest = text.partition("\n# ")
+        title, nl, body = rest.partition("\n")
+        text = f"{head}{sep}{title}\n\n{mark}\n{nl}{body}" if sep else f"{mark}\n\n{text}"
     render.write_text(article_path(), text)
     facts.write_sources(sources_path())
     acceptance.stamp_notebook()

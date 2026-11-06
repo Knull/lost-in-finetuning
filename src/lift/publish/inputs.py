@@ -65,6 +65,15 @@ is checked against that recipe too, report or not. Any disagreement (a ``lift se
 stats``, a stale pull, a report made before the block existed) refuses everything that reads them
 (``PublishError``): the numbers would be another winner's.
 
+The recipe is the one the tag froze (review XB2-02, decisions item 77): the working tree's
+configs/frozen_recipe.json must be byte for byte (line endings aside) the one in the commit the newest
+local ``recipe-frozen-*`` tag points to (``git show <tag>:configs/frozen_recipe.json``). A recipe that
+differs from the tag's (a ``lift select --refreeze`` after the final), or a tag that does not hold one,
+refuses everything that reads the selection (``PublishError``), dry runs too. While there is no recipe
+or no tag, nothing is frozen yet: ``recipe_block`` says why, the dry runs still stage and print their
+plan, and every upload that names the repaired model or its numbers (the model, the parameters, the
+logs dataset, the collections, the article) is marked blocked, which ``--yes`` refuses.
+
 Formats: pct (0.123 -> 12.3%), pp (signed points), points (0.05 -> 5 points), pct_ci, pp_ci, p, int,
 f2, f3, hours, ms, text, list ([1, 2] -> "1, 2"), and P08's own p_stmt for running text ("p < 0.001",
 "p = 0.031", "p not run"). In any format, P07's "undefined" or "undefined: <reason>" (a value computed
@@ -79,7 +88,8 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Mapping
+import subprocess
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -251,6 +261,7 @@ class Facts:
     sources: list[dict[str, Any]] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     _docs: dict[Path, Any] = field(default_factory=dict)
+    _block: list[str | None] = field(default_factory=list)  # recipe_block's answer, once asked
 
     def doc(self, path: Path) -> Any | None:
         """A JSON input (None when absent or empty). final_report.json is checked (its version, and that
@@ -466,11 +477,79 @@ def _selection_sha() -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
 
 
+TAG_GLOB = "recipe-frozen-*"
+RECIPE_IN_GIT = "configs/frozen_recipe.json"  # where P05's lift select writes it, in every commit
+_TAG = re.compile(r"recipe-frozen-[A-Za-z0-9._-]+")
+FREEZE = (
+    "lift select (P05) writes it, a commit of it, then the tag it prints "
+    "(git tag recipe-frozen-YYYYMMDD && git push --tags)"
+)
+
+
+def _git(argv: Sequence[str]) -> str | None:
+    """stdout of ``git <argv>`` in the repo, or None when git fails or is not there."""
+    try:
+        out = subprocess.run(
+            ["git", *argv], cwd=paths.REPO_ROOT, capture_output=True, text=True, timeout=60, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def frozen_tags(git: Callable[[Sequence[str]], str | None] | None = None) -> list[str]:
+    """The local ``recipe-frozen-*`` tags, oldest first (their names are dated): the last is the newest."""
+    out = (git or _git)(["tag", "--list", TAG_GLOB]) or ""
+    return sorted({t.strip() for t in out.splitlines() if _TAG.fullmatch(t.strip())})
+
+
+def _lf(text: str) -> str:
+    return text.replace("\r\n", "\n")
+
+
+def recipe_block(facts: Facts) -> str | None:
+    """Why nothing is frozen yet (no configs/frozen_recipe.json, or no local ``recipe-frozen-*`` tag): the
+    uploads that name the repaired model are blocked. None when the working tree's recipe is the one the
+    newest tag froze. PublishError when it is not, or when the tag does not hold one: the recipe in this
+    checkout is not the one that was frozen and evaluated."""
+    if facts._block:
+        return facts._block[0]
+    path = frozen_recipe_path()
+    tags = frozen_tags()
+    if not path.is_file():
+        block = f"no {RECIPE_IN_GIT}: the recipe is not frozen yet ({FREEZE})"
+    elif not tags:
+        block = (
+            f"no {TAG_GLOB} tag in this checkout, so {RECIPE_IN_GIT} is not frozen yet ({FREEZE}); "
+            "a clone without tags: git fetch --tags"
+        )
+    else:
+        tag = tags[-1]
+        tagged = _git(["show", f"{tag}:{RECIPE_IN_GIT}"])
+        if tagged is None:
+            raise PublishError(
+                f"{RECIPE_IN_GIT} cannot be read at {tag}, the newest {TAG_GLOB} tag: the tag must point to "
+                "the commit that holds the frozen recipe"
+            )
+        if _lf(tagged) != _lf(path.read_bytes().decode("utf-8", "replace")):
+            raise PublishError(
+                f"{shown(path)} is not the recipe the tag {tag} froze (a lift select after the freeze, or an "
+                f"edit): only the recipe the tag froze is evaluated and published (decisions item 77). "
+                f"Restore it (git checkout {tag} -- {RECIPE_IN_GIT}) and its selection.json (lift sync "
+                "pull); a new freeze needs a new dated tag and a decisions.md entry"
+            )
+        block = None
+    facts._block.append(block)
+    return block
+
+
 def _recipe(facts: Facts) -> dict | None:
-    """configs/frozen_recipe.json checked to be in P05's shape, or None while there is none."""
+    """configs/frozen_recipe.json checked to be in P05's shape (and, once tagged, to be the tag's:
+    ``recipe_block``), or None while there is none."""
     path = frozen_recipe_path()
     if not path.is_file():
         return None
+    recipe_block(facts)
     doc = facts.doc(path)
     where = f"{shown(path)} (the committed frozen recipe)"
     if not isinstance(doc, Mapping) or doc.get("version") != RECIPE_VERSION:

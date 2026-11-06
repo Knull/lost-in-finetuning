@@ -6,6 +6,10 @@ refuses while the HF namespace is unset (LIFT_HF_NAMESPACE or configs/publish.ya
 plan needs is not built, while a staged text still holds a ``[PENDING ...]`` placeholder (an input that
 does not exist yet; ``--allow-pending`` uploads such a repo as a private draft instead), or while a file
 that would be public fails the public-text scan, which needs this machine's outputs (``lift sync pull``).
+``--yes`` also refuses every plan that names the repaired model or its numbers (model, parameters, logs,
+collections) while configs/frozen_recipe.json is not the one the newest ``recipe-frozen-*`` tag froze
+(the dry run prints it BLOCKED); ``article`` then writes a draft marked blocked and exits 1. A recipe
+that differs from the tag's is refused outright.
 ``article`` writes hf/article.md; ``preflight`` checks the git repo can go public: it fetches every
 branch, tag and pull-request ref of origin first, and refuses a machine with no harmful outputs to check
 against. Exit codes: 0 done (or dry run), 1 refused or failed (preflight: findings).
@@ -65,11 +69,16 @@ def _space(args: argparse.Namespace) -> int:
 
 def _collections(args: argparse.Namespace) -> int:
     from lift.publish import PublishError, collect
+    from lift.publish.inputs import Facts, recipe_block
 
     try:
-        plan = collect.plan()
+        facts = Facts()
+        plan = collect.plan(facts)
         for line in collect.describe(plan):
             print(line)
+        block = recipe_block(facts)
+        if block:
+            print(f"BLOCKED: {block}")
         if args.yes:
             collect.execute(plan)
         else:
@@ -81,10 +90,11 @@ def _collections(args: argparse.Namespace) -> int:
 
 def _article(args: argparse.Namespace) -> int:
     from lift.publish import PublishError, article
-    from lift.publish.inputs import shown
+    from lift.publish.inputs import recipe_block, shown
 
     try:
         path, facts = article.build()
+        block = recipe_block(facts)
     except PublishError as exc:
         return _fail(exc)
     print(f"wrote {shown(path)} ({len(facts.sources)} values, sources in {shown(article.sources_path())})")
@@ -93,6 +103,9 @@ def _article(args: argparse.Namespace) -> int:
         print(f"{len(pend)} placeholders still pending (inputs not made yet, or for a person to fill in):")
         for p in pend:
             print(f"  {p}")
+    if block:
+        print(f"lift publish: BLOCKED, a draft not for posting: {block}", file=sys.stderr)
+        return 1
     print("Post it by hand as an HF community article (huggingface.co/new-blog) once nothing is pending.")
     return 0
 

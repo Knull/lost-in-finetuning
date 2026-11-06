@@ -589,13 +589,18 @@ def write_figures(names: tuple[str, ...] = FIGURES) -> None:
         (folder / f"{name}.png").write_bytes(PNG + name.encode())
 
 
-def write_report(doc: dict | None = None, selection_doc: dict | None = None) -> dict:
-    """Write selection.json and a final_report.json bound to it (its ``selection`` block replaced)."""
+def write_report(
+    doc: dict | None = None, selection_doc: dict | None = None, *, frozen: bool = True
+) -> dict:
+    """Write selection.json and a final_report.json bound to it (its ``selection`` block replaced), and
+    (``frozen``) the recipe of that selection, committed and tagged (``freeze``)."""
     sel = selection() if selection_doc is None else selection_doc
     write_json(paths.metrics_dir() / "selection.json", sel)
     doc = dict(report(sel) if doc is None else doc)
     doc["selection"] = binding(sel)
     write_json(paths.metrics_dir() / "final_report.json", doc)
+    if frozen:
+        freeze(sel)
     return doc
 
 
@@ -606,10 +611,14 @@ def write_inputs(
     selection_doc: dict | None = None,
     report_doc: dict | None = None,
     figures: bool = True,
+    frozen: bool = True,
 ) -> None:
     """selection.json, then final_report.json bound to it (P07 builds no report from an undecided
-    selection, so none by default when ``selection_doc`` is incomplete), and the figures."""
+    selection, so none by default when ``selection_doc`` is incomplete), and the figures; a decided
+    selection's recipe is committed and tagged (``freeze``) unless ``frozen`` is False."""
     sel = selection() if selection_doc is None else selection_doc
+    if frozen and sel.get("status") == "decided":
+        freeze(sel)
     if with_report is None:
         with_report = sel.get("status") == "decided"
     if with_selection:
@@ -644,16 +653,56 @@ class FakeApi:
         return [c[0] for c in self.calls]
 
 
+class FakeGit:
+    """The git repo ``lift.publish.inputs`` asks for the ``recipe-frozen-*`` tags and the recipe each one
+    froze (``git show <tag>:configs/frozen_recipe.json``); nothing runs git."""
+
+    def __init__(self):
+        self.tags: dict[str, str | None] = {}  # tag -> the recipe in its commit (None: not there)
+
+    def __call__(self, argv):
+        argv = list(argv)
+        if argv[:2] == ["tag", "--list"]:
+            return "".join(f"{t}\n" for t in self.tags)
+        if argv[0] == "show":
+            tag, _, path = argv[1].partition(":")
+            if path == "configs/frozen_recipe.json" and self.tags.get(tag) is not None:
+                return self.tags[tag]
+            return None
+        raise AssertionError(f"unexpected git call: {argv}")
+
+
 @pytest.fixture(autouse=True)
 def no_committed_recipe(tmp_path, monkeypatch):
     """The publish tests never read the repo's own configs/frozen_recipe.json (P05 commits it once the
-    recipe is frozen): each test has its own path, empty until ``write_recipe``. Import this fixture into
-    every publish test module."""
+    recipe is frozen) nor its git tags: each test has its own path, empty until ``write_recipe``, and its
+    own tags (``FakeGit``, none until ``tag_recipe``). Import this fixture into every publish test
+    module."""
     from lift.publish import inputs
 
     path = tmp_path / "configs" / "frozen_recipe.json"
     monkeypatch.setattr(inputs, "frozen_recipe_path", lambda: path)
+    monkeypatch.setattr(inputs, "_git", FakeGit(), raising=False)
     return path
+
+
+TAG = "recipe-frozen-20261107"
+
+
+def tag_recipe(tag: str = TAG, text: str | None = None) -> str:
+    """``git tag <tag>`` on a commit holding the recipe now in the working tree (or ``text``)."""
+    from lift.publish import inputs
+
+    path = inputs.frozen_recipe_path()
+    inputs._git.tags[tag] = text if text is not None else path.read_text(encoding="utf-8")
+    return tag
+
+
+def freeze(selection_doc: dict | None = None, tag: str = TAG) -> None:
+    """The legitimate freeze: ``lift select`` writes the recipe of this selection, it is committed, and
+    the tag points to that commit."""
+    write_recipe(frozen_recipe(selection_doc))
+    tag_recipe(tag)
 
 
 def write_recipe(doc: dict) -> Path:

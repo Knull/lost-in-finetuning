@@ -476,19 +476,21 @@ def notebook_path() -> Path:
 def stamp_notebook(path: str | Path | None = None) -> dict[str, str]:
     """Write the notebook's links from the settings, not by hand: REPO_URL (configs/publish.yaml
     github_repo, else the origin remote), PARAMS_REPO (the repair-parameters repo) and WINNER (the
-    overall frozen winner, once selection.json is decided). A value not known yet is left as it is.
+    overall frozen winner, once selection.json is decided and the recipe is the one its tag froze:
+    ``inputs.recipe_block``). A value not known yet is left as it is.
     The measured run time line is written from the runtime file ("not yet timed" without one).
     Returns what was written."""
     from lift.publish import settings
-    from lift.publish.inputs import Facts, frozen_winner
+    from lift.publish.inputs import Facts, frozen_winner, recipe_block
 
     path = Path(path) if path is not None else notebook_path()
     values = {"PARAMS_REPO": settings.repo("repair_params").repo_id}
     gh = settings.github_repo()
     if gh:
         values["REPO_URL"] = gh
-    winner = frozen_winner(Facts())
-    if winner:
+    facts = Facts()
+    winner = frozen_winner(facts)
+    if winner and recipe_block(facts) is None:
         values["WINNER"] = winner
     text = path.read_text(encoding="utf-8")
     nb = json.loads(text)

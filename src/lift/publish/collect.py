@@ -5,7 +5,8 @@ lists the logs dataset, the gated raw completions and the translated prompt sets
 listed repo is first checked to exist on the Hub (nothing is created while one is missing, so no
 collection is left half-built), then the collections are created (or reused: ``exists_ok``) under the
 team namespace and every item is added, and their urls are written to outputs/publish/collections.json,
-which the article reads for its links.
+which the article reads for its links. Both name the repaired model, so ``--yes`` refuses while the
+recipe is not frozen at its ``recipe-frozen-*`` tag (``lift.publish.inputs.recipe_block``, review XB2-02).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import Any
 
 from lift import paths
 from lift.publish import PublishError, hub, render, settings
-from lift.publish.inputs import Facts, frozen_winner
+from lift.publish.inputs import Facts, frozen_winner, recipe_block
 
 
 def links_path() -> Path:
@@ -69,6 +70,9 @@ def execute(
         raise PublishError(
             "not creating collections: no namespace or no frozen winner yet for " + ", ".join(problems)
         )
+    block = recipe_block(Facts())
+    if block:
+        raise PublishError(f"not creating collections: blocked: {block}")
     api = (api_factory or hub.default_api)()
     absent = [
         f"{r.repo_type} {r.repo_id}"

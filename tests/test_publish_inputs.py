@@ -257,22 +257,26 @@ def test_a_report_that_disagrees_with_the_selection_is_refused(change):
 
 def test_the_committed_frozen_recipe_must_agree():
     """configs/frozen_recipe.json (P05, XB-02) pins the selection: a selection.json or a report that
-    disagrees with it is refused, with or without a report."""
-    from publish_fakes import CAST_WINS, frozen_recipe, selection, write_recipe
+    disagrees with it is refused, with or without a report (the recipe as its tag froze it: XB2-02)."""
+    from publish_fakes import CAST_WINS, frozen_recipe, selection, tag_recipe, write_recipe
+
+    def freeze(doc):  # committed and tagged, so only the agreement is under test here
+        write_recipe(doc)
+        tag_recipe()
 
     from lift.publish.inputs import frozen_variants, frozen_winner, selection_path
 
     _bound()
-    write_recipe(frozen_recipe())
+    freeze(frozen_recipe())
     assert Facts().report() and frozen_winner(Facts()) == selection()["overall"]["winner"]
     for change in ("selection_sha256", "overall_winner", "frozen", "adapter", "version"):
         doc = frozen_recipe()
         doc[change] = {"frozen": {"wiseft": "x"}, "version": 2}.get(change, "0" * 64)
-        write_recipe(doc)
+        freeze(doc)
         with pytest.raises(PublishError, match="frozen_recipe.json"):
             Facts().report()
     # without any report: the model and parameters read selection.json alone, and it must match too
-    write_recipe(frozen_recipe(selection(CAST_WINS)))
+    freeze(frozen_recipe(selection(CAST_WINS)))
     report_path().unlink()
     with pytest.raises(PublishError, match="frozen_recipe.json"):
         frozen_winner(Facts())
@@ -280,6 +284,6 @@ def test_the_committed_frozen_recipe_must_agree():
         frozen_variants(Facts())
     write_json(selection_path(), selection(CAST_WINS))
     assert frozen_winner(Facts()) == "cast-m1.0-adapter-aya-std-s1"
-    write_recipe({"version": 1})
+    freeze({"version": 1})
     with pytest.raises(PublishError, match="frozen_recipe.json"):
         frozen_winner(Facts())

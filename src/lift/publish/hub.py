@@ -2,7 +2,9 @@
 
 Every command builds a list of ``Upload`` (one staged folder per repo), prints it, and calls
 ``execute`` only with ``--yes``. ``execute`` refuses (``check_ready``, every plan checked before anything
-is sent) while the namespace is the placeholder, while something is not built, while a gated repo's card
+is sent) while the namespace is the placeholder, while something is not built, while the plan is blocked
+(it names the repaired model or its numbers and the recipe is not frozen at a ``recipe-frozen-*`` tag:
+``lift.publish.inputs.recipe_block``; ``allow_pending`` does not lift it), while a gated repo's card
 lacks its terms, while a staged text still holds a ``[PENDING`` placeholder (unless ``allow_pending``),
 and while any file of an upload that is not gated with manual approval fails the public-text scan
 (``lift.publish.preflight.scan_folder``: secrets, raw completion records, notebooks with outputs, any run
@@ -51,6 +53,8 @@ class Upload:
     notes: list[str] = field(default_factory=list)
     # Files that the plan expects but that are made by a later step (weights not yet materialised).
     expected: list[str] = field(default_factory=list)
+    # Why it may not be uploaded at all yet (the recipe is not frozen at its tag); --yes refuses it.
+    blocked: list[str] = field(default_factory=list)
 
     def files(self) -> list[Path]:
         if not self.folder.is_dir():
@@ -62,13 +66,15 @@ class Upload:
         size = sum(p.stat().st_size for p in files)
         gate = {False: "public", "auto": "GATED (automatic approval)", "manual": "GATED (manual approval)"}
         lines = [
-            f"{self.title}: {self.repo.url}  [{self.repo.repo_type}, {gate[self.repo.gated]}]",
+            f"{self.title}: {self.repo.url}  [{self.repo.repo_type}, {gate[self.repo.gated]}]"
+            + ("  BLOCKED" if self.blocked else ""),
             f"  from {shown(self.folder)}: {len(files)} files, {size / 1e6:.1f} MB",
         ]
         for p in files[:12]:
             lines.append(f"    {p.relative_to(self.folder).as_posix()}")
         if len(files) > 12:
             lines.append(f"    ... and {len(files) - 12} more")
+        lines += [f"  BLOCKED: {why}" for why in self.blocked]
         lines += [f"  missing until built: {name}" for name in self.expected]
         lines += [f"  note: {n}" for n in self.notes]
         return lines
@@ -102,6 +108,8 @@ def check_ready(
             problems.append(
                 f"{u.title}: no HF namespace (set LIFT_HF_NAMESPACE or configs/publish.yaml namespace)"
             )
+        if u.blocked:
+            problems.append(f"{u.title}: blocked: {'; '.join(u.blocked)}")
         if u.expected:
             problems.append(f"{u.title}: not built yet: {', '.join(u.expected)}")
         if not u.files():

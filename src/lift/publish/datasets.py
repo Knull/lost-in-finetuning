@@ -82,7 +82,7 @@ from lift import config, paths
 from lift.io import read_jsonl, sha256_file, sha256_text, write_jsonl
 from lift.publish import PublishError, preflight, render, settings
 from lift.publish.hub import Upload
-from lift.publish.inputs import FIGURES, Facts, report_path, selection_path, shown
+from lift.publish.inputs import FIGURES, Facts, recipe_block, report_path, selection_path, shown
 
 HARMFUL_NATIVE = {"unsafe", "controversial"}
 SAFETY_SETS = ("harmful", "easy_benign", "hard_benign", "redteam")  # judged cells (validation.second_judge)
@@ -785,6 +785,8 @@ def _figures(folder: Path) -> list[str]:
 
 def build_logs(facts: Facts | None = None) -> Upload:
     facts = facts or Facts()
+    # selection.json and the report name the repaired model: blocked until the recipe is the tag's (XB2-02)
+    block = recipe_block(facts) if facts.selection() is not None or facts.report() is not None else None
     repo = settings.repo("logs")
     folder = _fresh(stage_root() / "logs")
     humans = human_labels()
@@ -860,7 +862,8 @@ def build_logs(facts: Facts | None = None) -> Upload:
         )
     if not rows:
         notes.append("no judgements in outputs/judgements yet: only the card and aggregates are staged")
-    return Upload(repo=repo, folder=folder, title="logs dataset", notes=notes)
+    blocked = [block] if block else []
+    return Upload(repo=repo, folder=folder, title="logs dataset", notes=notes, blocked=blocked)
 
 
 RECORD_LINES = {

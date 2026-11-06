@@ -24,6 +24,9 @@
 - Adapters (gated, automatic approval): every registered adapter (configs/variants.yaml), from
   outputs/adapters/, its weights and adapter_config.json only (registration.json stays private: it names
   the runs repo). One not pulled to this machine is listed as missing, which blocks ``--yes``.
+- The repaired model and the parameters name the frozen recipe, so both are blocked (``--yes`` refuses
+  them; the dry run still stages and prints them) until configs/frozen_recipe.json is the one the newest
+  ``recipe-frozen-*`` tag froze (``lift.publish.inputs.recipe_block``, review XB2-02).
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ from lift.publish.inputs import (
     frozen_variants,
     frozen_winner,
     pending,
+    recipe_block,
     report_path,
     selection_path,
     selection_problem,
@@ -447,6 +451,7 @@ def build_model(
     facts: Facts, variant: str | None = None, *, build_weights: bool = False, device: str = "cuda:0"
 ) -> Upload:
     """The overall winner's repo. Another variant is refused: the card's repair effect is the winner's."""
+    block = recipe_block(facts)
     winner = frozen_winner(facts)
     if variant is not None and variant != winner:
         raise PublishError(
@@ -498,10 +503,12 @@ def build_model(
         title=f"repaired model ({variant or 'winner pending'})",
         expected=expected,
         notes=notes,
+        blocked=[block] if block else [],
     )
 
 
 def build_params(facts: Facts) -> Upload:
+    block = recipe_block(facts)
     repo = settings.repo("repair_params")
     folder = stage_root() / "repair_params"
     if folder.exists():
@@ -544,7 +551,8 @@ def build_params(facts: Facts) -> Upload:
     }
     body = render.fill(render.template("params_card.md"), {"table": table, **_links()})
     render.write_text(folder / "README.md", render.frontmatter(meta) + "\n" + body)
-    return Upload(repo=repo, folder=folder, title="repair parameters", expected=expected)
+    blocked = [block] if block else []
+    return Upload(repo=repo, folder=folder, title="repair parameters", expected=expected, blocked=blocked)
 
 
 def registered_adapters() -> dict[str, Any]:

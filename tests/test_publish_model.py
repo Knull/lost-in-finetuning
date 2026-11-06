@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -394,3 +395,130 @@ def test_an_adapter_not_pulled_is_listed_as_missing_and_blocks_yes(registry, mon
         hub.check_ready([s2], windows=set())
     repos = [r.repo_id for r in collect.plan()["models"]]
     assert "test-org/lift-adapter-aya-std-s2" in repos and "test-org/lift-adapter-aya-std-s1" in repos
+
+
+# ------------------------------------------------------- the recipe the newest tag froze (review XB2-02)
+
+
+@pytest.fixture
+def article_out(tmp_path, monkeypatch):
+    """hf/article.md, its sources and the notebook written under tmp_path, never into the repo."""
+    from lift.publish import acceptance, article
+
+    monkeypatch.setattr(article, "article_path", lambda: tmp_path / "article.md")
+    monkeypatch.setattr(article, "sources_path", lambda: tmp_path / "article.sources.json")
+    notebook = tmp_path / "acceptance_test.ipynb"
+    notebook.write_text(acceptance.notebook_path().read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(acceptance, "notebook_path", lambda: notebook)
+    return tmp_path
+
+
+def _reselect_after_the_tag(numbers):
+    """XB2-02's probe: after the final, ``lift select --refreeze`` wrote another winner to selection.json
+    and configs/frozen_recipe.json (and ``lift stats``/``report`` followed it); nothing was tagged."""
+    from publish_fakes import frozen_recipe, write_recipe, write_report
+
+    doc = selection(numbers)
+    write_report(selection_doc=doc, frozen=False)
+    write_recipe(frozen_recipe(doc))
+    return doc
+
+
+def test_a_reselection_after_the_tag_publishes_nothing(registry, monkeypatch, capsys, article_out):
+    """XB2-02: the tag still names the old winner; a recipe that differs from the tag's refuses the
+    model, the parameters, the logs, the collections and the article, dry runs included."""
+    from lift import cli
+    from lift.publish import article, collect, datasets
+
+    monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
+    write_inputs()
+    assert not any(u.blocked for u in model.build_all())
+    _reselect_after_the_tag(RESTA_WINS)
+    for build in (model.build_all, collect.plan, article.build, lambda: datasets.build_logs(Facts())):
+        with pytest.raises(PublishError, match="recipe-frozen-20261107"):
+            build()
+    for argv in (["publish", "model"], ["publish", "collections"], ["publish", "article"]):
+        assert cli.main(argv) == 1
+    assert "not the recipe the tag recipe-frozen-20261107 froze" in capsys.readouterr().err
+    assert not (model.stage_root() / "model" / "resta-a0.25-adapter-aya-std-s1" / "README.md").exists()
+
+
+def test_the_newest_tag_decides_and_must_hold_the_recipe(registry):
+    from publish_fakes import TAG, frozen_recipe, tag_recipe, write_report
+
+    from lift.publish.inputs import frozen_winner, recipe_block
+
+    write_inputs()
+    tag_recipe("recipe-frozen-20261106", text='{"version": 1}')  # an older freeze: not the newest
+    assert recipe_block(Facts()) is None and frozen_winner(Facts()) == selection()["overall"]["winner"]
+    # line endings do not count (a Windows checkout)
+    tag_recipe(TAG, text=json.dumps(frozen_recipe()).replace("\n", "\r\n"))
+    assert recipe_block(Facts()) is None
+    # a later freeze with its own dated tag (and a decisions entry) is the one published
+    doc = selection(RESTA_WINS)
+    write_report(selection_doc=doc, frozen=False)
+    from publish_fakes import write_recipe
+
+    write_recipe(frozen_recipe(doc))
+    tag_recipe("recipe-frozen-20261108")
+    assert frozen_winner(Facts()) == "resta-a0.25-adapter-aya-std-s1"
+    # a tag on a commit without the recipe
+    tag_recipe("recipe-frozen-20261109", text=None)
+    from lift.publish import inputs
+
+    inputs._git.tags["recipe-frozen-20261109"] = None
+    with pytest.raises(PublishError, match="cannot be read at recipe-frozen-20261109"):
+        model.build_all()
+
+
+@pytest.mark.parametrize("state", ["no recipe", "no tag"])
+def test_without_a_tagged_recipe_the_plans_are_printed_blocked_and_yes_refuses(
+    registry, monkeypatch, capsys, tmp_path, article_out, state
+):
+    """XB2-02: before the freeze is committed and tagged, the dry runs still stage and print their plan,
+    marked BLOCKED; --yes refuses every plan that names the repaired model (with --allow-pending too),
+    the collections are not created, the article is a draft marked blocked (exit 1) and the notebook's
+    WINNER is not stamped. The adapters name no winner and are not blocked."""
+    from publish_fakes import frozen_recipe, tag_recipe, write_recipe
+
+    from lift import cli
+    from lift.publish import acceptance, article, collect, datasets, hub
+
+    monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
+    write_inputs(frozen=False)
+    if state == "no tag":
+        write_recipe(frozen_recipe())
+    ups = model.build_all()
+    by = {u.title.split(" (")[0]: u for u in ups}
+    why = "no configs/frozen_recipe.json" if state == "no recipe" else "no recipe-frozen-\\* tag"
+    for title in ("repaired model", "repair parameters"):
+        assert by[title].blocked and re.search(why, by[title].blocked[0])
+        assert any(line.startswith("  BLOCKED: ") for line in by[title].describe())
+        with pytest.raises(PublishError, match="blocked"):
+            hub.check_ready([by[title]], allow_pending=True, windows=set())
+    assert not by["adapter adapter-aya-std-s1"].blocked
+    assert datasets.build_logs(Facts()).blocked
+    with pytest.raises(PublishError, match="blocked"):
+        collect.execute(collect.plan(), api_factory=FakeApi, log=lambda _: None)
+    assert cli.main(["publish", "model"]) == 0  # the dry run prints the plan
+    assert cli.main(["publish", "collections"]) == 0
+    out = capsys.readouterr().out
+    assert "BLOCKED" in out and "lift-wiseft-l0.50-adapter-aya-std-s1" in out
+    assert cli.main(["publish", "model", "--yes", "--allow-pending"]) == 1
+    assert cli.main(["publish", "article"]) == 1
+    assert "BLOCKED" in capsys.readouterr().err
+    text = article.article_path().read_text(encoding="utf-8")
+    title = next(i for i, line in enumerate(text.splitlines()) if line.startswith("# "))
+    assert "BLOCKED" in text.splitlines()[title + 2]
+    assert any("BLOCKED" in p for p in article.placeholders(text))
+    nb = tmp_path / "nb.ipynb"
+    nb.write_text(acceptance.notebook_path().read_text(encoding="utf-8"), encoding="utf-8")
+    assert "WINNER" not in acceptance.stamp_notebook(nb)
+    # the freeze is committed and tagged: nothing is blocked any more
+    if state == "no recipe":
+        write_recipe(frozen_recipe())
+    tag_recipe()
+    assert not any(u.blocked for u in model.build_all())
+    assert "WINNER" in acceptance.stamp_notebook(nb)
+    assert cli.main(["publish", "article"]) == 0
+    assert "BLOCKED" not in article.article_path().read_text(encoding="utf-8")
