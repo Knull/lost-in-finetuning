@@ -122,6 +122,14 @@ def fmt(value: Any, kind: str) -> str:
     raise ValueError(f"unknown format {kind!r}")
 
 
+def p_statement(value: Any) -> str:
+    """A p-value in running text, as P08's article writes it (lift.publish.inputs, "p_stmt"): "p < 0.001",
+    "p = 0.031"."""
+    if value is None:
+        return f"p {NOT_RUN}"
+    return "p < 0.001" if float(value) < 0.001 else f"p = {float(value):.3f}"
+
+
 def markdown(spec: Mapping[str, Any]) -> str:
     cols = spec["columns"]
     lines = [
@@ -295,11 +303,30 @@ def per_language(stats: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
+def _row_seeds(main: Mapping[str, Any] | None, others: Sequence[tuple[str, Any]]) -> str | None:
+    """The seeds a row pools ("1, 2"): its harmful rate's, then any other cell that pools other seeds by name
+    ("1, 2, 3; Belebele-hi 1, 2"). None when nothing in the row was run."""
+    head = _seeds(main) if main else None
+    parts = [head] if head else []
+    for label, value in others:
+        seeds = _seeds(value) if isinstance(value, Mapping) else None
+        if seeds and seeds != head:
+            parts.append(f"{label} {seeds}")
+    return "; ".join(parts) or None
+
+
 def repair_comparison(stats: Mapping[str, Any]) -> dict[str, Any]:
     retained = stats["utility"]["retained"]
     rows = []
     for c in stats["repair_comparison"]:
         pooled = c.get("pooled")
+        seeds = _row_seeds(
+            pooled,
+            [
+                ("hard-benign refusal", c.get("overrefusal_hard_hi_change")),
+                ("Belebele-hi", c.get("belebele_hi_change")),
+            ],
+        )
         rows.append(
             {
                 "family": c["family"],
@@ -312,10 +339,11 @@ def repair_comparison(stats: Mapping[str, Any]) -> dict[str, Any]:
                 "gain_kept": _shown(retained.get(c["family"]), "pct_ci"),
                 "overrefusal_change": _ci(c.get("overrefusal_hard_hi_change")),
                 "belebele_change": _ci(c.get("belebele_hi_change")),
+                "seeds": seeds,
             }
         )
     return table(
-        "Every frozen repair family on the final split (Hindi, pooled over seeds)",
+        "Every frozen repair family on the final split (Hindi, pooled over the seeds named)",
         [
             ("family", "Family", "text"),
             ("variant", "Frozen setting (seed 1)", "text"),
@@ -326,11 +354,13 @@ def repair_comparison(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("gain_kept", "Utility gain kept", "text"),
             ("overrefusal_change", "Hard-benign refusal - stock", "pp_ci"),
             ("belebele_change", "Belebele-hi - stock", "pp_ci"),
+            ("seeds", "Seeds", "text"),
         ],
         rows,
         "The overall winner's effect is the primary endpoint; the other families are reported "
         "descriptively (unadjusted, not a pre-registered claim). WiSE-FT attenuation is the baseline "
-        "every repair is measured against.",
+        "every repair is measured against. Each row pools the seeds named (a seed not run is left out, never "
+        "estimated); a cell that pools fewer is named with its own; the gain kept names its seeds.",
     )
 
 
@@ -525,7 +555,7 @@ def judge_sensitivity(stats: Mapping[str, Any]) -> dict[str, Any]:
         if pooled:
             note += (
                 f" With Controversial read loosely, the pooled Hindi {kind} is {fmt(pooled, 'pp_ci')} "
-                f"(p {fmt(pooled['p'], 'p')}); final_report.json primary.{kind}_loose."
+                f"({p_statement(pooled['p'])}); final_report.json primary.{kind}_loose."
             )
     return table(
         "Judge sensitivity",
@@ -774,6 +804,24 @@ def write_tables(doc: Mapping[str, Any]) -> list[Path]:
     return written
 
 
+def _check_recipe(stats: Mapping[str, Any]) -> None:
+    """The final results of repaired variants are shown only under the recipe the newest tag froze (XB2-02,
+    ``lift.final.reported_recipe``), and only from a final_stats.json built from the selection.json it pins;
+    else ``lift.final.Refused``. Stock and the adapter alone need no recipe."""
+    from lift.final import Refused, read_selection, reported_recipe
+
+    repaired = [str(n) for by_seed in stats["roles"]["families"].values() for n in by_seed.values()]
+    if not repaired:
+        return
+    recipe = reported_recipe(read_selection(), repaired)
+    built = (stats.get("selection") or {}).get("sha256")
+    if recipe is not None and built != recipe["selection_sha256"]:
+        raise Refused(
+            f"final_stats.json was built from another selection.json (sha256 {str(built)[:12]}) than the one "
+            f"the frozen recipe pins ({str(recipe['selection_sha256'])[:12]}): run `lift stats` again"
+        )
+
+
 def build_all(*, stats: Mapping[str, Any] | None = None, figures: bool = True) -> dict[str, Any]:
     """``lift report``: final_report.json, the tables, the figures and the cost section, from
     outputs/metrics/final_stats.json (run ``lift stats`` first)."""
@@ -786,6 +834,7 @@ def build_all(*, stats: Mapping[str, Any] | None = None, figures: bool = True) -
             raise FileNotFoundError(f"{path.name} is missing: run `lift stats` first")
         stats = json.loads(path.read_text(encoding="utf-8"))
     roles = stats["roles"]
+    _check_recipe(stats)
     names = [("stock", "stock")] + [(n, "adapter") for n in roles["adapter"].values()]
     names += [(n, "standard adapter") for n in (roles.get("standard") or {}).values()]
     for family, by_seed in roles["families"].items():

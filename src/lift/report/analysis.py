@@ -386,31 +386,32 @@ def drift_meaningful(drift: Mapping[str, Any] | None) -> bool | None:
 
 def verdict(meaningful: bool | None, selection_verdict: str | None) -> tuple[str | None, str]:
     """README, Verdict per adapter: retain if it does not drift meaningfully; repair if a repair passes the
-    selection rule; reject if nothing restores safety while keeping the gain. (verdict or None, reason)."""
+    selection rule; reject if nothing restores safety while keeping the gain. (verdict or None, reason): the
+    reason is a sentence of its own, shown after "**verdict**." (XB-15), so it starts with a capital."""
     if meaningful is None:
-        return None, "the final drift is not run, so no verdict is given"
+        return None, "The final drift is not run, so no verdict is given"
     if not meaningful:
         return "retain", (
-            "it does not drift meaningfully on the final Hindi set (pooled drift under 8 points or p >= 0.05)"
+            "It does not drift meaningfully on the final Hindi set (pooled drift under 8 points or p >= 0.05)"
         )
     if selection_verdict == "repair":
         return (
             "repair",
-            "it drifts, and a repair passed the selection rule on dev (frozen, then run on final)",
+            "It drifts, and a repair passed the selection rule on dev (frozen, then run on final)",
         )
     if selection_verdict == "reject":
         return "reject", (
-            "it drifts, and no repair passed the selection rule on dev while keeping the gain "
+            "It drifts, and no repair passed the selection rule on dev while keeping the gain "
             "(the best was frozen anyway)"
         )
-    return None, "it drifts, but no selection is decided (lift select)"
+    return None, "It drifts, but no selection is decided (lift select)"
 
 
 def standard_verdict(drift: Mapping[str, Any] | None) -> tuple[str | None, str]:
     """README Gate 2, if it fails: "the stress recipe carries the repair comparison, labelled; the standard
     recipe gets retain with its interval" (docs/decisions.md 78). The interval is the final pooled drift."""
     if not drift:
-        return None, "the standard adapter's final drift is not run, so its interval is not given"
+        return None, "The standard adapter's final drift is not run, so its interval is not given"
     shown = f"{drift['est'] * 100:+.1f} pp [{drift['lo'] * 100:+.1f}, {drift['hi'] * 100:+.1f}]"
     reason = (
         "Gate 2 failed on dev, so the stress recipe carries the repair comparison and the standard recipe "
@@ -920,8 +921,13 @@ def run(
     dtype: str | None = None,
     reader: Callable[[], Mapping[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
-    """``lift stats``: compute and write outputs/metrics/final_stats.json."""
+    """``lift stats``: compute and write outputs/metrics/final_stats.json. Final results of repaired variants
+    are read only under the recipe the newest ``recipe-frozen-*`` tag froze (``lift.final.reported_recipe``,
+    lift final's own check; XB2-02): otherwise ``lift.final.Refused`` and nothing is written."""
+    from lift.final import read_selection, reported_recipe
+
     selection = reader() if reader is not None else None
+    reported_recipe(selection if reader is not None else read_selection())
     doc = compute(source or Source(dtype), selection, use_file=reader is None)
     write_json(stats_path(), doc)
     return doc

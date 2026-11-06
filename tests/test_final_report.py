@@ -308,38 +308,35 @@ def test_ratio_and_pooled_effect_helpers():
 
 def test_lift_stats_and_lift_report_write_final_report_json_to_p08s_contract(monkeypatch, capsys):
     monkeypatch.setattr(analysis, "Source", lambda dtype=None: FakeSource())
-    (metrics_dir()).mkdir(parents=True, exist_ok=True)
-    (metrics_dir() / "selection.json").write_text(
-        json.dumps(
-            {
-                **SELECTION,
-                "table": [
-                    {
-                        "name": WINNER.format(1),
-                        "family": "wiseft",
-                        "win_rate": 0.7,
-                        "harmful_hi": 0.15,
-                        "min_win_rate": 0.6,
-                        "overrefusal_increase": 0.02,
-                        "belebele_drop": 0.01,
-                        "eligible": True,
-                    },
-                    {
-                        "name": CAST.format(1),
-                        "family": "cast",
-                        "win_rate": 0.55,
-                        "harmful_hi": 0.10,
-                        "min_win_rate": 0.6,
-                        "overrefusal_increase": 0.08,
-                        "belebele_drop": 0.0,
-                        "eligible": False,
-                    },
-                ],
-                "adapter_scores": {"harmful_hi": 0.4},
-                "rules": {"max_overrefusal_increase": 0.05, "max_belebele_hi_drop": 0.03},
-            }
-        ),
-        encoding="utf-8",
+    freeze(
+        monkeypatch,
+        {
+            **SELECTION,
+            "table": [
+                {
+                    "name": WINNER.format(1),
+                    "family": "wiseft",
+                    "win_rate": 0.7,
+                    "harmful_hi": 0.15,
+                    "min_win_rate": 0.6,
+                    "overrefusal_increase": 0.02,
+                    "belebele_drop": 0.01,
+                    "eligible": True,
+                },
+                {
+                    "name": CAST.format(1),
+                    "family": "cast",
+                    "win_rate": 0.55,
+                    "harmful_hi": 0.10,
+                    "min_win_rate": 0.6,
+                    "overrefusal_increase": 0.08,
+                    "belebele_drop": 0.0,
+                    "eligible": False,
+                },
+            ],
+            "adapter_scores": {"harmful_hi": 0.4},
+            "rules": {"max_overrefusal_increase": 0.05, "max_belebele_hi_drop": 0.03},
+        },
     )
     manifests = metrics_dir().parent / "manifests"
     manifests.mkdir(parents=True, exist_ok=True)
@@ -506,7 +503,9 @@ def test_lift_stats_reads_real_cells_through_paired_labels(fake_prompt_files):
     assert LANGS[0] == "en"
 
 
-def test_a_pair_that_cannot_be_paired_is_refused_loudly_not_shown_as_not_run(fake_prompt_files, capsys):
+def test_a_pair_that_cannot_be_paired_is_refused_loudly_not_shown_as_not_run(
+    fake_prompt_files, capsys, monkeypatch
+):
     """Both cells were run, but the adapter's outputs come from another Global revision: paired_labels refuses
     the pair, and lift stats must stop with that refusal, not report the primary endpoint as "not run"."""
     pids = PIDS["harmful"]
@@ -517,8 +516,7 @@ def test_a_pair_that_cannot_be_paired_is_refused_loudly_not_shown_as_not_run(fak
     write_cell(A.format(1), pids, 8, meta={"model_rev": "e" * 40})
     with pytest.raises(analysis.Unpairable, match="cannot be paired"):
         analysis.compute(analysis.Source(), SELECTION, use_file=False)
-    metrics_dir().mkdir(parents=True, exist_ok=True)
-    (metrics_dir() / "selection.json").write_text(json.dumps(SELECTION), encoding="utf-8")
+    freeze(monkeypatch)
     assert cli.main(["stats"]) == 2
     assert "cannot be paired" in capsys.readouterr().err
     assert not analysis.stats_path().exists()
@@ -617,9 +615,8 @@ def test_final_report_names_the_selection_it_was_built_from(monkeypatch):
     from lift.io import sha256_file
 
     monkeypatch.setattr(analysis, "Source", lambda dtype=None: FakeSource())
-    metrics_dir().mkdir(parents=True, exist_ok=True)
+    freeze(monkeypatch)
     path = metrics_dir() / "selection.json"
-    path.write_text(json.dumps(SELECTION, indent=1), encoding="utf-8")
     assert cli.main(["stats"]) == 0 and cli.main(["report"]) == 0
     doc = json.loads(tables.report_path().read_text(encoding="utf-8"))
     sel = doc["selection"]
@@ -801,3 +798,114 @@ def test_each_repair_against_wiseft_is_descriptive_and_outside_the_claim_familie
     assert "p" not in {c["format"] for c in spec["columns"]}
     assert tables.validate(tables._json_safe(doc)) == []
     assert "+10.0 pp" in tables.markdown(spec)
+
+
+# -------------------------------------------------- XB2-02: lift stats and lift report read the tagged recipe
+
+
+def freeze(monkeypatch, selection=SELECTION):
+    """selection.json and configs/frozen_recipe.json naming its sha (P05's writer), committed at HEAD and in
+    the commit the newest recipe-frozen-* tag points to (a fake git): the state lift final opened the
+    split in."""
+    from lift import final, paths
+    from lift.repair.select import recipe_doc, recipe_text
+
+    text = json.dumps(selection, indent=1)
+    path = metrics_dir() / "selection.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    recipe = recipe_text(recipe_doc(selection, text))
+    paths.frozen_recipe_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.frozen_recipe_path().write_text(recipe, encoding="utf-8")
+    monkeypatch.setattr(final, "frozen_tags", lambda git=None: ["recipe-frozen-20261106"])
+    monkeypatch.setattr(final, "_git", lambda argv, env=None: recipe if argv[:1] == ["show"] else None)
+    return recipe
+
+
+def test_stats_and_report_read_repaired_results_only_under_the_recipe_the_tag_froze(monkeypatch, capsys):
+    """XB2-02 (decisions.md 77): lift stats and lift report apply lift final's recipe check whenever they read
+    final results of repaired variants. A lift select --refreeze after the final (ReSta now the winner) makes
+    both refuse with the remedy; results of stock and the adapter alone stay readable."""
+    from lift import final, paths
+    from lift.repair.select import recipe_doc, recipe_text
+
+    monkeypatch.setattr(analysis, "Source", lambda dtype=None: FakeSource())
+    tagged = freeze(monkeypatch)
+    assert cli.main(["stats"]) == 0 and cli.main(["report"]) == 0
+    capsys.readouterr()
+    stats_bytes = analysis.stats_path().read_bytes()
+    # lift select --refreeze after the final: another winner, selection.json and the recipe rewritten, nothing
+    # committed or tagged.
+    moved = {**SELECTION, "overall": {"winner": RESTA.format(1), "verdict": "repair"}}
+    text = json.dumps(moved, indent=1)
+    (metrics_dir() / "selection.json").write_text(text, encoding="utf-8")
+    paths.frozen_recipe_path().write_text(recipe_text(recipe_doc(moved, text)), encoding="utf-8")
+    assert cli.main(["stats"]) == 2
+    err = capsys.readouterr().err
+    assert "refused" in err and "differs from HEAD" in err
+    assert analysis.stats_path().read_bytes() == stats_bytes  # nothing written
+    assert cli.main(["report"]) == 2
+    assert "differs from HEAD" in capsys.readouterr().err
+    # The recipe restored (git checkout), the re-selected selection.json kept: its sha is not the recipe's.
+    paths.frozen_recipe_path().write_text(tagged, encoding="utf-8")
+    for command in ("stats", "report"):
+        assert cli.main([command]) == 2
+        err = capsys.readouterr().err
+        assert "not the one the recipe froze" in err and "lift sync pull" in err
+    # The frozen selection.json pulled back: both read again.
+    freeze(monkeypatch)
+    assert cli.main(["report"]) == 0
+    # final_stats.json built from another selection than the recipe's: lift report asks for lift stats again.
+    doc = json.loads(stats_bytes)
+    doc["selection"]["sha256"] = "f" * 64
+    analysis.stats_path().write_text(json.dumps(doc), encoding="utf-8")
+    assert cli.main(["report"]) == 2
+    assert "lift stats" in capsys.readouterr().err
+    # No recipe-frozen-* tag.
+    monkeypatch.setattr(final, "frozen_tags", lambda git=None: [])
+    assert cli.main(["stats"]) == 2
+    assert "no recipe-frozen-* git tag" in capsys.readouterr().err
+    # Stock and the adapter only (no selection, so no repaired variant): allowed without the recipe.
+    (metrics_dir() / "selection.json").unlink()
+    assert cli.main(["stats"]) == 3
+    assert "refused" not in capsys.readouterr().err
+    assert cli.main(["report"]) == 0
+
+
+def test_the_repair_comparison_names_the_seeds_each_row_pools():
+    """XB2-05 (decisions.md 78): a pooled value names its seeds. CAST's seed 3 was not run, so its row pools
+    seeds 1 and 2; a cell that pools fewer seeds than the row's harmful rate names its own."""
+    present = [v for v in all_variants() if v != CAST.format(3)]
+    stats = analysis.compute(FakeSource(present), SELECTION, use_file=False)
+    doc = tables.build(stats, cost.section([("stock", "stock")], docs=[]))
+    spec = doc["tables"]["repair_comparison"]
+    rows = {r["family"]: r for r in spec["rows"]}
+    assert rows["cast"]["seeds"] == "1, 2" and rows["resta"]["seeds"] == "1, 2, 3"
+    assert ("seeds", "Seeds") in {(c["key"], c["label"]) for c in spec["columns"]}
+    assert tables.validate(tables._json_safe(doc)) == []
+
+    class NoBelebele(FakeSource):
+        def belebele(self, variant, lang):
+            if variant == RESTA.format(3):
+                raise analysis.Missing("no scores")
+            return super().belebele(variant, lang)
+
+    stats = analysis.compute(NoBelebele(), SELECTION, use_file=False)
+    doc = tables.build(stats, cost.section([("stock", "stock")], docs=[]))
+    rows = {r["family"]: r for r in doc["tables"]["repair_comparison"]["rows"]}
+    assert rows["resta"]["seeds"] == "1, 2, 3; Belebele-hi 1, 2"
+
+
+def test_verdict_sentences_start_with_a_capital_and_p_reads_p_less_than():
+    """XB2-07 (XB-15 a, b): "**repair**. It drifts, ..." in lift stats, the report and P08's article and card,
+    and the loose-reading note's "p < 0.001" in the article's form."""
+    for meaningful, sel in ((None, None), (False, None), (True, "repair"), (True, "reject"), (True, None)):
+        _v, reason = analysis.verdict(meaningful, sel)
+        assert reason[0].isupper(), reason
+    for drift in (None, {"est": 0.05, "lo": 0.01, "hi": 0.09, "p": 0.2}):
+        assert analysis.standard_verdict(drift)[1][0].isupper()
+    stats = analysis.compute(
+        FakeSource(count=lambda v, lang, s: 2 if v == "stock" else 18), SELECTION, use_file=False
+    )
+    note = tables.judge_sensitivity(stats)["note"]
+    assert "(p < 0.001)" in note and "p <0.001" not in note

@@ -314,6 +314,70 @@ def _winner_problem(winner: Any, frozen: Mapping[str, Any]) -> str | None:
     )
 
 
+def _selection_problems(selection: Mapping[str, Any] | None, recipe: Mapping[str, Any] | None) -> list[str]:
+    """What keeps a decided selection from being the frozen recipe's: an overall winner its family did not
+    freeze (XB-01), or another frozen map or winner than the recipe's (decisions.md 77)."""
+    settings = frozen_settings(selection)
+    if not settings:
+        return []
+    problems = []
+    problem = _winner_problem(overall_winner(selection), settings)
+    if problem:
+        problems.append(f"outputs/metrics/selection.json: {problem}")
+    if recipe is not None and (
+        settings != {str(k): str(v) for k, v in recipe["frozen"].items()}
+        or overall_winner(selection) != recipe.get("overall_winner")
+    ):
+        problems.append(
+            f"selection.json's frozen map or winner differs from the frozen recipe ({RECIPE}): only "
+            "the recipe the tag froze is evaluated"
+        )
+    return problems
+
+
+def reported_recipe(
+    selection: Mapping[str, Any] | None,
+    repaired: Sequence[str] = (),
+    *,
+    tags: Sequence[str] | None = None,
+    git: Callable[..., str | None] | None = None,
+) -> dict[str, Any] | None:
+    """The check ``lift stats`` and ``lift report`` make before they read or show final results of repaired
+    variants (XB2-02; decisions.md 77: only the recipe the tag froze is evaluated, and so reported): the
+    recipe as the newest tag froze it (``verified_recipe``: working tree, HEAD and tag agree, and its
+    selection_sha256 is outputs/metrics/selection.json's), ``selection`` its frozen map and winner, and every
+    repaired variant reported (``repaired``; default every frozen variant of ``selection``) one the recipe
+    froze. Returns that recipe, or None when no repaired variant is reported (stock and the adapter seeds
+    need no recipe here; lift final checked them). ``Refused`` names what does not hold and the remedy."""
+    names = list(dict.fromkeys([*repaired, *frozen_variants(selection)]))
+    if not names:
+        return None
+    tags = list(frozen_tags() if tags is None else tags)
+    if not tags:
+        raise Refused(
+            f"no {TAG_GLOB} git tag exists, so no final result of a repaired variant is reported: the "
+            "recipe is frozen (Gate 3) by `lift select`, a commit of configs/frozen_recipe.json and the tag "
+            "it prints (a clone without tags: git fetch --tags)"
+        )
+    recipe = verified_recipe(tags[-1], git=git)
+    problems = _selection_problems(selection, recipe)
+    if not frozen_settings(selection):
+        problems.append(
+            "outputs/metrics/selection.json is missing or not decided, so it is not the selection the recipe "
+            "froze: lift sync pull of the frozen run"
+        )
+    frozen = set(frozen_variants({"frozen": dict(recipe["frozen"])}))
+    outside = [n for n in names if n not in frozen]
+    if outside:
+        problems.append(
+            f"{', '.join(outside)} {'is' if len(outside) == 1 else 'are'} not frozen by the recipe the tag "
+            f"{tags[-1]} froze: only its variants are reported"
+        )
+    if problems:
+        raise Refused("; ".join(problems))
+    return recipe
+
+
 def check_final(
     variant: str,
     *,
@@ -342,19 +406,7 @@ def check_final(
             recipe = verified_recipe(tags[-1])
         except Refused as exc:
             problems.append(str(exc))
-    settings = frozen_settings(selection)
-    if settings:
-        problem = _winner_problem(overall_winner(selection), settings)
-        if problem:
-            problems.append(f"outputs/metrics/selection.json: {problem}")
-        if recipe is not None and (
-            settings != {str(k): str(v) for k, v in recipe["frozen"].items()}
-            or overall_winner(selection) != recipe.get("overall_winner")
-        ):
-            problems.append(
-                f"selection.json's frozen map or winner differs from the frozen recipe ({RECIPE}): only "
-                "the recipe the tag froze is evaluated"
-            )
+    problems += _selection_problems(selection, recipe)
     try:
         spec = get_spec(variant)
     except KeyError:

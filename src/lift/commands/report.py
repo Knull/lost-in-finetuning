@@ -5,7 +5,9 @@
 ``lift stats`` (lift.report.analysis) writes outputs/metrics/final_stats.json; ``lift report``
 (lift.report.tables, figures, cost) writes outputs/metrics/final_report.json (the file P08 reads), the
 markdown and CSV tables in outputs/metrics/report/, outputs/metrics/final_report.md and the figures in
-outputs/figures/. An arm that was not run is shown as "not run", never estimated.
+outputs/figures/. An arm that was not run is shown as "not run", never estimated. Both read final results of
+repaired variants only under the recipe the newest ``recipe-frozen-*`` tag froze (lift final's check,
+``lift.final.reported_recipe``); otherwise they refuse (exit 2) and write nothing.
 """
 
 from __future__ import annotations
@@ -16,12 +18,13 @@ import sys
 
 
 def _stats(args: argparse.Namespace) -> int:
+    from lift.final import Refused
     from lift.report import analysis
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     try:
         doc = analysis.run(dtype=args.dtype)
-    except analysis.Unpairable as exc:
+    except (analysis.Unpairable, Refused) as exc:
         print(f"lift stats: refused: {exc}", file=sys.stderr)
         return 2
     for v in doc["verdicts"]:
@@ -43,6 +46,7 @@ def _stats(args: argparse.Namespace) -> int:
 
 
 def _report(args: argparse.Namespace) -> int:
+    from lift.final import Refused
     from lift.report import tables
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -50,6 +54,9 @@ def _report(args: argparse.Namespace) -> int:
         doc = tables.build_all(figures=not args.no_figures)
     except FileNotFoundError as exc:
         print(f"lift report: {exc}")
+        return 2
+    except Refused as exc:
+        print(f"lift report: refused: {exc}", file=sys.stderr)
         return 2
     print(
         f"wrote {tables.report_path()}, {len(doc['written']) - 1} table files and "
