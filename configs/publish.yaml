@@ -1,0 +1,42 @@
+# Where and how `lift publish` puts the submission's artifacts on the Hugging Face Hub (P08).
+# Not an experimental setting: nothing here reaches a cache key or a reported number.
+# Repo ids are {namespace}/{name}. The namespace is the team's HF organisation (or the team lead's
+# user, whose HF username must match the registration form). Until it is set, every command still
+# runs its dry run, and `--yes` refuses to upload.
+
+namespace_env: LIFT_HF_NAMESPACE   # set this (not a secret) or fill `namespace` below
+namespace: null
+
+repos:
+  # The frozen repair applied to the seed-1 adapter: {variant} is its configs/variants.yaml name.
+  model: {name: "lift-{variant}", type: model, access: public}
+  # Every frozen setting's parameters (WiSE-FT lambda, ReSta alpha, CAST vectors and threshold).
+  repair_params: {name: lift-repair-params, type: model, access: public}
+  # One repo per unrepaired adapter, gated with automatic approval (docs/decisions.md item 14).
+  adapter: {name: "lift-{adapter}", type: model, access: gated-auto}
+  # Prompt ids, labels, metadata, refusal texts and aggregate tables.
+  logs: {name: lift-eval-logs, type: dataset, access: public}
+  # Every generation and judgement, harmful ones included: gated with manual approval.
+  raw: {name: lift-raw-completions, type: dataset, access: gated-manual}
+  # The translations we made (Hindi PolyRefuse, Chinese harmless, OR-Bench-Hard in 5 languages).
+  prompts: {name: lift-multilingual-safety-prompts, type: dataset, access: public}
+  space: {name: lift-acceptance-test, type: space, access: public, sdk: gradio}
+
+collections:
+  models: {title: "Lost in Fine-Tuning: models", description: "Tiny Aya Global, a Hindi LoRA adapter tested for safety drift, and its frozen post-hoc repair (Lexsi hackathon, Track 2b-6)."}
+  data: {title: "Lost in Fine-Tuning: data", description: "Multilingual safety prompts, evaluation logs and gated raw completions for the retain / repair / reject test of a Hindi Tiny Aya adapter."}
+
+# The public GitHub repo. null: read from `git remote get-url origin` (credentials stripped).
+github_repo: null
+
+# Team section of the article, filled in by a person: HF usernames (e.g. [{name: ..., hf: ...}]).
+# Annotators are thanked by name only if they agree: list those who agreed, [] to thank nobody by
+# name; null leaves the article's placeholder in place.
+team: []
+annotators: null
+
+# The AuditKIT paired_bootstrap issue, once a person has filed hf/auditkit_issue.md upstream.
+auditkit_issue_url: null
+# Full citations for the build plan's related-work entries the repo does not hold, as markdown
+# lines (a person fills them in from the build plan). null leaves a placeholder in the article.
+references: null

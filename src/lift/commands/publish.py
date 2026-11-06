@@ -1,0 +1,178 @@
+"""``lift publish model|datasets|collections|article|space|preflight``: the HF artifacts (P08).
+
+Every upload command stages its files under outputs/publish/, prints what it would upload, and uploads
+only with ``--yes`` (a person runs the real uploads, with HF_TOKEN set by a hidden prompt). ``--yes``
+refuses while the HF namespace is unset (LIFT_HF_NAMESPACE or configs/publish.yaml), while something the
+plan needs is not built, or while a staged text still holds a ``[PENDING ...]`` placeholder (an input
+that does not exist yet). ``article`` writes hf/article.md; ``preflight`` checks the git repo can go
+public. Exit codes: 0 done (or dry run), 1 refused or failed (preflight: findings).
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+_EPILOG = "Dry run by default: nothing is uploaded without --yes."
+
+
+def _fail(exc: Exception) -> int:
+    print(f"lift publish: {exc}", file=sys.stderr)
+    return 1
+
+
+def _finish(uploads: list, args: argparse.Namespace, message: str) -> int:
+    from lift.publish import hub
+
+    hub.report(uploads, yes=args.yes)
+    if args.yes:
+        hub.execute(uploads, message=message, allow_pending=args.allow_pending)
+    return 0
+
+
+def _model(args: argparse.Namespace) -> int:
+    from lift.publish import PublishError, model
+
+    try:
+        uploads = model.build_all(
+            variant=args.variant, build_weights=args.build, device=args.device, adapters=not args.no_adapters
+        )
+        return _finish(uploads, args, "lift publish model")
+    except PublishError as exc:
+        return _fail(exc)
+
+
+def _datasets(args: argparse.Namespace) -> int:
+    from lift.publish import PublishError, datasets
+
+    try:
+        return _finish(datasets.build(args.only), args, "lift publish datasets")
+    except PublishError as exc:
+        return _fail(exc)
+
+
+def _space(args: argparse.Namespace) -> int:
+    from lift.publish import PublishError, space
+
+    try:
+        return _finish([space.build()], args, "lift publish space")
+    except PublishError as exc:
+        return _fail(exc)
+
+
+def _collections(args: argparse.Namespace) -> int:
+    from lift.publish import PublishError, collect
+
+    try:
+        plan = collect.plan()
+        for line in collect.describe(plan):
+            print(line)
+        if args.yes:
+            collect.execute(plan)
+        else:
+            print("dry run: nothing was created. Add --yes to create the collections.")
+        return 0
+    except PublishError as exc:
+        return _fail(exc)
+
+
+def _article(args: argparse.Namespace) -> int:
+    from lift.publish import PublishError, article
+    from lift.publish.inputs import shown
+
+    try:
+        path, facts = article.build()
+    except PublishError as exc:
+        return _fail(exc)
+    print(f"wrote {shown(path)} ({len(facts.sources)} values, sources in {shown(article.sources_path())})")
+    pend = article.placeholders(path.read_text(encoding="utf-8"))
+    if pend:
+        print(f"{len(pend)} placeholders still pending (inputs not made yet, or for a person to fill in):")
+        for p in pend:
+            print(f"  {p}")
+    print("Post it by hand as an HF community article (huggingface.co/new-blog) once nothing is pending.")
+    return 0
+
+
+def _preflight(args: argparse.Namespace) -> int:
+    from lift.publish import preflight
+
+    findings = preflight.run(history=not args.no_history)
+    if findings:
+        print(f"preflight FAILED: {len(findings)} finding(s) (matched text is never shown):")
+        for f in findings[:200]:
+            print(f"  {f}")
+        if len(findings) > 200:
+            print(f"  ... and {len(findings) - 200} more")
+        if any(f.where.startswith("history") for f in findings):
+            print(
+                "A finding in the history stays public even after the file is fixed: rewrite the history "
+                "(git filter-repo) or publish a fresh repo, and revoke any secret found."
+            )
+        return 1
+    print(
+        "preflight passed: no secret, token or raw completion in the tracked files"
+        + ("" if args.no_history else " or the git history")
+        + "."
+    )
+    print(preflight.PUBLIC_STEPS)
+    return 0
+
+
+def register(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "publish",
+        help="stage and upload the HF artifacts (dry run unless --yes); preflight",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    cmds = p.add_subparsers(dest="publish_command", required=True, metavar="<what>")
+
+    def upload_flags(q: argparse.ArgumentParser) -> None:
+        q.add_argument("--yes", action="store_true", help="upload for real (default: dry run)")
+        q.add_argument(
+            "--allow-pending",
+            action="store_true",
+            help="upload even if a staged text still holds a [PENDING ...] placeholder (drafts only)",
+        )
+
+    q = cmds.add_parser(
+        "model", help="the repaired model, the repair parameters and the gated adapters", epilog=_EPILOG
+    )
+    q.add_argument("--variant", default=None, help="a frozen variant (default: the winner in selection.json)")
+    q.add_argument(
+        "--build",
+        action="store_true",
+        help="materialise the weights through build_variant (GPU VM: needs the model in memory)",
+    )
+    q.add_argument("--device", default="cuda:0", help="device for --build (default cuda:0)")
+    q.add_argument("--no-adapters", action="store_true", help="leave the gated adapters out")
+    upload_flags(q)
+    q.set_defaults(func=_model)
+
+    q = cmds.add_parser(
+        "datasets", help="logs (public), raw completions (gated), translated prompts (public)", epilog=_EPILOG
+    )
+    q.add_argument("--only", nargs="+", choices=["logs", "raw", "prompts"], default=None)
+    upload_flags(q)
+    q.set_defaults(func=_datasets)
+
+    q = cmds.add_parser("space", help="the Gradio Space over the public aggregate dataset", epilog=_EPILOG)
+    upload_flags(q)
+    q.set_defaults(func=_space)
+
+    q = cmds.add_parser("collections", help="the two HF collections (models, data)", epilog=_EPILOG)
+    q.add_argument("--yes", action="store_true", help="create the collections for real (default: dry run)")
+    q.set_defaults(func=_collections)
+
+    q = cmds.add_parser("article", help="write hf/article.md from the template and outputs/metrics")
+    q.set_defaults(func=_article)
+
+    q = cmds.add_parser(
+        "preflight",
+        help="fail if a tracked file or the git history holds a secret, a token or a raw completion",
+    )
+    q.add_argument(
+        "--no-history", action="store_true", help="check the tracked files only, not the git history"
+    )
+    q.set_defaults(func=_preflight)

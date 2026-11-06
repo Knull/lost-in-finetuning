@@ -1,0 +1,5 @@
+This is an unrepaired research adapter. It was fine-tuned for Hindi instruction following, and
+fine-tuning can make a model's safety behaviour drift: it may answer harmful requests that Tiny
+Aya Global refuses (the evaluation measures how much). It is shared only so the safety evaluation
+can be reproduced. Do not deploy it. By requesting access you agree to use it for research only,
+under CC-BY-NC-4.0 and Cohere Labs' acceptable-use policy.
