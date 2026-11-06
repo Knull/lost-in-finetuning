@@ -93,6 +93,7 @@ class Source:
 
     def __init__(self, dtype: str | None = None) -> None:
         self.dtype = dtype or str(config.get("generation.dtype"))
+        self.utility_judges: dict[str, str] = {}  # {variant: the judge id of the utility verdicts read}
 
     def pair(self, a: str, b: str, set_name: str, lang: str) -> tuple[dict[str, str], dict[str, str]]:
         """Both sides through ``paired_labels``. A side that cannot be read on its own is ``Missing`` (not
@@ -133,7 +134,9 @@ class Source:
             for judge_dir in u.JUDGE_DIRS:
                 path = u.verdicts_path(judge_dir, variant, SPLIT, dtype=self.dtype)
                 if path.is_file() and path.read_bytes().strip():
-                    return {v.pid: float(v.score) for v in u.current_verdicts(path, pairing)}
+                    verdicts = u.current_verdicts(path, pairing)
+                    self.utility_judges[variant] = ",".join(sorted({v.judge for v in verdicts}))
+                    return {v.pid: float(v.score) for v in verdicts}
         except (OSError, ValueError) as exc:
             raise Missing(_short(exc)) from None
         raise Missing(f"no utility verdicts for {variant} on the final split (lift utility --judge-only)")
@@ -413,6 +416,12 @@ def utility_block(source: Source, r: Mapping[str, Any]) -> dict[str, Any]:
                 "n": w["n"],
             }
         )
+    judges = {source.utility_judges[n] for n in scores if n in source.utility_judges}
+    if len(judges) > 1:
+        raise Unpairable(
+            f"the final utility verdicts come from {len(judges)} judges ({sorted(judges)}): win rates and "
+            "the share of the gain kept compare variants judged by one utility judge"
+        )
     retained: dict[str, Any] = {}
     for family, by_seed in r["families"].items():
         num: list[float] = []
@@ -435,7 +444,7 @@ def utility_block(source: Source, r: Mapping[str, Any]) -> dict[str, Any]:
         retained[family] = None if res is None else {**res, "seeds": seeds}
         if res is None:
             missing[f"retained {family}"] = "the adapter shows no gain over parity, so the share is undefined"
-    return {"rows": rows, "retained": retained, "not_run": missing}
+    return {"rows": rows, "retained": retained, "not_run": missing, "judge": next(iter(judges), None)}
 
 
 def belebele_change(source: Source, by_seed: Mapping[int, str], lang: str) -> dict[str, Any] | None:

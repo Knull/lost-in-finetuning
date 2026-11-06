@@ -298,6 +298,11 @@ def test_ratio_and_pooled_effect_helpers():
     res = ratio_bootstrap([0.5, 0.0, 0.25], [0.5, 0.5, 0.5], ["a", "b", "c"], n_boot=500)
     assert res["est"] == pytest.approx(0.5) and res["lo"] <= 0.5 <= res["hi"]
     assert ratio_bootstrap([0.1], [-0.1], ["a"]) is None
+    # Joint resampling by cluster: when every cluster keeps the same share of its own gain, every resample
+    # does too, so the interval collapses on it (resampling the two sums apart would spread it).
+    joint = ratio_bootstrap([0.1, 0.05, 0.3, 0.15], [0.2, 0.1, 0.6, 0.3], ["a", "a", "b", "c"], n_boot=500)
+    assert (joint["lo"], joint["est"], joint["hi"]) == pytest.approx((0.5, 0.5, 0.5))
+    assert joint["n_clusters"] == 3 and joint["n"] == 4
     assert pooled_effect({}) == {"pooled": None, "per_seed": []}
 
 
@@ -509,3 +514,20 @@ def test_a_pair_that_cannot_be_paired_is_refused_loudly_not_shown_as_not_run(fak
     assert cli.main(["stats"]) == 2
     assert "cannot be paired" in capsys.readouterr().err
     assert not analysis.stats_path().exists()
+
+
+def test_utility_verdicts_of_two_judges_are_never_mixed():
+    """The share of the gain kept divides a repair's verdicts by the adapter's: both must come from one
+    utility judge (frontier or its local fallback), or lift stats refuses."""
+
+    class TwoJudges(FakeSource):
+        def utility(self, variant):
+            out = super().utility(variant)
+            judge = "fallback-judge" if variant.startswith("cast") else "frontier-judge"
+            self.utility_judges[variant] = judge
+            return out
+
+    with pytest.raises(analysis.Unpairable, match="utility"):
+        analysis.compute(TwoJudges(), SELECTION, use_file=False)
+    stats = analysis.compute(FakeSource(), SELECTION, use_file=False)
+    assert stats["utility"]["retained"]["wiseft"]["est"] == pytest.approx(2 / 3)
