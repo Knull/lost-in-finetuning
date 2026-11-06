@@ -237,6 +237,124 @@ def test_select_refuses_to_decide_with_a_missing_setting(registry, monkeypatch, 
     assert "git tag recipe-frozen-" in out and "lift fit-cast --adapter adapter-aya-std-s2" in out
 
 
+REAL_FROZEN_TAGS = getattr(select, "frozen_tags", None)
+
+
+@pytest.fixture(autouse=True)
+def no_frozen_tags(monkeypatch):
+    """No recipe-frozen-* tag unless a test sets one: the repo's own tags never reach a test."""
+    tags: list[str] = []
+    monkeypatch.setattr(select, "frozen_tags", lambda *a, **k: list(tags))
+    return tags
+
+
+def _register_seed(seed):
+    name = select.seed_name(ADAPTER, seed)
+    config.load("variants")["variants"].append(
+        {"name": name, "method": "adapter", "adapter": name, "seed": seed,
+         "artifacts": {"adapter": str(seed) * 64}})
+
+
+def test_the_same_inputs_keep_both_files_when_only_the_registry_or_the_date_changed(registry):
+    """XB2-01: after the printed next step (seed 2 registered) and on another day, lift select on the same
+    dev numbers is not refused: the freeze plan and the date are not the decision. Another decision still
+    is."""
+    numbers = CASES["ties"]
+    doc = select.run(ADAPTER, reader=fake_reader(numbers), families=["wiseft"], date="20261106")
+    assert "pending" in doc["freeze"]["variants"][1]
+    sel_bytes, recipe = select.report_paths()[0].read_bytes(), _recipe().read_text(encoding="utf-8")
+    _register_seed(2)
+    again = select.run(ADAPTER, reader=fake_reader(numbers), families=["wiseft"], date="20261107")
+    assert select.report_paths()[0].read_bytes() == sel_bytes
+    assert _recipe().read_text(encoding="utf-8") == recipe
+    # The plan printed is today's: seed 2's entry can be written now.
+    assert "entry" in again["freeze"]["variants"][1] and "recipe-frozen-20261107" in again["freeze"]["tag"]
+    other = dict(numbers, **{"wiseft-l0.75": (0.11, 0.30, 0.66, 0.60)})
+    with pytest.raises(select.RecipeFrozen, match="decides another one"):
+        select.run(ADAPTER, reader=fake_reader(other), families=["wiseft"], date="20261107")
+    assert select.report_paths()[0].read_bytes() == sel_bytes
+
+
+def test_refreeze_is_refused_once_a_recipe_tag_exists(registry, monkeypatch, capsys, no_frozen_tags):
+    """XB2-03: after Gate 3's tag, --refreeze writes nothing and says what re-freezing then takes."""
+    numbers = dict(CASES["largest"])
+    monkeypatch.setattr(select, "read_scores", fake_reader(numbers))
+    assert cli.main(["select", "--adapter", ADAPTER]) == 0
+    sel_bytes, recipe = select.report_paths()[0].read_bytes(), _recipe().read_text(encoding="utf-8")
+    no_frozen_tags.append("recipe-frozen-20261106")
+    numbers.update({"wiseft-l0.50": (0.115, 0.30, 0.66, 0.60)})
+    capsys.readouterr()
+    assert cli.main(["select", "--adapter", ADAPTER, "--refreeze"]) == 2
+    err = capsys.readouterr().err
+    assert "recipe-frozen-20261106" in err and "decisions" in err and "git tag -d" in err
+    assert select.report_paths()[0].read_bytes() == sel_bytes
+    assert _recipe().read_text(encoding="utf-8") == recipe
+    # Without --refreeze the refusal names the tag too, not --refreeze alone.
+    assert cli.main(["select", "--adapter", ADAPTER]) == 2
+    assert "recipe-frozen-20261106" in capsys.readouterr().err
+    # The same inputs after the tag still pass, and change nothing.
+    numbers.update(CASES["largest"])
+    assert cli.main(["select", "--adapter", ADAPTER]) == 0
+    assert select.report_paths()[0].read_bytes() == sel_bytes
+    assert list(select.report_paths()[0].parent.glob("selection.*.json")) == []
+
+
+def test_frozen_tags_lists_the_local_recipe_tags(tmp_path):
+    import subprocess
+
+    frozen_tags = REAL_FROZEN_TAGS
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+           "-c", "tag.gpgsign=false"]
+    subprocess.run([*git, "init", "-q", str(tmp_path)], check=True)
+    assert frozen_tags(tmp_path) == []
+    subprocess.run([*git, "-C", str(tmp_path), "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    for tag in ("recipe-frozen-20261106", "other", "recipe-frozen-20261107"):
+        subprocess.run([*git, "-C", str(tmp_path), "tag", tag], check=True)
+    assert frozen_tags(tmp_path) == ["recipe-frozen-20261106", "recipe-frozen-20261107"]
+    assert frozen_tags(tmp_path / "not-a-repo") is None
+
+
+def test_refreeze_keeps_a_copy_of_the_pinned_selection(registry):
+    """XB2-03: --refreeze (no tag yet) never overwrites the selection.json a recipe pins without a copy."""
+    import hashlib
+
+    select.run(ADAPTER, reader=fake_reader(CASES["largest"]))
+    pinned = select.report_paths()[0].read_bytes()
+    sha = hashlib.sha256(pinned).hexdigest()
+    assert json.loads(_recipe().read_text(encoding="utf-8"))["selection_sha256"] == sha
+    select.run(ADAPTER, reader=fake_reader(CASES["ties"]), refreeze=True)
+    assert select.report_paths()[0].read_bytes() != pinned
+    backup = select.report_paths()[0].with_name(f"selection.{sha[:12]}.json")
+    assert backup.read_bytes() == pinned
+
+
+def test_selection_json_holds_no_absolute_local_path(registry):
+    """XB2-04 (writer side): the freeze plan's pending reasons and the missing inputs name paths relative
+    to the repo (outputs/...), never the laptop's absolute paths."""
+    from lift.paths import REPO_ROOT, output_dir
+
+    _register_seed(2)
+    doc = select.run(ADAPTER, reader=fake_reader(CASES["largest"]))     # cast wins; s2 has no artifact yet
+    text = select.report_paths()[0].read_text(encoding="utf-8")
+    assert "outputs/artifacts/cast/adapter-aya-std-s2/" in text
+    assert str(output_dir()) not in text and str(REPO_ROOT) not in text
+    assert str(output_dir()) not in json.dumps(doc["freeze"])
+    numbers = case()
+    del numbers["cast-m2.0"]
+
+    def reader(name, method, dtype):
+        if name.startswith("cast-m2.0"):
+            return None, [f"{output_dir() / 'generations' / name / 'harmful_hi_dev.jsonl'} not found; "
+                          f"{REPO_ROOT / 'configs' / 'variants.yaml'} has no entry"], {}
+        return fake_reader(numbers)(name, method, dtype)
+
+    select.run(ADAPTER, reader=reader, refreeze=True)
+    text = select.report_paths()[0].read_text(encoding="utf-8")
+    assert f"outputs/generations/cast-m2.0-{ADAPTER}/harmful_hi_dev.jsonl not found" in text
+    assert "; configs/variants.yaml has no entry" in text
+    assert str(output_dir()) not in text and str(REPO_ROOT) not in text
+
+
 # --- the sweep ------------------------------------------------------------------------------------------
 
 
