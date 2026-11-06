@@ -457,6 +457,12 @@ def test_lift_fit_cast(fake_prompt_files, tiny_lora_adapter, tiny_model_dir, mon
     assert report["safetune_config"]["legacy_cast_gate"] is False
     digest = cast.artifact_hash(path)
     assert cli.main(line) == 0 and "kept" in capsys.readouterr().out          # a rerun keeps it
+    # One fitted on another Global revision (which the CAST builder refuses) is not kept either.
+    cond, vecs, info = cast.load(path)
+    original = path.read_bytes()
+    cast.save(path, cond.condition_vector, vecs, {**info, "model_rev": "f" * 40})
+    assert cli.main(line) == 2 and "--refit" in capsys.readouterr().err
+    path.write_bytes(original)
     fit_store(fake_prompt_files, salt=" now")                                 # other prompts: refused
     assert cli.main(line) == 2
     assert cast.artifact_hash(path) == digest
