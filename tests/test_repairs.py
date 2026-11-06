@@ -4,6 +4,7 @@ CAST's fit, gate and artifacts, and the variants' cache keys."""
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 
 import pytest
@@ -104,6 +105,34 @@ def test_wiseft_equals_the_lora_delta_scaled_by_lambda(tiny_lora_adapter, tiny_m
     d_adapter = sum(float((got[k] - adapter_weights[k]).norm()) for k in got)
     assert (d_stock < d_adapter) == (lam < 0.5)
     assert wiseft.alpha_for(lam) == pytest.approx(1 - lam)
+
+
+def test_wiseft_interpolates_the_largest_tensors_on_the_cpu(tiny_lora_adapter, tiny_model_dir, monkeypatch):
+    """apply_wise_ft holds five fp32 copies of a tensor on its device at once: for Tiny Aya's 262k x 2048
+    embedding that is 10 GiB beside the 6.2 GiB fp16 model, over a T4's 15 GiB. The largest tensors are
+    interpolated on the CPU (the same elementwise arithmetic) and put back where they were, ties kept."""
+    import safetune.interventions.recover.wise_ft as st_wise
+
+    merged = merged_fp32(tiny_lora_adapter, tiny_model_dir)
+    stock = load_model(str(tiny_model_dir), "local", dtype="fp32", device="cpu")
+    sizes = {n: p.numel() for n, p in merged.named_parameters()}
+    biggest = max(sizes.values())
+    monkeypatch.setattr(wiseft, "LARGE_NUMEL", biggest - 1)
+    big = {n for n, k in sizes.items() if k == biggest}
+    assert big == set(wiseft.large_parameters(merged))
+    seen = []
+    real = st_wise.apply_wise_ft
+
+    def spy(model, aligned, alpha):
+        seen.append({n: p.device.type for n, p in model.named_parameters() if n in big})
+        return real(model, aligned, alpha=alpha)
+
+    monkeypatch.setattr(st_wise, "apply_wise_ft", spy)
+    tied = merged.get_output_embeddings().weight is merged.get_input_embeddings().weight
+    wiseft.make(merged, stock, 0.5)
+    assert seen == [{n: "cpu" for n in big}]
+    assert (merged.get_output_embeddings().weight is merged.get_input_embeddings().weight) == tied
+    assert close(state(merged), state(lora_scaled(tiny_lora_adapter, tiny_model_dir, 0.5)), atol=1e-5)
 
 
 def test_wiseft_builder_is_the_same_repair(tiny_lora_adapter, tiny_model_dir):
@@ -291,7 +320,8 @@ def cast_registry(monkeypatch, tiny_lora_adapter, digest_cast, extra=()):
     return doc
 
 
-def test_cast_variant_through_the_harness(fitted, tiny_lora_adapter, tiny_model_dir, tmp_path, monkeypatch):
+def test_cast_variant_through_the_harness(fitted, tiny_lora_adapter, tiny_model_dir, tmp_path, monkeypatch,
+                                         caplog):
     model, tok, _ = fitted
     install(tiny_lora_adapter)
     digest = merge.adapter_hash(tiny_lora_adapter)
@@ -302,8 +332,11 @@ def test_cast_variant_through_the_harness(fitted, tiny_lora_adapter, tiny_model_
     cast_registry(monkeypatch, tiny_lora_adapter, None)
     s_gated, s_always = rs.specs_for(ADAPTER, [rs.Setting("cast", 1.0), rs.Setting("cast_always", 1.0)])
     assert s_gated.artifacts == {"adapter": digest, "cast": cast.artifact_hash(path)}
-    v = variants.build_variant(s_gated, device="cpu", dtype="fp32", model_id=str(tiny_model_dir))
+    with caplog.at_level(logging.WARNING, logger="lift.repair"):
+        v = variants.build_variant(s_gated, device="cpu", dtype="fp32", model_id=str(tiny_model_dir))
+    assert "fitted in" not in caplog.text                     # fitted in the run's precision: no warning
     assert v.base is not None and v.score_logits is not None and v.hf_model is v.base
+    assert cast.load(path)[2]["dtype"] == "fp32"
     out = tmp_path / "g.jsonl"
     prompts = [make_prompt(f"p-{i}", text=t) for i, t in enumerate(TEXTS[:4])]
     gen.generate(v, prompts, out_path=out, max_new_tokens=4, batch_size=2)
@@ -317,6 +350,14 @@ def test_cast_variant_through_the_harness(fitted, tiny_lora_adapter, tiny_model_
     va = variants.build_variant(s_always, device="cpu", dtype="fp32", model_id=str(tiny_model_dir))
     gen.generate(va, prompts, out_path=tmp_path / "a.jsonl", max_new_tokens=4, batch_size=2)
     assert all(r.meta["gate_always_on"] for r in gen.read_generations(tmp_path / "a.jsonl"))
+    assert all(r.meta["intervention"] == intervention_digest(s_always)
+               for r in gen.read_generations(tmp_path / "a.jsonl"))
+    # An artifact fitted in another precision than the run's builds, with a warning naming both: its cells
+    # are keyed by the run's dtype and the artifact's hash, and paired only within one dtype.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="lift.repair"):
+        variants.build_variant(s_gated, device="cpu", dtype="bf16", model_id=str(tiny_model_dir))
+    assert "fitted in fp32" in caplog.text and "bf16" in caplog.text and "--refit" in caplog.text
     # A changed artifact is refused: its hash is pinned.
     path.write_bytes(path.read_bytes() + b" ")
     with pytest.raises(ValueError, match="does not match"):
@@ -429,6 +470,12 @@ def test_lift_fit_cast(fake_prompt_files, tiny_lora_adapter, tiny_model_dir, mon
     assert report["safetune_config"]["legacy_cast_gate"] is False
     digest = cast.artifact_hash(path)
     assert cli.main(line) == 0 and "kept" in capsys.readouterr().out          # a rerun keeps it
+    # One fitted on another Global revision (which the CAST builder refuses) is not kept either.
+    cond, vecs, info = cast.load(path)
+    original = path.read_bytes()
+    cast.save(path, cond.condition_vector, vecs, {**info, "model_rev": "f" * 40})
+    assert cli.main(line) == 2 and "--refit" in capsys.readouterr().err
+    path.write_bytes(original)
     fit_store(fake_prompt_files, salt=" now")                                 # other prompts: refused
     assert cli.main(line) == 2
     assert cast.artifact_hash(path) == digest

@@ -15,7 +15,7 @@ Decisions (docs/decisions.md): the condition and the vectors are fitted per seed
 being repaired, from train/fit data only (PolyRefuse harmful train vs harmless train + the 100
 OR-Bench fit prompts, all 6 languages pooled). Strengths {0.5, 1.0, 2.0} plus always-on at 1.0.
 
-How it is used here (decisions.md item 66):
+How it is used here (decisions.md item 67):
 - Condition: ``fit_cast_condition`` with its default candidate layers (n/4 to 3n/4), ``pool`` from
   configs/repairs.yaml (``last``), its default threshold grid and held-out half, chat template on.
 - Steering vectors: ``extract_caa_vectors(model, tok, harmful, benign, CAAConfig(target_layers=...))``,

@@ -269,7 +269,7 @@ six languages, so pairing, splitting and clustering all go by pid.
   `lift register-repairs` (laptop), `lift sweep` (run-dev, utility --generate-only and belebele hi per
   setting, resumable; `--judge-only` on the laptop) and `lift select` (outputs/metrics/selection.json and
   .md, overall and per family, then the freeze steps). A sweep line goes last in its job: the runners do
-  not go past its partial exit. Decisions 66-68.
+  not go past its partial exit. Decisions 67-69.
 - **P07 (final evaluation, statistics, report).** Implemented and tested offline on synthetic records:
   `lift final --variant V | --all` (lift.final: refused unless a `recipe-frozen-*` tag exists and the variant
   is frozen; the same guard in generate, utility, belebele and heldout-loss on `--split final`; safety cells

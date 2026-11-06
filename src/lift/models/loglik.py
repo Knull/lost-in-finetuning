@@ -59,7 +59,8 @@ then "bos" and "letters" for Belebele, "template" for the held-out loss) and the
 configuration and one stack, as a generations file is (lift.models.generate): done keys are skipped. A
 stale file raises StaleOutputError naming the command's ``--restart`` line (with the run's --dtype outside
 generation.dtype, so it starts over that precision's file and no other):
-- a record made under another configuration (``meta.run_config``);
+- a record made under another configuration (``meta.run_config``; ``meta.intervention`` names the
+  variant's registry entry alone, ``lift.cachekey.intervention_digest``, which lift select checks);
 - a pid under another key (a fixed text) or with another gold answer;
 - an unfinished file begun under another stack.
 That line sets the file aside under outputs/.aside/ (never synced) and leaves it EMPTY, as lift restart
@@ -119,7 +120,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from lift import config
-from lift.cachekey import generation_key
+from lift.cachekey import generation_key, intervention_digest
 from lift.io import append_jsonl, read_jsonl, sha256_file, sha256_text
 from lift.models import generate as gen
 from lift.models.variants import LoadedVariant
@@ -872,6 +873,7 @@ def _run_cell(variant: LoadedVariant, *, cfg: Mapping[str, Any], units: Sequence
 
     gpu = device_name(variant.device)
     provenance = {"model_rev": variant.model_rev, "adapter_hash": variant.adapter_hash,
+                  "intervention": intervention_digest(variant.spec),
                   "template": variant.template_hash[:16], **env, "stack": gen.stack_digest(env),
                   "task": gen.decoding_digest(dict(cfg)), "task_version": cfg["version"],
                   "run_config": run_config}

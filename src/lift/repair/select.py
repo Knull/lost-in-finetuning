@@ -15,8 +15,13 @@ the adapter and every setting of the chosen families (lift.repair.settings) it b
   every item of the split; stock's and each setting's must share the model revision. The adapter's own
   Belebele is not used by the rule and is reported when present.
 
-Nothing is selected while an input is missing: the report says "incomplete" with each reason and its
-remedy (rule 9: a subset would be a selection the pre-registration did not make). Otherwise
+Every safety cell and Belebele score file read must also have been made under the variant's registry
+entry as it is now (``_stale``: each record's ``meta.intervention``), so cells of a replaced entry (a CAST
+artifact fitted again) are never read as the new entry's; the utility metrics are checked against it by
+Gate 1's checks above.
+
+Nothing is selected while an input is missing or stale: the report says "incomplete" with each reason and
+its remedy (rule 9: a subset would be a selection the pre-registration did not make). Otherwise
 ``lift.selection.select_repair`` decides the overall winner over all settings, and the same rule within
 each family (wiseft, resta, cast with cast_always) gives that family's frozen setting: 3 families x 3
 seeds = the 9 repaired variants of the final eval. outputs/metrics/selection.json and .md hold the full
@@ -72,11 +77,50 @@ def _dtype_flag(dtype: str) -> str:
     return "" if dtype == config.get("generation.dtype") else f" --dtype {dtype}"
 
 
+def _stale(variant: str, path: Path) -> str | None:
+    """Why the records at ``path`` were not made under ``variant``'s registry entry as it is now, or None.
+
+    Each generation and score record names the entry it was made under (``meta.intervention``, lift.cachekey's
+    intervention digest: method, adapter, seed, params and artifacts, so a refit CAST artifact's hash too).
+    The paired_labels and Belebele checks compare a cell with itself, its prompts and stock, not with the
+    registry: after ``lift fit-cast --refit`` and ``lift register-repairs --replace`` the old artifact's
+    cells would still read as complete. A repair's records must name their entry; stock's and the
+    adapter's, made before records named one, are checked only where they do."""
+    from lift.cachekey import intervention_digest
+    from lift.io import read_jsonl
+    from lift.models.variants import get_spec
+
+    if not path.is_file():
+        return None
+    try:
+        spec = get_spec(variant)
+    except KeyError:
+        return None
+    now = intervention_digest(spec)
+    made = {(r.get("meta") or {}).get("intervention") for r in read_jsonl(path)}
+    if None in made and spec.method in rs.METHODS:
+        return (f"{path.name} has records that do not name the registry entry they were made under, so "
+                "nothing shows they are this entry's")
+    other = sorted(str(x) for x in made - {None, now})
+    if other:
+        return (f"{path.name} was made under another registry entry of {variant} (intervention "
+                f"{', '.join(x[:12] for x in other)}; the entry now is {now[:12]}: a CAST artifact fitted "
+                "again and registered with --replace?)")
+    return None
+
+
 def _rate(variant: str, which: str, dtype: str) -> tuple[float, dict[str, Any]]:
     from lift.judge import pipeline
+    from lift.models.generate import generations_path, restart_command
     from lift.stats import rates
 
     set_name, lang, split = CELLS[which]
+    stale = _stale(variant, generations_path(variant, set_name, lang, split))
+    if stale:
+        raise Missing(f"{set_name}_{lang}_{split}: {stale}; start the cell over: run "
+                      f"`{restart_command(variant, set_name, lang, split, dtype=dtype)}` as a job line right "
+                      f"after `lift sync pull`, then `lift run-dev --variant {variant}{_dtype_flag(dtype)}` "
+                      "(or lift sweep), then lift sync pull")
     try:
         _stock, labels = pipeline.paired_labels("stock", variant, set_name, lang, split, judge="primary",
                                                 dtype=dtype)
@@ -112,6 +156,10 @@ def _belebele(variant: str, dtype: str, *, pinned: str | None) -> tuple[float, d
     from lift.models import loglik
 
     rerun = f"`lift belebele --variant {variant} --split dev --langs hi{_dtype_flag(dtype)}` (GPU)"
+    stale = _stale(variant, loglik.belebele_scores_path(variant, "hi", "dev", dtype=dtype))
+    if stale:
+        raise Missing(f"Belebele-hi dev: {stale}; start it over: run `lift belebele --variant {variant} "
+                      f"--split dev --langs hi --restart{_dtype_flag(dtype)}` (GPU), then lift sync pull")
     try:
         doc = loglik.belebele_metrics(variant, "dev", dtype=dtype, langs=("hi",))
     except (OSError, ValueError) as exc:

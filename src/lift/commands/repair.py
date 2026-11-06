@@ -143,15 +143,19 @@ def _fit_cast(args: argparse.Namespace) -> int:
 
     path = cast.artifact_path(args.adapter)
     if path.is_file() and not args.refit:
+        from lift import config
+        from lift.models.load import resolved_revision
+
         info = read_cast_info(path)
-        if (info.get("adapter_hash"), info.get("fit_digest"), info.get("dtype")) == \
-                (spec.artifacts["adapter"], digest, dtype):
+        model_rev = resolved_revision(config.get("models.global.id"), config.get("models.global.revision"))
+        if (info.get("adapter_hash"), info.get("fit_digest"), info.get("dtype"), info.get("model_rev")) == \
+                (spec.artifacts["adapter"], digest, dtype, model_rev):
             print(f"{path}: already fitted on {args.adapter} ({spec.artifacts['adapter'][:12]}) with these "
                   "prompts "
                   f"in {dtype}; kept (sha256 {cast.artifact_hash(path)[:12]})")
             return 0
-        print(f"{path} exists and was fitted on another adapter, prompt set or precision; --refit replaces "
-              "it "
+        print(f"{path} exists and was fitted on another adapter, Global revision, prompt set or precision; "
+              "--refit replaces it "
               "(every CAST entry registered on it then goes stale: lift register-repairs --replace)",
               file=sys.stderr)
         return 2
