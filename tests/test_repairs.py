@@ -106,6 +106,34 @@ def test_wiseft_equals_the_lora_delta_scaled_by_lambda(tiny_lora_adapter, tiny_m
     assert wiseft.alpha_for(lam) == pytest.approx(1 - lam)
 
 
+def test_wiseft_interpolates_the_largest_tensors_on_the_cpu(tiny_lora_adapter, tiny_model_dir, monkeypatch):
+    """apply_wise_ft holds five fp32 copies of a tensor on its device at once: for Tiny Aya's 262k x 2048
+    embedding that is 10 GiB beside the 6.2 GiB fp16 model, over a T4's 15 GiB. The largest tensors are
+    interpolated on the CPU (the same elementwise arithmetic) and put back where they were, ties kept."""
+    import safetune.interventions.recover.wise_ft as st_wise
+
+    merged = merged_fp32(tiny_lora_adapter, tiny_model_dir)
+    stock = load_model(str(tiny_model_dir), "local", dtype="fp32", device="cpu")
+    sizes = {n: p.numel() for n, p in merged.named_parameters()}
+    biggest = max(sizes.values())
+    monkeypatch.setattr(wiseft, "LARGE_NUMEL", biggest - 1)
+    big = {n for n, k in sizes.items() if k == biggest}
+    assert big == set(wiseft.large_parameters(merged))
+    seen = []
+    real = st_wise.apply_wise_ft
+
+    def spy(model, aligned, alpha):
+        seen.append({n: p.device.type for n, p in model.named_parameters() if n in big})
+        return real(model, aligned, alpha=alpha)
+
+    monkeypatch.setattr(st_wise, "apply_wise_ft", spy)
+    tied = merged.get_output_embeddings().weight is merged.get_input_embeddings().weight
+    wiseft.make(merged, stock, 0.5)
+    assert seen == [{n: "cpu" for n in big}]
+    assert (merged.get_output_embeddings().weight is merged.get_input_embeddings().weight) == tied
+    assert close(state(merged), state(lora_scaled(tiny_lora_adapter, tiny_model_dir, 0.5)), atol=1e-5)
+
+
 def test_wiseft_builder_is_the_same_repair(tiny_lora_adapter, tiny_model_dir):
     install(tiny_lora_adapter)
     v = variants.build_variant(spec("wiseft", **{"lambda": 0.25}), device="cpu", dtype="fp32",

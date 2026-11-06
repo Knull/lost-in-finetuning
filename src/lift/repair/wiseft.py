@@ -11,12 +11,20 @@ two agree on a tiny model, which catches the sign convention.
 
 Memory (one T4, 16 GB): the merged adapter is on the GPU in the run's dtype, stock Global stays on the
 CPU, and apply_wise_ft moves one stock tensor at a time to the adapter's device (computing in fp32).
+It holds five fp32 copies of a tensor at once (stock, adapter, both scaled, their sum): for Tiny Aya's
+262k x 2048 tied embedding that is 10 GiB beside the 6.2 GiB fp16 model, more than a T4's 15 GiB. So a
+parameter of more than ``LARGE_NUMEL`` elements is moved to the CPU for the call and back after (the same
+elementwise fp32 arithmetic, the same result; a tied weight stays tied).
 The caller always passes a freshly merged adapter (lift.repair.build): applying twice compounds.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
+
+LARGE_NUMEL = 1 << 27         # 512 MiB in fp32: on Tiny Aya only the embedding (2 GiB) is larger
 
 
 def alpha_for(lam: float) -> float:
@@ -33,7 +41,30 @@ def make(adapter_model: Any, stock_model: Any, lam: float) -> Any:
     from safetune.interventions.recover.wise_ft import apply_wise_ft
 
     _check_same_parameters(adapter_model, stock_model)
-    return apply_wise_ft(adapter_model, stock_model, alpha=alpha_for(lam))
+    with _large_on_cpu(adapter_model):
+        apply_wise_ft(adapter_model, stock_model, alpha=alpha_for(lam))
+    return adapter_model
+
+
+def large_parameters(model: Any) -> list[str]:
+    """The parameters (each tied group once) with more than ``LARGE_NUMEL`` elements."""
+    return [n for n, p in model.named_parameters() if p.numel() > LARGE_NUMEL]
+
+
+@contextmanager
+def _large_on_cpu(model: Any) -> Iterator[None]:
+    """Inside the block the large parameters' data is on the CPU; after it, back on its own device."""
+    large = set(large_parameters(model))
+    moved = []
+    for name, p in model.named_parameters():
+        if name in large:
+            moved.append((p, p.device))
+            p.data = p.data.to("cpu")
+    try:
+        yield
+    finally:
+        for p, device in moved:
+            p.data = p.data.to(device)
 
 
 def _check_same_parameters(model: Any, reference: Any) -> None:
