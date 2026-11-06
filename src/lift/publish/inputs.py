@@ -107,6 +107,16 @@ TABLES = {
 # P06 (the exploratory diagnosis) may never be built; P08 invents no contract for it.
 OPTIONAL = {"signatures": "the exploratory diagnosis (P06) put no signatures in final_report.json"}
 NOT_RUN = "not run"
+P07_FIGURES = "P07 lift report"
+# The figures P07's ``lift report`` draws into outputs/figures/ (lift.report.figures.draw_all), with the
+# alt text P08 gives them. The logs dataset carries the PNGs; the article and the logs card embed them.
+FIGURES = {
+    "forest_primary": "Primary endpoint: drift and repair in the Hindi harmful rate, per seed and pooled",
+    "tradeoff_dev": "Seed-1 dev settings of every repair family against the selection constraints",
+    "heatmap_harmful": "Harmful rate per language for stock, the adapter and each frozen repair, final split",
+    "heatmap_overrefusal": "Hard-benign refusal rate per language for stock, the adapter and each frozen "
+    "repair, final split",
+}
 
 
 def selection_path() -> Path:
@@ -355,6 +365,24 @@ class Facts:
                 }
             )
         return f"{out}\n\n{note}" if note else out
+
+    def figure(self, name: str, base: str = "") -> str:
+        """A figure P07 drew (outputs/figures/{name}.png) as a markdown image linked at
+        ``{base}figures/{name}.png`` (where the logs dataset carries it), its sha256 recorded in the
+        sources; a pending line while it is not drawn. The image is the file: no number is typed."""
+        path = paths.figures_dir() / f"{name}.png"
+        if not path.is_file() or path.stat().st_size == 0:
+            return f"_{self._missing(f'the figure {name}.png', path, P07_FIGURES)}_"
+        link = f"figures/{name}.png"
+        self.sources.append(
+            {
+                "shown": link,
+                "file": shown(path),
+                "pointer": "",
+                "value": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        )
+        return f"![{FIGURES[name]}]({base}{link})"
 
     def per_seed_table(self, effects: list[tuple[str, str]]) -> str:
         """Each seed of the primary effects (``[(label, key of primary)]``) as a markdown table: the

@@ -316,3 +316,83 @@ def test_the_notebook_run_time_is_not_claimed_until_measured(out, monkeypatch):
     text = " ".join(path.read_text(encoding="utf-8").split())
     assert "notebook (default sample): 25 minutes on NVIDIA A100" in text
     assert any(s["file"] == "outputs/metrics/acceptance_runtime.json" for s in facts.sources)
+
+
+# ---------------------------------------------------------------- figures (XB-08), repair vs WiSE-FT (XB-07)
+
+FIGURES = ("forest_primary", "tradeoff_dev", "heatmap_harmful", "heatmap_overrefusal")
+
+
+def test_p07s_figures_are_embedded_from_the_logs_dataset(out):
+    """XB-08: the four PNGs P07 draws go into the article, linked from the logs dataset that carries
+    them, each recorded in the sources with its sha256 (no number is typed: the image is the file)."""
+    import hashlib
+
+    from lift import paths
+
+    write_inputs()
+    path, facts = article.build()
+    text = path.read_text(encoding="utf-8")
+    logs = settings.repo("logs").url
+    for name in FIGURES:
+        assert f"]({logs}/resolve/main/figures/{name}.png)" in text
+        png = paths.output_dir() / "figures" / f"{name}.png"
+        sha = hashlib.sha256(png.read_bytes()).hexdigest()
+        assert any(s["file"] == f"outputs/figures/{name}.png" and s["value"] == sha for s in facts.sources)
+    assert text.index("figures/forest_primary.png") < text.index("### Per language")
+    assert not any("figure" in p for p in article.placeholders(text))
+
+
+def test_a_figure_not_drawn_is_pending(out):
+    from lift import paths
+
+    write_inputs()
+    (paths.output_dir() / "figures" / "tradeoff_dev.png").unlink()
+    text = article.build()[0].read_text(encoding="utf-8")
+    assert any("tradeoff_dev.png" in p and "lift report" in p for p in article.placeholders(text))
+    assert "figures/tradeoff_dev.png)" not in text
+
+
+def _vs_wiseft_table():
+    from publish_fakes import interval, table
+
+    return table(
+        [
+            ("family", "Family", "text"),
+            ("harmful", "Hindi harmful rate: family - WiSE-FT", "pp_ci"),
+            ("retained", "Gain kept: family - WiSE-FT", "pp_ci"),
+        ],
+        [
+            {"family": "resta", "harmful": interval(-0.04, -0.08, -0.01), "retained": interval(0, -0.1, 0.1)},
+            {"family": "cast", "harmful": interval(0.01, -0.02, 0.04), "retained": None},
+        ],
+        "Each repair against simply scaling the adapter down (descriptive, not pre-registered)",
+        "Paired by prompt; unadjusted intervals; not pre-registered.",
+    )
+
+
+def test_the_repair_vs_wiseft_table_is_shown_only_when_p07_writes_it(out):
+    """XB-07: P07 may add a descriptive family-minus-WiSE-FT table; the article renders it, with one
+    sentence read from its intervals, and shows nothing (no placeholder) while it is absent."""
+    from publish_fakes import report
+
+    write_inputs()
+    text = article.build()[0].read_text(encoding="utf-8")
+    assert "not pre-registered" not in text and text.count("simply scaling the adapter down") == 1
+    doc = report()
+    doc["tables"]["repair_vs_wiseft"] = _vs_wiseft_table()
+    write_report(doc)
+    path, facts = article.build()
+    text = path.read_text(encoding="utf-8")
+    section = _section(text, "Each repair against simply scaling the adapter down")
+    assert "| resta | -4.0 pp [-8.0, -1.0] | +0.0 pp [-10.0, +10.0] |" in section
+    assert "not pre-registered" in section
+    sentence = " ".join(section.split())
+    assert "wholly below zero for resta" in sentence and "includes zero for cast" in sentence
+    assert "Hindi harmful rate: family - WiSE-FT" in sentence
+    assert text.index("### Repair comparison") < text.index("### Each repair against")
+    assert any(s["pointer"] == "/tables/repair_vs_wiseft/rows/0/harmful" for s in facts.sources)
+    assert any(s["pointer"] == "/tables/repair_vs_wiseft/title" for s in facts.sources)
+    assert not article.placeholders(text) or all(
+        "wiseft" not in p.lower() for p in article.placeholders(text)
+    )

@@ -21,7 +21,7 @@ from lift import config, paths
 from lift.publish import PublishError, render, settings
 from lift.publish.collect import links_path, read_links
 from lift.publish.datasets import verdict_lines
-from lift.publish.inputs import P07, Facts, pending, report_path, shown
+from lift.publish.inputs import FIGURES, P07, TABLES, Facts, _interval, pending, report_path, shown
 
 SECTIONS = (
     "Problem and approach",
@@ -179,6 +179,76 @@ def backtranslation(facts: Facts) -> dict[str, str]:
     }
 
 
+# final_report.json tables the article never places: P07's index of every final cell.
+UNPLACED = {"cells"}
+
+
+def _is_vs_wiseft(name: str, spec: dict) -> bool:
+    words = f"{name} {spec.get('title', '')}".lower().replace("-", "")
+    return "wiseft" in words
+
+
+def vs_wiseft_sentence(name: str, spec: dict) -> str:
+    """One sentence answering "does any repair beat simply scaling the adapter down?" from P07's
+    descriptive table (review XB-07): where each row's first interval column lies against zero. It
+    repeats no number (the table below holds them, recorded in the sources); "" when the table has no
+    text column and no interval column to read."""
+    columns = spec.get("columns") or []
+    who = next((c for c in columns if c.get("format", "text") == "text"), None)
+    ci = next((c for c in columns if str(c.get("format", "")).endswith("_ci")), None)
+    if who is None or ci is None:
+        return ""
+    where: dict[str, list[str]] = {}
+    for row in spec.get("rows") or []:
+        value = row.get(ci["key"])
+        if value is None:
+            place = NOT_RUN_PLACE
+        else:
+            try:
+                _, lo, hi = _interval(value)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise PublishError(f"{shown(report_path())}/tables/{name}: {exc}") from exc
+            place = (
+                "lies wholly below zero"
+                if hi < 0
+                else "lies wholly above zero"
+                if lo > 0
+                else "includes zero"
+            )
+        where.setdefault(place, []).append(str(row.get(who["key"])))
+    if not where:
+        return ""
+    order = ("lies wholly below zero", "lies wholly above zero", "includes zero", NOT_RUN_PLACE)
+    parts = [f"{place} for {', '.join(where[place])}" for place in order if place in where]
+    return (
+        "Does any repair beat simply scaling the adapter down? Descriptively (paired, unadjusted, not "
+        f'pre-registered), the 95% interval of "{ci.get("label", ci["key"])}" {"; ".join(parts)}.\n\n'
+    )
+
+
+NOT_RUN_PLACE = "was not estimated (not run)"
+
+
+def extra_tables(facts: Facts) -> str:
+    """Tables final_report.json carries beyond TABLES (P07's optional repair-vs-WiSE-FT contrast, review
+    XB-07), each under its own title, after the repair comparison; "" when there is none: nothing is
+    shown, and nothing is pending."""
+    report = facts.report()
+    tables = (report or {}).get("tables") or {}
+    blocks = []
+    for name, spec in tables.items():
+        if name in TABLES or name in UNPLACED or not isinstance(spec, dict):
+            continue
+        title = (
+            facts.value(report_path(), f"/tables/{name}/title", "text", what=f"the {name} title", stage=P07)
+            if spec.get("title")
+            else name
+        )
+        lead = vs_wiseft_sentence(name, spec) if _is_vs_wiseft(name, spec) else ""
+        blocks.append(f"### {title}\n\n{lead}{facts.table(name)}")
+    return "".join(f"\n\n{b}" for b in blocks)
+
+
 def context(facts: Facts) -> dict[str, str]:
     from lift.publish import acceptance
 
@@ -271,6 +341,10 @@ def context(facts: Facts) -> dict[str, str]:
         "cost",
     ):
         ctx[f"table_{name}"] = facts.table(name)
+    ctx["extra_tables"] = extra_tables(facts)
+    logs = settings.repo("logs").url
+    for name in FIGURES:  # the PNGs travel in the logs dataset (datasets.build_logs), linked from there
+        ctx[f"figure_{name}"] = facts.figure(name, base=f"{logs}/resolve/main/")
     return ctx
 
 

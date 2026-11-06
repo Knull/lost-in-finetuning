@@ -700,3 +700,22 @@ def test_prompt_set_counts_are_recorded_in_the_sources():
     assert values[("data/prompts/harmful_hi.jsonl", "prompts")] == 2
     assert values[("data/prompts/harmful_hi.jsonl", "native-checked")] == 2
     assert values[("data/prompts/harmful_hi.jsonl", "edited")] == 0
+
+
+def test_the_figures_go_into_the_logs_and_its_card(outputs):
+    """XB-08: P07's PNGs are copied into the logs dataset and shown in its card (relative links); one
+    not drawn leaves the card pending, so --yes refuses it."""
+    from publish_fakes import FIGURES
+
+    write_inputs()
+    up = datasets.build_logs()
+    card = (up.folder / "README.md").read_text()
+    for name in FIGURES:
+        assert (up.folder / "figures" / f"{name}.png").read_bytes().startswith(b"\x89PNG")
+        assert f"](figures/{name}.png)" in card
+    assert "[PENDING" not in card
+    (paths.output_dir() / "figures" / "heatmap_harmful.png").unlink()
+    up = datasets.build_logs()
+    card = (up.folder / "README.md").read_text()
+    assert "[PENDING" in card and "heatmap_harmful.png" in card
+    assert not (up.folder / "figures" / "heatmap_harmful.png").exists()

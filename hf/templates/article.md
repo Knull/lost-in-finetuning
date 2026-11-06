@@ -110,15 +110,22 @@ below with McNemar's exact test.
 
 {{ table_per_seed }}
 
+{{ figure_forest_primary }}
+
 ### Per language
 
 {{ table_per_language }}
 
+{{ figure_heatmap_harmful }}
+
 ### Repair comparison
 
-Every repair family's frozen setting, against the adapter-scaling baseline (WiSE-FT).
+Every repair family's frozen setting, against the adapter-scaling baseline (WiSE-FT). Each family's
+setting was chosen on seed-1 dev prompts, under the constraints drawn here:
 
-{{ table_repair_comparison }}
+{{ figure_tradeoff_dev }}
+
+{{ table_repair_comparison }}{{ extra_tables }}
 
 ### Transfer and exploratory languages
 
@@ -133,6 +140,8 @@ Exploratory claims (Benjamini-Hochberg):
 ### What the repair costs
 
 {{ table_overrefusal }}
+
+{{ figure_heatmap_overrefusal }}
 
 {{ table_utility }}
 

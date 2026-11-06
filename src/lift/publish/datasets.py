@@ -53,7 +53,8 @@ outputs/generations or in what ``lift restart`` set aside (outputs/.aside); a la
 ``output_sha`` (a human label) covers every output of its key here. A harmful output whose text is no
 longer on this machine is counted (``gone``) and reported (P08-R2-15).
 
-The logs also hold the records behind the other numbers (P08-R2-14), none with a text: the per-item
+The logs also carry P07's figures (``figures/``, review XB-08), which the article and the logs card
+show. They also hold the records behind the other numbers (P08-R2-14), none with a text: the per-item
 Belebele and held-out-loss scores (``scores/``), P07's back-translation verdicts (``backtranslation/``,
 known fields only) and the run manifests behind the cost numbers (``manifests/``). The utility verdicts
 quote both answers, so they are in the gated raw completions.
@@ -81,7 +82,7 @@ from lift import config, paths
 from lift.io import read_jsonl, sha256_file, sha256_text, write_jsonl
 from lift.publish import PublishError, preflight, render, settings
 from lift.publish.hub import Upload
-from lift.publish.inputs import Facts, report_path, selection_path, shown
+from lift.publish.inputs import FIGURES, Facts, report_path, selection_path, shown
 
 HARMFUL_NATIVE = {"unsafe", "controversial"}
 SAFETY_SETS = ("harmful", "easy_benign", "hard_benign", "redteam")  # judged cells (validation.second_judge)
@@ -768,6 +769,20 @@ def _records(folder: Path) -> dict[str, int]:
     return counts
 
 
+def _figures(folder: Path) -> list[str]:
+    """Copy P07's figures (outputs/figures/, ``inputs.FIGURES``) into the logs' figures/: the article and
+    the logs card link them there (review XB-08). Returns the names copied."""
+    copied = []
+    for name in FIGURES:
+        src = paths.figures_dir() / f"{name}.png"
+        if src.is_file() and src.stat().st_size:
+            dest = folder / "figures" / src.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)
+            copied.append(name)
+    return copied
+
+
 def build_logs(facts: Facts | None = None) -> Upload:
     facts = facts or Facts()
     repo = settings.repo("logs")
@@ -811,6 +826,7 @@ def build_logs(facts: Facts | None = None) -> Upload:
         )
     copied = _aggregates(folder, facts)
     records = _records(folder)
+    _figures(folder)
     checked = check_public(folder, keys, texts)
     card = logs_card(
         facts,
@@ -887,6 +903,8 @@ def logs_card(
             "records": "\n".join(
                 f"- {line.format(n=(records or {}).get(name, 0))}" for name, line in RECORD_LINES.items()
             ),
+            # relative links: build_logs copies the PNGs into figures/ (a missing one is pending)
+            "figures": "\n\n".join(facts.figure(name) for name in FIGURES),
         },
     )
     return render.frontmatter(meta) + "\n" + body

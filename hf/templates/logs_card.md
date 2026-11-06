@@ -24,6 +24,7 @@ The utility verdicts quote both answers they compare, so they are in the gated r
 - `aggregates/`: the result tables as CSV and `final_report.json`, plus the repair selection
   (`selection.json`).
 - `auditkit/`: the AuditKIT evaluation records, with every output replaced by its sha256.
+- `figures/`: the report's figures (below).
 {{ records }}
 
 Variants: {{ variants }}.
@@ -31,6 +32,12 @@ Variants: {{ variants }}.
 Aggregate files:
 
 {{ aggregates }}
+
+## Figures
+
+Drawn by `lift report` from the aggregate tables and the selection; the PNGs are in `figures/`.
+
+{{ figures }}
 
 ## Harmful content
 
