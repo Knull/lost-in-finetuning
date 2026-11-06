@@ -18,8 +18,9 @@ then finds its cells done and costs a model load). A stage that exits 3 (cells s
 its remedy by the command) or fails is not recorded as done; the sweep goes on with the next stage and
 setting, and exits 3 (some stage partial) or 1 (some stage failed) at the end.
 
-Costs. Each setting gets a run manifest (stage "sweep_setting": the wall time of each stage this run,
-devices 1) and its cost summary, recomputed from its records whenever it runs: the GPU seconds the
+Costs. Each setting gets a run manifest (stage "sweep_setting": the wall time of each stage this run, the
+judge device, and ``devices``: 2 when run-dev's local judge sits on another GPU than the generator, as on
+Kaggle T4 x2, else 1) and its cost summary, recomputed from its records whenever it runs: the GPU seconds the
 generation records attribute to each prompt, the tokens generated, seconds per generated token, and for
 CAST the gate's prefill pass (``gate_seconds`` per record, lift.repair.cast) apart from the rest, with
 its share; Belebele's scoring seconds likewise. The adapter's own summary is printed beside them, so the
@@ -167,9 +168,14 @@ def gpu(adapter: str, *, families: Sequence[str], device: str, judge_device: str
         batch_size: int | None, recheck: bool = False, call: Callable[[Sequence[str]], int] = _call) -> int:
     """The GPU half: register, then every stage of every setting (module docstring). Exit 0, 3 or 1."""
     from lift.cachekey import intervention_digest
+    from lift.commands.run import _judge_device
+    from lift.judge.pipeline import judge_dir
     from lift.manifest import finish_run, start_run
 
     run_dtype = dtype or config.get("generation.dtype")
+    judge_device = _judge_device(judge_device)
+    # The devices the stages hold: run-dev's judge takes its own GPU only when it is local and elsewhere.
+    devices = len({device, judge_device}) if judge_dir("primary") == "qwen3guard" else 1
     chosen = rs.settings(families)
     specs = rs.specs_for(adapter, chosen)
     outcome = rs.register(specs)
@@ -180,7 +186,8 @@ def gpu(adapter: str, *, families: Sequence[str], device: str, judge_device: str
         digest = intervention_digest(spec)
         entry = state["settings"].setdefault(spec.name, {"stages": {}})
         run = start_run("sweep_setting", variant=spec.name, adapter=adapter, method=spec.method,
-                        params=spec.params, dtype=run_dtype, device=device, devices=1)
+                        params=spec.params, dtype=run_dtype, device=device, judge_device=judge_device,
+                        devices=devices)
         stage_seconds: dict[str, float] = {}
         results[spec.name] = {}
         for stage in STAGES:

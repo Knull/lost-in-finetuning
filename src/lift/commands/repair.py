@@ -292,10 +292,17 @@ def _select(args: argparse.Namespace) -> int:
     from lift.repair import select
 
     _adapter(args.adapter)
-    doc = select.run(args.adapter, families=_families(args.repairs), dtype=args.dtype)
+    try:
+        doc = select.run(args.adapter, families=_families(args.repairs), dtype=args.dtype,
+                         refreeze=args.refreeze)
+    except select.RecipeFrozen as exc:
+        print(f"lift select: {exc}", file=sys.stderr)
+        return 2
     json_path, md_path = select.report_paths()
     print_selection(doc)
     print(f"wrote {json_path} and {md_path.name}")
+    if doc.get("recipe"):
+        print(f"wrote {select.RECIPE}")
     return 0 if doc["status"] == "decided" else 3
 
 
@@ -306,7 +313,13 @@ def print_selection(doc: dict[str, Any]) -> None:
     if doc["status"] != "decided":
         return
     plan = doc["freeze"]
-    print("\nFreeze (Gate 3), after committing outputs/metrics/selection.md's numbers to the record:")
+    recipe = doc.get("recipe")
+    print(f"\nFreeze (Gate 3): commit {select.RECIPE} and tag it, after committing outputs/metrics/"
+          "selection.md's numbers to the record:")
+    if recipe:
+        print(f"  # {select.RECIPE}: overall winner {recipe['overall_winner']}; frozen "
+              f"{', '.join(f'{k} {v}' for k, v in sorted(recipe['frozen'].items()))}; selection.json sha256 "
+              f"{recipe['selection_sha256']}")
     print(f"  {plan['tag']}")
     print("\nconfigs/variants.yaml entries of the frozen variants (seeds 1-3; seed 1's are registered "
           "already):")
@@ -374,4 +387,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--repairs", default=None, help="families, comma-separated (default wiseft,resta,cast)")
     p.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default=None,
                    help="default: generation.dtype")
+    p.add_argument("--refreeze", action="store_true",
+                   help="replace a recipe already frozen in configs/frozen_recipe.json (needs a dated "
+                        "docs/decisions.md entry)")
     p.set_defaults(func=_select)

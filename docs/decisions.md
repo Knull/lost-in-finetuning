@@ -2,6 +2,80 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 6, 2026 (night): P07 fixes from the cross-branch review, before any final run
+
+Found by the cross-branch review (XB-02, XB-07, XB-09, XB-11, XB-12) on synthetic records; no final-split
+output existed and the recipe was not frozen. None of these changes a pre-registered claim family.
+
+76. **Each repair against WiSE-FT is reported descriptively, not tested** (`lift.report.analysis.vs_wiseft`,
+    table `repair_vs_wiseft`). The README frames the question ("each repair is compared with the obvious
+    fallback of simply scaling the adapter down") but its endpoints pre-register only drift and repair
+    against the adapter; the secondary and exploratory families (item 72) have no repair-vs-WiSE-FT claim.
+    So the contrast is labelled "not pre-registered, descriptive": each other frozen family minus WiSE-FT's
+    frozen setting, paired by prompt within each seed and pooled over the seeds run (clustered bootstrap,
+    clusters = pid), on the Hindi harmful rate, the Hindi hard-benign refusal rate, and the share of the
+    adapter's utility gain kept (sum(family - wiseft) / sum(adapter - 0.5) over the same pids, a joint
+    cluster bootstrap). Estimates and 95% intervals only: no p-value, not added to the Holm or BH family,
+    never stated as a claim. If WiSE-FT is not frozen, the table is empty and says so.
+77. **The final guard reads the committed frozen recipe** (amends item 70; reader of item 75). The final
+    split opens only when configs/frozen_recipe.json exists, is the same in the working tree, at HEAD and
+    in the commit the newest `recipe-frozen-*` tag points to (`git show <tag>:configs/frozen_recipe.json`; a
+    shallow GPU clone fetches that one tag, the token passed as before through GIT_CONFIG_* variables), and
+    its `selection_sha256` equals the sha256 of outputs/metrics/selection.json's bytes. A repaired variant
+    is frozen only if the recipe's `frozen` names it (stock and the adapter seeds as before). A selection
+    whose `overall.winner` is not one of its frozen settings, or whose frozen map or winner differs from
+    the recipe's, is refused, as is `lift final --all`'s plan for it. So a `lift select` run after the tag
+    is refused at final time. final_report.json's `selection` carries `winner`, `frozen` and `sha256` (the
+    selection.json it was built from, None when handed a selection that is not the file's) beside the
+    adapter, its verdict and the winner's family, for P08 to check.
+78. **Report details the review found open.**
+    - Stress branch (README Gate 2 fails): the stress adapter carries the repair comparison (its verdict
+      as item 71, labelled `stress`), and the standard recipe "gets retain with its interval": a second
+      verdict row, `retain`, with the final pooled Hindi drift of the standard adapter's seeds in its
+      reason. The standard adapter is the Gate 1 pick (`candidate` in outputs/metrics/gate2.json, from
+      `lift gate 2 --candidate NAME`, or selection.json's `standard_adapter`); its seeds 1-3 join the core
+      plan after the winner. Its final drift is reported even if it meets Gate 2's bar, and never
+      re-decides the verdict (final numbers never re-select).
+    - None means "not run" and nothing else (item 73): a share of the gain kept that is undefined (the
+      adapter shows no gain over parity) is the text "undefined: ...", and a non-finite number is
+      written as "undefined". Table cells that can hold either are text, and a pooled value names its
+      seeds. Belebele and utility arms not run join the report's not-run list.
+    - A check-up counts the dev sweep (`sweep_setting` manifests) and the CAST fit (`fit_cast`) of the
+      selection's adapter in the reported precision only, plus the final battery in that precision.
+    - Belebele is paired with stock only when model revision, template, scoring path and task settings
+      match; otherwise lift stats refuses (Unpairable), as for safety pairs.
+
+## Nov 6, 2026 (evening): the frozen set always holds the selection's winner, before any repair was run
+
+Found by the cross-branch review (XB-01, XB-02) on synthetic dev numbers; no sweep number existed yet.
+Item 75 is the orchestrator's call, **pending team confirmation**.
+
+75. **The overall winner is frozen as its family's setting** (`lift select`; amends item 69). Item 69
+    froze each family's own pick and named the overall winner the adapter's verdict, but the two can
+    differ, so the winner the README says is "frozen, tagged in git, and applied to all three seeds"
+    could be frozen nowhere. The tie window moves with the pool: drops within 2 points of the best tie.
+    Example (adapter harmful 0.30, minimum win rate 0.60, every setting eligible): ReSta drops 0.20,
+    WiSE-FT A drops 0.18 (win 0.62), WiSE-FT B drops 0.165 (win 0.68). Over all settings the window is
+    0.18-0.20, A ties ReSta and wins as the cheaper repair. Within WiSE-FT alone the best drop is A's,
+    the window is 0.16-0.18, A and B tie at the same cost and B wins on its higher win rate. Freezing B
+    meant the winner A was never evaluated on the final split (the final guard refuses it) and P08 would
+    publish an unevaluated model.
+    - Now the overall winner replaces its own family's pick; the other families keep the rule within
+      the family. The frozen set is still one setting per family (3 x 3 seeds = 9 repaired variants)
+      and always holds `overall.winner`. selection.json keeps the family's own pick as
+      `families.<family>.family_rule_winner` when it differs.
+    - In the no-winner case (verdict reject) the overall pick (fewest violations, then the largest drop)
+      is also its family's pick, so nothing changes there.
+    - The freeze is recorded in a committed file, configs/frozen_recipe.json, written by a decided
+      `lift select`: `{"version": 1, "adapter", "selection_sha256"` (of the outputs/metrics/selection.json
+      bytes it wrote), `"overall_winner", "frozen": {family: setting}}`, sorted keys. Gate 3 commits it
+      before the tag (`git add configs/frozen_recipe.json && git commit -m "Freeze the recipe" && git tag
+      recipe-frozen-YYYYMMDD && git push && git push --tags`), so the tag names a concrete recipe the final
+      guard can compare with selection.json. A recipe is frozen once: while the file exists, `lift select`
+      refuses a run that would change it or the selection.json it pins (an undecided run included) and
+      writes nothing; the same inputs again keep both files. Re-freezing means deleting the file and a
+      dated entry here (`--refreeze` does it in one step).
+
 ## Nov 6, 2026: P07 final evaluation, statistics and report details, before any final run
 
 Pinned while writing P07 (branch p07-final-report), offline on CPU on synthetic judged records: no final-split
