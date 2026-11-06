@@ -39,6 +39,7 @@ from lift.io import sha256_file
 from lift.publish import PublishError, render, settings
 from lift.publish.hub import Upload
 from lift.publish.inputs import (
+    NOT_RUN,
     P05,
     Facts,
     frozen_variants,
@@ -309,11 +310,12 @@ def model_card(facts: Facts, variant: str | None, spec: Any | None, gated: list[
         "base_revision": config.get("models.global.revision"),
         "verdicts": verdict_lines(facts),
         "drift": facts.report_value("/primary/drift/pooled", "pp_ci", what="the pooled Hindi drift effect"),
-        "drift_p": facts.report_value("/primary/drift/pooled/p", "p", what="the drift p-value"),
+        "drift_p": facts.report_value("/primary/drift/pooled/p", "p_stmt", what="the drift p-value"),
         "repair": facts.report_value(
             "/primary/repair/pooled", "pp_ci", what="the pooled Hindi repair effect"
         ),
-        "repair_p": facts.report_value("/primary/repair/pooled/p", "p", what="the repair p-value"),
+        "repair_p": facts.report_value("/primary/repair/pooled/p", "p_stmt", what="the repair p-value"),
+        **this_model(facts),
         "drift_seeds": facts.report_value(
             "/primary/drift/pooled/seeds", "list", what="the seeds pooled for drift"
         ),
@@ -362,6 +364,23 @@ def model_card(facts: Facts, variant: str | None, spec: Any | None, gated: list[
     return render.frontmatter(meta) + "\n" + render.fill(render.template("model_card.md"), context)
 
 
+def this_model(facts: Facts) -> dict[str, str]:
+    """The repair effect of these weights: the seed-1 row of P07's per-seed repair effect (review XB-13),
+    "not run" when seed 1 was not, pending while there is no report."""
+    seeds = facts.raw(report_path(), "/primary/repair/per_seed")
+    if seeds is None:
+        line = facts.report_value("/primary/repair/per_seed", "pp_ci", what="the seed-1 repair effect")
+        return {"repair_this": line, "repair_this_p": ""}
+    i = next((i for i, r in enumerate(seeds) if isinstance(r, dict) and r.get("seed") == 1), None)
+    if i is None:
+        return {"repair_this": NOT_RUN, "repair_this_p": f"p {NOT_RUN}"}
+    at = f"/primary/repair/per_seed/{i}"
+    return {
+        "repair_this": facts.report_value(at, "pp_ci", what="the seed-1 repair effect"),
+        "repair_this_p": facts.report_value(f"{at}/p", "p_stmt", what="the seed-1 repair p-value"),
+    }
+
+
 def safety_claim(facts: Facts) -> str:
     """The one sentence about safety the card may make: "safer than the adapter on our benchmark" only
     when every final verdict is repair and the pooled Hindi repair interval lies wholly below zero."""
@@ -378,8 +397,8 @@ def safety_claim(facts: Facts) -> str:
     )
     if supported:
         return (
-            "On our Hindi benchmark this model is safer than the adapter (the repair interval above lies "
-            "below zero), which does not make it safe in general."
+            "On our Hindi benchmark the frozen recipe is safer than the adapter (its pooled repair interval "
+            "above lies below zero), which does not make this model safe in general."
         )
     return "This card makes no safety claim beyond the verdict and the intervals above."
 

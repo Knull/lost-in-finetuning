@@ -17,12 +17,15 @@ Hackathon, Track 2b, statement 6 (repairing safety drift without retraining).
 ## Before and after
 
 All numbers are from the final split, which was used only to score frozen variants. Each effect
-is paired by prompt, with a 95% interval from a bootstrap clustered by prompt id, pooled over the
-seeds that were run (drift: seeds {{ drift_seeds }}; repair: seeds {{ repair_seeds }}). A rate's
-upper bound counts unclear outputs as harmful.
+is paired by prompt. The pooled effects describe the recipe (the same frozen setting applied to
+each seed's adapter), with a 95% interval from a bootstrap clustered by prompt id over the seeds
+that were run (drift: seeds {{ drift_seeds }}; repair: seeds {{ repair_seeds }}). These weights
+are the seed-1 repair: their own effect is the seed-1 row, as in the table below. A rate's upper
+bound counts unclear outputs as harmful.
 
-- **Drift** (adapter minus stock, Hindi harmful rate): {{ drift }}, p = {{ drift_p }}
-- **Repair** (this model minus the adapter, Hindi harmful rate): {{ repair }}, p = {{ repair_p }}
+- **Drift** (the adapter minus stock, Hindi harmful rate, pooled over seeds): {{ drift }}, {{ drift_p }}
+- **Repair, the frozen recipe** (repair minus adapter, Hindi harmful rate, pooled over seeds): {{ repair }}, {{ repair_p }}
+- **This model** (seed 1: these weights minus the seed-1 adapter, Hindi harmful rate, McNemar): {{ repair_this }}, {{ repair_this_p }}
 - **Utility kept** (share of the adapter's win-rate gain over stock): {{ utility_retained }}
 
 {{ per_seed }}

@@ -65,7 +65,7 @@ def test_full_inputs_leave_no_placeholder(out, monkeypatch):
     path, facts = article.build()
     text = path.read_text(encoding="utf-8")
     assert PENDING not in text, article.placeholders(text)
-    assert "+16.0 pp [+11.0, +21.0], p = <0.001" in text
+    assert "+16.0 pp [+11.0, +21.0], p < 0.001" in text and "p = <" not in text  # XB-15
     assert "**repair**" in text and "ReSta on seed 3" in text
     assert "https://github.com/o/r/blob/main/notebooks/acceptance_test.ipynb" in text
     nb = json.loads((out / "acceptance_test.ipynb").read_text())
@@ -161,7 +161,7 @@ def test_an_arm_not_run_says_not_run(out):
     doc["primary"]["redteam_repair"] = {"pooled": None, "per_seed": []}
     _report_with(primary=doc["primary"])
     text = article.build()[0].read_text(encoding="utf-8")
-    assert "minus adapter): not run, p = not run" in text and "repair: not run" in text
+    assert "minus adapter): not run, p not run" in text and "repair: not run" in text
     assert not any("repair" in p for p in article.placeholders(text))
 
 
@@ -396,3 +396,43 @@ def test_the_repair_vs_wiseft_table_is_shown_only_when_p07_writes_it(out):
     assert not article.placeholders(text) or all(
         "wiseft" not in p.lower() for p in article.placeholders(text)
     )
+
+
+# -------------------------------------------------------------- the model card's "this model" (XB-13, XB-15)
+
+
+def test_the_card_tells_the_pooled_recipe_from_this_models_seed(out):
+    """XB-13: the pooled effect is the frozen recipe's over seeds; "this model" is the seed-1 row."""
+    card, _ = _card()
+    lines = card.splitlines()
+    pooled = next(line for line in lines if "-14.0 pp [-19.0, -9.0]" in line)
+    assert "frozen recipe" in pooled and "pooled" in pooled and "this model" not in pooled
+    this = next(line for line in lines if line.startswith("- **This model**"))
+    assert "-13.9 pp [-19.0, -9.0]" in this and "seed 1" in this and "p < 0.001" in this
+    assert "p = <" not in card
+
+
+def test_this_model_not_run_says_so(out):
+    from publish_fakes import effect
+
+    seeds_2_3 = effect(-0.14, -0.19, -0.09, 0.0002, seeds=(2, 3))
+    card, _ = _card(repair=seeds_2_3)
+    this = next(line for line in card.splitlines() if line.startswith("- **This model**"))
+    assert "not run" in this and "-13" not in this
+
+
+def test_the_design_counts_are_checked_against_the_evaluated_ones(out):
+    """XB-15: the design table's final counts come from configs/, the per-language table's from the data;
+    the article says whether they agree, and names each language that differs, with both numbers sourced."""
+    from publish_fakes import report
+
+    write_inputs()
+    text = " ".join(article.build()[0].read_text(encoding="utf-8").split())
+    assert "final harmful prompts per language match this design" in text
+    doc = report()
+    doc["tables"]["per_language"]["rows"][0]["n"] = 380  # Hindi
+    write_report(doc)
+    path, facts = article.build()
+    text = " ".join(path.read_text(encoding="utf-8").split())
+    assert "Hindi (380)" in text and "400 designed" in text and "match this design" not in text
+    assert any(s["pointer"] == "/tables/per_language/rows/0/n" and s["shown"] == "380" for s in facts.sources)

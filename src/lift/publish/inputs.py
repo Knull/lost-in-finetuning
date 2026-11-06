@@ -66,7 +66,8 @@ stats``, a stale pull, a report made before the block existed) refuses everythin
 (``PublishError``): the numbers would be another winner's.
 
 Formats: pct (0.123 -> 12.3%), pp (signed points), points (0.05 -> 5 points), pct_ci, pp_ci, p, int,
-f2, f3, hours, ms, text, list ([1, 2] -> "1, 2"). A null anywhere on a value's path (``pooled`` of an arm
+f2, f3, hours, ms, text, list ([1, 2] -> "1, 2"), and P08's own p_stmt for running text ("p < 0.001",
+"p = 0.031", "p not run"). A null anywhere on a value's path (``pooled`` of an arm
 not run) renders as "not run"; only a missing key renders as pending.
 """
 
@@ -172,7 +173,7 @@ def _interval(value: Any) -> tuple[float, float, float]:
 def fmt(value: Any, kind: str) -> str:
     """One value as the public text shows it. None is "not run" (an arm never estimated)."""
     if value is None:
-        return NOT_RUN
+        return f"p {NOT_RUN}" if kind == "p_stmt" else NOT_RUN
     if kind == "text":
         return str(value)
     if kind == "pct":
@@ -190,6 +191,9 @@ def fmt(value: Any, kind: str) -> str:
     if kind == "p":
         p = _num(value)
         return "<0.001" if p < 0.001 else f"{p:.3f}"
+    if kind == "p_stmt":  # P08's, for running text: "p < 0.001", "p = 0.031"
+        p = _num(value)
+        return "p < 0.001" if p < 0.001 else f"p = {p:.3f}"
     if kind == "int":
         n = _num(value)
         if n != int(n):

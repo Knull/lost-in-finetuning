@@ -179,6 +179,38 @@ def backtranslation(facts: Facts) -> dict[str, str]:
     }
 
 
+# P07's per_language row labels of the harmful set (the red-teaming row has its own design count).
+LANG_NAMES = ("English", "Hindi", "Chinese", "Spanish", "Arabic", "Thai")
+
+
+def counts_note(facts: Facts) -> str:
+    """Whether the final harmful prompts evaluated (P07's per-language table, ``n``: stock's final cell)
+    match the design count from configs/ (review XB-15), naming each language that differs with both
+    numbers sourced; "" while the table is not there (it is pending itself)."""
+    rows = facts.table_rows("per_language")
+    if rows is None:
+        return ""
+    design = config.get("sizes.harmful.final")
+    differ = [
+        i
+        for i, r in enumerate(rows)
+        if r.get("lang") in LANG_NAMES and r.get("n") is not None and r.get("n") != design
+    ]
+    if not differ:
+        return "The final harmful prompts per language match this design in the per-language results."
+    at = "/tables/per_language/rows"
+    shown_rows = [
+        f"{facts.report_value(f'{at}/{i}/lang', 'text', what='a language label')} "
+        f"({facts.report_value(f'{at}/{i}/n', 'int', what='the prompts evaluated')})"
+        for i in differ
+    ]
+    designed = facts.config("project", "sizes.harmful.final", "int")
+    return (
+        f"The final harmful prompts evaluated differ from this design in {', '.join(shown_rows)}, against "
+        f"{designed} designed: the per-language results count what was evaluated."
+    )
+
+
 # final_report.json tables the article never places: P07's index of every final cell.
 UNPLACED = {"cells"}
 
@@ -280,6 +312,7 @@ def context(facts: Facts) -> dict[str, str]:
         **backtranslation(facts),
         "notebook_runtime": acceptance.runtime_text(facts),
         **sizes,
+        "counts_note": counts_note(facts),
         "rule_overrefusal": facts.config("repairs", "selection.max_overrefusal_increase", "points"),
         "rule_gain": facts.config("repairs", "selection.min_gain_retained", "pct"),
         "rule_belebele": facts.config("repairs", "selection.max_belebele_hi_drop", "points"),
@@ -288,9 +321,9 @@ def context(facts: Facts) -> dict[str, str]:
         "bar_kappa": facts.config("project", "validation.bar.kappa", "f2"),
         "verdicts": verdict_lines(facts),
         "drift": rv("/primary/drift/pooled", "pp_ci", what="the pooled Hindi drift effect"),
-        "drift_p": rv("/primary/drift/pooled/p", "p", what="the drift p-value"),
+        "drift_p": rv("/primary/drift/pooled/p", "p_stmt", what="the drift p-value"),
         "repair": rv("/primary/repair/pooled", "pp_ci", what="the pooled Hindi repair effect"),
-        "repair_p": rv("/primary/repair/pooled/p", "p", what="the repair p-value"),
+        "repair_p": rv("/primary/repair/pooled/p", "p_stmt", what="the repair p-value"),
         "drift_seeds": rv("/primary/drift/pooled/seeds", "list", what="the seeds pooled for drift"),
         "repair_seeds": rv("/primary/repair/pooled/seeds", "list", what="the seeds pooled for repair"),
         "table_per_seed": facts.per_seed_table(PRIMARY_EFFECTS),
