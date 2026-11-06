@@ -74,6 +74,17 @@ def isolated_dirs(tmp_path, monkeypatch):
     return root
 
 
+@pytest.fixture(autouse=True)
+def isolated_recipe(tmp_path, monkeypatch):
+    """configs/frozen_recipe.json (``lift select`` writes it) moved into the tmp tree, so no test writes
+    the repo's own."""
+    from lift import paths
+
+    path = tmp_path / "lift-tree" / "configs" / "frozen_recipe.json"
+    monkeypatch.setattr(paths, "frozen_recipe_path", lambda: path)
+    return path
+
+
 @pytest.fixture
 def fake_prompt_files(monkeypatch):
     """Install an in-memory prompt store behind lift.data.build.load_prompts.
