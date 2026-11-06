@@ -410,7 +410,7 @@ def _prompt_set():
 def test_a_harmful_output_that_repeats_its_prompt_does_not_flag_the_prompt():
     _prompt_set()
     harmful_tree("Sure. " + PROMPT + ": " + HARMFUL + " In English: " + PROMPT_EN.upper())
-    windows, n = preflight.load_windows()
+    windows, n, _gone = preflight.load_windows()
     assert n == 1
     for text in (PROMPT, PROMPT_EN, json.dumps({"text": PROMPT, "text_en": PROMPT_EN})):
         assert preflight.scan_text(text, "harmful/hi.jsonl", "staged", windows) == []
@@ -422,7 +422,7 @@ def test_a_harmful_output_that_repeats_its_prompt_does_not_flag_the_prompt():
 
 def test_without_the_prompt_files_every_window_stays():
     harmful_tree("Sure. " + PROMPT + ": " + HARMFUL)
-    windows, _ = preflight.load_windows()
+    windows, _n, _gone = preflight.load_windows()
     assert kinds(preflight.scan_text(PROMPT, "p.md", "staged", windows)) == [preflight.HARMFUL_TEXT]
 
 

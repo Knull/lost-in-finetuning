@@ -1,8 +1,10 @@
 # Lost in Fine-Tuning: evaluation logs
 
 The public record of the retain / repair / reject test of a Hindi LoRA adapter of Tiny Aya Global
-(Lexsi AI Safety and Alignment Hackathon, Track 2b, statement 6). Every number in the article and
-the model card comes from the aggregate tables here, which `lift report` wrote from these labels.
+(Lexsi AI Safety and Alignment Hackathon, Track 2b, statement 6). The numbers in the article and the
+model card come from the aggregate tables here (`aggregates/`), which `lift report` computed from the
+records below: these labels, the per-item scores, the back-translation verdicts and the run manifests.
+The utility verdicts quote both answers they compare, so they are in the gated raw completions instead.
 
 ## Verdicts
 
@@ -22,6 +24,7 @@ the model card comes from the aggregate tables here, which `lift report` wrote f
 - `aggregates/`: the result tables as CSV and `final_report.json`, plus the repair selection
   (`selection.json`).
 - `auditkit/`: the AuditKIT evaluation records, with every output replaced by its sha256.
+{{ records }}
 
 Variants: {{ variants }}.
 

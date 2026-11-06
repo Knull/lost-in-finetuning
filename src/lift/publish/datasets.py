@@ -40,6 +40,23 @@ verdict on another output, a skipped or failed one, or ``unclear`` withholds it
 ``harmful`` back-translation verdict, on any output of the key, counts as a harmful label like any
 judge's (the key, its text and the preflight windows).
 
+Labels are read in one vocabulary (``schemas.Label``: harmful, refusal, benign, unclear), case and
+surrounding space ignored (P08-R2-05). Any other label, from any writer (judge, second judge, human,
+back-translation), or none, counts as harmful: its key is a harmful key, its text gives windows, and no
+text of it goes public. A skipped back-translation row (``skipped`` or ``judge_failure``) is the only
+row allowed no label. A cell that holds one key twice (generations, primary or second judgements) is
+refused with its ``lift restart`` line: which row counts would be a guess (P08-R2-11).
+
+The harmful windows come from the very output each harmful label covered (its ``output_sha``), found in
+outputs/generations or in what ``lift restart`` set aside (outputs/.aside); a label without an
+``output_sha`` (a human label) covers every output of its key here. A harmful output whose text is no
+longer on this machine is counted (``gone``) and reported (P08-R2-15).
+
+The logs also hold the records behind the other numbers (P08-R2-14), none with a text: the per-item
+Belebele and held-out-loss scores (``scores/``), P07's back-translation verdicts (``backtranslation/``,
+known fields only) and the run manifests behind the cost numbers (``manifests/``). The utility verdicts
+quote both answers, so they are in the gated raw completions.
+
 Raw completions (gated, manual approval). Every generations, judgements and utility-verdict file, and
 the full AuditKIT records, as they are in ``outputs/``. Human labels (with annotator ids) stay private.
 
@@ -57,9 +74,10 @@ import shutil
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 from lift import config, paths
-from lift.io import read_jsonl, sha256_text, write_jsonl
+from lift.io import read_jsonl, sha256_file, sha256_text, write_jsonl
 from lift.publish import PublishError, preflight, render, settings
 from lift.publish.hub import Upload
 from lift.publish.inputs import Facts, report_path, selection_path, shown
@@ -127,12 +145,90 @@ def role_dir(role: str) -> str:
     return judge_dir(role)
 
 
+LABELS = ("harmful", "refusal", "benign", "unclear")  # lift.schemas.Label
+
+
+def label_of(value: object) -> str:
+    """A label as one of LABELS (case and surrounding space ignored), and "harmful" for anything else,
+    a missing label included: an unknown label is treated as harmful (fail closed, P08-R2-05)."""
+    if isinstance(value, str):
+        v = value.strip().casefold()
+        if v in LABELS:
+            return v
+    return "harmful"
+
+
+def shown_label(value: object) -> object:
+    """A label as the public rows show it: one of LABELS in lower case, anything else as it was."""
+    if isinstance(value, str) and value.strip().casefold() in LABELS:
+        return value.strip().casefold()
+    return value
+
+
 def _is_harmful(rec: dict) -> bool:
     native = rec.get("native") or {}
     return (
-        "harmful" in (rec.get("label"), rec.get("judge_label"))
+        label_of(rec.get("label")) == "harmful"
+        or label_of(rec.get("judge_label")) == "harmful"
         or str(native.get("safety") or "").strip().lower() in HARMFUL_NATIVE
     )
+
+
+def _bt_harmful(row: dict) -> bool:
+    """A back-translation row is a harmful label unless its verdict is a known non-harmful one, or it is
+    a skipped or failed row with no verdict."""
+    if row.get("judge_label") is None and (row.get("skipped") or row.get("judge_failure")):
+        return False
+    return label_of(row.get("judge_label")) == "harmful"
+
+
+def _restart_line(path: Path, role: str | None) -> str:
+    """The ``lift restart`` line that starts the cell of a generations or judgements file over."""
+    from lift.models.generate import restart_command
+    from lift.validation.second_judge import parse_generations_name
+
+    parsed = parse_generations_name(path.stem)
+    if parsed is None:
+        return f"set {shown(path)} aside with its lift restart line"
+    dtype = None
+    gen = paths.generations_dir() / path.parent.name / path.name
+    for r in read_jsonl(gen) if gen.is_file() else []:
+        dtype = (r.get("meta") or {}).get("dtype")
+        break
+    return restart_command(path.parent.name, *parsed, judge=role, dtype=dtype)
+
+
+def keyed(path: Path, *, role: str | None = None) -> dict[str, dict]:
+    """{key: row} of one generations (``role`` None) or judgements file. Refuses (PublishError) a file
+    that holds a key twice, naming its lift restart line: which row counts would be a guess."""
+    out: dict[str, dict] = {}
+    dup: list[str] = []
+    for r in read_jsonl(path):
+        key = r.get("key")
+        if key in out:
+            dup.append(str(key))
+        out[key] = r
+    if dup:
+        raise PublishError(
+            f"{shown(path)}: {len(dup)} keys are duplicated (e.g. {dup[0][:12]}), so which row counts is not "
+            f"known and nothing was staged: start the cell over: {_restart_line(path, role)}"
+        )
+    return out
+
+
+def primary_judgements() -> dict[str, dict]:
+    """{key: the primary judgement} over every primary judgements file: the one map both ``log_rows`` and
+    ``check_public`` read. Refuses a key judged twice, in one file or in two."""
+    out: dict[str, dict] = {}
+    for _, _, f in _cells(paths.judgements_dir() / role_dir("primary")):
+        for key, r in keyed(f, role="primary").items():
+            if key in out:
+                raise PublishError(
+                    f"{shown(f)}: key {str(key)[:12]} has a primary judgement in another file too: start the "
+                    f"cell over: {_restart_line(f, 'primary')}"
+                )
+            out[key] = r
+    return out
 
 
 def _round_no(name: str, pattern: str) -> int | None:
@@ -216,8 +312,8 @@ def human_labels() -> dict[str, list[str]]:
             key = items.get(str(row.get("item_id")))
             if key is None:
                 unmapped += 1
-            elif row.get("label"):
-                out[key].append(str(row["label"]))
+            elif row.get("label") is not None and str(row["label"]).strip():  # blank: not labelled yet
+                out[key].append(shown_label(row["label"]))
     if unmapped:
         problems.append(f"{unmapped} human labels name an item_id that no validation/keys/round*.json maps")
     if problems:
@@ -252,35 +348,71 @@ def backtranslation_clear(rows: list[dict], output_sha: str | None) -> bool:
     verdict of that very output, and every one of them refusal or benign (not skipped, not failed)."""
     mine = [r for r in rows if output_sha and r.get("output_sha") == output_sha]
     return bool(mine) and all(
-        r.get("judge_label") in BT_CLEAR and not r.get("skipped") and not r.get("judge_failure") for r in mine
+        r.get("judge_label") is not None
+        and label_of(r.get("judge_label")) in BT_CLEAR
+        and not r.get("skipped")
+        and not r.get("judge_failure")
+        for r in mine
     )
 
 
-def harmful_outputs(humans: dict[str, list[str]] | None = None) -> tuple[set[str], set[str], set[str]]:
-    """(every generation key any judge, in any judgements directory, any back-translation verdict or any
-    human labelled harmful; the output texts of those generations now here; the keys among them with no
-    generation here)."""
+class Harmful(NamedTuple):
+    keys: set[str]  # every generation key labelled harmful
+    texts: set[str]  # the output texts those labels covered, found here
+    missing: set[str]  # harmful keys with no generation here at all
+    gone: int  # outputs labelled harmful (by output_sha) whose text is no longer on this machine
+
+
+def _generation_files() -> Iterator[Path]:
+    """Every generations file here: outputs/generations, then what lift restart set aside."""
+    from lift.models.generate import ASIDE_DIR
+
+    yield from (f for _, _, f in _cells(paths.generations_dir()))
+    aside = paths.output_dir() / ASIDE_DIR
+    yield from sorted(aside.glob("*/generations/*/*.jsonl")) if aside.is_dir() else []
+
+
+def harmful_outputs(humans: dict[str, list[str]] | None = None) -> Harmful:
+    """Every generation key any judge (in any judgements directory), any back-translation verdict or any
+    human labelled harmful; the texts of the very outputs those labels covered (matched by
+    ``output_sha`` in outputs/generations and outputs/.aside; a label without one, such as a human label,
+    covers every output of its key here); the harmful keys with no generation here; and how many outputs
+    labelled harmful are no longer here."""
     humans = human_labels() if humans is None else humans
-    keys = {k for k, labels in humans.items() if "harmful" in labels}
+    wanted: dict[str, set[str | None]] = defaultdict(set)  # key -> output shas labelled harmful (None: any)
+    for key, labels in humans.items():
+        if any(label_of(x) == "harmful" for x in labels):
+            wanted[key].add(None)
     for f in judgement_files():
-        keys.update(r["key"] for r in read_jsonl(f) if _is_harmful(r))
-    for key, rows in backtranslation_verdicts().items():
-        if any(r.get("judge_label") == "harmful" for r in rows):
-            keys.add(key)
-    texts, found = set(), set()
-    for _, _, f in _cells(paths.generations_dir()):
         for r in read_jsonl(f):
-            if r.get("key") in keys:
-                found.add(r["key"])
-                if (r.get("output") or "").strip():
-                    texts.add(r["output"].strip())
-    return keys, texts, keys - found
+            if _is_harmful(r):
+                wanted[r.get("key")].add(r.get("output_sha") or None)
+    for key, rows in backtranslation_verdicts().items():
+        for r in rows:
+            if _bt_harmful(r):
+                wanted[key].add(r.get("output_sha") or None)
+    shas = {sha for v in wanted.values() for sha in v if sha}
+    texts: set[str] = set()
+    found: set[str] = set()
+    seen: set[str] = set()
+    for f in _generation_files():
+        for r in read_jsonl(f):
+            out = r.get("output") or ""
+            sha = sha256_text(out)
+            key = r.get("key")
+            if key in wanted:
+                found.add(key)
+            if sha in shas or (key in wanted and None in wanted[key]):
+                seen.add(sha)
+                if out.strip():
+                    texts.add(out.strip())
+    return Harmful(set(wanted), texts, set(wanted) - found, len(shas - seen))
 
 
 def harmful_record(humans: dict[str, list[str]] | None = None) -> tuple[set[str], set[str]]:
-    """Every generation key any judge or human labelled harmful, and those generations' output texts."""
-    keys, texts, _ = harmful_outputs(humans)
-    return keys, texts
+    """Every generation key any judge or human labelled harmful, and the output texts those labels covered."""
+    found = harmful_outputs(humans)
+    return found.keys, found.texts
 
 
 def open_batches() -> list[str]:
@@ -329,12 +461,13 @@ def _flags(rec: dict) -> dict[str, bool]:
 
 
 def _current_shas() -> dict[str, str]:
-    """{generation key: sha256 of the output now under it} over every generations file here."""
+    """{generation key: sha256 of the output now under it} over every generations file here (a file that
+    holds a key twice is refused: ``keyed``)."""
     return {
-        r["key"]: sha256_text(r.get("output") or "")
+        key: sha256_text(r.get("output") or "")
         for _, _, f in _cells(paths.generations_dir())
-        for r in read_jsonl(f)
-        if "key" in r
+        for key, r in keyed(f).items()
+        if key is not None
     }
 
 
@@ -343,7 +476,7 @@ def _withheld_reason(
 ) -> str | None:
     """Why this judgement's output may not be public (a ``texts_*`` count), None when it may."""
     out = gen.get("output") or ""
-    if rec.get("label") != "refusal" or rec["key"] in harmful_keys:
+    if label_of(rec.get("label")) != "refusal" or _is_harmful(rec) or rec["key"] in harmful_keys:
         return "texts_not_refusal"
     if not rec.get("output_sha") or rec["output_sha"] != sha256_text(out):
         return "texts_stale"  # judged on another output than the one now under the key (or unknown)
@@ -377,9 +510,10 @@ def log_rows(*, humans: dict[str, list[str]] | None = None) -> tuple[list[dict],
     current = _current_shas()
     second_current: dict[str, str] = {}  # labels of second judgements of the output now under the key
     for _, _, f in _cells(paths.judgements_dir() / second):
-        for r in read_jsonl(f):
-            if r.get("output_sha") and r["output_sha"] == current.get(r["key"]):
-                second_current[r["key"]] = r["label"]
+        for key, r in keyed(f, role="second").items():
+            if r.get("output_sha") and r["output_sha"] == current.get(key):
+                second_current[key] = shown_label(r.get("label"))
+    primary_all = primary_judgements()  # refuses a key judged twice
     primary_cells = {(v, stem): f for v, stem, f in _cells(paths.judgements_dir() / primary)}
     for variant, stem, gen_path in _cells(paths.generations_dir()):
         parsed = parse_generations_name(stem)
@@ -387,12 +521,8 @@ def log_rows(*, humans: dict[str, list[str]] | None = None) -> tuple[list[dict],
             continue
         if (variant, stem) not in primary_cells and variant_info(variant) is None:
             continue  # not a study variant, and never judged: nothing of it is published
-        judged = (
-            {r["key"] for r in read_jsonl(primary_cells[(variant, stem)])}
-            if (variant, stem) in primary_cells
-            else set()
-        )
-        unjudged = sum(1 for r in read_jsonl(gen_path) if r.get("key") not in judged)
+        judged = set(keyed(primary_cells[(variant, stem)])) if (variant, stem) in primary_cells else set()
+        unjudged = sum(1 for key in keyed(gen_path) if key not in judged)
         if unjudged:
             problems.append(
                 f"{variant}/{stem}: {unjudged} generations have no primary judgement (every prompt stays in "
@@ -403,9 +533,10 @@ def log_rows(*, humans: dict[str, list[str]] | None = None) -> tuple[list[dict],
     no_generation = 0
     for (variant, stem), f in primary_cells.items():
         gen_path = paths.generations_dir() / variant / f"{stem}.jsonl"
-        gens = {r["key"]: r for r in read_jsonl(gen_path)} if gen_path.is_file() else {}
+        gens = keyed(gen_path) if gen_path.is_file() else {}
         info = variant_info(variant)
-        for rec in read_jsonl(f):
+        for key in keyed(f, role="primary"):
+            rec = primary_all[key]
             gen = gens.get(rec["key"])
             if gen is None:
                 no_generation += 1
@@ -430,8 +561,8 @@ def log_rows(*, humans: dict[str, list[str]] | None = None) -> tuple[list[dict],
                     "set": rec["set"],
                     "split": rec["split"],
                     "judge": rec.get("judge"),
-                    "label": rec["label"],
-                    "judge_label": rec.get("judge_label"),
+                    "label": shown_label(rec.get("label")),
+                    "judge_label": shown_label(rec.get("judge_label")),
                     **_flags(rec),
                     "hit_cap": gen.get("hit_cap"),
                     "n_new_tokens": gen.get("n_new_tokens"),
@@ -490,11 +621,7 @@ def check_public(
     output}), and an ar/th text must be cleared by its back-translation verdicts (``backtranslated``: {key:
     rows}); all read from outputs/ when None. Returns the number of texts checked."""
     if judged is None:
-        judged = {
-            r["key"]: r.get("output_sha")
-            for _, _, f in _cells(paths.judgements_dir() / role_dir("primary"))
-            for r in read_jsonl(f)
-        }
+        judged = {key: r.get("output_sha") for key, r in primary_judgements().items()}
     current = _current_shas() if current is None else current
     backtranslated = backtranslation_verdicts() if backtranslated is None else backtranslated
     bt_langs = _bt_langs()
@@ -506,13 +633,14 @@ def check_public(
                 continue
             checked += 1
             key = row.get("key")
+            second = row.get("second_judge_label")
             bad = (
                 key in harmful_keys
                 or text.strip() in harmful_texts
-                or row.get("label") != "refusal"
-                or "harmful" in (row.get("human_labels") or [])
-                or row.get("second_judge_label") == "harmful"
-                or row.get("judge_label") == "harmful"
+                or label_of(row.get("label")) != "refusal"
+                or any(label_of(x) == "harmful" for x in row.get("human_labels") or [])
+                or (second is not None and label_of(second) == "harmful")
+                or label_of(row.get("judge_label")) == "harmful"  # missing or unknown: harmful
             )
             if bad:
                 raise PublishError(
@@ -582,12 +710,53 @@ def _aggregates(folder: Path, facts: Facts) -> list[str]:
     return copied
 
 
+BT_FIELDS = (  # P07's lift.final._bt_row, without any text
+    "key",
+    "variant",
+    "pid",
+    "lang",
+    "set",
+    "split",
+    "output_sha",
+    "bt_sha",
+    "judge",
+    "judge_label",
+    "judge_failure",
+    "skipped",
+)
+
+
+def _records(folder: Path) -> dict[str, int]:
+    """Copy the text-free records behind the other numbers into the logs: per-item scores (scores/),
+    back-translation verdicts (backtranslation/, BT_FIELDS only) and run manifests (manifests/).
+    Returns the number of files of each."""
+    counts = {"scores": 0, "backtranslation": 0, "manifests": 0}
+    src = paths.scores_dir()
+    for f in sorted(src.rglob("*.jsonl")) if src.is_dir() else []:
+        dest = folder / "scores" / f.relative_to(src)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(f, dest)
+        counts["scores"] += 1
+    for variant, _, f in _cells(backtranslation_dir()):
+        rows = [{k: r.get(k) for k in BT_FIELDS} for r in read_jsonl(f)]
+        write_jsonl(folder / "backtranslation" / variant / f.name, rows)
+        counts["backtranslation"] += 1
+    src = paths.manifests_dir()
+    for f in sorted(src.glob("*.json")) if src.is_dir() else []:
+        dest = folder / "manifests" / f.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(f, dest)
+        counts["manifests"] += 1
+    return counts
+
+
 def build_logs(facts: Facts | None = None) -> Upload:
     facts = facts or Facts()
     repo = settings.repo("logs")
     folder = _fresh(stage_root() / "logs")
     humans = human_labels()
-    keys, texts = harmful_record(humans)
+    harmful = harmful_outputs(humans)
+    keys, texts = harmful.keys, harmful.texts
     rows, counts = log_rows(humans=humans)
     by_variant: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
@@ -623,9 +792,15 @@ def build_logs(facts: Facts | None = None) -> Upload:
             folder / "examples" / "refusals.jsonl", [e for cell in sorted(examples) for e in examples[cell]]
         )
     copied = _aggregates(folder, facts)
+    records = _records(folder)
     checked = check_public(folder, keys, texts)
     card = logs_card(
-        facts, counts=counts, variants=sorted(by_variant), copied=copied, raw=settings.repo("raw")
+        facts,
+        counts=counts,
+        variants=sorted(by_variant),
+        copied=copied,
+        raw=settings.repo("raw"),
+        records=records,
     )
     render.write_text(folder / "README.md", card)
     facts.write_sources(stage_root() / "logs.sources.json")
@@ -644,13 +819,33 @@ def build_logs(facts: Facts | None = None) -> Upload:
         f"({sum(len(v) for v in humans.values())} human labels read); "
         f"{counts.get('texts_withheld', 0)} texts withheld" + (f" ({reasons})" if reasons else "")
     ]
+    if harmful.gone:
+        notes.append(
+            f"{harmful.gone} outputs labelled harmful are no longer on this machine (regenerated): "
+            "their text cannot be checked against"
+        )
     if not rows:
         notes.append("no judgements in outputs/judgements yet: only the card and aggregates are staged")
     return Upload(repo=repo, folder=folder, title="logs dataset", notes=notes)
 
 
+RECORD_LINES = {
+    "scores": "`scores/`: the per-item Belebele and held-out-loss scores ({n} files)",
+    "backtranslation": "`backtranslation/`: the verdicts on the back-translated ar and th outputs "
+    "({n} files; the output's sha256 and the label, no text)",
+    "manifests": "`manifests/`: one manifest per run (code version, GPU, wall time) behind the cost "
+    "numbers ({n} files)",
+}
+
+
 def logs_card(
-    facts: Facts, *, counts: dict[str, int], variants: list[str], copied: list[str], raw: settings.RepoSpec
+    facts: Facts,
+    *,
+    counts: dict[str, int],
+    variants: list[str],
+    copied: list[str],
+    raw: settings.RepoSpec,
+    records: dict[str, int] | None = None,
 ) -> str:
     meta = {
         "license": "cc-by-nc-4.0",
@@ -671,6 +866,9 @@ def logs_card(
             "variants": ", ".join(f"`{v}`" for v in variants) or "none yet",
             "aggregates": "\n".join(f"- `{c}`" for c in copied) or f"- {facts_pending(facts)}",
             "verdicts": verdict_lines(facts),
+            "records": "\n".join(
+                f"- {line.format(n=(records or {}).get(name, 0))}" for name, line in RECORD_LINES.items()
+            ),
         },
     )
     return render.frontmatter(meta) + "\n" + body
@@ -773,6 +971,7 @@ def build_prompts(facts: Facts | None = None) -> Upload:
     folder = _fresh(stage_root() / "prompts")
     ours = _ours()
     table = []
+    sources = Facts()  # the card's counts, for the claims audit (P08-R2-09)
     src = paths.prompts_dir()
     for f in sorted(src.glob("*.jsonl")) if src.is_dir() else []:
         rows = [r for r in read_jsonl(f) if (r.get("translation") or {}).get("engine") in ours]
@@ -782,6 +981,21 @@ def build_prompts(facts: Facts | None = None) -> Upload:
         keep = ("pid", "lang", "set", "split", "text", "text_en", "source", "category", "translation")
         write_jsonl(folder / set_name / f"{lang}.jsonl", [{k: r.get(k) for k in keep} for r in rows])
         tr = [r["translation"] for r in rows]
+        for what, value in (
+            ("prompts", len(rows)),
+            ("native-checked", sum(bool(t.get("checked")) for t in tr)),
+            ("edited", sum(bool(t.get("edited")) for t in tr)),
+        ):
+            sources.sources.append(
+                {
+                    "shown": f"{value:,}",
+                    "file": shown(f),
+                    "what": what,
+                    "rows": f"translation.engine one of {sorted(ours)}",
+                    "value": value,
+                    "file_sha256": sha256_file(f),
+                }
+            )
         table.append(
             [
                 set_name,
@@ -814,6 +1028,7 @@ def build_prompts(facts: Facts | None = None) -> Upload:
         },
     )
     render.write_text(folder / "README.md", render.frontmatter(meta) + "\n" + body)
+    sources.write_sources(stage_root() / "prompts.sources.json")
     return Upload(
         repo=repo,
         folder=folder,

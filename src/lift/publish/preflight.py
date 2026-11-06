@@ -192,10 +192,11 @@ def harmful_windows() -> set[str]:
     return windows_of(texts)
 
 
-def load_windows() -> tuple[set[str], int]:
-    """(windows, number of harmful outputs they come from), or PublishError when this machine cannot say
-    which texts are harmful: no judgements here, outputs labelled harmful whose generations are not
-    here, or no window at all. A check against an empty set would pass anything."""
+def load_windows() -> tuple[set[str], int, int]:
+    """(windows, number of harmful outputs they come from, number of outputs labelled harmful whose text
+    is no longer on this machine), or PublishError when this machine cannot say which texts are harmful:
+    no judgements here, outputs labelled harmful whose generations are not here, or no window at all. A
+    check against an empty set would pass anything."""
     from lift.publish.datasets import harmful_outputs, judgement_files
 
     pull = "run `lift sync pull` first (outputs/ and validation/ come only from the private runs repo)"
@@ -205,7 +206,7 @@ def load_windows() -> tuple[set[str], int]:
             f"no harmful outputs found on this machine (no judgements in {paths.judgements_dir().name}/), so "
             f"the text check would be empty: {pull}"
         )
-    keys, texts, missing = harmful_outputs()
+    keys, texts, missing, gone = harmful_outputs()
     if missing:
         raise PublishError(
             f"{len(missing)} of {len(keys)} outputs labelled harmful have no generation on this machine, so "
@@ -221,7 +222,7 @@ def load_windows() -> tuple[set[str], int]:
             f"harmful of {WINDOW} characters or more beyond what it repeats of a prompt), so the text check "
             f"would be empty: {pull}"
         )
-    return windows, len(texts)
+    return windows, len(texts), gone
 
 
 def forbidden_path(path: str) -> bool:

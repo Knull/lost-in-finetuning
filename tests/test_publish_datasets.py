@@ -414,6 +414,7 @@ def test_check_public_requires_the_backtranslation_verdict(tmp_path, outputs):
     row = {
         "key": K("th1"),
         "label": "refusal",
+        "judge_label": "refusal",
         "lang": "th",
         "set": "easy_benign",
         "output_sha": sha256_text(out),
@@ -480,3 +481,195 @@ def test_prompts_keep_only_our_translations():
 def test_build_refuses_unknown_names():
     with pytest.raises(PublishError):
         datasets.build(["everything"])
+
+
+# ------------------------------------------------------- P08-R2-05 labels outside the vocabulary
+
+
+def _add(name, output, label, *, safety="Safe", judge_label=None, cell=CELL):
+    """One more generation and its primary judgement in ``cell``."""
+    gens = list(read_jsonl(_gen_path(cell))) if _gen_path(cell).is_file() else []
+    write_jsonl(_gen_path(cell), [*gens, _generation(name, output)])
+    judged = list(read_jsonl(_primary_path(cell))) if _primary_path(cell).is_file() else []
+    rec = _judgement(name, label, safety, "q", output=output)
+    rec["judge_label"] = label if judge_label is None else judge_label
+    write_jsonl(_primary_path(cell), [*judged, rec])
+
+
+ODD_TEXT = "ODD-LABEL-TEXT " + FILLER
+
+
+@pytest.mark.parametrize("label", ["Harmful", "HARMFUL", " harmful ", "unsafe", "", None, 1])
+def test_a_label_outside_the_vocabulary_counts_as_harmful(outputs, label):
+    """A judgement labelled "Harmful" (or anything unknown) is harmful: its text gives windows, so a refusal
+    quoting it is withheld, and the key is a harmful key."""
+    _add("odd", ODD_TEXT, label)
+    _add("quoting", "I refuse. " + ODD_TEXT, "refusal")
+    rows, counts = datasets.log_rows()
+    texts = {r["key"]: r["refusal_text"] for r in rows}
+    assert texts[K("quoting")] is None and counts["texts_overlap"] == 1
+    keys, harmful_texts = datasets.harmful_record()
+    assert K("odd") in keys and ODD_TEXT.strip() in harmful_texts
+
+
+@pytest.mark.parametrize("field", ["judge_label", "second", "human"])
+def test_an_odd_label_anywhere_counts_as_harmful(outputs, field):
+    _add("odd", ODD_TEXT, "refusal", judge_label="Harmful" if field == "judge_label" else None)
+    if field == "second":
+        rec = _judgement("odd", "Harmful", "", "f@x", output=ODD_TEXT)
+        write_jsonl(_second_path(), [*read_jsonl(_second_path()), rec])
+    if field == "human":
+        keys = paths.validation_dir() / "keys" / "round1.json"
+        doc = json.loads(keys.read_text())
+        doc["r1hi-odd"] = {"key": K("odd"), "variant": VARIANT, "sheet": "round1_hi", "lang": "hi"}
+        keys.write_text(json.dumps(doc))
+        labels = paths.validation_dir() / "labels" / "round1_hi.jsonl"
+        write_jsonl(
+            labels, [*read_jsonl(labels), {"item_id": "r1hi-odd", "annotator": "r", "label": "HARMFUL"}]
+        )
+        rec = _judgement(
+            "odd", "refusal", "", "f@x", output=ODD_TEXT
+        )  # a validated key: second judge covers it
+        write_jsonl(_second_path(), [*read_jsonl(_second_path()), rec])
+    rows, _ = datasets.log_rows()
+    assert {r["key"]: r["refusal_text"] for r in rows}[K("odd")] is None
+    assert K("odd") in datasets.harmful_record()[0]
+
+
+def test_label_case_is_normalised(outputs):
+    """ "Refusal" is a refusal (its clean text may be public), written as "refusal"."""
+    _add("cased", "I will not help with this request, sorry.", "Refusal")
+    rows, _ = datasets.log_rows()
+    row = {r["key"]: r for r in rows}[K("cased")]
+    assert row["label"] == "refusal" and row["refusal_text"] == "I will not help with this request, sorry."
+
+
+@pytest.mark.parametrize("bt", [("Harmful", None), (None, None), ("dangerous", None)])
+def test_an_odd_backtranslation_verdict_counts_as_harmful(outputs, bt):
+    label, skipped = bt
+    out = "I am not able to help with that request."
+    write_jsonl(_bt_path("easy_benign", "th"), [_bt_row("odd-bt", out, label, skipped=skipped)])
+    assert K("odd-bt") in datasets.harmful_record()[0]
+
+
+def test_a_skipped_backtranslation_is_not_a_harmful_label(outputs):
+    out = "I am not able to help with that request."
+    write_jsonl(_bt_path("easy_benign", "th"), [_bt_row("bt-skip", out, None, skipped="blank output")])
+    assert K("bt-skip") not in datasets.harmful_record()[0]
+
+
+@pytest.mark.parametrize("field", ["judge_label", "second_judge_label", "human_labels", "label"])
+def test_check_public_reads_labels_in_any_case(tmp_path, outputs, field):
+    out = "I cannot help with that request."
+    row = {
+        "key": K("k1"),
+        "label": "refusal",
+        "lang": "hi",
+        "output_sha": sha256_text(out),
+        "refusal_text": out,
+        field: ["Harmful"] if field == "human_labels" else ("Unknown" if field == "label" else "HARMFUL"),
+    }
+    write_jsonl(tmp_path / "labels" / "x.jsonl", [row])
+    judged = current = {K("k1"): sha256_text(out)}
+    with pytest.raises(PublishError, match="labelled harmful"):
+        datasets.check_public(tmp_path, set(), set(), judged=judged, current=current, backtranslated={})
+
+
+# --------------------------------------------------------------------- P08-R2-11 duplicated keys
+
+
+@pytest.mark.parametrize("where", ["primary", "second", "generations"])
+def test_a_duplicated_key_in_a_cell_is_refused(outputs, where):
+    path = {"primary": _primary_path(), "second": _second_path(), "generations": _gen_path()}[where]
+    rows = list(read_jsonl(path))
+    write_jsonl(path, [*rows, {**rows[0]}])
+    with pytest.raises(
+        PublishError, match=r"harmful_hi_dev.jsonl: 1 keys are duplicated.*lift restart --variant"
+    ):
+        datasets.build_logs()
+
+
+def test_check_public_refuses_duplicated_judgements(outputs):
+    up = datasets.build_logs()
+    rows = list(read_jsonl(_primary_path()))
+    write_jsonl(_primary_path(), [*rows, {**rows[0]}])
+    keys, texts = datasets.harmful_record()
+    with pytest.raises(PublishError, match="duplicated"):
+        datasets.check_public(up.folder, keys, texts)
+
+
+# ------------------------------------------------------------- P08-R2-15 harmful windows by output_sha
+
+
+def test_the_harmful_windows_come_from_the_output_judged_harmful(outputs):
+    """A harmful verdict on an older output: the text judged harmful (set aside by lift restart) gives the
+    windows, not the output regenerated under the key, and one no longer here is counted."""
+    judged = "OLD-HARMFUL-OUTPUT " + FILLER
+    regenerated = "A NEW OUTPUT never judged harmful, " + FILLER.replace("harmful", "other")
+    aside = (
+        paths.output_dir() / ".aside" / "20261105T000000Z" / "generations" / VARIANT / "redteam_hi_dev.jsonl"
+    )
+    write_jsonl(aside, [_generation("re", judged)])
+    _add("re", regenerated, "refusal", cell="redteam_hi_dev")
+    second = paths.judgements_dir() / datasets.role_dir("second") / VARIANT / "redteam_hi_dev.jsonl"
+    write_jsonl(second, [_judgement("re", "harmful", "", "f@x", output=judged)])
+    gone = _judgement("gone", "harmful", "", "f@x", output="a harmful output deleted long ago " + FILLER)
+    write_jsonl(second, [*read_jsonl(second), {**gone, "key": K("re")}])
+    found = datasets.harmful_outputs()
+    assert K("re") in found.keys
+    assert judged.strip() in found.texts and regenerated.strip() not in found.texts
+    assert found.gone == 1 and not found.missing
+
+
+def test_the_preflight_summary_counts_outputs_no_longer_here(outputs, capsys):
+    from lift import cli
+
+    second = paths.judgements_dir() / datasets.role_dir("second") / VARIANT / "redteam_hi_dev.jsonl"
+    write_jsonl(second, [{**_judgement("k2", "harmful", "", "f@x", output="an older output " + FILLER)}])
+    cli.main(["publish", "preflight", "--no-history"])
+    assert "1 outputs labelled harmful are no longer on this machine" in capsys.readouterr().out
+
+
+# ------------------------------------------- P08-R2-14 scores, back-translation verdicts and manifests
+
+
+def test_scores_backtranslation_and_manifests_are_in_the_logs(outputs):
+    score = {"key": "s1", "variant": VARIANT, "pid": "b-1", "lang": "hi", "task": "belebele", "correct": True}
+    write_jsonl(paths.output_dir() / "scores" / "belebele" / VARIANT / "belebele_hi_dev.jsonl", [score])
+    bt = {**_bt_row("bt-ok", "I am not able to help.", "refusal"), "back_translation": "SECRET-BT-TEXT"}
+    write_jsonl(_bt_path("easy_benign", "th"), [bt])
+    write_json(
+        paths.output_dir() / "manifests" / "generate-1.json", {"run_id": "generate-1", "wall_seconds": 3}
+    )
+    up = datasets.build_logs()
+    assert list(read_jsonl(up.folder / "scores" / "belebele" / VARIANT / "belebele_hi_dev.jsonl")) == [score]
+    [row] = read_jsonl(up.folder / "backtranslation" / VARIANT / "easy_benign_th_final.jsonl")
+    assert row["judge_label"] == "refusal" and "back_translation" not in row  # known fields only
+    assert "SECRET-BT-TEXT" not in _texts(up.folder)
+    assert (up.folder / "manifests" / "generate-1.json").is_file()
+    card = (up.folder / "README.md").read_text()
+    assert "which `lift report` wrote from these labels" not in card
+    assert "scores/" in card and "backtranslation/" in card and "manifests/" in card
+
+
+# ----------------------------------------------------------------- P08-R2-09 prompt-set counts sourced
+
+
+def test_prompt_set_counts_are_recorded_in_the_sources():
+    row = {
+        "pid": "prh-test-0001",
+        "lang": "hi",
+        "set": "harmful",
+        "split": "dev",
+        "text": "t",
+        "text_en": "e",
+        "source": "polyrefuse",
+        "translation": {"engine": "google-cloud-v2", "checked": True, "edited": False},
+    }
+    write_jsonl(paths.prompts_dir() / "harmful_hi.jsonl", [row, {**row, "pid": "prh-test-0002"}])
+    datasets.build_prompts()
+    doc = json.loads((datasets.stage_root() / "prompts.sources.json").read_text())
+    values = {(v["file"], v["what"]): v["value"] for v in doc["values"]}
+    assert values[("data/prompts/harmful_hi.jsonl", "prompts")] == 2
+    assert values[("data/prompts/harmful_hi.jsonl", "native-checked")] == 2
+    assert values[("data/prompts/harmful_hi.jsonl", "edited")] == 0

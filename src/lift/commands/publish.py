@@ -104,9 +104,14 @@ def _preflight(args: argparse.Namespace) -> int:
     try:
         if not args.no_history and not args.no_fetch:
             fetched = preflight.fetch_public_refs()
-        windows, n_harmful = preflight.load_windows()
+        windows, n_harmful, n_gone = preflight.load_windows()
     except PublishError as exc:
         return _fail(exc)
+    if n_gone:
+        print(
+            f"note: {n_gone} outputs labelled harmful are no longer on this machine (regenerated): "
+            "their text cannot be looked for"
+        )
     findings = preflight.run(history=not args.no_history, windows=windows)
     if findings:
         print(f"preflight FAILED: {len(findings)} finding(s) (matched text is never shown):")
