@@ -9,7 +9,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from publish_fakes import FakeApi, write_inputs
+from publish_fakes import FakeApi, no_committed_recipe, write_inputs  # noqa: F401
 
 from lift import cli, paths
 from lift.io import sha256_text, write_jsonl

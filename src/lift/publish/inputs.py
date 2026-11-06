@@ -28,6 +28,8 @@ checked against their writers on origin/p05-repairs and origin/p07-final-report 
 ``final_report.json`` (P07, ``lift stats`` / ``lift report``: ``lift.report.tables.build``), version 1:
 
     {"version": 1, "dtype": "bf16", "primary_judge": "<judge id of the final judgements>" | null,
+     "selection": {"winner": "<overall winner>", "frozen": {family: setting},
+                   "sha256": "<sha256 of the selection.json bytes the report was built from>", ...},
      "verdicts": [{"adapter": "<seed-1 adapter>", "recipe": "standard" | "stress",
                    "verdict": "retain" | "repair" | "reject" | null, "reason": "<one sentence>"}],
      "primary": {"drift": <Effect>, "repair": <Effect>,
@@ -55,6 +57,14 @@ checked against their writers on origin/p05-repairs and origin/p07-final-report 
     string, an Interval (formats ending in ``_ci``) or null ("not run"). Every rendered value, text cells
     and table notes included, is recorded in the sources.
 
+The report is bound to the selection (review XB-04): every read of final_report.json first checks that
+its ``selection`` block names the winner and frozen map of the selection.json on this machine and the
+sha256 of its bytes, and, when P05's committed ``configs/frozen_recipe.json`` exists (``{"version": 1,
+"adapter", "selection_sha256", "overall_winner", "frozen"}``), that both agree with it; selection.json
+is checked against that recipe too, report or not. Any disagreement (a ``lift select`` after ``lift
+stats``, a stale pull, a report made before the block existed) refuses everything that reads them
+(``PublishError``): the numbers would be another winner's.
+
 Formats: pct (0.123 -> 12.3%), pp (signed points), points (0.05 -> 5 points), pct_ci, pp_ci, p, int,
 f2, f3, hours, ms, text, list ([1, 2] -> "1, 2"). A null anywhere on a value's path (``pooled`` of an arm
 not run) renders as "not run"; only a missing key renders as pending.
@@ -62,6 +72,7 @@ not run) renders as "not run"; only a missing key renders as pending.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -104,6 +115,19 @@ def selection_path() -> Path:
 
 def report_path() -> Path:
     return paths.metrics_dir() / "final_report.json"
+
+
+def frozen_recipe_path() -> Path:
+    """P05's committed record of the frozen recipe (review XB-02), once ``lift select`` froze it."""
+    return paths.CONFIG_DIR / "frozen_recipe.json"
+
+
+RECIPE_VERSION = 1
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+RESTATS = (
+    "re-run lift stats and lift report (P07) on the current selection, or restore the selection.json "
+    "they were built from (lift sync pull)"
+)
 
 
 def shown(path: Path) -> str:
@@ -208,6 +232,8 @@ class Facts:
     _docs: dict[Path, Any] = field(default_factory=dict)
 
     def doc(self, path: Path) -> Any | None:
+        """A JSON input (None when absent or empty). final_report.json is checked (its version, and that
+        it is bound to this selection: ``check_report``) before any value of it is used."""
         path = Path(path)
         if path not in self._docs:
             if not path.is_file() or path.stat().st_size == 0:
@@ -219,16 +245,16 @@ class Facts:
                     raise PublishError(
                         f"{shown(path)} is not valid JSON ({exc.msg}, line {exc.lineno})"
                     ) from exc
+                if path == report_path():
+                    try:
+                        check_report(self, self._docs[path])
+                    except PublishError:
+                        del self._docs[path]  # refused every time it is asked for, never half-read
+                        raise
         return self._docs[path]
 
     def report(self) -> dict | None:
-        doc = self.doc(report_path())
-        if doc is not None and doc.get("version") != REPORT_VERSION:
-            raise PublishError(
-                f"{shown(report_path())} has version {doc.get('version')!r}; P08 reads version "
-                f"{REPORT_VERSION} (lift.publish.inputs)"
-            )
-        return doc
+        return self.doc(report_path())
 
     def selection(self) -> dict | None:
         return self.doc(selection_path())
@@ -396,6 +422,109 @@ def seed_variant(name: str, seed: int) -> str:
     return f"{m.group('tag')}-{m.group('stem')}{seed}"
 
 
+def _selection_sha() -> str | None:
+    path = selection_path()
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def _recipe(facts: Facts) -> dict | None:
+    """configs/frozen_recipe.json checked to be in P05's shape, or None while there is none."""
+    path = frozen_recipe_path()
+    if not path.is_file():
+        return None
+    doc = facts.doc(path)
+    where = f"{shown(path)} (the committed frozen recipe)"
+    if not isinstance(doc, Mapping) or doc.get("version") != RECIPE_VERSION:
+        raise PublishError(f"{where} is not version {RECIPE_VERSION} of P05's recipe record")
+    problems = [k for k in ("adapter", "overall_winner") if not isinstance(doc.get(k), str) or not doc[k]]
+    if not isinstance(doc.get("selection_sha256"), str) or not _SHA256.match(doc["selection_sha256"]):
+        problems.append("selection_sha256")
+    if not isinstance(doc.get("frozen"), Mapping) or not doc["frozen"]:
+        problems.append("frozen")
+    if problems:
+        raise PublishError(f"{where} lacks or garbles {', '.join(problems)}")
+    return dict(doc)
+
+
+def _recipe_check(
+    facts: Facts, *, sha: str | None, winner: Any, frozen: Any, adapter: Any, what: str
+) -> None:
+    """Refuse when ``what`` (selection.json or the report's selection block) disagrees with the
+    committed frozen recipe, if there is one."""
+    recipe = _recipe(facts)
+    if recipe is None:
+        return
+    diffs = []
+    if sha != recipe["selection_sha256"]:
+        diffs.append(f"selection sha256 {str(sha)[:12]} vs {recipe['selection_sha256'][:12]}")
+    if winner != recipe["overall_winner"]:
+        diffs.append(f"winner {winner} vs {recipe['overall_winner']}")
+    if not isinstance(frozen, Mapping) or dict(frozen) != dict(recipe["frozen"]):
+        diffs.append("the frozen map")
+    if adapter is not None and adapter != recipe["adapter"]:
+        diffs.append(f"adapter {adapter} vs {recipe['adapter']}")
+    if diffs:
+        raise PublishError(
+            f"{what} disagrees with {shown(frozen_recipe_path())}, the committed frozen recipe "
+            f"({'; '.join(diffs)}): publish only the recipe that was frozen and evaluated. Restore that "
+            f"selection.json (lift sync pull), or {RESTATS}"
+        )
+
+
+def check_report(facts: Facts, report: Any) -> None:
+    """final_report.json must be P08's version and bound to the selection.json here (and to the frozen
+    recipe, when committed): its ``selection`` block's winner, frozen map and sha256 of the selection.json
+    bytes. PublishError otherwise; nothing that reads the report may render from another selection."""
+    where = shown(report_path())
+    if not isinstance(report, Mapping) or report.get("version") != REPORT_VERSION:
+        version = report.get("version") if isinstance(report, Mapping) else None
+        raise PublishError(
+            f"{where} has version {version!r}; P08 reads version {REPORT_VERSION} (lift.publish.inputs)"
+        )
+    block = report.get("selection")
+    winner = block.get("winner") if isinstance(block, Mapping) else None
+    frozen = block.get("frozen") if isinstance(block, Mapping) else None
+    sha = block.get("sha256") if isinstance(block, Mapping) else None
+    if (
+        not isinstance(winner, str)
+        or not winner
+        or not isinstance(frozen, Mapping)
+        or not frozen
+        or not isinstance(sha, str)
+        or not _SHA256.match(sha)
+    ):
+        raise PublishError(
+            f"{where} does not name the selection it was built from (selection.winner, selection.frozen and "
+            f"selection.sha256): it predates that record or is garbled; {RESTATS}"
+        )
+    found = _selection_sha()
+    if found is None:
+        raise PublishError(
+            f"{where} was built from a selection.json with sha256 {sha[:12]} (winner {winner}), but "
+            f"{shown(selection_path())} is not here: lift sync pull"
+        )
+    sel = facts.selection()
+    overall = sel.get("overall") if isinstance(sel, Mapping) else None
+    now_winner = overall.get("winner") if isinstance(overall, Mapping) else None
+    now_frozen = sel.get("frozen") if isinstance(sel, Mapping) else None
+    status = sel.get("status") if isinstance(sel, Mapping) else None
+    if found != sha or status != "decided" or now_winner != winner or now_frozen != dict(frozen):
+        raise PublishError(
+            f"{where} is not this selection's: it was built from selection.json sha256 {sha[:12]} (winner "
+            f"{winner}), and {shown(selection_path())} now has sha256 {found[:12]} (status {status}, "
+            f"winner {now_winner}{'' if now_frozen == dict(frozen) else ', another frozen map'}). Its "
+            f"numbers would be published under another winner; {RESTATS}"
+        )
+    _recipe_check(
+        facts,
+        sha=sha,
+        winner=winner,
+        frozen=frozen,
+        adapter=sel.get("adapter") if isinstance(sel, Mapping) else None,
+        what=f"{where}'s selection",
+    )
+
+
 def selection_problem(facts: Facts) -> str | None:
     """Why selection.json freezes nothing yet (missing, or not decided), or None when it is decided."""
     sel = facts.selection()
@@ -422,6 +551,14 @@ def _decided(facts: Facts) -> dict | None:
         raise PublishError(
             f"{shown(selection_path())} is decided but frozen is not P05's {{family: seed-1 setting}} mapping"
         )
+    _recipe_check(
+        facts,
+        sha=_selection_sha(),
+        winner=overall.get("winner"),
+        frozen=frozen,
+        adapter=sel.get("adapter"),
+        what=shown(selection_path()),
+    )
     return sel
 
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from publish_fakes import report, write_inputs, write_json
+from publish_fakes import no_committed_recipe, report, write_inputs, write_json, write_report  # noqa: F401
 
 from lift import paths
 from lift.io import read_jsonl, sha256_text, write_jsonl
@@ -299,7 +299,7 @@ def test_a_public_auditkit_record_must_be_redacted(outputs, problem):
 def test_the_aggregates_are_scanned_for_harmful_text(outputs):
     doc = report()
     doc["tables"]["per_language"]["note"] = "Example: " + CASES["k3"][0]  # a quoted completion in a note
-    write_json(paths.metrics_dir() / "final_report.json", doc)
+    write_report(doc)
     with pytest.raises(PublishError, match="text of an output labelled harmful"):
         datasets.build_logs()
 

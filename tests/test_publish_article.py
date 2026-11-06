@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 
 import pytest
-from publish_fakes import write_inputs, write_json
+from publish_fakes import no_committed_recipe, write_inputs, write_json, write_report  # noqa: F401
 
 from lift.publish import article, settings
 from lift.publish.collect import links_path
-from lift.publish.inputs import PENDING, report_path
+from lift.publish.inputs import PENDING
 
 
 @pytest.fixture
@@ -101,11 +101,9 @@ def test_committed_draft_matches_the_template_sections():
 def _report_with(**changes):
     from publish_fakes import report
 
-    from lift.publish.inputs import report_path
-
     doc = report()
     doc.update(changes)
-    write_json(report_path(), doc)
+    write_report(doc)
     return doc
 
 
@@ -186,14 +184,14 @@ def _card(verdict="repair", repair=None):
     from publish_fakes import effect, report
 
     from lift.publish import model
-    from lift.publish.inputs import Facts, report_path
+    from lift.publish.inputs import Facts
     from lift.schemas import VariantSpec
 
     doc = report()
     doc["verdicts"][0]["verdict"] = verdict
     if repair is not None:
         doc["primary"]["repair"] = repair
-    write_json(report_path(), doc)
+    write_report(doc)
     spec = VariantSpec(
         name="wiseft-l0.50-adapter-aya-std-s1",
         method="wiseft",
@@ -245,7 +243,7 @@ def test_signatures_in_the_report_are_rendered(out):
     doc["tables"]["signatures"] = table(
         [("probe", "Probe", "text"), ("auc", "AUC", "f2")], [{"probe": "harm", "auc": 0.71}]
     )
-    write_json(report_path(), doc)
+    write_report(doc)
     section = _section(article.build()[0].read_text(encoding="utf-8"), "Exploratory signatures")
     assert "| harm | 0.71 |" in section and "not run" not in section.lower()
 
@@ -273,7 +271,7 @@ def test_back_translation_is_claimed_only_when_it_ran(out):
     assert "judged after back-translation into English" in text
     doc = _bt_rows(report(), lambda r: not r["check"].startswith("back-translated"))
     doc["not_run"] = ["ar/th back-translation: no verdicts"]
-    write_json(report_path(), doc)
+    write_report(doc)
     text = article.build()[0].read_text(encoding="utf-8")
     assert "judged after back-translation" not in text and "NLLB-200-distilled-600M (CC" not in text
     assert "back-translation check was not run" in text

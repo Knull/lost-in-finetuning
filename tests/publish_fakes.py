@@ -5,9 +5,12 @@ Every number here is made up for the tests; nothing reaches the Hub.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from lift import paths
 
@@ -340,18 +343,21 @@ def _p07_tables() -> dict:
     }
 
 
-def report() -> dict:
+def report(selection_doc: dict | None = None) -> dict:
     """final_report.json exactly as P07's ``lift.report.tables.build`` writes it (origin/p07-final-report
     @ 1570807): its TABLES with their columns, labels, formats and notes, the per-language table wide (one
     row per language label, role columns), over-refusal in its own table, and the extra keys P08 does not
-    read (``cells``, ``created``, ``selection``, ``cost_detail``, ``primary.*_loose``)."""
+    read (``cells``, ``created``, ``cost_detail``, ``primary.*_loose``). ``selection`` carries the
+    cross-branch contract (review XB-04): the overall winner, the frozen map and the sha256 of the
+    selection.json bytes the report was built from (``selection_doc``, default ``selection()``, as
+    ``write_json`` writes it)."""
     return {
         "version": 1,
         "dtype": "bf16",
         # the judge id of the final judgement records (Qwen3GuardJudge.judge_id, revision "main" in tests)
         "primary_judge": QWEN_ID,
         "created": "2026-11-11T00:00:00+00:00",
-        "selection": {"adapter": "adapter-aya-std-s1", "winner_family": "wiseft"},
+        "selection": binding(selection() if selection_doc is None else selection_doc),
         "verdicts": [
             {
                 "adapter": "adapter-aya-std",
@@ -489,19 +495,88 @@ def frozen_variants(doc: dict) -> list[str]:
     ]
 
 
+def json_bytes(doc: dict) -> bytes:
+    """The bytes ``write_json`` writes for ``doc``."""
+    return json.dumps(doc).encode("utf-8")
+
+
 def write_json(path: Path, doc: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc), encoding="utf-8")
+    path.write_bytes(json_bytes(doc))
     return path
 
 
+def binding(selection_doc: dict) -> dict:
+    """final_report.json's ``selection`` block as P07 writes it (review XB-04 contract): the overall
+    winner, the frozen map and the sha256 of the selection.json bytes, plus P07's older keys."""
+    overall = selection_doc.get("overall") or {}
+    winner = overall.get("winner")
+    frozen = dict(selection_doc.get("frozen") or {})
+    return {
+        "adapter": selection_doc.get("adapter"),
+        "winner_family": next((f for f, name in frozen.items() if name == winner), None),
+        "selection_verdict": overall.get("verdict"),
+        "winner": winner,
+        "frozen": frozen,
+        "sha256": hashlib.sha256(json_bytes(selection_doc)).hexdigest(),
+    }
+
+
+def frozen_recipe(selection_doc: dict | None = None) -> dict:
+    """configs/frozen_recipe.json as P05 commits it once the recipe is frozen (review XB-02 contract)."""
+    doc = selection() if selection_doc is None else selection_doc
+    return {
+        "version": 1,
+        "adapter": doc["adapter"],
+        "selection_sha256": hashlib.sha256(json_bytes(doc)).hexdigest(),
+        "overall_winner": doc["overall"]["winner"],
+        "frozen": dict(doc["frozen"]),
+    }
+
+
+FIGURES = ("forest_primary", "tradeoff_dev", "heatmap_harmful", "heatmap_overrefusal")
+PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(16)  # binary, as the scan sees a figure
+
+
+def write_figures(names: tuple[str, ...] = FIGURES) -> None:
+    """The PNGs P07's ``lift report`` draws into outputs/figures/ (lift.report.figures.draw_all)."""
+    folder = paths.output_dir() / "figures"
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (folder / f"{name}.png").write_bytes(PNG + name.encode())
+
+
+def write_report(doc: dict | None = None, selection_doc: dict | None = None) -> dict:
+    """Write selection.json and a final_report.json bound to it (its ``selection`` block replaced)."""
+    sel = selection() if selection_doc is None else selection_doc
+    write_json(paths.metrics_dir() / "selection.json", sel)
+    doc = dict(report(sel) if doc is None else doc)
+    doc["selection"] = binding(sel)
+    write_json(paths.metrics_dir() / "final_report.json", doc)
+    return doc
+
+
 def write_inputs(
-    *, with_report: bool = True, with_selection: bool = True, selection_doc: dict | None = None
+    *,
+    with_report: bool | None = None,
+    with_selection: bool = True,
+    selection_doc: dict | None = None,
+    report_doc: dict | None = None,
+    figures: bool = True,
 ) -> None:
-    if with_report:
-        write_json(paths.metrics_dir() / "final_report.json", report())
+    """selection.json, then final_report.json bound to it (P07 builds no report from an undecided
+    selection, so none by default when ``selection_doc`` is incomplete), and the figures."""
+    sel = selection() if selection_doc is None else selection_doc
+    if with_report is None:
+        with_report = sel.get("status") == "decided"
     if with_selection:
-        write_json(paths.metrics_dir() / "selection.json", selection_doc or selection())
+        write_json(paths.metrics_dir() / "selection.json", sel)
+    if with_report:
+        doc = dict(report(sel) if report_doc is None else report_doc)
+        doc["selection"] = binding(sel)
+        write_json(paths.metrics_dir() / "final_report.json", doc)
+        if figures:
+            write_figures()
 
 
 class FakeApi:
@@ -524,3 +599,21 @@ class FakeApi:
 
     def names(self) -> list[str]:
         return [c[0] for c in self.calls]
+
+
+@pytest.fixture(autouse=True)
+def no_committed_recipe(tmp_path, monkeypatch):
+    """The publish tests never read the repo's own configs/frozen_recipe.json (P05 commits it once the
+    recipe is frozen): each test has its own path, empty until ``write_recipe``. Import this fixture into
+    every publish test module."""
+    from lift.publish import inputs
+
+    path = tmp_path / "configs" / "frozen_recipe.json"
+    monkeypatch.setattr(inputs, "frozen_recipe_path", lambda: path)
+    return path
+
+
+def write_recipe(doc: dict) -> Path:
+    from lift.publish import inputs
+
+    return write_json(inputs.frozen_recipe_path(), doc)

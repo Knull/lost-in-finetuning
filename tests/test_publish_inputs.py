@@ -6,7 +6,7 @@ import json
 import re
 
 import pytest
-from publish_fakes import write_inputs, write_json
+from publish_fakes import no_committed_recipe, write_inputs, write_json, write_report  # noqa: F401
 
 from lift import paths
 from lift.publish import PublishError, render
@@ -84,7 +84,7 @@ def test_bad_table_cell_names_the_table():
             "cost": {"columns": [{"key": "x", "label": "X", "format": "pct"}], "rows": [{"x": "lots"}]}
         },
     }
-    write_json(report_path(), doc)
+    write_report(doc)  # bound to selection.json (XB-04)
     with pytest.raises(PublishError, match="tables/cost"):
         Facts().table("cost")
 
@@ -165,9 +165,105 @@ def test_table_text_cells_and_notes_are_recorded():
             }
         },
     }
-    write_json(report_path(), doc)
+    write_report(doc)  # bound to selection.json (XB-04)
     facts = Facts()
     facts.table("cost")
     pointers = {s["pointer"]: s["shown"] for s in facts.sources}
     assert pointers["/tables/cost/rows/0/x"] == "a note with 12.5 inside"
     assert pointers["/tables/cost/note"] == "Pooled over 3 seeds."
+
+
+# -------------------------------------------------------------- the report is bound to the selection (XB-04)
+
+
+def _bound():
+    from publish_fakes import report, selection
+
+    write_inputs()
+    return report(), selection()
+
+
+def test_a_report_bound_to_the_current_selection_is_read():
+    from lift.publish.inputs import frozen_winner
+
+    _bound()
+    facts = Facts()
+    assert facts.report()["selection"]["winner"] == frozen_winner(facts)
+
+
+def test_a_selection_changed_after_lift_stats_is_refused():
+    """XB-04: selection.json's winner changed after lift stats; the report's numbers are another
+    winner's, so nothing that reads them may render."""
+    from publish_fakes import CAST_WINS, selection
+
+    from lift.publish.inputs import selection_path
+
+    _bound()
+    write_json(selection_path(), selection(CAST_WINS))
+    with pytest.raises(PublishError, match="lift stats"):
+        Facts().report()
+    with pytest.raises(PublishError, match="lift stats"):
+        Facts().raw(report_path(), "/verdicts")  # every reader of the report, not only report()
+    with pytest.raises(PublishError, match="lift stats"):
+        Facts().report_value("/primary/repair/pooled", "pp_ci", what="r")
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["no block", "no sha", "bad sha", "winner", "frozen", "no selection.json", "undecided"],
+)
+def test_a_report_that_disagrees_with_the_selection_is_refused(change):
+    from publish_fakes import selection
+
+    from lift.publish.inputs import selection_path
+
+    _bound()
+    doc = json.loads(report_path().read_text())
+    block = doc["selection"]
+    if change == "no block":
+        doc["selection"] = {"adapter": "adapter-aya-std-s1", "winner_family": "wiseft"}  # P07 before XB-04
+    elif change == "no sha":
+        del block["sha256"]
+    elif change == "bad sha":
+        block["sha256"] = "0" * 64
+    elif change == "winner":
+        block["winner"] = "cast-m1.0-adapter-aya-std-s1"
+    elif change == "frozen":
+        block["frozen"] = {**block["frozen"], "cast": "cast-m2.0-adapter-aya-std-s1"}
+    elif change == "no selection.json":
+        selection_path().unlink()
+    else:
+        write_json(selection_path(), selection(incomplete=True))
+    write_json(report_path(), doc)
+    with pytest.raises(PublishError, match="selection"):
+        Facts().report()
+
+
+def test_the_committed_frozen_recipe_must_agree():
+    """configs/frozen_recipe.json (P05, XB-02) pins the selection: a selection.json or a report that
+    disagrees with it is refused, with or without a report."""
+    from publish_fakes import CAST_WINS, frozen_recipe, selection, write_recipe
+
+    from lift.publish.inputs import frozen_variants, frozen_winner, selection_path
+
+    _bound()
+    write_recipe(frozen_recipe())
+    assert Facts().report() and frozen_winner(Facts()) == selection()["overall"]["winner"]
+    for change in ("selection_sha256", "overall_winner", "frozen", "adapter", "version"):
+        doc = frozen_recipe()
+        doc[change] = {"frozen": {"wiseft": "x"}, "version": 2}.get(change, "0" * 64)
+        write_recipe(doc)
+        with pytest.raises(PublishError, match="frozen_recipe.json"):
+            Facts().report()
+    # without any report: the model and parameters read selection.json alone, and it must match too
+    write_recipe(frozen_recipe(selection(CAST_WINS)))
+    report_path().unlink()
+    with pytest.raises(PublishError, match="frozen_recipe.json"):
+        frozen_winner(Facts())
+    with pytest.raises(PublishError, match="frozen_recipe.json"):
+        frozen_variants(Facts())
+    write_json(selection_path(), selection(CAST_WINS))
+    assert frozen_winner(Facts()) == "cast-m1.0-adapter-aya-std-s1"
+    write_recipe({"version": 1})
+    with pytest.raises(PublishError, match="frozen_recipe.json"):
+        frozen_winner(Facts())

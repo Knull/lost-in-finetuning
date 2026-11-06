@@ -9,7 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from publish_fakes import CAST_WINS, REJECT, FakeApi, frozen_variants, selection, write_inputs
+from publish_fakes import (  # noqa: F401
+    CAST_WINS,
+    REJECT,
+    FakeApi,
+    frozen_variants,
+    no_committed_recipe,
+    selection,
+    write_inputs,
+)
 
 from lift import paths
 from lift.models import variants
@@ -348,3 +356,17 @@ def test_adapter_gate_does_not_assert_drift(registry):
     (a,) = model.build_adapters(Facts())
     card = (a.folder / "README.md").read_text()
     assert "it drifted" not in card and "may affect safety" in card and "safety-drift" not in card
+
+
+def test_a_winner_changed_after_lift_stats_publishes_nothing(registry):
+    """XB-04: selection.json's winner changed after lift stats. The card would print WiSE-FT's repair
+    effect under CAST's name, so lift publish model refuses (exit 1) and stages no card."""
+    from lift import cli
+    from lift.publish.inputs import selection_path
+
+    write_inputs()
+    selection_path().write_text(json.dumps(selection(CAST_WINS)), encoding="utf-8")
+    with pytest.raises(PublishError, match="lift stats"):
+        model.build_all()
+    assert cli.main(["publish", "model"]) == 1
+    assert not (model.stage_root() / "model" / "cast-m1.0-adapter-aya-std-s1" / "README.md").exists()

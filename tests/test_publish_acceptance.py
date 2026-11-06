@@ -7,6 +7,7 @@ import shutil
 
 import pytest
 import yaml
+from publish_fakes import no_committed_recipe  # noqa: F401
 
 from lift import paths
 from lift.models import variants
