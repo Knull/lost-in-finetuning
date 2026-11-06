@@ -3,9 +3,12 @@
 Every upload command stages its files under outputs/publish/, prints what it would upload, and uploads
 only with ``--yes`` (a person runs the real uploads, with HF_TOKEN set by a hidden prompt). ``--yes``
 refuses while the HF namespace is unset (LIFT_HF_NAMESPACE or configs/publish.yaml), while something the
-plan needs is not built, or while a staged text still holds a ``[PENDING ...]`` placeholder (an input
-that does not exist yet). ``article`` writes hf/article.md; ``preflight`` checks the git repo can go
-public. Exit codes: 0 done (or dry run), 1 refused or failed (preflight: findings).
+plan needs is not built, while a staged text still holds a ``[PENDING ...]`` placeholder (an input that
+does not exist yet; ``--allow-pending`` uploads such a repo as a private draft instead), or while a file
+that would be public fails the public-text scan, which needs this machine's outputs (``lift sync pull``).
+``article`` writes hf/article.md; ``preflight`` checks the git repo can go public: it fetches every
+branch, tag and pull-request ref of origin first, and refuses a machine with no harmful outputs to check
+against. Exit codes: 0 done (or dry run), 1 refused or failed (preflight: findings).
 """
 
 from __future__ import annotations
@@ -95,9 +98,16 @@ def _article(args: argparse.Namespace) -> int:
 
 
 def _preflight(args: argparse.Namespace) -> int:
-    from lift.publish import preflight
+    from lift.publish import PublishError, preflight
 
-    findings = preflight.run(history=not args.no_history)
+    fetched = False
+    try:
+        if not args.no_history and not args.no_fetch:
+            fetched = preflight.fetch_public_refs()
+        windows, n_harmful = preflight.load_windows()
+    except PublishError as exc:
+        return _fail(exc)
+    findings = preflight.run(history=not args.no_history, windows=windows)
     if findings:
         print(f"preflight FAILED: {len(findings)} finding(s) (matched text is never shown):")
         for f in findings[:200]:
@@ -111,10 +121,21 @@ def _preflight(args: argparse.Namespace) -> int:
             )
         return 1
     print(
-        "preflight passed: no secret, token or raw completion in the tracked files"
-        + ("" if args.no_history else " or the git history")
+        "preflight passed: no secret, token, raw completion, notebook output or text of the "
+        f"{n_harmful} outputs labelled harmful on this machine ({len(windows)} windows) in the tracked files"
+        + ("" if args.no_history else " or the git history of every ref")
         + "."
     )
+    partial = []
+    if args.no_history:
+        partial.append("the git history was not scanned (--no-history)")
+    elif not fetched:
+        partial.append(
+            "only local refs were scanned (--no-fetch, or no origin remote): GitHub also publishes every "
+            "remote branch, tag and pull-request ref"
+        )
+    if partial:
+        print(f"NOT ENOUGH TO MAKE THE REPO PUBLIC: {'; '.join(partial)}. Run lift publish preflight alone.")
     print(preflight.PUBLIC_STEPS)
     return 0
 
@@ -133,7 +154,8 @@ def register(sub: argparse._SubParsersAction) -> None:
         q.add_argument(
             "--allow-pending",
             action="store_true",
-            help="upload even if a staged text still holds a [PENDING ...] placeholder (drafts only)",
+            help="upload a repo whose staged text still holds a [PENDING ...] placeholder as a PRIVATE draft "
+            "(it stays private until uploaded again without placeholders)",
         )
 
     q = cmds.add_parser(
@@ -170,9 +192,16 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     q = cmds.add_parser(
         "preflight",
-        help="fail if a tracked file or the git history holds a secret, a token or a raw completion",
+        help="fail if a tracked file or the git history (every ref of origin) holds a secret, a token or "
+        "a raw completion",
     )
     q.add_argument(
         "--no-history", action="store_true", help="check the tracked files only, not the git history"
+    )
+    q.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="do not fetch origin's branches, tags and pull-request refs first (local refs only: not enough "
+        "to make the repo public)",
     )
     q.set_defaults(func=_preflight)
