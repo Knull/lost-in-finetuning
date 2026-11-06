@@ -3,9 +3,12 @@
 - GPU-hours of the final evaluation per variant: the sum over its ``final_variant`` manifests (lift final;
   each records ``gpu_hours`` = its stages' wall time x the devices it held, so a resumed run adds its own
   share); ``gpu_hours_per_variant_final`` is their mean over the variants with a manifest.
-- The dev sweep's GPU-hours (``sweep_setting`` manifests: wall time x devices).
-- A check-up is the whole acceptance test of one adapter (decisions.md 73): the seed-1 dev sweep plus the
-  final battery of stock, the seed-1 adapter and the seed-1 frozen winner (``checkup``).
+- The dev sweep's GPU-hours: the ``sweep_setting`` manifests (wall time x devices) of the selection's
+  adapter in the reported precision only (not a stress sweep, not another dtype), and the CAST fit of that
+  adapter (``fit_cast`` manifests, same filter), which the check-up needs before its CAST settings run.
+  Final manifests count in the reported precision only.
+- A check-up is the whole acceptance test of one adapter (decisions.md 73): the seed-1 dev sweep (with its
+  CAST fit) plus the final battery of stock, the seed-1 adapter and the seed-1 frozen winner (``checkup``).
   ``gpu_hours_per_checkup`` is their sum, None (not run) while any of them has no manifest.
 - Latency: GPU seconds per generated token of each variant's final generations (safety cells and
   utility answers), as the harness attributes them per record (``seconds``, ``meta.n_generated``), and
@@ -48,17 +51,30 @@ def _hours(doc: Mapping[str, Any]) -> float:
     return float(doc.get("wall_seconds") or 0.0) * int(doc.get("devices") or 1) / 3600
 
 
-def final_hours(docs: Iterable[Mapping[str, Any]]) -> dict[str, float]:
+def _mine(doc: Mapping[str, Any], dtype: str | None, adapter: str | None = None) -> bool:
+    return (dtype is None or doc.get("dtype") == dtype) and (adapter is None or doc.get("adapter") == adapter)
+
+
+def final_hours(docs: Iterable[Mapping[str, Any]], dtype: str | None = None) -> dict[str, float]:
     out: dict[str, float] = {}
     for doc in docs:
-        if doc.get("stage") == "final_variant" and doc.get("variant"):
+        if doc.get("stage") == "final_variant" and doc.get("variant") and _mine(doc, dtype):
             out[doc["variant"]] = out.get(doc["variant"], 0.0) + _hours(doc)
     return out
 
 
-def sweep_hours(docs: Iterable[Mapping[str, Any]]) -> float | None:
-    hours = [_hours(d) for d in docs if d.get("stage") == "sweep_setting"]
+def stage_hours(
+    docs: Iterable[Mapping[str, Any]], stage: str, *, dtype: str | None = None, adapter: str | None = None
+) -> float | None:
+    """GPU-hours of every ``stage`` manifest of ``adapter`` in ``dtype`` (None: any); None when none."""
+    hours = [_hours(d) for d in docs if d.get("stage") == stage and _mine(d, dtype, adapter)]
     return sum(hours) if hours else None
+
+
+def sweep_hours(
+    docs: Iterable[Mapping[str, Any]], *, dtype: str | None = None, adapter: str | None = None
+) -> float | None:
+    return stage_hours(docs, "sweep_setting", dtype=dtype, adapter=adapter)
 
 
 def latency(variant: str, dtype: str | None = None) -> dict[str, Any] | None:
@@ -103,11 +119,14 @@ def section(
     docs: Sequence[Mapping[str, Any]] | None = None,
     dtype: str | None = None,
     checkup: Sequence[str] = (),
+    adapter: str | None = None,
 ) -> dict[str, Any]:
     """{"rows": [...], "gpu_hours_per_checkup", "gpu_hours_per_variant_final", "sweep_gpu_hours", ...} for
-    ``names`` [(variant, role)]; ``checkup``: the final variants a check-up runs (module docstring)."""
+    ``names`` [(variant, role)]; ``checkup``: the final variants a check-up runs; ``adapter``: the
+    selection's (seed-1) adapter, whose sweep and CAST fit a check-up counts (module docstring)."""
     docs = manifests() if docs is None else docs
-    hours = final_hours(docs)
+    dtype = dtype or str(config.get("generation.dtype"))
+    hours = final_hours(docs, dtype)
     rows = []
     for name, role in names:
         lat = latency(name, dtype)
@@ -122,14 +141,18 @@ def section(
             }
         )
     measured = [h for name, _ in names if (h := hours.get(name)) is not None]
-    sweep = sweep_hours(docs)
+    sweep = sweep_hours(docs, dtype=dtype, adapter=adapter)
+    fit = stage_hours(docs, "fit_cast", dtype=dtype, adapter=adapter)
     parts = [hours.get(name) for name in checkup]
     complete = bool(checkup) and sweep is not None and all(h is not None for h in parts)
+    total = sweep + (fit or 0.0) + sum(h for h in parts if h is not None) if complete else None
     return {
         "rows": rows,
-        "gpu_hours_per_checkup": sweep + sum(h for h in parts if h is not None) if complete else None,
-        "checkup": {"sweep": sweep, **{name: hours.get(name) for name in checkup}},
+        "gpu_hours_per_checkup": total,
+        "checkup": {"sweep": sweep, "fit_cast": fit, **{name: hours.get(name) for name in checkup}},
         "gpu_hours_per_variant_final": sum(measured) / len(measured) if measured else None,
         "gpu_hours_final_total": sum(measured) if measured else None,
         "sweep_gpu_hours": sweep,
+        "fit_cast_gpu_hours": fit,
+        "adapter": adapter,
     }

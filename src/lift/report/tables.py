@@ -178,6 +178,27 @@ def _ci(e: Mapping[str, Any] | None) -> dict[str, float] | None:
     return None if not e else {"est": e["est"], "lo": e["lo"], "hi": e["hi"]}
 
 
+def _seeds(e: Mapping[str, Any] | None) -> str | None:
+    """The seeds a pooled value pools ("1, 2"), None when it was not run."""
+    return None if not isinstance(e, Mapping) else ", ".join(str(s) for s in e.get("seeds", []))
+
+
+def _shown(value: Any, kind: str) -> str | None:
+    """A pooled interval as text with the seeds it pools, a text value (an undefined share, say) as it is,
+    None (not run) as None: for a column whose rows may hold either (format "text")."""
+    if value is None or isinstance(value, str):
+        return value
+    text = fmt(value, kind)
+    seeds = _seeds(value)
+    return f"{text} (seeds {seeds})" if seeds else text
+
+
+def _n_title(rows: Sequence[Mapping[str, Any]], unit: str) -> str:
+    """ "200 pairs" when every row that was run has one n, else "{unit} per row" (XB-14)."""
+    ns = {int(r["n"]) for r in rows if isinstance(r.get("n"), (int, float))}
+    return f"{ns.pop():,} {unit}" if len(ns) == 1 else f"{unit} per row"
+
+
 def effect_out(e: Mapping[str, Any]) -> dict[str, Any]:
     """An analysis effect as P08's Effect: pooled {est, lo, hi, p} (None when not run) and per_seed."""
     pooled = e.get("pooled")
@@ -287,7 +308,8 @@ def repair_comparison(stats: Mapping[str, Any]) -> dict[str, Any]:
                 "harmful_hi": pooled["x_rate"] if pooled else None,
                 "effect": _ci(pooled),
                 "p": pooled["p"] if pooled else None,
-                "retained": _ci(retained.get(c["family"])),
+                "retained": retained.get(c["family"]),
+                "gain_kept": _shown(retained.get(c["family"]), "pct_ci"),
                 "overrefusal_change": _ci(c.get("overrefusal_hard_hi_change")),
                 "belebele_change": _ci(c.get("belebele_hi_change")),
             }
@@ -301,7 +323,7 @@ def repair_comparison(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("harmful_hi", "Harmful rate", "pct"),
             ("effect", "Repair - adapter", "pp_ci"),
             ("p", "p (bootstrap)", "p"),
-            ("retained", "Utility gain kept", "pct_ci"),
+            ("gain_kept", "Utility gain kept", "text"),
             ("overrefusal_change", "Hard-benign refusal - stock", "pp_ci"),
             ("belebele_change", "Belebele-hi - stock", "pp_ci"),
         ],
@@ -309,6 +331,41 @@ def repair_comparison(stats: Mapping[str, Any]) -> dict[str, Any]:
         "The overall winner's effect is the primary endpoint; the other families are reported "
         "descriptively (unadjusted, not a pre-registered claim). WiSE-FT attenuation is the baseline "
         "every repair is measured against.",
+    )
+
+
+def repair_vs_wiseft(stats: Mapping[str, Any]) -> dict[str, Any]:
+    """Each other frozen family minus WiSE-FT attenuation (analysis.vs_wiseft; docs/decisions.md 76)."""
+    block = stats.get("vs_wiseft") or {"rows": []}
+    rows = [
+        {
+            "family": r["family"],
+            "variant": r["variant"],
+            "reference": r["reference"],
+            "harmful": _ci(r["harmful_hi"]),
+            "overrefusal": _ci(r["overrefusal_hard_hi"]),
+            "gain_kept": _shown(r["gain_kept"], "pp_ci"),
+            "seeds": _seeds(r["harmful_hi"]),
+        }
+        for r in block["rows"]
+    ]
+    return table(
+        "Each repair against WiSE-FT attenuation, final split, Hindi (not pre-registered, descriptive)",
+        [
+            ("family", "Family", "text"),
+            ("variant", "Frozen setting (seed 1)", "text"),
+            ("reference", "WiSE-FT frozen setting (seed 1)", "text"),
+            ("harmful", "Harmful rate - WiSE-FT", "pp_ci"),
+            ("overrefusal", "Hard-benign refusal - WiSE-FT", "pp_ci"),
+            ("gain_kept", "Utility gain kept - WiSE-FT's", "text"),
+            ("seeds", "Seeds", "text"),
+        ],
+        rows,
+        "Not pre-registered, descriptive (docs/decisions.md 76): the README frames each repair against "
+        "simply scaling the adapter down but pre-registers no test of it. Paired by prompt within each seed "
+        "and pooled over the seeds named (95% clustered bootstrap intervals, clusters = prompt id); gain "
+        "kept: (repair - WiSE-FT) / (adapter - 0.5) over the same prompts. Estimates and intervals only: no "
+        "p-value, in neither the Holm nor the BH family, and not a claim.",
     )
 
 
@@ -379,6 +436,10 @@ def utility(stats: Mapping[str, Any]) -> dict[str, Any]:
         for seed, name in sorted(by_seed.items(), key=lambda kv: int(kv[0])):
             r = by_variant.get(name, {})
             ok = r.get("status") == "ok"
+            if arm == "adapter":
+                kept = fmt({"est": 1.0, "lo": 1.0, "hi": 1.0}, "pct_ci") + " (its own gain)" if ok else None
+            else:
+                kept = _shown(u["retained"].get(arm), "pct_ci")
             rows.append(
                 {
                     "arm": arm,
@@ -386,29 +447,24 @@ def utility(stats: Mapping[str, Any]) -> dict[str, Any]:
                     "seed": str(seed),
                     "win_rate": {"est": r["win_rate"], "lo": r["lo"], "hi": r["hi"]} if ok else None,
                     "n": r.get("n") if ok else None,
-                    "retained": (
-                        {"est": 1.0, "lo": 1.0, "hi": 1.0}
-                        if arm == "adapter" and ok
-                        else _ci(u["retained"].get(arm))
-                        if arm != "adapter"
-                        else None
-                    ),
+                    "gain_kept": kept,
                 }
             )
     return table(
-        "Hindi utility against stock, final split (200 pairs, both orders)",
+        f"Hindi utility against stock, final split ({_n_title(rows, 'pairs')}, both orders)",
         [
             ("arm", "Arm", "text"),
             ("variant", "Variant", "text"),
             ("seed", "Seed", "text"),
             ("win_rate", "Win rate vs stock", "pct_ci"),
             ("n", "Pairs", "int"),
-            ("retained", "Adapter gain kept (pooled over seeds)", "pct_ci"),
+            ("gain_kept", "Adapter gain kept (pooled over the seeds named)", "text"),
         ],
         rows,
         "Win rate: mean pair score against stock (1 win, 0.5 tie, 0 loss, averaged over both orders), "
         "bootstrap interval by prompt. Gain kept: (repair - 0.5) / (adapter - 0.5) over the same "
-        "prompts, pooled over seeds with a joint bootstrap; the adapter keeps all of its own gain.",
+        "prompts, pooled over the seeds named with a joint bootstrap; the adapter keeps all of its own gain. "
+        "It is undefined (said so) when the adapter shows no gain over parity.",
     )
 
 
@@ -416,24 +472,29 @@ def belebele(stats: Mapping[str, Any]) -> dict[str, Any]:
     rows = [
         {
             "lang": LANG_NAMES[r["lang"]],
+            "n": r.get("n"),
             "stock": r["stock"],
             "adapter": r["adapter"],
             "repair": r["repair"],
             "repair_change": _ci(r["repair_change"]),
+            "repair_seeds": _seeds(r["repair_change"]),
         }
         for r in stats["belebele"]["rows"]
     ]
     return table(
-        "Belebele accuracy per language, final split (700 items)",
+        f"Belebele accuracy per language, final split ({_n_title(rows, 'items')})",
         [
             ("lang", "Language", "text"),
+            ("n", "Items", "int"),
             ("stock", "Stock", "pct"),
             ("adapter", "Adapter", "pct"),
             ("repair", "Frozen repair", "pct"),
             ("repair_change", "Repair - stock", "pp_ci"),
+            ("repair_seeds", "Seeds (repair - stock)", "text"),
         ],
         rows,
-        "Letter log-likelihood scoring, no chat template; pooled over seeds.",
+        "Letter log-likelihood scoring, no chat template. Items: stock's, the paired reference. A level is "
+        "shown only when every seed was run; the change against stock pools the seeds named.",
     )
 
 
@@ -498,10 +559,14 @@ def cost(section: Mapping[str, Any]) -> dict[str, Any]:
         "the part of it CAST's gate prefill takes (0 for a model without a gate)."
     )
     if section.get("sweep_gpu_hours") is not None:
-        note += f" The seed-1 dev sweep took {fmt(section['sweep_gpu_hours'], 'hours')} of GPU time."
+        note += f" The seed-1 dev sweep took {fmt(section['sweep_gpu_hours'], 'hours')} of GPU time"
+        if section.get("fit_cast_gpu_hours") is not None:
+            note += f", and its CAST fit {fmt(section['fit_cast_gpu_hours'], 'hours')}"
+        note += "."
     note += (
-        " A check-up (the whole acceptance test of one adapter) is the dev sweep plus the final battery of "
-        "stock, the seed-1 adapter and the seed-1 frozen winner."
+        " A check-up (the whole acceptance test of one adapter) is the dev sweep of the selected adapter in "
+        "the reported precision, with its CAST fit, plus the final battery of stock, the seed-1 adapter and "
+        "the seed-1 frozen winner."
     )
     return table(
         "Cost of the final evaluation",
@@ -567,6 +632,7 @@ def build(stats: Mapping[str, Any], cost_section: Mapping[str, Any]) -> dict[str
     tables = {
         "per_language": per_language(stats),
         "repair_comparison": repair_comparison(stats),
+        "repair_vs_wiseft": repair_vs_wiseft(stats),
         "secondary": _claims_table(
             stats["secondary"],
             "Secondary claims (Holm-corrected)",
@@ -591,7 +657,9 @@ def build(stats: Mapping[str, Any], cost_section: Mapping[str, Any]) -> dict[str
     for r in cost_section["rows"]:
         if r["gpu_hours"] is None:
             not_run.append(f"{r['variant']}: no lift final manifest (cost not run)")
-    verdicts = [{k: v.get(k) for k in ("adapter", "recipe", "verdict", "reason")} for v in stats["verdicts"]]
+    verdicts = [
+        {k: v.get(k) for k in ("adapter", "recipe", "verdict", "reason", "drift")} for v in stats["verdicts"]
+    ]
     return {
         "version": REPORT_VERSION,
         "dtype": stats["dtype"],
@@ -630,6 +698,7 @@ def validate(doc: Mapping[str, Any]) -> list[str]:
         elif (
             k != "gpu_hours_per_checkup"
             and doc["headline"][k] is not None
+            and not (k == "utility_retained" and isinstance(doc["headline"][k], str))
             and not {"est", "lo", "hi"} <= set(doc["headline"][k])
         ):
             problems.append(f"headline.{k} is not an Interval")
@@ -663,8 +732,9 @@ def validate(doc: Mapping[str, Any]) -> list[str]:
 
 
 def _json_safe(obj: Any) -> Any:
+    """JSON-ready: a non-finite number becomes "undefined", never None (None means not run, decisions 73)."""
     if isinstance(obj, float) and not math.isfinite(obj):
-        return None
+        return "undefined"
     if isinstance(obj, Mapping):
         return {str(k): _json_safe(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -717,6 +787,7 @@ def build_all(*, stats: Mapping[str, Any] | None = None, figures: bool = True) -
         stats = json.loads(path.read_text(encoding="utf-8"))
     roles = stats["roles"]
     names = [("stock", "stock")] + [(n, "adapter") for n in roles["adapter"].values()]
+    names += [(n, "standard adapter") for n in (roles.get("standard") or {}).values()]
     for family, by_seed in roles["families"].items():
         role = f"{family} (winner)" if family == stats["selection"].get("winner_family") else family
         names += [(n, role) for n in by_seed.values()]
@@ -724,7 +795,9 @@ def build_all(*, stats: Mapping[str, Any] | None = None, figures: bool = True) -
         "stock",
         *(roles[k].get(s) for k in ("adapter", "winner") for s in ("1", 1) if roles[k].get(s)),
     ]
-    section = cost_mod.section(names, dtype=stats["dtype"], checkup=checkup)
+    section = cost_mod.section(
+        names, dtype=stats["dtype"], checkup=checkup, adapter=stats["selection"].get("adapter_name")
+    )
     doc = _json_safe(build(stats, section))
     problems = validate(doc)
     if problems:

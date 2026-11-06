@@ -352,7 +352,15 @@ def test_lift_stats_and_lift_report_write_final_report_json_to_p08s_contract(mon
             ("sweep_setting", WINNER.format(1), None),
         ]
     ):
-        doc = {"stage": stage, "variant": variant, "gpu_hours": hours, "wall_seconds": 3600, "devices": 2}
+        doc = {
+            "stage": stage,
+            "variant": variant,
+            "adapter": A.format(1),
+            "dtype": "bf16",
+            "gpu_hours": hours,
+            "wall_seconds": 3600,
+            "devices": 2,
+        }
         (manifests / f"{stage}-{i}.json").write_text(json.dumps(doc), encoding="utf-8")
     assert cli.main(["stats"]) == 0
     assert cli.main(["report"]) == 0
@@ -549,3 +557,247 @@ def test_a_cell_made_under_a_replaced_registry_entry_is_not_read(fake_prompt_fil
     assert cell["status"] == "not run" and "registry entry" in cell["why"] and "lift restart" in cell["why"]
     assert doc["primary"]["drift"]["pooled"] is None
     assert "registry entry" in doc["primary"]["drift"]["not_run"][1]
+
+
+# ------------------------------------------------------------------------------- cross-branch review fixes
+
+
+def test_belebele_pairs_only_files_of_one_global_revision_and_scoring():
+    """XB-03: a variant's final Belebele made on another Global revision (or template, scoring, task) than
+    stock's is refused loudly (Unpairable), as a safety pair is, never paired item by item."""
+
+    class OtherRevision(FakeSource):
+        def belebele_meta(self, variant, lang):
+            rev = "e" * 40 if variant == "stock" and lang == "th" else "c" * 40
+            return {
+                "model_rev": rev,
+                "template": "t",
+                "scoring": "next_token",
+                "task": "k",
+                "task_version": 1,
+            }
+
+    with pytest.raises(analysis.Unpairable, match="Belebele th.*model_rev"):
+        analysis.compute(OtherRevision(), SELECTION, use_file=False)
+
+    class Same(FakeSource):
+        def belebele_meta(self, variant, lang):
+            return {"model_rev": "c" * 40, "template": "t", "scoring": "next_token", "task": "k"}
+
+    assert analysis.compute(Same(), SELECTION, use_file=False)["belebele"]["rows"]
+
+
+def test_the_real_belebele_reader_keeps_each_files_configuration(monkeypatch):
+    from lift.models import loglik
+    from lift.repair import select
+
+    path = loglik.belebele_scores_path("stock", "hi", "final", dtype="bf16")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}\n", encoding="utf-8")
+    meta = {
+        "model_rev": "c" * 40,
+        "template": "t" * 16,
+        "scoring": "next_token",
+        "task": "k",
+        "dtype": "bf16",
+    }
+    recs = [{"pid": f"bel-{i}", "pred": "A", "gold": "A" if i else "B", "meta": meta} for i in range(3)]
+    monkeypatch.setattr(select, "_stale", lambda variant, p: None)
+    monkeypatch.setattr(loglik, "_readable", lambda p, task: (recs, None))
+    monkeypatch.setattr(loglik, "_belebele_items", lambda r, lang, split, **kw: (recs, 0, None))
+    source = analysis.Source("bf16")
+    assert source.belebele("stock", "hi") == {"bel-0": False, "bel-1": True, "bel-2": True}
+    assert source.belebele_meta("stock", "hi")["model_rev"] == "c" * 40
+    assert source.belebele_meta("stock", "en") == {}
+
+
+def test_final_report_names_the_selection_it_was_built_from(monkeypatch):
+    """XB-04: final_report.json carries the winner, the frozen map and selection.json's sha256, which P08
+    checks against selection.json before it publishes anything."""
+    from lift.io import sha256_file
+
+    monkeypatch.setattr(analysis, "Source", lambda dtype=None: FakeSource())
+    metrics_dir().mkdir(parents=True, exist_ok=True)
+    path = metrics_dir() / "selection.json"
+    path.write_text(json.dumps(SELECTION, indent=1), encoding="utf-8")
+    assert cli.main(["stats"]) == 0 and cli.main(["report"]) == 0
+    doc = json.loads(tables.report_path().read_text(encoding="utf-8"))
+    sel = doc["selection"]
+    assert sel["winner"] == WINNER.format(1)
+    assert sel["frozen"] == SELECTION["frozen"]
+    assert sel["sha256"] == sha256_file(path)
+    # A selection handed in (not read from the file) has no file digest unless the file holds the same.
+    assert analysis.compute(FakeSource(), SELECTION, use_file=False)["selection"]["sha256"] == sha256_file(
+        path
+    )
+    other = {**SELECTION, "overall": {"winner": RESTA.format(1), "verdict": "repair"}}
+    assert analysis.compute(FakeSource(), other, use_file=False)["selection"]["sha256"] is None
+
+
+def test_partial_belebele_and_utility_arms_are_listed_and_their_seeds_named():
+    """XB-10: a seed not run on Belebele or utility is in not_run, and a pooled value names its seeds."""
+
+    class Partial(FakeSource):
+        def belebele(self, variant, lang):
+            if variant == WINNER.format(3) and lang == "th":
+                raise analysis.Missing("no scores")
+            return super().belebele(variant, lang)
+
+        def utility(self, variant):
+            if variant == CAST.format(3):
+                raise analysis.Missing("no verdicts")
+            return super().utility(variant)
+
+    stats = analysis.compute(Partial(), SELECTION, use_file=False)
+    assert any(x.startswith(f"Belebele {WINNER.format(3)} th") for x in stats["not_run"])
+    assert any(x.startswith(f"utility {CAST.format(3)}") for x in stats["not_run"])
+    th = next(r for r in stats["belebele"]["rows"] if r["lang"] == "th")
+    assert th["repair"] is None and th["repair_change"]["seeds"] == [1, 2]
+    doc = tables.build(stats, cost.section([("stock", "stock")], docs=[]))
+    row = next(r for r in doc["tables"]["belebele"]["rows"] if r["lang"] == "Thai")
+    assert row["repair_seeds"] == "1, 2"
+    assert (
+        next(r for r in doc["tables"]["belebele"]["rows"] if r["lang"] == "Hindi")["repair_seeds"]
+        == "1, 2, 3"
+    )
+    cast3 = next(r for r in doc["tables"]["utility"]["rows"] if r["variant"] == CAST.format(3))
+    assert cast3["win_rate"] is None and "seeds 1, 2" in cast3["gain_kept"]
+    assert any(x.startswith(f"Belebele {WINNER.format(3)} th") for x in doc["not_run"])
+
+
+def test_an_undefined_value_is_never_shown_as_not_run():
+    """XB-11 (decisions.md 73): None means not run and nothing else. The share of the gain kept is undefined
+    when the adapter shows no gain over parity: a text value with the reason, never None."""
+
+    def no_gain(variant):
+        win = 0.4 if variant.startswith("adapter") else 0.6
+        return {f"utl-aya-{i:05d}": 1.0 if i < win * 20 else 0.0 for i in range(20)}
+
+    stats = analysis.compute(FakeSource(utility=no_gain), SELECTION, use_file=False)
+    assert stats["utility"]["retained"]["wiseft"] == analysis.UNDEFINED_GAIN
+    assert stats["headline"]["utility_retained"] == analysis.UNDEFINED_GAIN
+    doc = tables.build(stats, cost.section([("stock", "stock")], docs=[]))
+    assert tables.validate(tables._json_safe(doc)) == []
+    row = next(r for r in doc["tables"]["repair_comparison"]["rows"] if r["family"] == "wiseft")
+    assert row["gain_kept"] == analysis.UNDEFINED_GAIN
+    assert tables.fmt(row["gain_kept"], "text") != tables.NOT_RUN
+    assert analysis._json_safe({"kappa": float("nan")}) == {"kappa": "undefined"}
+    assert tables._json_safe([float("inf")]) == ["undefined"]
+    # Not run is still None.
+    nothing = analysis.compute(FakeSource(["stock"]), SELECTION, use_file=False)
+    assert nothing["utility"]["retained"]["wiseft"] is None
+
+
+def test_table_titles_take_their_sizes_from_the_rows(stats):
+    """XB-14: no hard-coded 200 pairs or 700 items."""
+    doc = tables.build(stats, cost.section([("stock", "stock")], docs=[]))
+    assert "20 pairs" in doc["tables"]["utility"]["title"] and "200" not in doc["tables"]["utility"]["title"]
+    assert (
+        "20 items" in doc["tables"]["belebele"]["title"] and "700" not in doc["tables"]["belebele"]["title"]
+    )
+    assert {r["n"] for r in doc["tables"]["belebele"]["rows"]} == {20}
+
+
+def test_a_checkup_counts_only_the_selected_adapters_sweep_and_cast_fit_in_the_reported_precision():
+    """XB-12: the dev sweep of the selection's adapter in the reported dtype, plus its CAST fit; not a
+    stress sweep, another precision or another seed's fit."""
+    docs = [
+        {
+            "stage": "sweep_setting",
+            "adapter": A.format(1),
+            "dtype": "bf16",
+            "wall_seconds": 3600,
+            "devices": 1,
+        },
+        {
+            "stage": "sweep_setting",
+            "adapter": A.format(1),
+            "dtype": "bf16",
+            "wall_seconds": 1800,
+            "devices": 2,
+        },
+        {"stage": "sweep_setting", "adapter": "adapter-aya-stress-s1", "dtype": "bf16", "wall_seconds": 3600},
+        {"stage": "sweep_setting", "adapter": A.format(1), "dtype": "fp16", "wall_seconds": 3600},
+        {"stage": "fit_cast", "adapter": A.format(1), "dtype": "bf16", "wall_seconds": 720, "devices": 1},
+        {"stage": "fit_cast", "adapter": A.format(2), "dtype": "bf16", "wall_seconds": 720, "devices": 1},
+        {"stage": "final_variant", "variant": "stock", "dtype": "bf16", "gpu_hours": 0.5},
+        {"stage": "final_variant", "variant": "stock", "dtype": "fp16", "gpu_hours": 9.0},
+    ]
+    out = cost.section([("stock", "stock")], docs=docs, dtype="bf16", checkup=["stock"], adapter=A.format(1))
+    assert out["sweep_gpu_hours"] == pytest.approx(2.0)
+    assert out["fit_cast_gpu_hours"] == pytest.approx(0.2)
+    assert out["gpu_hours_per_checkup"] == pytest.approx(2.0 + 0.2 + 0.5)
+
+
+STRESS = "adapter-indicalign-stress-s{}"
+STD = "adapter-indicalign-std-s{}"
+
+
+def test_when_the_stress_recipe_carries_the_comparison_the_standard_recipe_gets_retain_with_its_interval():
+    """XB-09 (README Gate 2): Gate 2 failed, so the stress adapter carries the repair comparison and the
+    standard recipe gets retain with its interval: both verdicts, the standard seeds in the plan."""
+    from lift import final
+
+    stress_win = "wiseft-l0.50-adapter-indicalign-stress-s{}"
+    sel = {
+        "status": "decided",
+        "adapter": STRESS.format(1),
+        "standard_adapter": STD.format(1),
+        "overall": {"winner": stress_win.format(1), "verdict": "repair"},
+        "frozen": {"wiseft": stress_win.format(1)},
+    }
+    plan = final.core_plan(sel)
+    assert [p.name for p in plan if p.role == "standard"] == [STD.format(s) for s in (1, 2, 3)]
+
+    def count(variant, lang, set_name):
+        if variant.startswith("adapter-indicalign-std"):
+            return 3  # one point above stock (2 of 20): no meaningful drift
+        return harmful_count(variant, lang, set_name)
+
+    present = ["stock", STRESS.format(1), stress_win.format(1), *(STD.format(s) for s in (1, 2, 3))]
+    stats = analysis.compute(FakeSource(present, count=count), sel, use_file=False)
+    by_recipe = {v["recipe"]: v for v in stats["verdicts"]}
+    assert by_recipe["stress"]["adapter"] == STRESS.format(1) and by_recipe["stress"]["verdict"] == "repair"
+    std = by_recipe["standard"]
+    assert (std["adapter"], std["verdict"]) == (STD.format(1), "retain")
+    assert "Gate 2" in std["reason"] and "+5.0 pp" in std["reason"]
+    assert std["drift"]["est"] == pytest.approx(0.05)
+    doc = tables.build(stats, cost.section([("stock", "stock")], docs=[]))
+    assert [v["recipe"] for v in doc["verdicts"]] == ["stress", "standard"]
+    assert tables.validate(tables._json_safe(doc)) == []
+
+
+def test_the_standard_adapter_comes_from_gate_2():
+    from lift import final
+
+    sel = {"status": "decided", "adapter": STRESS.format(1)}
+    assert final.standard_adapter({"adapter": A.format(1)}) is None
+    assert final.standard_adapter(sel) is None
+    metrics_dir().mkdir(parents=True, exist_ok=True)
+    (metrics_dir() / "gate2.json").write_text(json.dumps({"gate": 2, "candidate": "indicalign"}), "utf-8")
+    assert final.standard_adapter(sel) == STD.format(1)
+
+
+def test_each_repair_against_wiseft_is_descriptive_and_outside_the_claim_families(stats):
+    """XB-07 (decisions.md 76): the README frames "each repair is compared with simply scaling the adapter
+    down" but pre-registers no test of it, so the contrast is descriptive: estimates and intervals, no
+    p-values, in neither Holm's nor BH's family."""
+    rows = {r["family"]: r for r in stats["vs_wiseft"]["rows"]}
+    assert set(rows) == {"resta", "cast"}
+    resta = rows["resta"]
+    assert resta["reference"] == WINNER.format(1)
+    assert resta["harmful_hi"]["est"] == pytest.approx(0.10)  # 5/20 vs WiSE-FT's 3/20, paired by prompt
+    assert resta["harmful_hi"]["seeds"] == [1, 2, 3]
+    assert resta["overrefusal_hard_hi"]["est"] == pytest.approx(0.0)
+    assert resta["gain_kept"]["est"] == pytest.approx(-1 / 3)  # (0.6 - 0.7) / (0.8 - 0.5)
+    for r in rows.values():
+        for key in ("harmful_hi", "overrefusal_hard_hi", "gain_kept"):
+            assert "p" not in r[key] and "p_mcnemar" not in r[key]
+    assert "not pre-registered" in stats["vs_wiseft"]["label"]
+    assert len(stats["secondary"]) == 4 and len(stats["exploratory"]) == 8
+    doc = tables.build(stats, cost.section([("stock", "stock")], docs=[]))
+    spec = doc["tables"]["repair_vs_wiseft"]
+    assert "not pre-registered, descriptive" in spec["title"]
+    assert "p" not in {c["format"] for c in spec["columns"]}
+    assert tables.validate(tables._json_safe(doc)) == []
+    assert "+10.0 pp" in tables.markdown(spec)

@@ -52,7 +52,9 @@ running exits 3, the same line collects it), and the utility pairs through ``lif
 
 ``lift final --all`` runs the 13 core variants (``core_plan``) in an order that completes the primary
 endpoint first: stock, the three adapter seeds, the overall winner on all three seeds, then the other two
-families (cost order). A variant that is not registered yet is listed as not run, with its remedy.
+families (cost order). When the stress adapter carries the repair comparison (Gate 2 failed), the standard
+adapter's three seeds follow the winner, for the standard recipe's "retain with its interval" (16 variants).
+A variant that is not registered yet is listed as not run, with its remedy.
 """
 
 from __future__ import annotations
@@ -393,9 +395,33 @@ def guard_split(variant: str, split: str) -> None:
 @dataclass(frozen=True)
 class Planned:
     name: str
-    role: str  # stock | adapter | winner | family
+    role: str  # stock | adapter | winner | standard | family
     family: str | None
     seed: int | None
+
+
+def standard_adapter(selection: Mapping[str, Any] | None) -> str | None:
+    """The seed-1 standard adapter whose recipe gets "retain with its interval" when the stress adapter
+    carries the repair comparison (README Gate 2; docs/decisions.md 78); None when the selection's adapter
+    is a standard one. Read from selection.json's ``standard_adapter`` when it names one, else from Gate 2's
+    report (outputs/metrics/gate2.json, ``candidate``: the Gate 1 pick, ``lift gate 2 --candidate NAME``);
+    None when neither says (the verdict is then listed as not run with that remedy)."""
+    adapter = str((selection or {}).get("adapter") or "")
+    if "-stress-" not in adapter:
+        return None
+    named = (selection or {}).get("standard_adapter")
+    if named:
+        return str(named)
+    path = metrics_dir() / "gate2.json"
+    try:
+        candidate = json.loads(path.read_text(encoding="utf-8")).get("candidate") if path.is_file() else None
+    except (OSError, ValueError):
+        candidate = None
+    if not candidate:
+        return None
+    from lift.gates import adapter_name
+
+    return adapter_name(str(candidate), "standard", 1)
 
 
 def core_plan(selection: Mapping[str, Any]) -> list[Planned]:
@@ -417,11 +443,14 @@ def core_plan(selection: Mapping[str, Any]) -> list[Planned]:
     plan = [Planned("stock", "stock", None, None)]
     plan += [Planned(seed_name(adapter, s), "adapter", None, s) for s in SEEDS]
     order = [win_setting.family] + [f for f in rs.FAMILIES if f != win_setting.family and f in frozen]
+    standard = standard_adapter(selection)
     for family in order:
         name = winner if family == win_setting.family else frozen[family]
         setting, base = rs.parse_name(str(name))
         role = "winner" if family == win_setting.family else "family"
         plan += [Planned(setting.name(seed_name(base, s)), role, family, s) for s in SEEDS]
+        if role == "winner" and standard:
+            plan += [Planned(seed_name(standard, s), "standard", None, s) for s in SEEDS]
     return plan
 
 
