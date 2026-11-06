@@ -890,6 +890,7 @@ def test_judge_over_generations_short_of_their_split_refuses_the_record_and_exit
     from fakes import make_prompt
 
     from lift import audit
+    from lift import config as lift_config
     from lift.cachekey import intervention_digest
     from lift.judge import pipeline
     from lift.models.generate import HARNESS_VERSION, generations_path
@@ -902,7 +903,8 @@ def test_judge_over_generations_short_of_their_split_refuses_the_record_and_exit
     meta = {"dtype": "bf16", "run_config": "rc0", "model_rev": "b" * 40, "harness": HARNESS_VERSION,
             "template": "9" * 16, "decoding": "d" * 16, "torch": "2.15.0", "transformers": "5.22.1",
             "gpu": "NVIDIA A100-SXM4-40GB", "gpu_capability": "8.0",
-            "intervention": intervention_digest(get_spec("stock"))}
+            "intervention": intervention_digest(get_spec("stock")),
+            "max_new_tokens": lift_config.load("project")["generation"]["max_new_tokens"]}
     for lang, made in (("en", pids), ("hi", pids[:1])):       # hi: its generate line stopped after one prompt
         fake_prompt_files[("harmful", lang)] = [make_prompt(p, lang, "harmful", "final", text=f"q {p}")
                                                 for p in pids]
