@@ -161,7 +161,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     q = cmds.add_parser(
         "model", help="the repaired model, the repair parameters and the gated adapters", epilog=_EPILOG
     )
-    q.add_argument("--variant", default=None, help="the overall winner in selection.json, seed 1 (the default); any other variant is refused")
+    q.add_argument("--variant", default=None,
+                   help="the overall winner in selection.json, seed 1 (the default); "
+                        "any other variant is refused")
     q.add_argument(
         "--build",
         action="store_true",
