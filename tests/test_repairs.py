@@ -4,6 +4,7 @@ CAST's fit, gate and artifacts, and the variants' cache keys."""
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 
 import pytest
@@ -319,7 +320,8 @@ def cast_registry(monkeypatch, tiny_lora_adapter, digest_cast, extra=()):
     return doc
 
 
-def test_cast_variant_through_the_harness(fitted, tiny_lora_adapter, tiny_model_dir, tmp_path, monkeypatch):
+def test_cast_variant_through_the_harness(fitted, tiny_lora_adapter, tiny_model_dir, tmp_path, monkeypatch,
+                                         caplog):
     model, tok, _ = fitted
     install(tiny_lora_adapter)
     digest = merge.adapter_hash(tiny_lora_adapter)
@@ -330,8 +332,11 @@ def test_cast_variant_through_the_harness(fitted, tiny_lora_adapter, tiny_model_
     cast_registry(monkeypatch, tiny_lora_adapter, None)
     s_gated, s_always = rs.specs_for(ADAPTER, [rs.Setting("cast", 1.0), rs.Setting("cast_always", 1.0)])
     assert s_gated.artifacts == {"adapter": digest, "cast": cast.artifact_hash(path)}
-    v = variants.build_variant(s_gated, device="cpu", dtype="fp32", model_id=str(tiny_model_dir))
+    with caplog.at_level(logging.WARNING, logger="lift.repair"):
+        v = variants.build_variant(s_gated, device="cpu", dtype="fp32", model_id=str(tiny_model_dir))
+    assert "fitted in" not in caplog.text                     # fitted in the run's precision: no warning
     assert v.base is not None and v.score_logits is not None and v.hf_model is v.base
+    assert cast.load(path)[2]["dtype"] == "fp32"
     out = tmp_path / "g.jsonl"
     prompts = [make_prompt(f"p-{i}", text=t) for i, t in enumerate(TEXTS[:4])]
     gen.generate(v, prompts, out_path=out, max_new_tokens=4, batch_size=2)
@@ -345,6 +350,14 @@ def test_cast_variant_through_the_harness(fitted, tiny_lora_adapter, tiny_model_
     va = variants.build_variant(s_always, device="cpu", dtype="fp32", model_id=str(tiny_model_dir))
     gen.generate(va, prompts, out_path=tmp_path / "a.jsonl", max_new_tokens=4, batch_size=2)
     assert all(r.meta["gate_always_on"] for r in gen.read_generations(tmp_path / "a.jsonl"))
+    assert all(r.meta["intervention"] == intervention_digest(s_always)
+               for r in gen.read_generations(tmp_path / "a.jsonl"))
+    # An artifact fitted in another precision than the run's builds, with a warning naming both: its cells
+    # are keyed by the run's dtype and the artifact's hash, and paired only within one dtype.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="lift.repair"):
+        variants.build_variant(s_gated, device="cpu", dtype="bf16", model_id=str(tiny_model_dir))
+    assert "fitted in fp32" in caplog.text and "bf16" in caplog.text and "--refit" in caplog.text
     # A changed artifact is refused: its hash is pinned.
     path.write_bytes(path.read_bytes() + b" ")
     with pytest.raises(ValueError, match="does not match"):

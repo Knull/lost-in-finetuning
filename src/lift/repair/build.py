@@ -13,18 +13,24 @@ the run's dtype and freed once applied: on one T4 (16 GB) only the repaired mode
 - resta: params {"alpha", "dare", "base", "base_revision"}; Base loaded at exactly the revision the entry
   names (a local directory's content hash in tests), ``lift.repair.resta.make``.
 - cast / cast_always: params {"strength", ...}, artifacts {"adapter", "cast"}; the artifact must hash to
-  the pinned value and have been fitted on this adapter hash and Global revision. A wrapper variant:
-  ``LoadedVariant.model`` is the wrapper (``generate``), ``base`` the merged model, ``batch_meta`` the
-  gate's per-row record and ``score_logits`` the gated scorer lift.models.loglik calls.
+  the pinned value and have been fitted on this adapter hash and Global revision. An artifact fitted in
+  another precision than the run's is used with a warning, not refused: the run's outputs are keyed by
+  its dtype and the artifact's hash (whose metadata names the fit's dtype) and pair only within one dtype
+  (``paired_labels``), as an adapter trained in bf16 is evaluated in fp16 under Gate 0's licence. A
+  wrapper variant: ``LoadedVariant.model`` is the wrapper (``generate``), ``base`` the merged model,
+  ``batch_meta`` the gate's per-row record and ``score_logits`` the gated scorer lift.models.loglik calls.
 """
 
 from __future__ import annotations
 
 import gc
+import logging
 from typing import Any
 
 from lift.models.variants import BuildContext, LoadedVariant, builder, checked_adapter
 from lift.schemas import VariantSpec
+
+log = logging.getLogger(__name__)
 
 
 def _param(spec: VariantSpec, key: str) -> float:
@@ -122,6 +128,14 @@ def _build_cast(spec: VariantSpec, ctx: BuildContext, *, gate: bool) -> LoadedVa
              if info.get(k) != v}
     if wrong:
         raise ValueError(f"{spec.name}: {path} was fitted on another model ({wrong}, artifact vs now)")
+    fitted = info.get("dtype")
+    if fitted != ctx.dtype:
+        log.warning("%s: its CAST artifact was fitted in %s and this run is %s, so the gate's threshold and "
+                    "the steering vectors come from %s activations. Its outputs are keyed by this run's "
+                    "precision and the artifact's hash, and pair only with %s cells. To fit in %s "
+                    "instead: `lift fit-cast --adapter %s --dtype %s --refit`, then `lift register-repairs "
+                    "--adapter %s --replace` (every output made on the old artifact goes stale)", spec.name,
+                    fitted, ctx.dtype, fitted, ctx.dtype, ctx.dtype, spec.adapter, ctx.dtype, spec.adapter)
     held = {"layer": info["condition_layer"], "threshold": info["threshold"],
             "comparator": info["comparator"]}
     for key in held:
