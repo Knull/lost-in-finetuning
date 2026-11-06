@@ -47,7 +47,8 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -128,10 +129,11 @@ def fit(model: Any, tokenizer: Any, harmful: list[str], benign: list[str], *, ou
     _check_runtime()
     pool = config.get("cast.fit.pool", name="repairs")
     layers = behavior_layers(_num_layers(model))
-    condition = fit_cast_condition(model, list(harmful), list(benign), tokenizer, pool=pool,
-                                   device=str(device))
-    vectors = extract_caa_vectors(model, tokenizer, list(harmful), list(benign),
-                                  CAAConfig(target_layers=layers))
+    with _hidden_states_only(model):
+        condition = fit_cast_condition(model, list(harmful), list(benign), tokenizer, pool=pool,
+                                       device=str(device))
+        vectors = extract_caa_vectors(model, tokenizer, list(harmful), list(benign),
+                                      CAAConfig(target_layers=layers))
     if sorted(int(k) for k in vectors) != layers:
         raise RuntimeError(f"extract_caa_vectors returned layers {sorted(vectors)}, not {layers}")
     info = {
@@ -141,6 +143,26 @@ def fit(model: Any, tokenizer: Any, harmful: list[str], benign: list[str], *, ou
         "n_harmful": len(harmful), "n_benign": len(benign), **dict(meta or {}),
     }
     return save(Path(out_dir) / ARTIFACT, condition.condition_vector, vectors, info)
+
+
+@contextmanager
+def _hidden_states_only(model: Any) -> Iterator[None]:
+    """Inside the block the model computes only the last position's logits (``logits_to_keep=1``). SafeTune's
+    fit reads decoder-layer hidden states through hooks and never the logits, which on Tiny Aya's 262k
+    vocabulary cost gigabytes per padded batch of 16 (extract_caa_vectors' batches): the hidden states, and
+    so the artifact, are the same."""
+    import functools
+
+    own = "forward" in vars(model)
+    previous = vars(model).get("forward")
+    model.forward = functools.partial(model.forward, logits_to_keep=1)
+    try:
+        yield
+    finally:
+        if own:
+            model.forward = previous
+        else:
+            del model.forward
 
 
 def save(path: Path, condition_vector: Any, vectors: Mapping[int, Any], info: Mapping[str, Any]) -> Path:
