@@ -16,7 +16,8 @@ A text is public only when all of these hold (otherwise it is withheld and count
   judged (``texts_stale``);
 - the generation stopped at EOS (``hit_cap`` false; a capped text may refuse, then comply);
 - its language is not exploratory for the harmful and red-team sets (the judge's precision there has no
-  human check), and not a back-translation language at all (below);
+  human check), and in a back-translation language (ar, th) its back-translation verdict clears it
+  (below);
 - it holds no 60-character window of an output labelled harmful (``lift.publish.preflight``).
 
 Nothing is staged unless the inputs are complete (``PublishError`` names the remedy): the human labels
@@ -27,10 +28,17 @@ validated key) on the current outputs, and no Message Batch is still open. ``che
 every staged row (harmful anywhere, or not the output its judgement covered, stops the publish) and the
 whole staged folder is scanned like a public upload (``preflight.scan_folder``).
 
-Back-translation (P08-R1-12): P07 judges NLLB back-translations of ar and th outputs, and where those
-verdicts live is not agreed yet. Verdicts stored under outputs/judgements/{dir}/{variant}/ with the
-generation key are already read as harmful labels; until the contract is fixed, every ar and th text is
-withheld (``texts_backtranslation``).
+Back-translation (P08-R1-12, P07's contract): P07 judges NLLB back-translations of a sample of ar and th
+final outputs and writes one row per output to
+``outputs/sensitivity/backtranslation/{variant}/{set}_{lang}_final.jsonl`` (``lift.final.bt_path``), with
+the generation ``key``, the ``output_sha`` of the native output and ``judge_label``, the verdict on the
+back-translation (None with ``skipped`` when the output was blank or the translation failed). A native
+ar or th text is public only when it passes every other check AND a verdict exists for the output now
+under its key (same ``output_sha``) and every such verdict is ``refusal`` or ``benign``. No verdict, a
+verdict on another output, a skipped or failed one, or ``unclear`` withholds it
+(``texts_backtranslation``: fail closed, so ar/th texts outside P07's sample are never public). A
+``harmful`` back-translation verdict, on any output of the key, counts as a harmful label like any
+judge's (the key, its text and the preflight windows).
 
 Raw completions (gated, manual approval). Every generations, judgements and utility-verdict file, and
 the full AuditKIT records, as they are in ``outputs/``. Human labels (with annotator ids) stay private.
@@ -221,13 +229,44 @@ def human_labels() -> dict[str, list[str]]:
     return dict(out)
 
 
+BT_CLEAR = {"refusal", "benign"}  # back-translation verdicts that clear a native ar/th text
+
+
+def backtranslation_dir() -> Path:
+    """P07's back-translation verdicts (origin/p07-final-report ``lift.final.bt_path``)."""
+    return paths.output_dir() / "sensitivity" / "backtranslation"
+
+
+def backtranslation_verdicts() -> dict[str, list[dict]]:
+    """{generation key: every back-translation row of it} over outputs/sensitivity/backtranslation/."""
+    out: dict[str, list[dict]] = defaultdict(list)
+    for _, _, f in _cells(backtranslation_dir()):
+        for r in read_jsonl(f):
+            if r.get("key"):
+                out[r["key"]].append(r)
+    return dict(out)
+
+
+def backtranslation_clear(rows: list[dict], output_sha: str | None) -> bool:
+    """Whether the back-translation verdicts of one key clear its output ``output_sha``: at least one
+    verdict of that very output, and every one of them refusal or benign (not skipped, not failed)."""
+    mine = [r for r in rows if output_sha and r.get("output_sha") == output_sha]
+    return bool(mine) and all(
+        r.get("judge_label") in BT_CLEAR and not r.get("skipped") and not r.get("judge_failure") for r in mine
+    )
+
+
 def harmful_outputs(humans: dict[str, list[str]] | None = None) -> tuple[set[str], set[str], set[str]]:
-    """(every generation key any judge, in any judgements directory, or any human labelled harmful; the
-    output texts of those generations now here; the keys among them with no generation here)."""
+    """(every generation key any judge, in any judgements directory, any back-translation verdict or any
+    human labelled harmful; the output texts of those generations now here; the keys among them with no
+    generation here)."""
     humans = human_labels() if humans is None else humans
     keys = {k for k, labels in humans.items() if "harmful" in labels}
     for f in judgement_files():
         keys.update(r["key"] for r in read_jsonl(f) if _is_harmful(r))
+    for key, rows in backtranslation_verdicts().items():
+        if any(r.get("judge_label") == "harmful" for r in rows):
+            keys.add(key)
     texts, found = set(), set()
     for _, _, f in _cells(paths.generations_dir()):
         for r in read_jsonl(f):
@@ -299,7 +338,9 @@ def _current_shas() -> dict[str, str]:
     }
 
 
-def _withheld_reason(rec: dict, gen: dict, *, harmful_keys: set[str], windows: set[str]) -> str | None:
+def _withheld_reason(
+    rec: dict, gen: dict, *, harmful_keys: set[str], windows: set[str], bt: dict[str, list[dict]]
+) -> str | None:
     """Why this judgement's output may not be public (a ``texts_*`` count), None when it may."""
     out = gen.get("output") or ""
     if rec.get("label") != "refusal" or rec["key"] in harmful_keys:
@@ -310,13 +351,15 @@ def _withheld_reason(rec: dict, gen: dict, *, harmful_keys: set[str], windows: s
         return "texts_cap_hit"  # stopped at the cap (or not recorded): may refuse, then comply
     if rec.get("lang") in config.get("languages.exploratory") and rec.get("set") in EXPLORATORY_WITHHELD_SETS:
         return "texts_exploratory"
-    if rec.get("lang") in (config.get("back_translation.langs") or []):
-        # TODO(P08-R1-12): read P07's back-translation verdicts once their path and key are agreed, and
-        # publish a text only when none of them is harmful. Until then no ar/th text is public.
-        return "texts_backtranslation"
+    if rec.get("lang") in _bt_langs() and not backtranslation_clear(bt.get(rec["key"], []), sha256_text(out)):
+        return "texts_backtranslation"  # no clean verdict on this very output: fail closed
     if preflight.has_window(out, windows):
         return "texts_overlap"  # shares a 60-character run with an output labelled harmful
     return None
+
+
+def _bt_langs() -> set[str]:
+    return {str(x) for x in config.get("back_translation.langs") or []}
 
 
 def log_rows(*, humans: dict[str, list[str]] | None = None) -> tuple[list[dict], dict[str, int]]:
@@ -328,6 +371,7 @@ def log_rows(*, humans: dict[str, list[str]] | None = None) -> tuple[list[dict],
     humans = human_labels() if humans is None else humans
     harmful_keys, harmful_texts = harmful_record(humans)
     windows = preflight.windows_of(harmful_texts)
+    bt = backtranslation_verdicts()
     primary, second = role_dir("primary"), role_dir("second")
     problems: list[str] = []
     current = _current_shas()
@@ -368,7 +412,7 @@ def log_rows(*, humans: dict[str, list[str]] | None = None) -> tuple[list[dict],
                 gen = {}
             text = None
             if (gen.get("output") or "").strip():
-                reason = _withheld_reason(rec, gen, harmful_keys=harmful_keys, windows=windows)
+                reason = _withheld_reason(rec, gen, harmful_keys=harmful_keys, windows=windows, bt=bt)
                 if reason is None:
                     text = gen["output"]
                     counts["refusal_texts"] += 1
@@ -438,11 +482,13 @@ def check_public(
     *,
     judged: dict[str, str | None] | None = None,
     current: dict[str, str] | None = None,
+    backtranslated: dict[str, list[dict]] | None = None,
 ) -> int:
     """Re-read every staged JSONL row: no text may come from (or equal) a generation labelled harmful by
-    a judge or a human, only refusals carry text, and a text must be the output now under its key and the
+    a judge or a human, only refusals carry text, a text must be the output now under its key and the
     output its primary judgement covered (``judged``: {key: output_sha}; ``current``: {key: sha256 of the
-    output}; both read from outputs/ when None). Returns the number of texts checked."""
+    output}), and an ar/th text must be cleared by its back-translation verdicts (``backtranslated``: {key:
+    rows}); all read from outputs/ when None. Returns the number of texts checked."""
     if judged is None:
         judged = {
             r["key"]: r.get("output_sha")
@@ -450,6 +496,8 @@ def check_public(
             for r in read_jsonl(f)
         }
     current = _current_shas() if current is None else current
+    backtranslated = backtranslation_verdicts() if backtranslated is None else backtranslated
+    bt_langs = _bt_langs()
     checked = 0
     for f in sorted(folder.rglob("*.jsonl")):
         for i, row in enumerate(read_jsonl(f), 1):
@@ -476,6 +524,13 @@ def check_public(
                 raise PublishError(
                     f"{shown(f)} line {i}: a public text is not the output its primary judgement covered "
                     f"(key {str(key)[:12]}): nothing was published"
+                )
+            if (row.get("lang") is None or row.get("lang") in bt_langs) and not backtranslation_clear(
+                backtranslated.get(key, []), sha
+            ):
+                raise PublishError(
+                    f"{shown(f)} line {i}: an {row.get('lang') or 'unknown-language'} text without a clean "
+                    f"back-translation verdict of this output (key {str(key)[:12]}): nothing was published"
                 )
     return checked
 

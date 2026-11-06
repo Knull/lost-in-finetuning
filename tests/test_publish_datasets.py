@@ -342,8 +342,92 @@ def test_risky_refusal_texts_are_withheld(outputs):
     texts = {r["key"]: r["refusal_text"] for r in rows}
     assert all(texts[K(n)] is None for n in cases)
     assert counts["texts_cap_hit"] == 2 and counts["texts_exploratory"] == 1
-    assert counts["texts_backtranslation"] == 1 and counts["texts_overlap"] == 1
+    assert counts["texts_backtranslation"] == 1 and counts["texts_overlap"] == 1  # th: no verdict
     assert counts["refusal_texts"] == 1  # k1 only
+
+
+# ------------------------------------------------- P08-R1-12: ar/th texts need a clean back-translation
+
+
+def _bt_path(set_name, lang, variant=VARIANT):
+    """P07's back-translation verdicts (origin/p07-final-report lift.final.bt_path)."""
+    return paths.output_dir() / "sensitivity" / "backtranslation" / variant / f"{set_name}_{lang}_final.jsonl"
+
+
+def _bt_row(name, output, label, *, skipped=None, lang="th", set_name="easy_benign"):
+    """One row as P07's lift.final._bt_row writes it."""
+    return {
+        "key": K(name),
+        "variant": VARIANT,
+        "pid": f"prh-test-{name}",
+        "lang": lang,
+        "set": set_name,
+        "split": "final",
+        "output_sha": sha256_text(output),
+        "bt_sha": None if skipped else sha256_text("back-translated " + name),
+        "judge": None if skipped else "q@x#bf16#strict",
+        "judge_label": label,
+        "judge_failure": None,
+        "skipped": skipped,
+    }
+
+
+def test_backtranslation_verdicts_decide_ar_th_texts(outputs):
+    refusal = "I am not able to help with that request."
+    cell = "easy_benign_th_final"
+    names = ["bt-ok", "bt-none", "bt-stale", "bt-harmful", "bt-failed", "bt-unclear"]
+    outs = {n: f"{refusal} ({n})" for n in names}
+    write_jsonl(_gen_path(cell), [_generation(n, outs[n]) for n in names])
+    write_jsonl(
+        _primary_path(cell),
+        [
+            {
+                **_judgement(n, "refusal", "Safe", "q", lang="th", set_name="easy_benign", output=outs[n]),
+                "split": "final",
+            }
+            for n in names
+        ],
+    )
+    write_jsonl(
+        _bt_path("easy_benign", "th"),
+        [
+            _bt_row("bt-ok", outs["bt-ok"], "refusal"),
+            _bt_row("bt-stale", "an older output of bt-stale", "refusal"),
+            _bt_row("bt-harmful", outs["bt-harmful"], "harmful"),
+            _bt_row("bt-failed", outs["bt-failed"], None, skipped="back-translation failed"),
+            _bt_row("bt-unclear", outs["bt-unclear"], "unclear"),
+        ],
+    )
+    rows, counts = datasets.log_rows()
+    by_key = {r["key"]: r["refusal_text"] for r in rows}
+    texts = {n: by_key[K(n)] for n in names}
+    assert texts["bt-ok"] == outs["bt-ok"]
+    assert all(texts[n] is None for n in names if n != "bt-ok")
+    assert counts["texts_backtranslation"] == 4  # none, stale, failed, unclear
+    # a harmful back-translation verdict is a harmful label like any other judge's
+    keys, _texts_ = datasets.harmful_record()
+    assert K("bt-harmful") in keys and K("bt-ok") not in keys
+
+
+def test_check_public_requires_the_backtranslation_verdict(tmp_path, outputs):
+    out = "I am not able to help with that request."
+    row = {
+        "key": K("th1"),
+        "label": "refusal",
+        "lang": "th",
+        "set": "easy_benign",
+        "output_sha": sha256_text(out),
+        "refusal_text": out,
+    }
+    write_jsonl(tmp_path / "labels" / "x.jsonl", [row])
+    judged, current = {K("th1"): sha256_text(out)}, {K("th1"): sha256_text(out)}
+    with pytest.raises(PublishError, match="back-translation"):
+        datasets.check_public(tmp_path, set(), set(), judged=judged, current=current, backtranslated={})
+    clean = {K("th1"): [{"output_sha": sha256_text(out), "judge_label": "refusal", "skipped": None}]}
+    assert (
+        datasets.check_public(tmp_path, set(), set(), judged=judged, current=current, backtranslated=clean)
+        == 1
+    )
 
 
 # --------------------------------------------------------------------- P08-R1-24 verdict reason sources
