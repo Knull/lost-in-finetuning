@@ -9,15 +9,29 @@ sample is small, and it never touches the final split. Its verdict covers safety
 (utility and Belebele are separate checks), and it says so. A prompt one variant has no label for stops
 the summary (rule 3) unless the caller allows it, and then it is counted and shown.
 
+A fresh clone has no prompts (data/ is gitignored): ``check_ready``, which ``run_check`` calls first, stops
+before any GPU work and says how to get them, and also checks the installed extras and what the primary
+judge needs (a frontier judge: its API key and a spend cap). It makes no data public.
+
+The run time is measured, never assumed: ``start_clock`` and ``record_runtime`` time a run of the notebook
+into outputs/metrics/acceptance_runtime.json, and ``runtime_text`` renders it (or "not yet timed") for the
+article and the notebook.
+
 ``stamp_notebook`` writes the notebook's links (the GitHub repo, the repair-parameters repo, the frozen
-winner) from configs/publish.yaml and selection.json; ``lift publish article`` runs it.
+winner) from configs/publish.yaml and selection.json, and its measured run time line from the runtime
+file; ``lift publish article`` runs it.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import math
+import os
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -159,6 +173,77 @@ def _names(text: str) -> list[str]:
     return out
 
 
+# What run-dev imports, and the extra that installs it (pyproject.toml).
+NEEDED = {"torch": "gpu", "transformers": "gpu", "fasttext": "data"}
+INSTALL = 'pip install -e ".[gpu,data,eval]" -c constraints.txt'
+
+
+def _installed(module: str) -> bool:
+    return importlib.util.find_spec(module) is not None
+
+
+def _how_to_get_prompts(sets: Sequence[str], langs: Sequence[str]) -> str:
+    return (
+        "data/ is gitignored, so a fresh clone has no prompts. Team members: set LIFT_RUNS_REPO and log "
+        "in with your HF token, then run `!lift sync pull`. Everyone else: our translated prompt sets are "
+        "in the prompt-set dataset of the article's data collection (log in with your HF token), and "
+        f"`!lift data build --only {' '.join(sets)} --langs {' '.join(langs)}` rebuilds these files from "
+        "the source datasets with that HF token (the Hindi translations also need GOOGLE_TRANSLATE_API_KEY). "
+        "Then run this cell again."
+    )
+
+
+def check_ready(
+    langs: Sequence[str] = ("hi", "en"), *, sets: Sequence[str] = SETS, limit: int | None = None
+) -> dict[str, int]:
+    """Stop before any GPU work when ``run_check`` could not finish: dev prompts missing from data/prompts/
+    (with how to get them), a missing extra, or a frontier primary judge without its API key or
+    LIFT_JUDGE_MAX_USD. Returns how many prompts each variant will be asked (``limit`` per cell)."""
+    from lift.data import build
+
+    missing, empty, n = [], [], 0
+    for set_name in sets:
+        for lang in langs:
+            try:
+                rows = build.load_prompts(set_name, lang, "dev")
+            except FileNotFoundError:
+                missing.append(f"{set_name}_{lang}")
+                continue
+            if not rows:
+                empty.append(f"{set_name}_{lang}")
+            n += len(rows) if limit is None else min(limit, len(rows))
+    problems = []
+    if missing:
+        problems.append(
+            f"no prompt files for {', '.join(missing)} in data/prompts/. " + _how_to_get_prompts(sets, langs)
+        )
+    if empty:
+        problems.append(f"no dev prompts in data/prompts/ for {', '.join(empty)}: rebuild or pull them")
+    absent = [m for m in NEEDED if not _installed(m)]
+    if absent:
+        problems.append(
+            f"{', '.join(absent)} not installed (the {', '.join(sorted({NEEDED[m] for m in absent}))} "
+            f"extra): `!{INSTALL}`, then restart the runtime"
+        )
+    entry = config.get("judges.safety_primary")
+    if isinstance(entry, Mapping) and "provider" in entry:
+        from lift.judge.frontier import API_KEY_ENV, SPEND_CAP_ENV
+
+        unset = [
+            v
+            for v in (API_KEY_ENV.get(str(entry["provider"]), "an API key"), SPEND_CAP_ENV)
+            if not os.environ.get(v, "").strip()
+        ]
+        if unset:
+            problems.append(
+                f"the primary safety judge is {entry['provider']}/{entry.get('model')}: set "
+                f"{' and '.join(unset)} (Colab secrets, read into os.environ; never paste a key into a cell)"
+            )
+    if problems:
+        raise PublishError("not ready to run the check: " + " | ".join(problems))
+    return {"prompts": n}
+
+
 def run_check(
     variants: Sequence[str],
     *,
@@ -167,7 +252,9 @@ def run_check(
     sets: Sequence[str] = SETS,
     main: Callable[[list[str]], int] | None = None,
 ) -> dict[str, int]:
-    """``lift run-dev`` on the first ``limit`` dev prompts per set and language for each variant."""
+    """``lift run-dev`` on the first ``limit`` dev prompts per set and language for each variant, after
+    ``check_ready`` (which stops a fresh clone before any GPU work)."""
+    check_ready(langs, sets=sets, limit=limit)
     if main is None:
         from lift.cli import main
     codes = {}
@@ -310,6 +397,75 @@ def markdown(summary: Mapping[str, Any]) -> str:
     )
 
 
+# ------------------------------------------------------------------------------------------- run time
+
+RUNTIME_MARK = "**Measured run time** (from the check in step 2 to the last verdict):"
+NOT_TIMED = "not yet timed"
+_STARTED: float | None = None
+
+
+def runtime_path() -> Path:
+    return paths.metrics_dir() / "acceptance_runtime.json"
+
+
+def start_clock() -> None:
+    """Start timing the notebook (after the install and the login)."""
+    global _STARTED
+    _STARTED = time.monotonic()
+
+
+def _gpu_name() -> str:
+    try:
+        import torch
+
+        return str(torch.cuda.get_device_name(0)) if torch.cuda.is_available() else "no GPU"
+    except Exception:  # no torch, or no device: say so rather than guess
+        return "an unknown device"
+
+
+def record_runtime(
+    *, limit: int, langs: Sequence[str], variants: int, gpu: str | None = None, path: Path | None = None
+) -> dict[str, Any]:
+    """Write the measured run time since ``start_clock`` to outputs/metrics/acceptance_runtime.json (minutes
+    rounded up). ``lift sync push`` takes it to the runs repo; ``lift publish article`` renders it."""
+    if _STARTED is None:
+        raise PublishError("the clock was not started: run acceptance.start_clock() before the check")
+    seconds = time.monotonic() - _STARTED
+    doc = {
+        "version": 1,
+        "seconds": round(seconds, 1),
+        "minutes": math.ceil(seconds / 60),
+        "gpu": gpu or _gpu_name(),
+        "limit": int(limit),
+        "langs": list(langs),
+        "variants": int(variants),
+        "created": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+    path = Path(path) if path is not None else runtime_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8", newline="\n")
+    return doc
+
+
+def runtime_text(facts: Any) -> str:
+    """The measured run time with its setting, each value recorded in ``facts``; "not yet timed" when no run
+    was timed (never an assumed budget)."""
+    path = runtime_path()
+    if facts.raw(path, "/minutes") is None:
+        return NOT_TIMED
+
+    def value(pointer: str, kind: str) -> str:
+        return facts.value(
+            path, pointer, kind, what=f"the notebook's run time {pointer}", stage="the notebook"
+        )
+
+    return (
+        f"{value('/minutes', 'int')} minutes on {value('/gpu', 'text')} "
+        f"({value('/variants', 'int')} variants, the first {value('/limit', 'int')} dev prompts per set and "
+        f"language, languages {value('/langs', 'list')})"
+    )
+
+
 STAMPED = ("REPO_URL", "PARAMS_REPO", "WINNER")
 
 
@@ -321,6 +477,7 @@ def stamp_notebook(path: str | Path | None = None) -> dict[str, str]:
     """Write the notebook's links from the settings, not by hand: REPO_URL (configs/publish.yaml
     github_repo, else the origin remote), PARAMS_REPO (the repair-parameters repo) and WINNER (the
     overall frozen winner, once selection.json is decided). A value not known yet is left as it is.
+    The measured run time line is written from the runtime file ("not yet timed" without one).
     Returns what was written."""
     from lift.publish import settings
     from lift.publish.inputs import Facts, frozen_winner
@@ -336,7 +493,13 @@ def stamp_notebook(path: str | Path | None = None) -> dict[str, str]:
     text = path.read_text(encoding="utf-8")
     nb = json.loads(text)
     pattern = re.compile(r"^(?P<name>" + "|".join(STAMPED) + r') = "[^"\n]*"(?P<rest>.*)$', re.DOTALL)
+    runtime = f"{RUNTIME_MARK} {runtime_text(Facts())}."
     for cell in nb["cells"]:
+        if cell["cell_type"] == "markdown":
+            for i, line in enumerate(cell["source"]):
+                if line.startswith(RUNTIME_MARK):
+                    cell["source"][i] = runtime + ("\n" if line.endswith("\n") else "")
+            continue
         if cell["cell_type"] != "code":
             continue
         for i, line in enumerate(cell["source"]):
