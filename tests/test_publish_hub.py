@@ -1,13 +1,17 @@
-"""Upload plans: nothing is sent without --yes, gating is set before any file goes up, and --yes refuses
-placeholders, a missing namespace or an unbuilt artifact. huggingface_hub is never reached."""
+"""Upload plans: nothing is sent without --yes, gating is set before any file goes up, each upload mirrors
+its staged folder, and --yes refuses placeholders on a public repo (a private draft instead), a missing
+namespace, an unbuilt artifact, a machine without harmful outputs to scan against, and any public file
+that fails the public-text scan. huggingface_hub is never reached."""
 
 from __future__ import annotations
+
+import json
 
 import pytest
 from publish_fakes import FakeApi, write_inputs
 
 from lift import cli, paths
-from lift.io import write_jsonl
+from lift.io import sha256_text, write_jsonl
 from lift.publish import PublishError, collect, hub, render, settings
 from lift.publish.hub import Upload
 
@@ -26,6 +30,32 @@ def no_hub(monkeypatch):
         raise AssertionError("an HfApi was built")
 
     monkeypatch.setattr(hub, "default_api", refuse)
+
+
+# A made-up "harmful completion", assembled at run time.
+HARMFUL = " ".join(f"hubfake{i:02d}" for i in range(30))
+
+
+@pytest.fixture
+def outputs():
+    """One output the primary judge labelled harmful, and validation round 1: the scan has windows."""
+    from lift.publish.datasets import role_dir
+
+    key, variant = sha256_text(HARMFUL), "adapter-aya-std-s1"
+    write_jsonl(
+        paths.generations_dir() / variant / "harmful_hi_dev.jsonl",
+        [{"key": key, "variant": variant, "pid": "p1", "output": HARMFUL, "hit_cap": False}],
+    )
+    write_jsonl(
+        paths.judgements_dir() / role_dir("primary") / variant / "harmful_hi_dev.jsonl",
+        [{"key": key, "pid": "p1", "label": "harmful", "judge_label": "harmful", "output_sha": key}],
+    )
+    keys = paths.validation_dir() / "keys"
+    keys.mkdir(parents=True)
+    (keys / "round1.json").write_text(json.dumps({"r1hi-a": {"key": key, "sheet": "round1_hi"}}))
+    write_jsonl(
+        paths.validation_dir() / "labels" / "round1_hi.jsonl", [{"item_id": "r1hi-a", "label": "harmful"}]
+    )
 
 
 def _staged(name: str, text: str = "# card\n", gated: str | None = None) -> Upload:
@@ -55,15 +85,28 @@ def test_gated_repo_is_gated_before_upload_and_public_after(namespace):
     assert public[2] == {"repo_type": "dataset", "private": False}
 
 
-def test_public_repo_is_created_public_and_uploaded(namespace):
+def test_public_repo_is_created_public_and_uploaded(namespace, outputs):
     api = FakeApi()
     hub.execute([_staged("logs")], message="m", api_factory=lambda: api, log=lambda _: None)
-    assert api.names() == ["create_repo", "upload_folder"]
-    assert api.calls[0][2]["private"] is False
+    assert api.names() == ["create_repo", "upload_folder", "update_repo_settings"]
+    assert api.calls[0][2]["private"] is False and api.calls[2][2] == {
+        "repo_type": "dataset",
+        "private": False,
+    }
+
+
+@pytest.mark.parametrize("gated", [None, "manual"])
+def test_every_upload_mirrors_its_staged_folder(namespace, outputs, gated):
+    """P08-R1-17: a file withdrawn from the staging folder is deleted at HEAD too."""
+    api = FakeApi()
+    text = "---\nextra_gated_prompt: terms\n---\n" if gated else "# card\n"
+    hub.execute([_staged("x", text, gated=gated)], message="m", api_factory=lambda: api, log=lambda _: None)
+    upload = [c for c in api.calls if c[0] == "upload_folder"]
+    assert upload[0][2]["delete_patterns"] == "*"
 
 
 @pytest.mark.parametrize("problem", ["namespace", "pending", "gate", "expected"])
-def test_check_ready_refuses(problem, monkeypatch):
+def test_check_ready_refuses(problem, monkeypatch, outputs):
     if problem != "namespace":
         monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
     text = "[PENDING: x from y (z)]" if problem == "pending" else "# ok"
@@ -74,9 +117,59 @@ def test_check_ready_refuses(problem, monkeypatch):
     with pytest.raises(PublishError, match="not uploading"):
         hub.execute([up], message="m", api_factory=lambda: api)
     assert api.calls == []
-    if problem == "pending":
-        hub.execute([up], message="m", api_factory=lambda: api, allow_pending=True, log=lambda _: None)
-        assert "upload_folder" in api.names()
+
+
+def test_allow_pending_uploads_a_private_draft(namespace, outputs):
+    """P08-R1-20: placeholders never go public, not even with --allow-pending."""
+    api = FakeApi()
+    up = _staged("x", "[PENDING: x from y (z)]")
+    hub.execute([up], message="m", api_factory=lambda: api, allow_pending=True, log=lambda _: None)
+    assert api.names() == ["create_repo", "update_repo_settings", "upload_folder"]
+    assert api.calls[0][2]["private"] is True
+    assert api.calls[1][2] == {"repo_type": "dataset", "private": True}  # an existing public repo too
+    assert all(c[2].get("private") is not False for c in api.calls)
+
+
+# --------------------------------------------------------------- P08-R1-11 the public-text scan
+
+
+@pytest.mark.parametrize("gated", [None, "auto"])
+def test_a_public_upload_quoting_a_harmful_output_is_refused(namespace, outputs, gated):
+    text = "---\nextra_gated_prompt: terms\n---\n" if gated else ""
+    up = _staged("model", text + "An example answer: " + HARMFUL[20:150] + "\n", gated=gated)
+    api = FakeApi()
+    with pytest.raises(PublishError, match="text of an output labelled harmful"):
+        hub.execute([up], message="m", api_factory=lambda: api)
+    assert api.calls == []
+
+
+def test_a_harmful_text_in_any_staged_file_is_refused(namespace, outputs):
+    up = _staged("logs")
+    write_jsonl(up.folder / "aggregates" / "examples.jsonl", [{"note": HARMFUL.replace(" ", "\n")}])
+    with pytest.raises(PublishError, match="examples.jsonl"):
+        hub.execute([up], message="m", api_factory=FakeApi)
+
+
+def test_an_unredacted_auditkit_record_is_refused(namespace, outputs):
+    up = _staged("logs")
+    record = {"metadata": {"lift": {"text": "full"}}, "samples": []}
+    render.write_text(up.folder / "auditkit" / "qwen3guard" / "v" / "harmful_hi_dev.json", json.dumps(record))
+    with pytest.raises(PublishError, match="AuditKIT record that is not redacted"):
+        hub.execute([up], message="m", api_factory=FakeApi)
+
+
+def test_the_raw_completions_are_not_scanned(namespace, outputs):
+    api = FakeApi()
+    up = _staged("raw", f"---\nextra_gated_prompt: terms\n---\n{HARMFUL}\n", gated="manual")
+    hub.execute([up], message="m", api_factory=lambda: api, log=lambda _: None)
+    assert "upload_folder" in api.names()
+
+
+def test_nothing_public_goes_up_from_a_machine_without_outputs(namespace):
+    api = FakeApi()
+    with pytest.raises(PublishError, match="public-text scan cannot run.*lift sync pull"):
+        hub.execute([_staged("logs")], message="m", api_factory=lambda: api)
+    assert api.calls == []
 
 
 def test_namespace_must_look_like_an_hf_name(monkeypatch):
@@ -95,6 +188,7 @@ def test_cli_dry_runs_never_build_an_api(no_hub, capsys):
         assert cli.main(argv) == 0
     out = capsys.readouterr().out
     assert "dry run" in out and "YOUR-HF-ORG/lift-eval-logs" in out
+    assert "super_squash_history" in out  # how to retract a file HF history keeps
 
 
 def test_cli_yes_refuses_without_namespace(no_hub, capsys):
@@ -102,7 +196,7 @@ def test_cli_yes_refuses_without_namespace(no_hub, capsys):
     assert "no HF namespace" in capsys.readouterr().err
 
 
-def test_cli_yes_uploads_with_a_fake_api(namespace, monkeypatch):
+def test_cli_yes_uploads_with_a_fake_api(namespace, monkeypatch, outputs):
     api = FakeApi()
     monkeypatch.setattr(hub, "default_api", lambda: api)
     write_jsonl(
