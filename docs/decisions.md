@@ -2,6 +2,40 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 6, 2026: P07 final evaluation, statistics and report details, before any final run
+
+Pinned while writing P07 (branch p07-final-report), offline on CPU on synthetic judged records: no final-split
+output existed and the recipe was not frozen. Numbered from 70 (66-69 are taken or reserved elsewhere).
+
+70. **The final-split guard and the final battery** (`lift.final`, `lift final`).
+    - The final split opens only when a `recipe-frozen-*` git tag exists and the variant is frozen: stock, a
+      registered adapter (an adapter seed), or a setting outputs/metrics/selection.json froze (one per
+      family, on seeds 1-3). A GPU job's shallow fetch carries no tags, so on the VM the tag is also looked
+      up with `git ls-remote --tags origin` (GITHUB_TOKEN as an http header, as colab/job.py fetches).
+    - The same guard runs in `lift generate`, `lift utility` (not --judge-only), `lift belebele` and
+      `lift heldout-loss` whenever they are given `--split final` (rule 1: no side line reaches the final
+      split). `lift judge` is not guarded: it only judges generations that exist.
+    - The ar/th back-translation sample is 20% of each safety set's final pids (configs back_translation),
+      drawn by pid with seed 70 so it is the same in every variant and language; the outputs go through
+      NLLB-200 on the judge's GPU and are judged again by the primary judge against the prompt's English
+      source. The second judge's 10% runs on the laptop (`lift final --judge-only`), over P04's key list
+      when drawn, else `--sample 0.10` (item 31).
+71. **The verdict per adapter** (`lift.report.analysis.verdict`). "Does not drift meaningfully" uses Gate 2's
+    bar on the final pooled drift: at least 8 points and the pooled bootstrap p < 0.05. A drifting adapter is
+    "repair" when selection.json's overall verdict is repair (the selection rule is applied on dev only, as
+    the README says) and "reject" otherwise. Final numbers are reported beside it, never used to re-select.
+72. **Claim families.** Secondary (Holm): drift and repair pooled over zh+es and in English, four claims.
+    Exploratory (BH-FDR): drift and repair in zh, es, ar and th one by one, eight claims. The primary Hindi
+    endpoint is in neither. The two non-winning frozen families' repair effects are reported descriptively,
+    unadjusted, and are not claims. Effects pooled over languages or seeds use the clustered bootstrap with
+    clusters = pid; a seed that was not run is left out and named, never estimated.
+73. **Report conventions.** The share of the adapter's utility gain a repair keeps is sum(repair - 0.5) /
+    sum(adapter - 0.5) over the same pids and seeds, with a joint cluster bootstrap. Belebele and
+    over-refusal changes are against stock, paired by item or prompt. A check-up is the whole acceptance test
+    of one adapter: the seed-1 dev sweep plus the final battery of stock, the seed-1 adapter and the seed-1
+    frozen winner (GPU-hours = wall time x devices from the `lift sweep` and `lift final` manifests); the
+    mean final battery per variant is reported beside it. In final_report.json, None means "not run" and nothing else.
+
 ## Nov 6, 2026: P05 repairs, sweep and selection details, before any repair was run
 
 Pinned while writing P05 (branch p05-repairs), offline on CPU with a tiny model: no repaired variant had
