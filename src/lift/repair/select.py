@@ -23,16 +23,28 @@ Gate 1's checks above.
 Nothing is selected while an input is missing or stale: the report says "incomplete" with each reason and
 its remedy (rule 9: a subset would be a selection the pre-registration did not make). Otherwise
 ``lift.selection.select_repair`` decides the overall winner over all settings, and the same rule within
-each family (wiseft, resta, cast with cast_always) gives that family's frozen setting: 3 families x 3
-seeds = the 9 repaired variants of the final eval. outputs/metrics/selection.json and .md hold the full
+each other family (wiseft, resta, cast with cast_always) gives that family's frozen setting; the overall
+winner is its own family's frozen setting (decisions item 75: the tie window moves with the pool, so the
+rule over one family alone can pick a sibling). 3 families x 3 seeds = the 9 repaired variants of the
+final eval, the overall winner always among them. outputs/metrics/selection.json and .md hold the full
 table (every setting's numbers, checks and violations) and the drop's paired interval against the
-adapter. The command then prints the freeze steps: the tag command, the configs/variants.yaml entries of
-the frozen settings on seeds 1-3 (seed 2 and 3 adapters must be registered; CAST needs its artifact,
+adapter.
+
+A decided selection also writes the frozen recipe, configs/frozen_recipe.json (``write_recipe``): the
+adapter, the overall winner, the frozen map {family: setting} and the sha256 of the selection.json bytes
+just written, which Gate 3 commits and tags and the final guard compares with selection.json. A recipe is
+frozen once: while the file exists, a run that would write another one or another selection.json (other
+numbers, or an undecided run) is refused before anything is written (``RecipeFrozen``) unless
+``refreeze``; the same inputs again keep both files as they are. An undecided run never writes it.
+
+The command then prints the freeze steps: the commit-and-tag command, the configs/variants.yaml entries
+of the frozen settings on seeds 1-3 (seed 2 and 3 adapters must be registered; CAST needs its artifact,
 fitted first), and the fit-cast lines of seeds 2-3.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -44,7 +56,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from lift import config
+from lift import config, paths
 from lift.paths import metrics_dir
 from lift.repair import settings as rs
 from lift.selection import DevScores, Selection, select_repair
@@ -54,6 +66,13 @@ CELLS = {"harmful_hi": ("harmful", "hi", "dev"), "overrefusal_hard_hi": ("hard_b
 
 
 Read = tuple[DevScores | None, list[str], dict[str, Any]]
+
+
+RECIPE = "configs/frozen_recipe.json"
+
+
+class RecipeFrozen(RuntimeError):
+    """A recipe is frozen already and this run would replace it or the selection.json it pins."""
 
 
 class Missing(ValueError):
@@ -264,11 +283,19 @@ def decide(c: Collected, rules: Mapping[str, Any], families: Sequence[str]) -> d
     """The overall selection and each family's, over complete inputs."""
     assert c.stock is not None and c.adapter is not None
     overall = select_repair(c.stock, c.adapter, c.candidates, rules)
+    winner_family = rs.FAMILY[next(x.method for x in c.candidates if x.name == overall.winner)]
     per_family: dict[str, Any] = {}
     for fam in families:
         pool = [x for x in c.candidates if rs.FAMILY[x.method] == fam]
-        if pool:
-            per_family[fam] = _selection_doc(select_repair(c.stock, c.adapter, pool, rules))
+        if not pool:
+            continue
+        own = select_repair(c.stock, c.adapter, pool, rules)
+        per_family[fam] = _selection_doc(own)
+        if fam == winner_family and own.winner != overall.winner:
+            # Decisions item 75: the overall winner is frozen as its family's setting, so it is the one
+            # evaluated on all three seeds; the family's own pick is kept for the record.
+            per_family[fam].update(winner=overall.winner, verdict=overall.verdict,
+                                   family_rule_winner=own.winner)
     min_win = 0.5 + rules["min_gain_retained"] * (c.adapter.win_rate - 0.5)
     rows = []
     for row in overall.table:
@@ -298,7 +325,8 @@ def freeze_plan(adapter: str, frozen: Mapping[str, str], *, date: str | None = N
     for each seed 1-3 each frozen variant's name and its registry entry where it can be written now (the
     seed's adapter registered; CAST: its artifact fitted), else the lines that make it, and the fit-cast
     lines of seeds 2-3."""
-    plan: dict[str, Any] = {"tag": f"git tag recipe-frozen-{date or _today()} && git push --tags",
+    plan: dict[str, Any] = {"tag": f'git add {RECIPE} && git commit -m "Freeze the recipe" && '
+                                   f"git tag recipe-frozen-{date or _today()} && git push && git push --tags",
                             "variants": [], "fit_cast": [], "register": []}
     tags = []
     needs_cast = False
@@ -329,8 +357,12 @@ def _short(exc: Any, n: int = 300) -> str:
 
 
 def run(adapter: str, *, families: Sequence[str] = rs.FAMILIES, dtype: str | None = None,
-        reader: Callable[..., Any] | None = None, date: str | None = None) -> dict[str, Any]:
-    """Collect, decide (when complete) and write outputs/metrics/selection.json and .md."""
+        reader: Callable[..., Any] | None = None, date: str | None = None,
+        refreeze: bool = False) -> dict[str, Any]:
+    """Collect, decide (when complete) and write outputs/metrics/selection.json and .md, and when decided
+    the frozen recipe (module docstring). Raises RecipeFrozen, writing nothing, when a recipe is frozen
+    and this run would change it or its selection.json, unless ``refreeze``. The returned doc is the one
+    written, plus "recipe" (the recipe written, when decided)."""
     dtype = dtype or config.get("generation.dtype")
     rules = config.get("selection", name="repairs")
     c = collect(adapter, families, dtype, reader=reader)
@@ -353,8 +385,80 @@ def run(adapter: str, *, families: Sequence[str] = rs.FAMILIES, dtype: str | Non
         frozen = {fam: sel["winner"] for fam, sel in doc["families"].items()}
         doc["frozen"] = frozen
         doc["freeze"] = freeze_plan(adapter, frozen, date=date)
-    write(doc)
-    return doc
+    path = paths.frozen_recipe_path()
+    held = path.read_text(encoding="utf-8") if path.is_file() else None
+    text = selection_text(doc)
+    if held is not None:
+        text = _unchanged(doc) or text
+    recipe = recipe_doc(doc, text) if doc["status"] == "decided" else None
+    if held is not None and not refreeze and (recipe is None or recipe_text(recipe) != held):
+        raise RecipeFrozen(_frozen_message(path, held, recipe))
+    write(doc, json_text=text)
+    if recipe is not None and recipe_text(recipe) != held:
+        write_recipe(recipe)
+    return {**doc, "recipe": recipe}
+
+
+def selection_text(doc: Mapping[str, Any]) -> str:
+    """outputs/metrics/selection.json's text: the bytes the recipe's sha256 pins."""
+    return json.dumps(_nan_safe(dict(doc)), indent=1, ensure_ascii=False) + "\n"
+
+
+def _unchanged(doc: Mapping[str, Any]) -> str | None:
+    """selection.json's text on disk when it says what ``doc`` says (its "created" time apart), else None:
+    the same inputs again keep the bytes a frozen recipe pins."""
+    path = report_paths()[0]
+    try:
+        text = path.read_text(encoding="utf-8")
+        old = json.loads(text)
+    except (OSError, ValueError):
+        return None
+    new = json.loads(selection_text(doc))
+    if not isinstance(old, dict):
+        return None
+    old.pop("created", None)
+    new.pop("created", None)
+    return text if old == new else None
+
+
+def recipe_doc(doc: Mapping[str, Any], selection_json: str) -> dict[str, Any]:
+    """The frozen recipe of a decided selection whose selection.json text is ``selection_json``."""
+    return {"version": 1, "adapter": doc["adapter"],
+            "selection_sha256": hashlib.sha256(selection_json.encode("utf-8")).hexdigest(),
+            "overall_winner": doc["overall"]["winner"], "frozen": dict(doc["frozen"])}
+
+
+def recipe_text(recipe: Mapping[str, Any]) -> str:
+    return json.dumps(dict(recipe), indent=2, sort_keys=True) + "\n"
+
+
+def write_recipe(recipe: Mapping[str, Any]) -> Path:
+    path = paths.frozen_recipe_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+        f.write(recipe_text(recipe))
+    os.replace(tmp, path)
+    return path
+
+
+def _frozen_message(path: Path, held: str, recipe: Mapping[str, Any] | None) -> str:
+    try:
+        old = json.loads(held)
+        what = (f"overall winner {old.get('overall_winner')} on {old.get('adapter')}, selection.json sha256 "
+                f"{str(old.get('selection_sha256'))[:12]}")
+    except ValueError:
+        old, what = {}, "unreadable"
+    if recipe is None:
+        change = "this run is undecided and would overwrite the selection.json it pins"
+    elif recipe["frozen"] != old.get("frozen") or recipe["overall_winner"] != old.get("overall_winner"):
+        change = (f"this run decides another one (overall winner {recipe['overall_winner']}, frozen "
+                  f"{', '.join(recipe['frozen'].values())})")
+    else:
+        change = "this run would write another selection.json (other numbers, same frozen settings)"
+    return (f"a recipe is already frozen in {path} ({what}); {change}. Nothing was written. Re-freezing "
+            f"needs deleting {RECIPE} and a dated docs/decisions.md entry saying why, then lift select "
+            "again (or --refreeze)")
 
 
 def _nan_safe(obj: Any) -> Any:
@@ -387,7 +491,9 @@ def render(doc: Mapping[str, Any]) -> str:
               f"{_pct(a['win_rate'])}%.", "",
               f"Overall winner: **{doc['overall']['winner']}** (verdict {doc['overall']['verdict']}).", ""]
     for fam, sel in doc["families"].items():
-        lines.append(f"- {fam}: {sel['winner']} (verdict {sel['verdict']})")
+        note = (f"; the overall winner, frozen in place of {sel['family_rule_winner']} by the family's rule "
+                "alone (decisions item 75)") if sel.get("family_rule_winner") else ""
+        lines.append(f"- {fam}: {sel['winner']} (verdict {sel['verdict']}{note})")
     lines += ["", "| setting | harmful hi % | drop pts | drop 95% CI | over-refusal +pts | win % (min) | "
               "Belebele-hi % (drop pts) | violations | eligible |", "|---|---|---|---|---|---|---|---|---|"]
     for r in doc["table"]:
@@ -401,10 +507,10 @@ def render(doc: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write(doc: Mapping[str, Any]) -> tuple[Path, Path]:
+def write(doc: Mapping[str, Any], *, json_text: str | None = None) -> tuple[Path, Path]:
     json_path, md_path = report_paths()
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    for path, text in ((json_path, json.dumps(_nan_safe(dict(doc)), indent=1, ensure_ascii=False) + "\n"),
+    for path, text in ((json_path, json_text if json_text is not None else selection_text(doc)),
                        (md_path, render(doc))):
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:

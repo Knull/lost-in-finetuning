@@ -2,6 +2,37 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 6, 2026 (evening): the frozen set always holds the selection's winner, before any repair was run
+
+Found by the cross-branch review (XB-01, XB-02) on synthetic dev numbers; no sweep number existed yet.
+Item 75 is the orchestrator's call, **pending team confirmation**.
+
+75. **The overall winner is frozen as its family's setting** (`lift select`; amends item 69). Item 69
+    froze each family's own pick and named the overall winner the adapter's verdict, but the two can
+    differ, so the winner the README says is "frozen, tagged in git, and applied to all three seeds"
+    could be frozen nowhere. The tie window moves with the pool: drops within 2 points of the best tie.
+    Example (adapter harmful 0.30, minimum win rate 0.60, every setting eligible): ReSta drops 0.20,
+    WiSE-FT A drops 0.18 (win 0.62), WiSE-FT B drops 0.165 (win 0.68). Over all settings the window is
+    0.18-0.20, A ties ReSta and wins as the cheaper repair. Within WiSE-FT alone the best drop is A's,
+    the window is 0.16-0.18, A and B tie at the same cost and B wins on its higher win rate. Freezing B
+    meant the winner A was never evaluated on the final split (the final guard refuses it) and P08 would
+    publish an unevaluated model.
+    - Now the overall winner replaces its own family's pick; the other families keep the rule within
+      the family. The frozen set is still one setting per family (3 x 3 seeds = 9 repaired variants)
+      and always holds `overall.winner`. selection.json keeps the family's own pick as
+      `families.<family>.family_rule_winner` when it differs.
+    - In the no-winner case (verdict reject) the overall pick (fewest violations, then the largest drop)
+      is also its family's pick, so nothing changes there.
+    - The freeze is recorded in a committed file, configs/frozen_recipe.json, written by a decided
+      `lift select`: `{"version": 1, "adapter", "selection_sha256"` (of the outputs/metrics/selection.json
+      bytes it wrote), `"overall_winner", "frozen": {family: setting}}`, sorted keys. Gate 3 commits it
+      before the tag (`git add configs/frozen_recipe.json && git commit -m "Freeze the recipe" && git tag
+      recipe-frozen-YYYYMMDD && git push && git push --tags`), so the tag names a concrete recipe the final
+      guard can compare with selection.json. A recipe is frozen once: while the file exists, `lift select`
+      refuses a run that would change it or the selection.json it pins (an undecided run included) and
+      writes nothing; the same inputs again keep both files. Re-freezing means deleting the file and a
+      dated entry here (`--refreeze` does it in one step).
+
 ## Nov 6, 2026: P05 repairs, sweep and selection details, before any repair was run
 
 Pinned while writing P05 (branch p05-repairs), offline on CPU with a tiny model: no repaired variant had

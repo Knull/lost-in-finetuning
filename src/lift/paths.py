@@ -19,6 +19,12 @@ def _env_dir(var: str, default: Path) -> Path:
     return Path(value).expanduser().resolve() if value else default
 
 
+def frozen_recipe_path() -> Path:
+    """configs/frozen_recipe.json: the frozen recipe ``lift select`` writes and Gate 3 commits and tags
+    (lift.repair.select.write_recipe)."""
+    return CONFIG_DIR / "frozen_recipe.json"
+
+
 def data_dir() -> Path:
     return _env_dir("LIFT_DATA_DIR", REPO_ROOT / "data")
 

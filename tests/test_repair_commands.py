@@ -91,11 +91,15 @@ def test_select_on_synthetic_metrics_matches_the_rule(name, registry):
     assert doc["overall"] == {"winner": direct.winner, "verdict": direct.verdict, "eligible": direct.eligible}
     for fam in rs.FAMILIES:
         pool = [c for c in cands if rs.FAMILY[c.method] == fam]
-        assert doc["families"][fam]["winner"] == select_repair(STOCK, ADAPTER_SCORES, pool, RULES).winner
+        expected = direct.winner if direct.winner in {c.name for c in pool} else \
+            select_repair(STOCK, ADAPTER_SCORES, pool, RULES).winner
+        assert doc["families"][fam]["winner"] == expected
     assert len(doc["table"]) == 10 and {r["family"] for r in doc["table"]} == set(rs.FAMILIES)
     assert doc["frozen"] == {f: doc["families"][f]["winner"] for f in rs.FAMILIES}
+    assert direct.winner in doc["frozen"].values()
     plan = doc["freeze"]
-    assert plan["tag"] == "git tag recipe-frozen-20261107 && git push --tags"
+    assert plan["tag"] == ('git add configs/frozen_recipe.json && git commit -m "Freeze the recipe" && '
+                           "git tag recipe-frozen-20261107 && git push && git push --tags")
     assert len(plan["variants"]) == 9                      # 3 families x 3 seeds
     assert plan["fit_cast"] == [f"lift fit-cast --adapter adapter-aya-std-s{s}" for s in (2, 3)]
     on_disk = json.loads(select.report_paths()[0].read_text(encoding="utf-8"))
@@ -105,14 +109,106 @@ def test_select_on_synthetic_metrics_matches_the_rule(name, registry):
 
 def test_the_selection_cases_decide_as_test_selection_says(registry):
     def winner(name):
-        return select.run(ADAPTER, reader=fake_reader(CASES[name]))["overall"]["winner"]
+        return select.run(ADAPTER, reader=fake_reader(CASES[name]), refreeze=True)["overall"]["winner"]
 
     assert winner("largest") == f"cast-m1.0-{ADAPTER}"
-    sel = select.run(ADAPTER, reader=fake_reader(CASES["constraints"]))
+    sel = select.run(ADAPTER, reader=fake_reader(CASES["constraints"]), refreeze=True)
     assert sel["overall"]["eligible"] == [f"wiseft-l0.50-{ADAPTER}"]
     assert winner("ties") == f"wiseft-l0.50-{ADAPTER}"
-    rej = select.run(ADAPTER, reader=fake_reader(CASES["reject"]))
+    rej = select.run(ADAPTER, reader=fake_reader(CASES["reject"]), refreeze=True)
     assert rej["overall"]["verdict"] == "reject" and rej["overall"]["eligible"] == []
+
+
+def test_select_freezes_the_overall_winner_when_its_family_alone_would_pick_a_sibling(registry):
+    """XB-01: the tie window moves with the pool. Over all settings ReSta's drop (0.20) is the best, so
+    WiSE-FT A (0.18) ties it and wins as the cheaper repair; within WiSE-FT alone the best drop is A's,
+    so B (0.165, within 2 points) ties A and wins on its higher win rate. The frozen WiSE-FT setting must
+    be the overall winner A, or the winner is never evaluated on the final split."""
+    a, b = f"wiseft-l0.25-{ADAPTER}", f"wiseft-l0.50-{ADAPTER}"
+    numbers = case(**{"resta-a0.25": (0.10, 0.30, 0.66, 0.60), "wiseft-l0.25": (0.12, 0.30, 0.62, 0.60),
+                      "wiseft-l0.50": (0.135, 0.30, 0.68, 0.60)})
+    cands = [cand(s.name(ADAPTER), s.method, *numbers[s.tag]) for s in rs.settings()]
+    wiseft = [c for c in cands if c.method == "wiseft"]
+    # The geometry: the rule over all settings and over WiSE-FT alone disagree.
+    assert select_repair(STOCK, ADAPTER_SCORES, cands, RULES).winner == a
+    assert select_repair(STOCK, ADAPTER_SCORES, wiseft, RULES).winner == b
+    doc = select.run(ADAPTER, reader=fake_reader(numbers), date="20261106")
+    assert doc["overall"]["winner"] == a and doc["overall"]["verdict"] == "repair"
+    assert doc["frozen"]["wiseft"] == a and doc["families"]["wiseft"]["winner"] == a
+    assert doc["families"]["wiseft"]["family_rule_winner"] == b
+    assert doc["frozen"]["resta"] == f"resta-a0.25-{ADAPTER}"
+    assert set(doc["frozen"]) == set(rs.FAMILIES)                      # still one setting per family
+    names = [i["name"] for i in doc["freeze"]["variants"]]
+    assert len(names) == 9 and [f"wiseft-l0.25-adapter-aya-std-s{s}" for s in (1, 2, 3)] == names[:3]
+    assert all("wiseft-l0.50" not in n for n in names)
+    assert "--settings wiseft-l0.25," in doc["freeze"]["register"][0]
+    assert f"{b} by the family's rule alone" in select.report_paths()[1].read_text(encoding="utf-8")
+
+
+def _recipe():
+    from lift import paths
+
+    return paths.frozen_recipe_path()
+
+
+def test_select_writes_the_frozen_recipe_and_refuses_another(registry, monkeypatch, capsys):
+    """XB-02 (writer side): a decided selection writes configs/frozen_recipe.json (the frozen map and
+    selection.json's sha256), the freeze line commits it before the tag; an undecided run never writes it,
+    and a recipe already frozen is not replaced without --refreeze."""
+    import hashlib
+
+    numbers = dict(CASES["largest"])
+    monkeypatch.setattr(select, "read_scores", fake_reader(numbers))
+    recipe = _recipe()
+    assert not recipe.exists()
+    assert cli.main(["select", "--adapter", ADAPTER]) == 0
+    out = capsys.readouterr().out
+    assert ('git add configs/frozen_recipe.json && git commit -m "Freeze the recipe" && git tag '
+            "recipe-frozen-") in out and "&& git push && git push --tags" in out
+    text = recipe.read_text(encoding="utf-8")
+    doc = json.loads(text)
+    sel_bytes = select.report_paths()[0].read_bytes()
+    sel = json.loads(sel_bytes)
+    assert doc == {"version": 1, "adapter": ADAPTER,
+                   "selection_sha256": hashlib.sha256(sel_bytes).hexdigest(),
+                   "overall_winner": f"cast-m1.0-{ADAPTER}", "frozen": sel["frozen"]}
+    assert text == json.dumps(doc, indent=2, sort_keys=True) + "\n"
+    assert doc["overall_winner"] in doc["frozen"].values() and len(doc["frozen"]) == 3
+
+    # The same inputs again: nothing changes, selection.json's bytes included.
+    assert cli.main(["select", "--adapter", ADAPTER]) == 0
+    assert recipe.read_text(encoding="utf-8") == text and select.report_paths()[0].read_bytes() == sel_bytes
+
+    # Other numbers decide another recipe: refused, and neither file is touched.
+    capsys.readouterr()
+    numbers.update({"wiseft-l0.50": (0.115, 0.30, 0.66, 0.60)})
+    assert cli.main(["select", "--adapter", ADAPTER]) == 2
+    err = capsys.readouterr().err
+    assert "already frozen" in err and "--refreeze" in err and "decisions" in err
+    assert recipe.read_text(encoding="utf-8") == text and select.report_paths()[0].read_bytes() == sel_bytes
+
+    # An undecided run is refused too while a recipe stands, and never writes the recipe.
+    del numbers["resta-a0.25"]
+    assert cli.main(["select", "--adapter", ADAPTER]) == 2
+    assert recipe.read_text(encoding="utf-8") == text and select.report_paths()[0].read_bytes() == sel_bytes
+    assert cli.main(["select", "--adapter", ADAPTER, "--refreeze"]) == 3
+    assert recipe.read_text(encoding="utf-8") == text
+    assert json.loads(select.report_paths()[0].read_bytes())["status"] == "incomplete"
+
+    # --refreeze with a decided selection replaces it.
+    numbers["resta-a0.25"] = DEFAULT
+    assert cli.main(["select", "--adapter", ADAPTER, "--refreeze"]) == 0
+    new = json.loads(recipe.read_text(encoding="utf-8"))
+    assert new["overall_winner"] == f"wiseft-l0.50-{ADAPTER}"
+    assert new["frozen"]["wiseft"] == new["overall_winner"]
+    assert new["selection_sha256"] == hashlib.sha256(select.report_paths()[0].read_bytes()).hexdigest()
+
+
+def test_an_undecided_selection_writes_no_recipe(registry):
+    numbers = case()
+    del numbers["cast-m2.0"]
+    doc = select.run(ADAPTER, reader=fake_reader(numbers))
+    assert doc["status"] == "incomplete" and not _recipe().exists()
 
 
 def test_seed_1_entries_are_written_and_later_seeds_wait(registry, monkeypatch):
@@ -176,6 +272,24 @@ def test_sweep_runs_every_stage_resumes_and_registers(registry):
     assert sweep.gpu(ADAPTER, families=["wiseft"], device="cuda:0", judge_device="cuda:0", dtype=None,
                      batch_size=None, recheck=True, call=lambda argv: calls.append(list(argv)) or 1) == 1
     assert len(calls) == 9
+
+
+@pytest.mark.parametrize(("device", "judge", "devices"), [("cuda:0", "cuda:1", 2), ("cuda:0", "cuda:0", 1),
+                                                      ("cuda:0", "auto", 2)])
+def test_sweep_manifest_records_the_judge_device_it_used(registry, monkeypatch, device, judge, devices):
+    """XB-12: run-dev's local judge holds a second GPU when it is on another device (T4 x2), and the
+    manifest's devices says so (the report bills device-hours from it)."""
+    from lift.commands import run as run_cmd
+
+    monkeypatch.setattr(run_cmd, "_judge_device", lambda v: "cuda:1" if v == "auto" else v)
+    calls = []
+    assert sweep.gpu(ADAPTER, families=["wiseft"], device=device, judge_device=judge, dtype=None,
+                     batch_size=None, call=lambda argv: calls.append(list(argv)) or 0) == 0
+    expected = "cuda:1" if judge == "auto" else judge
+    assert f"--judge-device={expected}" in calls[0]
+    docs = [json.loads(p.read_text(encoding="utf-8")) for p in manifests_dir().glob("sweep_setting-*.json")]
+    assert len(docs) == 3
+    assert all(d["devices"] == devices and d["judge_device"] == expected for d in docs)
 
 
 @pytest.fixture(autouse=True)
