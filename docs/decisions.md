@@ -5,9 +5,10 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 ## Nov 6, 2026: P05 repairs, sweep and selection details, before any repair was run
 
 Pinned while writing P05 (branch p05-repairs), offline on CPU with a tiny model: no repaired variant had
-been built on Tiny Aya and no sweep number existed. Numbered from 66 (the review branch R1 claims up to 65).
+been built on Tiny Aya and no sweep number existed. Numbered from 67 (the review branch R1 claims up to
+65, and main has 66).
 
-66. **How CAST is fitted and applied** (`lift.repair.cast`, `lift fit-cast`). The plan fixed the fit data,
+67. **How CAST is fitted and applied** (`lift.repair.cast`, `lift fit-cast`). The plan fixed the fit data,
     the pooling, the strengths and the always-on setting; it left these open.
     - Steering vectors: `extract_caa_vectors(model, tok, harmful, benign, CAAConfig(target_layers=L))`, so
       each is mean(harmful) - mean(benign) at the last prompt token (CAA's own pooling), not normalised:
@@ -36,10 +37,10 @@ been built on Tiny Aya and no sweep number existed. Numbered from 66 (the review
     - The diagnostic firing rates are read on exactly the held-out half `fit_cast_condition` scored
       (its interleaved split, reproduced; for an odd count SafeTune's split is not interleaved, a quirk
       kept as is).
-67. **How the sweep runs** (`lift register-repairs`, `lift sweep`).
+68. **How the sweep runs** (`lift register-repairs`, `lift sweep`).
     - Each setting is a configs/variants.yaml entry named by the scheme there, pinning the adapter hash
       (from the adapter's own entry, which must pin one); WiSE-FT params {lambda}; ReSta {alpha, dare:
-      false, base, base_revision} (a re-pinned Base is a new cache key); CAST as in item 66. The GPU job
+      false, base, base_revision} (a re-pinned Base is a new cache key); CAST as in item 67. The GPU job
       writes the entries into its own checkout before the first stage; the laptop writes the identical
       entries with `lift register-repairs` after `lift sync pull` and commits them (lift utility
       --judge-only compares the registry with the answers' check records).
@@ -55,7 +56,7 @@ been built on Tiny Aya and no sweep number existed. Numbered from 66 (the review
       still runs.
     - Costs per setting come from its records (GPU seconds per generated token; the gate apart), with a run
       manifest per setting holding each stage's wall time this run.
-68. **How the selection is applied** (`lift select`).
+69. **How the selection is applied** (`lift select`).
     - Nothing is selected while any input of stock, the adapter or any setting is missing or no longer
       current (the paired_labels checks, Gate 1's utility checks, complete Belebele-hi score files on one
       Global revision): a subset would be a selection the pre-registration did not make. The adapter's

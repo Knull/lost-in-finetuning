@@ -269,6 +269,6 @@ six languages, so pairing, splitting and clustering all go by pid.
   `lift register-repairs` (laptop), `lift sweep` (run-dev, utility --generate-only and belebele hi per
   setting, resumable; `--judge-only` on the laptop) and `lift select` (outputs/metrics/selection.json and
   .md, overall and per family, then the freeze steps). A sweep line goes last in its job: the runners do
-  not go past its partial exit. Decisions 66-68.
+  not go past its partial exit. Decisions 67-69.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.
