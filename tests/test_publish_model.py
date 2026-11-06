@@ -3,20 +3,32 @@ build_variant, CAST artifacts and wrapper, and the gated adapters (weights only)
 
 from __future__ import annotations
 
+import hashlib
 import json
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from publish_fakes import CAST_WINS, REJECT, FakeApi, frozen_variants, selection, write_inputs
 
 from lift import paths
 from lift.models import variants
-from lift.publish import PublishError, model
+from lift.publish import PublishError, model, settings
 from lift.publish.inputs import Facts
 from lift.schemas import VariantSpec
 
 HASH = "a" * 64
 PARAMS = {"wiseft": "lambda", "resta": "alpha", "cast": "strength", "castalways": "strength"}
+# ReSta wins: its dev drop is the largest eligible one.
+RESTA_WINS = {"wiseft-l0.50": (0.20, 0.30, 0.66, 0.60), "resta-a0.25": (0.12, 0.30, 0.66, 0.60)}
+
+
+def _cast_bytes(adapter: str) -> bytes:
+    return f"cast artifact of {adapter}".encode()
+
+
+def _cast_sha(adapter: str) -> str:
+    return hashlib.sha256(_cast_bytes(adapter)).hexdigest()
 
 
 def _spec(name: str) -> VariantSpec:
@@ -25,7 +37,7 @@ def _spec(name: str) -> VariantSpec:
     key = PARAMS[prefix]
     value = float(name.split("-")[1][1:])
     adapter = name.split("-", 2)[2]
-    arts = {"adapter": HASH, **({"cast": "b" * 64} if method.startswith("cast") else {})}
+    arts = {"adapter": HASH, **({"cast": _cast_sha(adapter)} if method.startswith("cast") else {})}
     return VariantSpec(
         name=name, method=method, adapter=adapter, seed=int(adapter[-1]), params={key: value}, artifacts=arts
     )
@@ -41,7 +53,7 @@ SPECS = {
         artifacts={"adapter": HASH},
     ),
 }
-for _doc in (selection(), selection(CAST_WINS), selection(REJECT)):
+for _doc in (selection(), selection(CAST_WINS), selection(REJECT), selection(RESTA_WINS)):
     SPECS.update({n: _spec(n) for n in frozen_variants(_doc)})
 
 
@@ -61,7 +73,7 @@ def registry(monkeypatch):
     for seed in (1, 2, 3):  # CAST is fitted per seed on the adapter being repaired
         cast = paths.artifacts_dir() / "cast" / f"adapter-aya-std-s{seed}"
         cast.mkdir(parents=True)
-        (cast / "condition.pt").write_bytes(b"cond")
+        (cast / "cast.safetensors").write_bytes(_cast_bytes(f"adapter-aya-std-s{seed}"))
         (cast / "config.json").write_text("{}")
 
 
@@ -76,7 +88,7 @@ def test_winner_card_params_and_adapters(registry):
     write_inputs()
     ups = model.build_all()
     m, params, *adapters = ups
-    assert m.repo.repo_id.endswith("/lift-wiseft-l0.50-adapter-aya-std-s1") and m.repo.gated is False
+    assert m.repo.repo_id.endswith("/lift-wiseft-l0.50-adapter-aya-std-s1") and m.repo.gated == "auto"
     doc = json.loads((m.folder / "repair" / "params.json").read_text())
     assert doc["params"] == {"lambda": 0.5} and doc["selection_rule"]["tie_margin"] == 0.02
     assert m.expected == ["model weights (no weights staged: lift publish model --build, on the GPU VM)"]
@@ -88,7 +100,7 @@ def test_winner_card_params_and_adapters(registry):
     assert sorted(p.stem for p in (params.folder / "params").iterdir()) == sorted(
         frozen_variants(selection())
     )
-    assert (params.folder / "cast" / "adapter-aya-std-s1" / "condition.pt").is_file()
+    assert (params.folder / "cast" / "adapter-aya-std-s1" / "cast.safetensors").is_file()
     # adapters: gated (automatic approval), weights only, terms in the card
     (a,) = adapters
     assert a.repo.gated == "auto"
@@ -121,10 +133,22 @@ def test_incomplete_selection_publishes_no_model(registry):
     assert model.build_params(Facts()).expected
 
 
-@pytest.mark.parametrize("numbers,why", [(CAST_WINS, "CAST"), (REJECT, "reject")])
-def test_cast_or_reject_winner_model_is_gated(registry, numbers, why):
-    """R1-04, decisions.md 74: a CAST winner's repo is the adapter-merged model (the unrepaired adapter
-    without the wrapper), and a reject verdict's best-anyway setting is not a repair: both gated."""
+def _meta(card: str) -> dict:
+    return yaml.safe_load(card.split("---\n")[1])
+
+
+@pytest.mark.parametrize(
+    "numbers,why",
+    [
+        (None, "lambda"),  # WiSE-FT: adapter = Global + (these - Global) / lambda
+        (RESTA_WINS, "alpha"),  # ReSta: adapter = these - alpha x (Global - Base)
+        (CAST_WINS, "wrapper"),  # CAST: these weights are the adapter, merged
+        (REJECT, "reject"),
+    ],
+)
+def test_every_repaired_model_is_gated(registry, numbers, why):
+    """R1-04, R2-07, decisions.md 74: with its public parameters, any repaired model's weights give back
+    the gated adapter (WiSE-FT and ReSta by arithmetic, CAST directly), so every one is gated like it."""
     doc = selection(numbers)
     write_inputs(selection_doc=doc)
     up = model.build_model(Facts())
@@ -133,11 +157,35 @@ def test_cast_or_reject_winner_model_is_gated(registry, numbers, why):
     card = (up.folder / "README.md").read_text()
     assert "extra_gated_prompt" in card and why in card
     assert "gated-auto" not in card
+    assert any("item 74" in n for n in up.notes)
 
 
-def test_repair_winner_model_is_public(registry):
+def test_a_public_model_repo_is_refused(registry, monkeypatch):
+    """R2-07: configs/publish.yaml cannot make the repaired model public while item 74 stands."""
+    cfg = settings.load()
+    cfg = {**cfg, "repos": {**cfg["repos"], "model": {**cfg["repos"]["model"], "access": "public"}}}
+    monkeypatch.setattr(settings, "load", lambda: cfg)
     write_inputs()
-    assert model.build_model(Facts()).repo.gated is False
+    with pytest.raises(PublishError, match="item 74"):
+        model.build_model(Facts())
+
+
+@pytest.mark.parametrize(
+    "numbers,says,never",
+    [
+        (None, "lambda", "wrapper"),
+        (RESTA_WINS, "alpha", "wrapper"),
+        (CAST_WINS, "wrapper", "lambda"),
+        (REJECT, "reject", "lambda"),
+    ],
+)
+def test_gate_prompt_gives_this_models_reasons(registry, numbers, says, never):
+    """R2-10: the gate text is filled from gate_reasons: no wrapper sentence on a WiSE-FT or ReSta model."""
+    write_inputs(selection_doc=selection(numbers))
+    up = model.build_model(Facts())
+    prompt = _meta((up.folder / "README.md").read_text())["extra_gated_prompt"]
+    assert says in prompt and never not in prompt
+    assert "Do not deploy it" in prompt and "{{" not in prompt
 
 
 def test_collections_list_the_winner_repo_whatever_its_access(registry, monkeypatch):
@@ -200,8 +248,41 @@ def test_cast_model_carries_artifacts_and_wrapper(registry, monkeypatch):
     write_inputs(selection_doc=selection(CAST_WINS))
     up = model.build_model(Facts(), "cast-m1.0-adapter-aya-std-s1")
     assert (up.folder / "cast_generate.py").is_file()
-    assert (up.folder / "repair" / "cast" / "condition.pt").is_file()
+    assert (up.folder / "repair" / "cast" / "cast.safetensors").is_file()
     assert "Using the CAST repair" in (up.folder / "README.md").read_text()
+    assert not any("CAST artifact" in e for e in up.expected)
+
+
+@pytest.mark.parametrize("stale", ["other bytes", None])
+def test_cast_artifact_must_match_the_registry_sha(registry, stale):
+    """R2-08: a stale (refitted, or not pulled) or missing cast.safetensors is never staged beside a
+    params.json that pins another sha; both repos list it as expected instead."""
+    write_inputs(selection_doc=selection(CAST_WINS))
+    art = model.cast_artifacts("adapter-aya-std-s1") / "cast.safetensors"
+    if stale is None:
+        art.unlink()
+    else:
+        art.write_bytes(stale.encode())
+    up = model.build_model(Facts())
+    assert any("cast.safetensors" in e and "sha256" in e for e in up.expected)
+    assert not (up.folder / "repair" / "cast").exists()
+    params = model.build_params(Facts())
+    assert any("cast.safetensors" in e and "sha256" in e for e in params.expected)
+    assert not (params.folder / "cast" / "adapter-aya-std-s1").exists()
+    assert (params.folder / "cast" / "adapter-aya-std-s2" / "cast.safetensors").is_file()
+
+
+def test_model_card_values_are_recorded(registry):
+    """R2-09: every value the model card renders goes to outputs/publish/model.sources.json."""
+    write_inputs()
+    model.build_model(Facts())
+    doc = json.loads((model.stage_root() / "model.sources.json").read_text())
+    pointers = {v["pointer"] for v in doc["values"]}
+    assert {"/primary/drift/pooled", "/primary/repair/pooled", "/headline/utility_retained"} <= pointers
+    assert any(p.startswith("/tables/per_language/rows/") for p in pointers)
+    assert any(p.startswith("/tables/belebele/rows/") for p in pointers)
+    assert "/generation/max_new_tokens" in pointers
+    assert doc["pending"] == []
 
 
 # ------------------------------------------------------------------ stale weights (R1-08, R1-25)

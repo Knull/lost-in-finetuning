@@ -1,12 +1,14 @@
 # Hugging Face deliverables (P08)
 
 The rules say every artifact is hosted on HF and the project is deployed publicly by the
-deadline. Gating follows docs/decisions.md items 14 and 74.
+deadline. Gating follows docs/decisions.md items 14 and 74. Gated repos are still hosted publicly
+(anyone can see them and, after accepting the terms, download them), and the GitHub repo, Space, article, logs, prompt sets and
+repair parameters are public, so the public deploy is met.
 
 | Artifact | Access | Contents |
 | --- | --- | --- |
-| Repaired model | public; gated, automatic approval, for a CAST winner or a "reject" verdict (item 74, pending team confirmation) | The overall frozen winner (seed 1) applied to the chosen adapter, and no other variant: the card shows the winner's repair effect. The model card carries the CC-BY-NC-4.0 and Cohere acceptable-use notices, the verdict, and the per-language before/after table. A CAST winner's weights are the adapter, merged (the repair is only in the wrapper), and a "reject" winner is the best setting frozen anyway, not a repair: both are gated like the adapters. |
-| Repair parameters | public | CAST vectors, condition and threshold; the WiSE-FT lambda; the ReSta alpha. |
+| Repaired model | gated, automatic approval, whatever the method or verdict (item 74, pending team confirmation) | The overall frozen winner (seed 1) applied to the chosen adapter, and no other variant: the card shows the winner's repair effect. The model card carries the CC-BY-NC-4.0 and Cohere acceptable-use notices, the verdict, and the per-language before/after table. With the public parameters, any repaired model's weights give back the gated adapter: WiSE-FT as Global + (weights - Global) / lambda, ReSta as weights - alpha x (Global - Base), and a CAST winner's weights are the adapter, merged (the repair is only in the wrapper). So it is gated like the adapters, and the card and gate text say which of these applies (plus "reject": the best setting frozen anyway, not a repair). `lift publish model` refuses a public `repos.model`. |
+| Repair parameters | public | CAST vectors, condition and threshold; the WiSE-FT lambda; the ReSta alpha. Public because no repaired weights are: on their own they rebuild nothing. |
 | Adapters (unrepaired) | gated, automatic approval | Research artifacts whose safety may have drifted (the verdict says whether it did), with a terms note. |
 | Logs dataset | public | Prompt ids, labels, metadata, refusal texts and aggregate tables. |
 | Raw completions | gated, manual approval | Every judged output, including the harmful ones. |
@@ -30,7 +32,7 @@ a dry run unless given `--yes`.
 
 | Command | Builds | Reads |
 | --- | --- | --- |
-| `lift publish model [--variant V] [--build --device cuda:0] [--yes]` | repaired model, repair parameters, gated adapters | `selection.json`, `final_report.json`, configs/variants.yaml, outputs/adapters, outputs/artifacts/cast |
+| `lift publish model [--variant V] [--build --device cuda:0] [--yes]` | repaired model (gated), repair parameters, gated adapters; writes outputs/publish/model.sources.json (every value on the model card with its file and pointer) | `selection.json`, `final_report.json`, configs/variants.yaml, outputs/adapters, outputs/artifacts/cast |
 | `lift publish datasets [--only logs raw prompts] [--yes]` | logs (public), raw completions (gated, manual), translated prompts (public) | outputs/judgements, generations, utility, metrics/auditkit, validation keys and labels, data/prompts |
 | `lift publish space [--yes]` | the Gradio Space (`hf/space/`) | nothing at build time; the Space reads the logs dataset |
 | `lift publish collections [--yes]` | the two collections; writes outputs/publish/collections.json | the repo ids above |
@@ -85,7 +87,9 @@ the logs only after every label is final, so this is never needed.
   full shape is in the docstring of `src/lift/publish/inputs.py`. If P07 writes something else, change
   `lift.publish.inputs` (one place), not the article.
 - `outputs/artifacts/cast/{adapter}/` (P05 `lift fit-cast`): copied as they are into the model and
-  parameter repos. `cast_generate.py` calls `lift.repair.cast.make` and reads `params.strength`.
+  parameter repos, only while `cast.safetensors` has the sha256 its registry entry pins
+  (`artifacts.cast`); a stale or missing one is listed as not built yet. `cast_generate.py` calls
+  `lift.repair.cast.make`, reads `params.strength` and checks that sha again.
 
 ### Decisions made while building P08 (Nov 6, before any result existed)
 

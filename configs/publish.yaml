@@ -8,12 +8,13 @@ namespace_env: LIFT_HF_NAMESPACE   # set this (not a secret) or fill `namespace`
 namespace: null
 
 repos:
-  # The frozen repair applied to the seed-1 adapter: {variant} is its configs/variants.yaml name.
-  model: {name: "lift-{variant}", type: model, access: public}
-  # The same repo, gated with automatic approval like the adapters, when the winner is CAST (its weights
-  # are the adapter, merged) or the verdict is reject (docs/decisions.md item 74, pending the team).
-  model_gated: {name: "lift-{variant}", type: model, access: gated-auto}
-  # Every frozen setting's parameters (WiSE-FT lambda, ReSta alpha, CAST vectors and threshold).
+  # The frozen repair applied to the seed-1 adapter: {variant} is its configs/variants.yaml name. Gated
+  # with automatic approval like the adapters, whatever the method or verdict: with the public parameters
+  # its weights give back the gated adapter (docs/decisions.md item 74, pending the team). `lift publish
+  # model` refuses a public one.
+  model: {name: "lift-{variant}", type: model, access: gated-auto}
+  # Every frozen setting's parameters (WiSE-FT lambda, ReSta alpha, CAST vectors and threshold). Public:
+  # every repaired model is gated, so no public weights pair with them (item 74).
   repair_params: {name: lift-repair-params, type: model, access: public}
   # One repo per unrepaired adapter, gated with automatic approval (docs/decisions.md item 14).
   adapter: {name: "lift-{adapter}", type: model, access: gated-auto}

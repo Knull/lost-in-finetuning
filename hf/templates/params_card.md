@@ -13,6 +13,10 @@ before the final split was touched), for each repair family and seed:
 WiSE-FT uses our lambda (0 is stock, 1 is the adapter); SafeTune's `apply_wise_ft` takes
 alpha = 1 - lambda. ReSta adds alpha x (Global - Base) with DARE off.
 
+These parameters are public on their own. With them, a repaired model's weights would give back
+the unrepaired adapter, so every repaired model is gated with automatic approval, like the
+adapters.
+
 Code and the frozen recipe tag: {{ github }}. Evaluation labels: {{ logs_repo }}.
 
 ## Licence

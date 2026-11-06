@@ -9,12 +9,18 @@
   it, the weights already staged are uploaded only while their ``lift_variant.json`` names the variant's
   registry entry as it is now (spec, adapter hash, Global revision), so ``--build`` once, check the dry
   run, then ``--yes`` uploads the same weights without building them again.
-  Access (docs/decisions.md item 74, pending team confirmation): public for a WiSE-FT or ReSta winner
-  with the verdict repair; gated with automatic approval, like the adapters (item 14), for a CAST winner
-  (its weights are the unrepaired adapter, merged: the repair is only in the wrapper) and for a
-  "reject" verdict's best-anyway setting (not a repair).
+  Access (docs/decisions.md item 74, pending team confirmation): always gated with automatic approval,
+  like the adapters (item 14), whatever the method or verdict. Its weights and the public parameters
+  give back the gated adapter: WiSE-FT as Global + (weights - Global) / lambda, ReSta as
+  weights - alpha x (Global - Base), and a CAST model's weights are the adapter, merged (the repair is
+  only in the wrapper). A public ``repos.model`` in configs/publish.yaml is refused. The card and the
+  gate text give this model's own reasons (``gate_reasons``).
 - Repair parameters (public): every frozen setting's VariantSpec on seeds 1-3 (lambda, alpha or
-  strength, artifact hashes) and the CAST artifacts from outputs/artifacts/cast/{adapter}/.
+  strength, artifact hashes) and the CAST artifacts from outputs/artifacts/cast/{adapter}/. They stay
+  public because no repaired weights are: on their own they rebuild nothing.
+- A CAST artifact is staged only when its sha256 is the one its registry entry pins (``artifacts.cast``,
+  which ``cast_generate.py`` checks again); a stale or missing one is listed as expected.
+- Every value the model card renders is recorded in outputs/publish/model.sources.json.
 - Adapters (gated, automatic approval): every registered adapter in outputs/adapters/, its weights
   and adapter_config.json only (registration.json stays private: it names the runs repo).
 """
@@ -28,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from lift import config, paths
+from lift.io import sha256_file
 from lift.publish import PublishError, render, settings
 from lift.publish.hub import Upload
 from lift.publish.inputs import (
@@ -44,6 +51,7 @@ from lift.publish.inputs import (
 )
 
 CAST_METHODS = ("cast", "cast_always")
+CAST_ARTIFACT = "cast.safetensors"  # lift.repair.cast.ARTIFACT, the file cast_generate.py loads
 ADAPTER_FILES = ("adapter_config.json", "adapter_model.safetensors")
 ARTIFACT_SUFFIXES = {".pt", ".json", ".safetensors", ".yaml", ".npy", ".npz", ".txt"}
 METHOD_TEXT = {
@@ -73,34 +81,55 @@ def frozen_names(facts: Facts) -> set[str]:
     return set(frozen_variants(facts))
 
 
+# Why each method's weights are gated (docs/decisions.md item 74): with the public parameters, they give
+# back the gated adapter (item 14).
+METHOD_GATE = {
+    "wiseft": "it is a WiSE-FT repair, Global + lambda x (adapter - Global), and lambda is public, so "
+    "anyone could rebuild the gated adapter from these weights as Global + (weights - Global) / lambda",
+    "resta": "it is a ReSta repair, adapter + alpha x (Global - Base), and alpha, Global and Base are "
+    "public, so anyone could rebuild the gated adapter from these weights as weights - alpha x "
+    "(Global - Base)",
+    "cast": "it is a CAST repair: these weights are the unrepaired adapter, merged, and the repair is "
+    "applied only by the wrapper (cast_generate.py); without it the model behaves as the adapter, which "
+    "may answer harmful requests that Tiny Aya Global refuses",
+    "adapter": "these weights are the unrepaired adapter, merged",
+}
+METHOD_GATE["cast_always"] = METHOD_GATE["cast"]
+
+
 def gate_reasons(facts: Facts, spec: Any | None) -> list[str]:
-    """Why the repaired model's repo is gated (docs/decisions.md item 74); [] when it is public. Fails
-    closed: an unknown method or verdict gates it."""
-    reasons = []
-    if spec is None or spec.method in CAST_METHODS or spec.method not in METHOD_TEXT:
-        reasons.append(
-            "it is a CAST repair: these weights are the unrepaired adapter, merged, and the repair is "
-            "applied only by the wrapper"
-            if spec is not None and spec.method in CAST_METHODS
-            else "its repair method is not known yet"
-        )
+    """Why the repaired model's repo is gated (docs/decisions.md item 74, pending team confirmation).
+    Never empty: every repaired model is gated, and these are this model's reasons, for the card and the
+    gate text. An unknown method or verdict says so."""
+    method = spec.method if spec is not None else None
+    reasons = [METHOD_GATE.get(method, "its repair method is not known yet")]
     verdicts = [
         str(v.get("verdict"))
         for v in (facts.raw(report_path(), "/verdicts") or [])
         if isinstance(v, dict) and v.get("verdict")
     ]
-    if selection_verdict(facts) != "repair" or "reject" in verdicts:
+    chosen = selection_verdict(facts)
+    if chosen == "reject" or "reject" in verdicts:
         reasons.append(
             'the verdict is "reject": no setting met every selection constraint, so this is the best setting '
             "frozen anyway, not a repair"
         )
+    elif chosen != "repair":
+        reasons.append("the selection verdict is not known yet")
     return reasons
 
 
 def model_repo(facts: Facts, variant: str | None, spec: Any | None) -> settings.RepoSpec:
-    """The repaired model's repo: ``model`` (public) or ``model_gated`` (configs/publish.yaml)."""
-    kind = "model_gated" if gate_reasons(facts, spec) else "model"
-    return settings.repo(kind, variant=variant or "pending-winner")
+    """The repaired model's repo (configs/publish.yaml ``repos.model``), which must be gated whatever the
+    method or verdict (docs/decisions.md item 74): a public one is refused."""
+    repo = settings.repo("model", variant=variant or "pending-winner")
+    if not repo.gated:
+        raise PublishError(
+            "configs/publish.yaml repos.model must be gated (gated-auto): with the public repair parameters, "
+            "any repaired model's weights give back the gated adapter (docs/decisions.md item 74, pending "
+            "team confirmation; changing it needs a new dated entry there)"
+        )
+    return repo
 
 
 def params_doc(spec: Any) -> dict[str, Any]:
@@ -121,6 +150,25 @@ def params_doc(spec: Any) -> dict[str, Any]:
 
 def cast_artifacts(adapter: str) -> Path:
     return paths.artifacts_dir() / "cast" / adapter
+
+
+def cast_artifact_problem(spec: Any) -> str | None:
+    """Why ``spec``'s CAST artifact cannot be staged (None when it can): ``cast.safetensors`` must have the
+    sha256 the registry entry pins (``artifacts.cast``), or a stale artifact would go up beside a
+    params.json that pins another one (and cast_generate.py would refuse it)."""
+    path = cast_artifacts(spec.adapter) / CAST_ARTIFACT
+    pinned = (spec.artifacts or {}).get("cast")
+    if not pinned:
+        return f"the sha256 of {spec.name}'s {CAST_ARTIFACT} (configs/variants.yaml artifacts.cast)"
+    if not path.is_file():
+        return f"{shown(path)} with sha256 {pinned[:12]} (lift fit-cast, then lift sync pull)"
+    found = sha256_file(path)
+    if found != pinned:
+        return (
+            f"{shown(path)} with sha256 {pinned[:12]}, as configs/variants.yaml pins for {spec.name} (found "
+            f"{found[:12]}: a stale artifact, refitted or not pulled; lift sync pull)"
+        )
+    return None
 
 
 def _copy_artifacts(src: Path, dest: Path) -> list[str]:
@@ -304,7 +352,9 @@ def model_card(facts: Facts, variant: str | None, spec: Any | None, gated: list[
         meta.update(
             {
                 "extra_gated_heading": "Research model: gated (see the model card)",
-                "extra_gated_prompt": render.template("gate_model.txt").strip(),
+                "extra_gated_prompt": render.fill(
+                    render.template("gate_model.txt"), {"reasons": "; and ".join(gated)}
+                ).strip(),
                 "extra_gated_fields": {"Intended use": "text", "I will not deploy this model": "checkbox"},
             }
         )
@@ -386,7 +436,7 @@ def build_model(
         )
     variant = winner
     spec = _spec(variant) if variant else None
-    gated = gate_reasons(facts, spec) if variant else []
+    gated = gate_reasons(facts, spec)
     repo = model_repo(facts, variant, spec)
     folder = stage_root() / "model" / (variant or "pending-winner")
     folder.mkdir(parents=True, exist_ok=True)
@@ -408,18 +458,20 @@ def build_model(
             raise PublishError(f"{variant} is seed {spec.seed}; the repaired model is the seed-1 winner")
         render.write_text(folder / "repair" / "params.json", json.dumps(params_doc(spec), indent=1))
         if spec.method in CAST_METHODS:
-            copied = _copy_artifacts(cast_artifacts(spec.adapter), folder / "repair" / "cast")
-            if not copied:
-                expected.append(f"CAST artifacts in {shown(cast_artifacts(spec.adapter))} (lift fit-cast)")
+            problem = cast_artifact_problem(spec)
+            if problem:
+                expected.append(f"the CAST artifact: {problem}")
+            else:
+                _copy_artifacts(cast_artifacts(spec.adapter), folder / "repair" / "cast")
             shutil.copyfile(render.templates_dir() / "cast_generate.py", folder / "cast_generate.py")
         if build_weights:
             materialise(spec, folder, device=device)
         why = weights_mismatch(folder, spec)
         if why:
             expected.append(f"model weights ({why}: lift publish model --build, on the GPU VM)")
-        if gated:
-            notes.append("gated (automatic approval), docs/decisions.md item 74: " + "; ".join(gated))
+    notes.append("gated (automatic approval), docs/decisions.md item 74: " + "; ".join(gated))
     render.write_text(folder / "README.md", model_card(facts, variant, spec, gated))
+    facts.write_sources(stage_root() / "model.sources.json")
     return Upload(
         repo=repo,
         folder=folder,
@@ -444,9 +496,11 @@ def build_params(facts: Facts) -> Upload:
             continue
         render.write_text(folder / "params" / f"{name}.json", json.dumps(params_doc(spec), indent=1))
         if spec.method in CAST_METHODS:
-            copied = _copy_artifacts(cast_artifacts(spec.adapter), folder / "cast" / spec.adapter)
-            if not copied:
-                expected.append(f"CAST artifacts for {spec.adapter} (lift fit-cast)")
+            problem = cast_artifact_problem(spec)
+            if problem:
+                expected.append(f"the CAST artifact of {spec.adapter}: {problem}")
+            else:
+                _copy_artifacts(cast_artifacts(spec.adapter), folder / "cast" / spec.adapter)
         rows.append(
             [
                 f"`{name}`",

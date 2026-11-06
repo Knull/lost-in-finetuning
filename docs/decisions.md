@@ -4,20 +4,33 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 6, 2026: P08 publishing, after review P08-R1 (before any result existed)
 
-74. **Which repaired model goes up gated** (`lift publish model`; configs/publish.yaml `model_gated`).
-    **Pending team confirmation:** the orchestrator set this safe default until the team decides.
+74. **The repaired model goes up gated, whatever the method or verdict** (`lift publish model`;
+    configs/publish.yaml `repos.model`). **Pending team confirmation:** the orchestrator set this safe
+    default until the team decides.
     - Only the overall frozen winner (selection.json `overall.winner`, seed 1) is published as "the
       repaired model": its card shows the winner's repair effect.
-    - Its repo is gated with automatic approval, exactly like the unrepaired adapters (item 14), when
-      the winner is CAST or plain steering (`cast`, `cast_always`): those weights are the
-      adapter-merged model, and the repair is applied only by the wrapper, so the weights alone are
-      the unrepaired adapter in merged form.
-    - It is also gated when the verdict is reject (selection.json `overall.verdict`, or a final
-      verdict in final_report.json): the frozen setting is then the best one anyway, not a repair.
-    - Otherwise (a WiSE-FT or ReSta winner with the verdict repair) it is public, as item 14 says.
-    - This conflicts with prompts/P08_publish.md, which lists "CAST: the adapter-merged model plus its
-      CAST artifacts" as part of the public repaired model. Item 14 (adapters gated) wins: publishing
-      the same weights merged would undo it. Reason: review finding P08-R1-04.
+    - Its repo is gated with automatic approval, exactly like the unrepaired adapters (item 14), for
+      every method, because with the public repair parameters its weights give back the gated adapter:
+      - WiSE-FT: the weights are G + lambda x (A - G) and lambda is public, so A = G + (weights - G) /
+        lambda (in bf16 the error is at most 1/lambda times rounding, and a low-rank fit removes most of
+        it);
+      - ReSta: the weights are A + alpha x (G - B) and alpha, G and B are public, so
+        A = weights - alpha x (G - B);
+      - CAST or plain steering (`cast`, `cast_always`): the weights are the adapter-merged model and the
+        repair is applied only by the wrapper, so the weights alone are the unrepaired adapter, merged.
+    - A "reject" verdict (selection.json `overall.verdict`, or a final verdict in final_report.json) is
+      a further reason given on the card: the frozen setting is then the best one anyway, not a repair.
+    - The repair-parameters repo stays public: no repaired weights are public, so the parameters alone
+      rebuild nothing. `lift publish model` refuses a public `repos.model`, and the card and gate text
+      give the model's own reasons.
+    - This conflicts with item 14 ("the repaired model ... public") and with prompts/P08_publish.md,
+      which lists the repaired model (CAST: "the adapter-merged model plus its CAST artifacts") as
+      public. Item 14's adapter gate wins: a public repaired model would undo it, as reviews P08-R1-04
+      (CAST) and P08-R2-07 (WiSE-FT, ReSta) found.
+    - The hackathon's "deployed publicly" requirement is still met: gated repos are hosted publicly on
+      HF (anyone can see them and, after accepting the terms, download them; the organisers said on
+      Oct 30 that gated repos are fine), and the GitHub repo, Space, article, logs, prompt sets and
+      repair parameters are public.
 
 ## Nov 4-5, 2026 (night): P03 training, utility, Belebele and gate details, before any adapter was trained
 
