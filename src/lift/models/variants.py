@@ -12,7 +12,8 @@ Weight-space repairs mutate in place: always start from freshly loaded adapter w
 a model a previous repair touched. Keep Base and Global copies on CPU and stream.
 
 P05 adds a repair by writing a builder ``(spec, ctx) -> LoadedVariant`` and registering it in
-``BUILDERS`` under its method (``@builder("wiseft")``); stock and adapter code stays untouched.
+``BUILDERS`` under its method (``@builder("wiseft")``); stock and adapter code stays untouched. The repair
+builders live in lift.repair.build, imported at the end of this module so the table is always complete.
 
 configs/variants.yaml holds one entry per variant: the VariantSpec fields (name, method, adapter,
 seed, params, artifacts) plus the documentation-only keys in ``REGISTRY_ONLY_KEYS``. An adapter's
@@ -183,3 +184,7 @@ def get_spec(name: str) -> VariantSpec:
     if name not in registry:
         raise KeyError(f"variant {name!r} is not in configs/variants.yaml (known: {sorted(registry)})")
     return registry[name]
+
+
+# The repair builders (wiseft, resta, cast, cast_always) register themselves in BUILDERS (P05).
+from lift.repair import build as _repair_builders  # noqa: E402, F401
