@@ -4,8 +4,8 @@ The final split is touched only here (CLAUDE.md rule 1), so every final line pas
 
 - a ``recipe-frozen-*`` git tag exists (Gate 3, README): listed by ``git tag`` in this checkout, or, on a GPU
   VM whose shallow fetch of the job's ref carries no tags, by ``git ls-remote --tags origin`` with the
-  GITHUB_TOKEN the job hands to lift lines (sent as an http header, as colab/job.py fetches; never in a URL,
-  argv is never logged);
+  GITHUB_TOKEN the job hands to lift lines (sent as an http header through that git process's GIT_CONFIG_*
+  variables, as kaggle/runner.ipynb fetches: never in a URL, on a command line or in a log);
 - the variant is frozen: stock, a registered adapter (method "adapter": an adapter seed), or a repaired
   variant outputs/metrics/selection.json froze ("frozen", one setting per family on the seed-1 adapter,
   applied to seeds 1-3: ``frozen_variants``) and configs/variants.yaml registers. A selection that is not
@@ -123,8 +123,16 @@ def frozen_tags(git: Callable[..., str | None] = _git) -> list[str]:
     basic = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_TRACE") and k != "GIT_CURL_VERBOSE"}
     env["GIT_TERMINAL_PROMPT"] = "0"
-    header = f"http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}"
-    return _tag_names(git(["-c", header, "ls-remote", "--tags", "origin", f"refs/tags/{TAG_GLOB}"], env=env))
+    # The header goes in through GIT_CONFIG_* variables of this one git process, never argv (``ps`` shows
+    # every user a process's command line), appended after any config the caller already passes this way.
+    try:
+        n = int(env.get("GIT_CONFIG_COUNT") or 0)
+    except ValueError:
+        n = 0
+    env["GIT_CONFIG_COUNT"] = str(n + 1)
+    env[f"GIT_CONFIG_KEY_{n}"] = "http.https://github.com/.extraheader"
+    env[f"GIT_CONFIG_VALUE_{n}"] = f"AUTHORIZATION: basic {basic}"
+    return _tag_names(git(["ls-remote", "--tags", "origin", f"refs/tags/{TAG_GLOB}"], env=env))
 
 
 def selection_path() -> Path:

@@ -5,6 +5,7 @@ No torch."""
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -126,9 +127,26 @@ def test_tags_come_from_git_then_the_remote_with_the_token_as_a_header(monkeypat
     monkeypatch.setenv("GIT_TRACE", "1")
     assert final.frozen_tags(git) == ["recipe-frozen-20261107"]
     argv, env = calls[-1]
-    assert "ls-remote" in argv and "secret-token" not in " ".join(argv)  # base64 in a header only
-    assert any(a.startswith("http.https://github.com/.extraheader=AUTHORIZATION: basic ") for a in argv)
-    assert "GIT_TRACE" not in env
+    basic = base64.b64encode(b"x-access-token:secret-token").decode("ascii")
+    assert "ls-remote" in argv
+    # The token is never on a command line (visible in ps), not even base64-encoded in a -c header: it
+    # reaches git through GIT_CONFIG_* variables of that one process.
+    for args, _env in calls:
+        assert not any("secret-token" in a or basic in a or "extraheader" in a for a in args)
+    count = int(env["GIT_CONFIG_COUNT"])
+    pairs = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(count)}
+    assert pairs["http.https://github.com/.extraheader"] == f"AUTHORIZATION: basic {basic}"
+    assert "GIT_TRACE" not in env and env["GIT_TERMINAL_PROMPT"] == "0"
+    # Config the caller already passes through GIT_CONFIG_* is kept, the header appended after it.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.askpass")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "")
+    assert final.frozen_tags(git) == ["recipe-frozen-20261107"]
+    env = calls[-1][1]
+    assert env["GIT_CONFIG_COUNT"] == "2" and env["GIT_CONFIG_KEY_0"] == "core.askpass"
+    assert env["GIT_CONFIG_KEY_1"] == "http.https://github.com/.extraheader"
+    for name in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
+        monkeypatch.delenv(name)
     monkeypatch.delenv("GITHUB_TOKEN")
     assert final.frozen_tags(lambda argv, env=None: "" if argv[0] == "tag" else "x") == []
     assert final.frozen_tags(lambda argv, env=None: "recipe-frozen-a\nnot-a-tag\n") == ["recipe-frozen-a"]
