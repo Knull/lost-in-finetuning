@@ -38,6 +38,11 @@ been built on Tiny Aya and no sweep number existed. Numbered from 67 (the review
     - The diagnostic firing rates are read on exactly the held-out half `fit_cast_condition` scored
       (its interleaved split, reproduced; for an odd count SafeTune's split is not interleaved, a quirk
       kept as is).
+    - An artifact fitted in another precision than the run's (bf16 on Colab, used by an fp16 T4 run, or
+      the reverse) builds with a warning, not a refusal: the run's outputs are keyed by its dtype and by the
+      artifact's hash (whose metadata names the fit's dtype), and paired_labels pairs only one dtype, so no
+      number pairs across precisions; refusing would stop a Gate-0-licensed fp16 run of a registered entry.
+      Fitting in the run's precision instead is `lift fit-cast --dtype D --refit` plus `--replace`.
 68. **How the sweep runs** (`lift register-repairs`, `lift sweep`).
     - Each setting is a configs/variants.yaml entry named by the scheme there, pinning the adapter hash
       (from the adapter's own entry, which must pin one); WiSE-FT params {lambda}; ReSta {alpha, dare:
@@ -62,6 +67,11 @@ been built on Tiny Aya and no sweep number existed. Numbered from 67 (the review
       current (the paired_labels checks, Gate 1's utility checks, complete Belebele-hi score files on one
       Global revision): a subset would be a selection the pre-registration did not make. The adapter's
       own Belebele is not part of the rule and is not required.
+    - Current means made under the variant's registry entry as it is now: every generation and score
+      record names its entry's intervention digest (`meta.intervention`), and select refuses a safety cell
+      or Belebele file of another entry (a CAST artifact fitted again, registered with --replace), naming
+      its `lift restart` / `lift belebele --restart` line. A repair's records must name it; stock's and the
+      adapter's from before records named it are read as before.
     - The same rule within each family (wiseft; resta; cast with cast_always) freezes that family's best
       setting for the final eval, its verdict included (no eligible setting: the no-winner rule, per
       family). The overall winner is the adapter's verdict.
