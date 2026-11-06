@@ -49,13 +49,12 @@ final split was touched once, to score the frozen variants.
 - **{{ qwen_judge }}: a safety classifier, run on the native text. Its "Controversial" label
   counts as harmful; the loose reading is a sensitivity analysis.
 - **{{ frontier_judge }}: a frontier model prompted with our safety rubric
-  (`configs/rubrics/safety_v1.md`). {{ utility_judge }} is also the pairwise utility judge.
+  (`configs/rubrics/safety_v1.md`). {{ utility_judge }}
 - {{ judge_roles }}
 - Which judge is primary was settled on the first validation round, before any final-split
-  number existed: the frontier judge would become primary only if it agreed with the native
-  readers at least {{ judge_rule }} more often than Qwen3Guard.
-- **GlotLID** for language identification and **NLLB-200-distilled-600M** (CC-BY-NC-4.0) for the
-  Arabic and Thai back-translation check.
+  number existed: the frontier judge would become primary only if its agreement with the native
+  readers exceeded Qwen3Guard's by more than {{ judge_rule }}.
+- **GlotLID** for language identification{{ nllb }}.
 
 Everything derived from Tiny Aya (the adapters and the repaired model) is non-commercial.
 
@@ -157,8 +156,7 @@ not show that the mechanism caused the drift.
 ### Limitations
 
 - Most prompts are machine translations. Native readers checked samples in Hindi, Chinese and
-  Spanish only; the Arabic and Thai prompts had no native check. For Arabic and Thai, a sample
-  of the outputs was also judged after back-translation into English (judge sensitivity table).
+  Spanish only; the Arabic and Thai prompts had no native check. {{ backtranslation_limit }}
 - One adapter of one model. The study cannot establish a general policy for which repair fits
   which kind of drift.
 - The automatic judge's precision differs by language. Hindi claims rest on its validation
@@ -170,7 +168,8 @@ not show that the mechanism caused the drift.
 
 A full check-up of one adapter (the seed-1 dev sweep, then the final battery of stock, the seed-1
 adapter and its seed-1 frozen repair) took {{ gpu_hours }} of GPU time; the final battery took
-{{ gpu_hours_variant }} per variant on average. Re-running
+{{ gpu_hours_variant }} per variant on average. Run time of the acceptance-test notebook (default
+sample): {{ notebook_runtime }}. Re-running
 safety fine-tuning would need a safety dataset in every language and a training run per
 adapter; the repairs here need no gradient step. Tiny Aya derivatives are non-commercial, so we
 make no commercial claims.

@@ -24,46 +24,334 @@ def effect(est: float, lo: float, hi: float, p: float, seeds: tuple[int, ...] = 
     }
 
 
-def table(columns: list[tuple[str, str, str]], rows: list[dict], title: str = "t") -> dict:
+def table(columns: list[tuple[str, str, str]], rows: list[dict], title: str = "t", note: str = "") -> dict:
+    """A table spec as P07's ``lift.report.tables.table`` writes it (title, columns, rows, note)."""
     return {
         "title": title,
         "columns": [{"key": k, "label": label, "format": f} for k, label, f in columns],
-        "rows": rows,
+        "rows": [dict(r) for r in rows],
+        "note": note,
     }
 
 
 QWEN_ID = "Qwen/Qwen3Guard-Gen-4B@main#bf16#strict"
 FRONTIER_ID = "anthropic/claude-sonnet-5-5@safety_v1:0123456789ab+t0+max1024+api2026-10-21"
 
+# P07's ``lift.report.tables.TABLES`` on origin/p07-final-report @ 1570807: the tables final_report.json
+# always carries (P07 also writes ``cells``, which P08 does not read). No ``signatures``: no stage writes it.
+P07_TABLES = (
+    "per_language",
+    "repair_comparison",
+    "secondary",
+    "exploratory",
+    "overrefusal",
+    "utility",
+    "belebele",
+    "judge_sensitivity",
+    "cost",
+)
+P07_LANG_NAMES = {
+    "en": "English",
+    "hi": "Hindi",
+    "zh": "Chinese",
+    "es": "Spanish",
+    "ar": "Arabic",
+    "th": "Thai",
+}
+WINNER = "wiseft-l0.50-adapter-aya-std-s1"
+# Per-language harmful rates (stock, adapter, frozen repair) behind the per_language table; Thai's repair
+# arm was not run (None), as P07 writes an arm it could not read.
+HARMFUL = {
+    "Hindi": (0.05, 0.21, 0.07),
+    "English": (0.02, 0.09, 0.03),
+    "Chinese": (0.04, 0.12, 0.05),
+    "Spanish": (0.03, 0.10, 0.04),
+    "Arabic": (0.06, 0.08, 0.06),
+    "Thai": (0.07, 0.09, None),
+    "Hindi (Aya Red-teaming)": (0.10, 0.20, 0.12),
+}
+# Hard-benign refusal rates (stock, adapter, frozen repair) behind the overrefusal table.
+HARD_REFUSAL = {"hi": (0.30, 0.25, 0.33), "en": (0.20, 0.18, 0.22), "zh": (0.25, 0.24, 0.27)}
 
-def report() -> dict:
-    per_language = table(
+
+def _p07_per_language() -> dict:
+    rows = []
+    for label, (stock, adapter, repair) in HARMFUL.items():
+        rows.append(
+            {
+                "lang": label,
+                "stock": stock,
+                "stock_upper": stock + 0.01,
+                "adapter": adapter,
+                "adapter_upper": adapter + 0.01,
+                "repair": repair,
+                "repair_upper": None if repair is None else repair + 0.01,
+                "n": 100 if "Red-teaming" in label else 400,
+                "drift": interval(adapter - stock, adapter - stock - 0.05, adapter - stock + 0.05),
+                "repair_effect": None
+                if repair is None
+                else interval(repair - adapter, repair - adapter - 0.05, repair - adapter + 0.05),
+            }
+        )
+    return table(
         [
             ("lang", "Language", "text"),
-            ("role", "Variant", "text"),
-            ("set", "Set", "text"),
-            ("harmful_rate", "Harmful", "pct_ci"),
-            ("harmful_upper", "Upper", "pct"),
+            ("n", "Prompts", "int"),
+            ("stock", "Stock", "pct"),
+            ("stock_upper", "Stock (upper)", "pct"),
+            ("adapter", "Adapter", "pct"),
+            ("adapter_upper", "Adapter (upper)", "pct"),
+            ("repair", "Frozen repair", "pct"),
+            ("repair_upper", "Frozen repair (upper)", "pct"),
+            ("drift", "Drift (adapter - stock)", "pp_ci"),
+            ("repair_effect", "Repair (repair - adapter)", "pp_ci"),
         ],
-        [
-            {
-                "lang": lang,
-                "role": role,
-                "set": "harmful",
-                "harmful_rate": interval(r, r - 0.02, r + 0.02),
-                "harmful_upper": r + 0.01,
-            }
-            for lang in ("hi", "en")
-            for role, r in (("stock", 0.05), ("adapter", 0.21), ("repair", 0.07))
-        ],
+        rows,
+        "Harmful rate per language, final split (pooled over seeds)",
+        "Harmful rate H/N; the upper bound counts unclear outputs as harmful, (H+U)/N.",
     )
-    simple = table([("name", "Name", "text"), ("value", "Value", "pct")], [{"name": "a", "value": 0.5}])
-    simple["note"] = "A note."
+
+
+def _p07_overrefusal() -> dict:
+    rows = []
+    for set_name, rates in (("easy", {"hi": (0.02, 0.03, 0.02)}), ("hard", HARD_REFUSAL)):
+        for lang, (stock, adapter, repair) in rates.items():
+            rows.append(
+                {
+                    "set": set_name,
+                    "lang": P07_LANG_NAMES[lang],
+                    "stock": stock,
+                    "adapter": adapter,
+                    "repair": repair,
+                    "adapter_change": interval(
+                        adapter - stock, adapter - stock - 0.03, adapter - stock + 0.03
+                    ),
+                    "repair_change": interval(repair - stock, repair - stock - 0.03, repair - stock + 0.03),
+                }
+            )
+    return table(
+        [
+            ("set", "Benign set", "text"),
+            ("lang", "Language", "text"),
+            ("stock", "Stock", "pct"),
+            ("adapter", "Adapter", "pct"),
+            ("repair", "Frozen repair", "pct"),
+            ("adapter_change", "Adapter - stock", "pp_ci"),
+            ("repair_change", "Repair - stock", "pp_ci"),
+        ],
+        rows,
+        "Over-refusal: refusal rate on benign prompts, final split",
+        "Refusals of benign prompts (PolyRefuse harmless = easy, OR-Bench-Hard = hard).",
+    )
+
+
+def _claims(names: list[str], adj: str, title: str) -> dict:
+    rows = [
+        {
+            "claim": name,
+            "effect": interval(0.05, 0.01, 0.09) if i else None,
+            "p": 0.01 if i else None,
+            "p_adj": 0.04 if i else None,
+            "n": 800 if i else None,
+            "seeds": "1, 2, 3" if i else "not run",
+        }
+        for i, name in enumerate(names)
+    ]
+    return table(
+        [
+            ("claim", "Claim", "text"),
+            ("effect", "Effect", "pp_ci"),
+            ("p", "p", "p"),
+            ("p_adj", adj, "p"),
+            ("n", "Rows", "int"),
+            ("seeds", "Seeds", "text"),
+        ],
+        rows,
+        title,
+        "Adjusted within this family.",
+    )
+
+
+def _p07_tables() -> dict:
+    utility_rows = [
+        {
+            "arm": arm,
+            "variant": name,
+            "seed": str(seed),
+            "win_rate": None if win is None else interval(win, win - 0.07, win + 0.07),
+            "n": None if win is None else 200,
+            "retained": interval(1.0, 1.0, 1.0) if arm == "adapter" else interval(0.8, 0.6, 1.0),
+        }
+        for arm, name, seed, win in (
+            ("adapter", "adapter-aya-std-s1", 1, 0.62),
+            ("wiseft", WINNER, 1, 0.58),
+            ("cast", "cast-m1.0-adapter-aya-std-s3", 3, None),
+        )
+    ]
+    return {
+        "per_language": _p07_per_language(),
+        "repair_comparison": table(
+            [
+                ("family", "Family", "text"),
+                ("variant", "Frozen setting (seed 1)", "text"),
+                ("role", "Role", "text"),
+                ("harmful_hi", "Harmful rate", "pct"),
+                ("effect", "Repair - adapter", "pp_ci"),
+                ("p", "p (bootstrap)", "p"),
+                ("retained", "Utility gain kept", "pct_ci"),
+                ("overrefusal_change", "Hard-benign refusal - stock", "pp_ci"),
+                ("belebele_change", "Belebele-hi - stock", "pp_ci"),
+            ],
+            [
+                {
+                    "family": "wiseft",
+                    "variant": WINNER,
+                    "role": "winner",
+                    "harmful_hi": 0.07,
+                    "effect": interval(-0.14, -0.19, -0.09),
+                    "p": 0.0002,
+                    "retained": interval(0.8, 0.6, 1.0),
+                    "overrefusal_change": interval(0.03, 0.0, 0.06),
+                    "belebele_change": interval(-0.01, -0.03, 0.01),
+                },
+                {
+                    "family": "resta",
+                    "variant": "resta-a0.25-adapter-aya-std-s1",
+                    "role": "family",
+                    "harmful_hi": None,
+                    "effect": None,
+                    "p": None,
+                    "retained": None,
+                    "overrefusal_change": None,
+                    "belebele_change": None,
+                },
+            ],
+            "Every frozen repair family on the final split (Hindi, pooled over seeds)",
+            "WiSE-FT attenuation is the baseline every repair is measured against.",
+        ),
+        "secondary": _claims(
+            ["drift zh+es", "repair zh+es", "drift en", "repair en"],
+            "p (Holm)",
+            "Secondary claims (Holm-corrected)",
+        ),
+        "exploratory": _claims(
+            [f"{k} {lang}" for lang in ("zh", "es", "ar", "th") for k in ("drift", "repair")],
+            "q (BH)",
+            "Exploratory claims (BH-FDR)",
+        ),
+        "overrefusal": _p07_overrefusal(),
+        "utility": table(
+            [
+                ("arm", "Arm", "text"),
+                ("variant", "Variant", "text"),
+                ("seed", "Seed", "text"),
+                ("win_rate", "Win rate vs stock", "pct_ci"),
+                ("n", "Pairs", "int"),
+                ("retained", "Adapter gain kept (pooled over seeds)", "pct_ci"),
+            ],
+            utility_rows,
+            "Hindi utility against stock, final split (200 pairs, both orders)",
+            "Win rate: mean pair score against stock.",
+        ),
+        "belebele": table(
+            [
+                ("lang", "Language", "text"),
+                ("stock", "Stock", "pct"),
+                ("adapter", "Adapter", "pct"),
+                ("repair", "Frozen repair", "pct"),
+                ("repair_change", "Repair - stock", "pp_ci"),
+            ],
+            [
+                {
+                    "lang": "Hindi",
+                    "stock": 0.5,
+                    "adapter": 0.49,
+                    "repair": 0.49,
+                    "repair_change": interval(-0.01, -0.03, 0.01),
+                }
+            ],
+            "Belebele accuracy per language, final split (700 items)",
+            "Letter log-likelihood scoring, no chat template; pooled over seeds.",
+        ),
+        "judge_sensitivity": table(
+            [
+                ("check", "Check", "text"),
+                ("lang", "Language", "text"),
+                ("n", "Items", "int"),
+                ("agreement", "Agreement", "pct"),
+                ("kappa", "Kappa", "f2"),
+                ("agreement_binary", "Binary agreement", "pct"),
+            ],
+            [
+                {
+                    "check": check,
+                    "lang": lang,
+                    "n": 40,
+                    "agreement": 0.9,
+                    "kappa": 0.8,
+                    "agreement_binary": 0.95,
+                }
+                for check, lang in (
+                    ("second judge vs primary", "Hindi"),
+                    ("back-translated (NLLB) vs native", "Arabic"),
+                    ("back-translated (NLLB) vs native", "Thai"),
+                )
+            ],
+            "Judge sensitivity",
+            "Four-class agreement and Cohen's kappa; binary = harmful vs not.",
+        ),
+        "cost": table(
+            [
+                ("variant", "Variant", "text"),
+                ("role", "Role", "text"),
+                ("gpu_hours", "GPU-hours", "hours"),
+                ("ms_per_token", "Per generated token", "ms"),
+                ("gate_share", "Gate share", "pct"),
+            ],
+            [
+                {
+                    "variant": "stock",
+                    "role": "stock",
+                    "gpu_hours": 0.4,
+                    "ms_per_token": 21.5,
+                    "gate_share": 0.0,
+                },
+                {
+                    "variant": WINNER,
+                    "role": "winner",
+                    "gpu_hours": None,
+                    "ms_per_token": None,
+                    "gate_share": 0.0,
+                },
+            ],
+            "Cost of the final evaluation",
+            "GPU-hours: the variant's whole final evaluation.",
+        ),
+        "cells": table(
+            [
+                ("variant", "Variant", "text"),
+                ("set", "Set", "text"),
+                ("lang", "Language", "text"),
+                ("n", "n", "int"),
+            ],
+            [{"variant": "stock", "set": "harmful", "lang": "hi", "n": 400}],
+            "Every final cell (variant x set x language)",
+        ),
+    }
+
+
+def report() -> dict:
+    """final_report.json exactly as P07's ``lift.report.tables.build`` writes it (origin/p07-final-report
+    @ 1570807): its TABLES with their columns, labels, formats and notes, the per-language table wide (one
+    row per language label, role columns), over-refusal in its own table, and the extra keys P08 does not
+    read (``cells``, ``created``, ``selection``, ``cost_detail``, ``primary.*_loose``)."""
     return {
         "version": 1,
         "dtype": "bf16",
         # the judge id of the final judgement records (Qwen3GuardJudge.judge_id, revision "main" in tests)
         "primary_judge": QWEN_ID,
+        "created": "2026-11-11T00:00:00+00:00",
+        "selection": {"adapter": "adapter-aya-std-s1", "winner_family": "wiseft"},
         "verdicts": [
             {
                 "adapter": "adapter-aya-std",
@@ -77,6 +365,8 @@ def report() -> dict:
             "repair": effect(-0.14, -0.19, -0.09, 0.0002),
             "redteam_drift": effect(0.1, 0.03, 0.17, 0.01),
             "redteam_repair": effect(-0.08, -0.15, -0.01, 0.03),
+            "drift_loose": effect(0.15, 0.10, 0.20, 0.0001),
+            "repair_loose": effect(-0.13, -0.18, -0.08, 0.0003),
         },
         "headline": {
             "utility_retained": interval(0.8, 0.6, 1.0),
@@ -85,22 +375,9 @@ def report() -> dict:
             "gpu_hours_per_checkup": 1.25,
             "gpu_hours_per_variant_final": 0.4,
         },
-        "tables": {
-            "per_language": per_language,
-            "repair_comparison": simple,
-            "secondary": simple,
-            "exploratory": simple,
-            "overrefusal": simple,
-            "utility": table(
-                [("variant", "Variant", "text"), ("win", "Win rate", "pct_ci")],
-                [{"variant": "repair", "win": interval(0.62, 0.55, 0.69)}, {"variant": "cast", "win": None}],
-            ),
-            "belebele": simple,
-            "judge_sensitivity": simple,
-            "signatures": simple,
-            "cost": simple,
-        },
+        "tables": _p07_tables(),
         "not_run": ["ReSta on seed 3"],
+        "cost_detail": {"rows": [], "gpu_hours_per_checkup": 1.25},
     }
 
 

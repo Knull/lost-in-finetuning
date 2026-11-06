@@ -56,9 +56,10 @@ def test_values_and_tables_record_their_source(tmp_path):
     facts = Facts()
     assert facts.report_value("/primary/drift/pooled", "pp_ci", what="d") == "+16.0 pp [+11.0, +21.0]"
     table = facts.table("utility")
-    assert "| Variant | Win rate |" in table and "62.0% [55.0, 69.0]" in table and "not run" in table
+    assert "| Variant | Seed | Win rate vs stock |" in table and "62.0% [55.0, 69.0]" in table
+    assert "not run" in table
     pointers = {s["pointer"] for s in facts.sources}
-    assert "/primary/drift/pooled" in pointers and "/tables/utility/rows/0/win" in pointers
+    assert "/primary/drift/pooled" in pointers and "/tables/utility/rows/0/win_rate" in pointers
     assert {s["file"] for s in facts.sources} == {"outputs/metrics/final_report.json"}
     out = facts.write_sources(tmp_path / "x.sources.json")
     assert json.loads(out.read_text())["pending"] == []

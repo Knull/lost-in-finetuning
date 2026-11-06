@@ -307,7 +307,7 @@ def test_the_aggregates_are_scanned_for_harmful_text(outputs):
 def test_aggregates_are_copied_as_csv(outputs):
     write_inputs()
     up = datasets.build_logs()
-    assert (up.folder / "aggregates" / "per_language.csv").read_text().startswith("lang,role,set,")
+    assert (up.folder / "aggregates" / "per_language.csv").read_text().startswith("lang,n,stock,")
     assert (up.folder / "aggregates" / "selection.json").is_file()
     card = (up.folder / "README.md").read_text()
     assert "**repair**" in card and "[PENDING" not in card

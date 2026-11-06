@@ -9,7 +9,7 @@ from publish_fakes import write_inputs, write_json
 
 from lift.publish import article, settings
 from lift.publish.collect import links_path
-from lift.publish.inputs import PENDING
+from lift.publish.inputs import PENDING, report_path
 
 
 @pytest.fixture
@@ -212,3 +212,109 @@ def test_the_safer_sentence_needs_a_repair_verdict_and_an_interval_below_zero():
     assert "safer than the adapter" not in _card(repair=effect(-0.02, -0.06, 0.01, 0.3))[0]
     seeds_card = _card(repair=effect(-0.14, -0.19, -0.09, 0.0002, seeds=(1, 2)))[0]
     assert "seeds 1, 2" in seeds_card
+
+
+# ---------------------------------------------------------------- the diagnosis is optional (P08-R2-02)
+
+
+def _section(text: str, head: str) -> str:
+    start = text.index(f"### {head}")
+    end = text.index("\n### ", start + 1)
+    return text[start:end]
+
+
+def test_signatures_absent_from_the_report_render_not_run(out):
+    """P07 writes no signatures table and P06 may never run: the section says not run, and it is no
+    placeholder (it does not block --yes)."""
+    from publish_fakes import P07_TABLES, report
+
+    assert set(report()["tables"]) - {"cells"} == set(P07_TABLES)
+    write_inputs()
+    path, facts = article.build()
+    text = path.read_text(encoding="utf-8")
+    section = _section(text, "Exploratory signatures")
+    assert "not run:" in section.lower() and PENDING not in section
+    assert not any("signatures" in p for p in article.placeholders(text))
+    assert not any("signatures" in m for m in facts.missing)
+
+
+def test_signatures_in_the_report_are_rendered(out):
+    from publish_fakes import report, table
+
+    doc = report()
+    doc["tables"]["signatures"] = table(
+        [("probe", "Probe", "text"), ("auc", "AUC", "f2")], [{"probe": "harm", "auc": 0.71}]
+    )
+    write_json(report_path(), doc)
+    section = _section(article.build()[0].read_text(encoding="utf-8"), "Exploratory signatures")
+    assert "| harm | 0.71 |" in section and "not run" not in section.lower()
+
+
+def test_signatures_are_pending_while_there_is_no_report(out):
+    section = _section(article.build()[0].read_text(encoding="utf-8"), "Exploratory signatures")
+    assert PENDING in section
+
+
+# ---------------------------------------------------------------- fixed text the data supports (P08-R2-10)
+
+
+def _bt_rows(doc, keep):
+    rows = doc["tables"]["judge_sensitivity"]["rows"]
+    doc["tables"]["judge_sensitivity"]["rows"] = [r for r in rows if keep(r)]
+    return doc
+
+
+def test_back_translation_is_claimed_only_when_it_ran(out):
+    from publish_fakes import report
+
+    write_inputs()
+    text = article.build()[0].read_text(encoding="utf-8")
+    assert "NLLB-200-distilled-600M" in text
+    assert "judged after back-translation into English" in text
+    doc = _bt_rows(report(), lambda r: not r["check"].startswith("back-translated"))
+    doc["not_run"] = ["ar/th back-translation: no verdicts"]
+    write_json(report_path(), doc)
+    text = article.build()[0].read_text(encoding="utf-8")
+    assert "judged after back-translation" not in text and "NLLB-200-distilled-600M (CC" not in text
+    assert "back-translation check was not run" in text
+
+
+def test_the_utility_judge_is_also_the_safety_judge_only_when_the_configs_agree(out, monkeypatch):
+    from lift import config
+
+    write_inputs()
+    text = article.build()[0].read_text(encoding="utf-8")
+    assert "is also the pairwise utility judge" in text
+    real = config.get
+
+    def get(dotted, *args, **kwargs):
+        if dotted == "judges.utility":
+            return {"provider": "openai", "model": "gpt-6", "rubric": "r"}
+        return real(dotted, *args, **kwargs)
+
+    monkeypatch.setattr(config, "get", get)
+    text = article.build()[0].read_text(encoding="utf-8")
+    assert "is also the pairwise utility judge" not in text
+    assert "The pairwise utility judge was gpt-6 (openai API)" in text
+
+
+def test_the_judge_rule_says_more_than(out):
+    """configs/project.yaml switch_primary_if_frontier_agreement_exceeds_by: strictly more, not "at least"."""
+    text = article.build()[0].read_text(encoding="utf-8")
+    assert "at least 5 points" not in text and "by more than 5 points" in text
+
+
+def test_the_notebook_run_time_is_not_claimed_until_measured(out, monkeypatch):
+    from lift.publish import acceptance
+
+    write_inputs()
+    text = " ".join(article.build()[0].read_text(encoding="utf-8").split())
+    assert "notebook (default sample): not yet timed" in text
+    clock = iter([0.0, 1500.0])
+    monkeypatch.setattr(acceptance.time, "monotonic", lambda: next(clock))
+    acceptance.start_clock()
+    acceptance.record_runtime(limit=50, langs=("hi", "en"), variants=3, gpu="NVIDIA A100")
+    path, facts = article.build()
+    text = " ".join(path.read_text(encoding="utf-8").split())
+    assert "notebook (default sample): 25 minutes on NVIDIA A100" in text
+    assert any(s["file"] == "outputs/metrics/acceptance_runtime.json" for s in facts.sources)

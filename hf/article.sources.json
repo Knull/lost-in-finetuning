@@ -23,7 +23,8 @@
   "the seeds pooled for drift (outputs/metrics/final_report.json)",
   "the seeds pooled for repair (outputs/metrics/final_report.json)",
   "the verdict per adapter (outputs/metrics/final_report.json)",
-  "utility win rate against stock and the share of the adapter's gain retained (outputs/metrics/final_report.json)"
+  "utility win rate against stock and the share of the adapter's gain retained (outputs/metrics/final_report.json)",
+  "whether the Arabic and Thai back-translation check ran (outputs/metrics/final_report.json)"
  ],
  "values": [
   {

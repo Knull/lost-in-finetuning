@@ -48,9 +48,12 @@ checked against their writers on origin/p05-repairs and origin/p07-final-report 
     Interval = {"est", "lo", "hi"}; any value may be null: "not run".
 
     ``primary_judge`` is the judge id written in the final judgement records (it follows the
-    decide-judge rule; never assume which judge it is). TABLES names the tables P08 places (a missing one
-    renders as pending). A cell is a number, a string, an Interval (formats ending in ``_ci``) or null
-    ("not run"). Every rendered value, text cells and table notes included, is recorded in the sources.
+    decide-judge rule; never assume which judge it is). TABLES names the tables P08 places: P07's
+    ``lift.report.tables.TABLES`` (a missing one renders as pending), plus the OPTIONAL ones no stage is
+    committed to write (``signatures``: P06's diagnosis, which may never run; when final_report.json exists
+    without it, it renders as "not run", like an arm not run, and is not pending). A cell is a number, a
+    string, an Interval (formats ending in ``_ci``) or null ("not run"). Every rendered value, text cells
+    and table notes included, is recorded in the sources.
 
 Formats: pct (0.123 -> 12.3%), pp (signed points), points (0.05 -> 5 points), pct_ci, pp_ci, p, int,
 f2, f3, hours, ms, text, list ([1, 2] -> "1, 2"). A null anywhere on a value's path (``pooled`` of an arm
@@ -88,6 +91,10 @@ TABLES = {
     "cost": "cost: GPU-hours per check-up and per-token latency per repair",
     "signatures": "exploratory diagnostic signatures (P06)",
 }
+# Tables no stage is committed to write: absent from an existing final_report.json, they render as not run
+# (the reason below), not as pending, so they never block ``--yes``. P07's TABLES has no signatures, and
+# P06 (the exploratory diagnosis) may never be built; P08 invents no contract for it.
+OPTIONAL = {"signatures": "the exploratory diagnosis (P06) put no signatures in final_report.json"}
 NOT_RUN = "not run"
 
 
@@ -281,6 +288,16 @@ class Facts:
         report = self.report()
         spec = (report or {}).get("tables", {}).get(name)
         if spec is None:
+            if report is not None and name in OPTIONAL:
+                self.sources.append(
+                    {
+                        "shown": NOT_RUN,
+                        "file": shown(report_path()),
+                        "pointer": f"/tables/{name}",
+                        "value": None,
+                    }
+                )
+                return f"_{NOT_RUN.capitalize()}: {OPTIONAL[name]}._"
             stage = P06 if name == "signatures" else P07
             return f"_{self._missing(TABLES.get(name, name), report_path(), stage)}_"
         try:

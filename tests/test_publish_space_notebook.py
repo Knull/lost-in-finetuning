@@ -9,7 +9,7 @@ import json
 import re
 
 import pytest
-from publish_fakes import report, write_json
+from publish_fakes import HARD_REFUSAL, HARMFUL, P07_LANG_NAMES, report, write_json
 
 from lift import paths
 from lift.publish import acceptance, space
@@ -45,13 +45,33 @@ def app(tmp_path, monkeypatch):
 def test_space_reads_the_aggregate_dataset(app):
     data = app.load_data()
     assert "**repair**" in app.verdict_markdown(data["report"])
-    names, langs, matrix = app.heatmap_matrix(data["report"])
-    assert names == ["stock", "adapter", "repair"] and langs == ["hi", "en"]
-    assert matrix[1][0] == pytest.approx(0.21)
     head, rows = app.table_rows(data["report"], "utility")
-    assert head == ["Variant", "Win rate"] and rows[1][1] == "not run"
+    assert head[3] == "Win rate vs stock" and rows[2][3] == "not run"
     assert app.example_rows(data["examples"], "hi")[0][-1] == "I can't help with that."
     assert app.verdict_markdown(None).startswith("The final results are not published")
+
+
+def test_space_harmful_heatmap_reads_p07s_per_language_table(app):
+    """P08-R2-01: P07's per_language table is wide (one row per language label, a column per role)."""
+    names, langs, matrix = app.heatmap_matrix(app.load_data()["report"], "harmful")
+    assert names == ["Stock", "Adapter", "Frozen repair"]
+    assert langs == list(HARMFUL)
+    for j, lang in enumerate(langs):
+        assert [matrix[i][j] for i in range(3)] == list(HARMFUL[lang])
+    assert matrix[2][langs.index("Thai")] is None  # an arm not run stays empty, never 0
+
+
+def test_space_overrefusal_heatmap_reads_p07s_overrefusal_table(app):
+    names, langs, matrix = app.heatmap_matrix(app.load_data()["report"], "overrefusal")
+    assert names == ["Stock", "Adapter", "Frozen repair"]
+    assert langs == [P07_LANG_NAMES[x] for x in HARD_REFUSAL]  # the hard set only
+    for j, code in enumerate(HARD_REFUSAL):
+        assert [matrix[i][j] for i in range(3)] == list(HARD_REFUSAL[code])
+
+
+def test_space_heatmaps_are_empty_without_a_report(app):
+    assert app.heatmap_matrix(None, "harmful") == ([], [], [])
+    assert app.heatmap_matrix({"tables": {}}, "overrefusal") == ([], [], [])
 
 
 def test_space_redacts_anything_but_refusals(app):
@@ -61,10 +81,27 @@ def test_space_redacts_anything_but_refusals(app):
     assert cut.endswith("[redacted]") and len(cut.split()) == app.MAX_WORDS + 1
 
 
-def test_space_heatmap_figure(app):
+def test_space_heatmap_figure_plots_the_table_values(app):
     pytest.importorskip("matplotlib")
-    fig = app.heatmap_figure(app.load_data()["report"])
-    assert fig.axes
+    import math
+
+    fig = app.heatmap_figure(app.load_data()["report"], "harmful")
+    ax = fig.axes[0]
+    image = ax.images[0].get_array()
+    langs = list(HARMFUL)
+    for j, lang in enumerate(langs):
+        for i, value in enumerate(HARMFUL[lang]):
+            got = image[i, j]
+            if value is None:
+                assert image.mask[i, j] or math.isnan(image.data[i, j])
+            else:
+                assert float(got) == pytest.approx(value * 100)
+    assert [t.get_text() for t in ax.get_xticklabels()] == langs
+    assert [t.get_text() for t in ax.get_yticklabels()] == ["Stock", "Adapter", "Frozen repair"]
+    cells = {t.get_text() for t in ax.texts}
+    assert "21.0" in cells and "-" in cells  # Hindi adapter; Thai repair not run
+    empty = app.heatmap_figure(None, "harmful")
+    assert not empty.axes[0].images and empty.axes[0].texts[0].get_text() == "not published yet"
 
 
 def test_space_staging_names_the_logs_dataset(monkeypatch):
@@ -111,7 +148,7 @@ def test_space_formats_cells_like_the_article(app):
 
     data = app.load_data()
     head, rows = app.table_rows(data["report"], "utility")
-    assert rows[0][1] == "62.0% [55.0, 69.0]"
+    assert rows[0][3] == "62.0% [55.0, 69.0]"
     _, rows = app.table_rows(data["report"], "belebele")
     assert rows[0][1] == "50.0%"
     for value, kind in [
@@ -198,3 +235,31 @@ def test_notebook_links_are_stamped_from_publish_settings(tmp_path, monkeypatch)
     assert 'REPO_URL = "https://github.com/o/r"' in code
     assert 'PARAMS_REPO = "test-org/lift-repair-params"' in code
     assert "Knull" not in code
+
+
+# ---------------------------------------------------------------- notebook: a fresh clone (P08-R2-06, R1-26)
+
+
+def test_notebook_installs_the_extras_and_checks_before_any_gpu_work():
+    nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    code = ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
+    install = next(c for c in code if "pip install" in c)
+    assert '".[gpu,data,eval]"' in install  # LangID (fasttext) is in the data extra
+    first = {
+        name: next(i for i, c in enumerate(code) if f"acceptance.{name}(" in c)
+        for name in ("check_ready", "run_check")
+    }
+    assert first["check_ready"] < first["run_check"]
+    timing = [
+        i for i, c in enumerate(code) if "acceptance.start_clock(" in c or "acceptance.record_runtime(" in c
+    ]
+    assert len(timing) == 2 and timing[0] < first["run_check"] and timing[1] == len(code) - 1
+
+
+def test_notebook_claims_no_run_time_it_has_not_measured():
+    nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    text = "".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "markdown")
+    assert not re.search(r"\d+\s*(?:-\s*)?minutes?", text.replace(acceptance.RUNTIME_MARK, "")), (
+        "an unmeasured duration"
+    )
+    assert f"{acceptance.RUNTIME_MARK} not yet timed" in text

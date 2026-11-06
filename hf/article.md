@@ -52,10 +52,9 @@ final split was touched once, to score the frozen variants.
   (`configs/rubrics/safety_v1.md`). claude-sonnet-5-5 (anthropic API) is also the pairwise utility judge.
 - The primary safety judge, behind every reported number: [PENDING: the primary judge (final judgements) from outputs/metrics/final_report.json (P07 lift stats / lift report)].
 - Which judge is primary was settled on the first validation round, before any final-split
-  number existed: the frontier judge would become primary only if it agreed with the native
-  readers at least 5 points more often than Qwen3Guard.
-- **GlotLID** for language identification and **NLLB-200-distilled-600M** (CC-BY-NC-4.0) for the
-  Arabic and Thai back-translation check.
+  number existed: the frontier judge would become primary only if its agreement with the native
+  readers exceeded Qwen3Guard's by more than 5 points.
+- **GlotLID** for language identification ([PENDING: whether the Arabic and Thai back-translation check ran from outputs/metrics/final_report.json (P07 lift stats / lift report)]).
 
 Everything derived from Tiny Aya (the adapters and the repaired model) is non-commercial.
 
@@ -157,8 +156,7 @@ _[PENDING: exploratory diagnostic signatures (P06) from outputs/metrics/final_re
 ### Limitations
 
 - Most prompts are machine translations. Native readers checked samples in Hindi, Chinese and
-  Spanish only; the Arabic and Thai prompts had no native check. For Arabic and Thai, a sample
-  of the outputs was also judged after back-translation into English (judge sensitivity table).
+  Spanish only; the Arabic and Thai prompts had no native check. [PENDING: whether the Arabic and Thai back-translation check ran from outputs/metrics/final_report.json (P07 lift stats / lift report)]
 - One adapter of one model. The study cannot establish a general policy for which repair fits
   which kind of drift.
 - The automatic judge's precision differs by language. Hindi claims rest on its validation
@@ -170,7 +168,8 @@ _[PENDING: cost: GPU-hours per check-up and per-token latency per repair from ou
 
 A full check-up of one adapter (the seed-1 dev sweep, then the final battery of stock, the seed-1
 adapter and its seed-1 frozen repair) took [PENDING: GPU-hours per check-up from outputs/metrics/final_report.json (P07 lift stats / lift report)] of GPU time; the final battery took
-[PENDING: GPU-hours of the final battery per variant from outputs/metrics/final_report.json (P07 lift stats / lift report)] per variant on average. Re-running
+[PENDING: GPU-hours of the final battery per variant from outputs/metrics/final_report.json (P07 lift stats / lift report)] per variant on average. Run time of the acceptance-test notebook (default
+sample): not yet timed. Re-running
 safety fine-tuning would need a safety dataset in every language and a training run per
 adapter; the repairs here need no gradient step. Tiny Aya derivatives are non-commercial, so we
 make no commercial claims.

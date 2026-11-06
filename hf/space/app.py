@@ -116,14 +116,6 @@ def redact(text: str, label: str | None) -> str:
     return " ".join(words[:MAX_WORDS]) + " [redacted]"
 
 
-def _est(value: Any) -> float | None:
-    if isinstance(value, dict):
-        return value.get("est")
-    if isinstance(value, (list, tuple)):
-        return value[0] if value else None
-    return value if isinstance(value, (int, float)) else None
-
-
 def verdict_markdown(report: dict | None) -> str:
     if not report:
         return "The final results are not published yet."
@@ -138,39 +130,50 @@ def verdict_markdown(report: dict | None) -> str:
     return "\n".join(lines)
 
 
-def heatmap_matrix(report: dict | None, metric: str = "harmful_rate", set_name: str = "harmful"):
-    """(row labels, column labels, matrix) of ``metric`` per variant role and language."""
-    rows = (((report or {}).get("tables") or {}).get("per_language") or {}).get("rows") or []
-    rows = [r for r in rows if r.get("set", set_name) == set_name and metric in r]
-    order = ["hi", "en", "zh", "es", "ar", "th"]
-    langs = sorted({r["lang"] for r in rows}, key=lambda x: (order.index(x) if x in order else len(order), x))
-    names = list(dict.fromkeys(str(r.get("role") or r.get("variant")) for r in rows))
-    matrix = [[None] * len(langs) for _ in names]
-    for r in rows:
-        matrix[names.index(str(r.get("role") or r.get("variant")))][langs.index(r["lang"])] = _est(r[metric])
-    return names, langs, matrix
+# The heatmaps, read from the tables P07 writes (its report/tables.py): ``per_language`` has one row
+# per language label with a column per role; ``overrefusal`` has one row per benign set and language.
+ROLES = ("stock", "adapter", "repair")
+HEATMAPS = {
+    "harmful": ("per_language", None, "harmful rate (%)"),
+    "overrefusal": ("overrefusal", ("set", "hard"), "hard-benign refusal rate (%)"),
+}
 
 
-def heatmap_figure(report: dict | None, metric: str = "harmful_rate", set_name: str = "harmful"):
+def heatmap_matrix(report: dict | None, kind: str = "harmful"):
+    """(role labels, language labels, matrix[role][language]) of P07's table for ``kind``; a value not run
+    stays None. Empty lists when the table is not there yet."""
+    name, keep, _ = HEATMAPS[kind]
+    spec = (((report or {}).get("tables") or {}).get(name)) or {}
+    labels = {c.get("key"): c.get("label") for c in spec.get("columns") or []}
+    rows = [r for r in spec.get("rows") or [] if keep is None or r.get(keep[0]) == keep[1]]
+    roles = [k for k in ROLES if k in labels]
+    if not rows or not roles:
+        return [], [], []
+    langs = [str(r.get("lang")) for r in rows]
+    matrix = [[r.get(role) for r in rows] for role in roles]
+    return [str(labels[k]) for k in roles], langs, matrix
+
+
+def heatmap_figure(report: dict | None, kind: str = "harmful"):
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    names, langs, matrix = heatmap_matrix(report, metric, set_name)
-    fig, ax = plt.subplots(figsize=(1.2 + 0.9 * max(1, len(langs)), 1 + 0.6 * max(1, len(names))))
+    names, langs, matrix = heatmap_matrix(report, kind)
+    fig, ax = plt.subplots(figsize=(1.2 + 1.1 * max(1, len(langs)), 1 + 0.6 * max(1, len(names))))
     if not names:
         ax.text(0.5, 0.5, "not published yet", ha="center", va="center")
         ax.axis("off")
         return fig
-    values = [[float("nan") if v is None else v * 100 for v in row] for row in matrix]
+    values = [[float("nan") if v is None else float(v) * 100 for v in row] for row in matrix]
     im = ax.imshow(values, cmap="Reds", vmin=0, aspect="auto")
-    ax.set_xticks(range(len(langs)), langs)
+    ax.set_xticks(range(len(langs)), langs, rotation=30, ha="right")
     ax.set_yticks(range(len(names)), names)
     for i, row in enumerate(values):
         for j, v in enumerate(row):
             ax.text(j, i, "-" if v != v else f"{v:.1f}", ha="center", va="center", fontsize=8)
-    fig.colorbar(im, ax=ax, label=f"{metric} (%)")
+    fig.colorbar(im, ax=ax, label=HEATMAPS[kind][2])
     fig.tight_layout()
     return fig
 
@@ -210,9 +213,9 @@ def build_ui(data: dict[str, Any] | None = None):
         gr.Markdown("# Lost in Fine-Tuning\nRetain, repair or reject a Hindi adapter of Tiny Aya Global.")
         gr.Markdown(verdict_markdown(report))
         with gr.Tab("Harmful rate"):
-            gr.Plot(heatmap_figure(report, "harmful_rate", "harmful"))
+            gr.Plot(heatmap_figure(report, "harmful"))
         with gr.Tab("Over-refusal"):
-            gr.Plot(heatmap_figure(report, "refusal_rate", "hard_benign"))
+            gr.Plot(heatmap_figure(report, "overrefusal"))
         with gr.Tab("Utility retained"):
             head, rows = table_rows(report, "utility")
             gr.Dataframe(value=rows, headers=head or None)

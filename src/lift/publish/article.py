@@ -21,7 +21,7 @@ from lift import config, paths
 from lift.publish import PublishError, render, settings
 from lift.publish.collect import links_path, read_links
 from lift.publish.datasets import verdict_lines
-from lift.publish.inputs import Facts, pending, report_path, shown
+from lift.publish.inputs import P07, Facts, pending, report_path, shown
 
 SECTIONS = (
     "Problem and approach",
@@ -135,10 +135,18 @@ def judges(facts: Facts) -> dict[str, str]:
             "and the validation items."
         )
     utility = config.get("judges.utility")
+    named = f"{utility.get('model')} ({utility.get('provider')} API)"
+    same = (utility.get("provider"), utility.get("model")) == (
+        frontier.get("provider"),
+        frontier.get("model"),
+    )
     return {
         "qwen_judge": f"{names['qwen']}** (`{qwen['id']}`, revision `{qwen.get('revision')}`)",
         "frontier_judge": f"{names['frontier']}** ({frontier['provider']} API)",
-        "utility_judge": f"{utility.get('model')} ({utility.get('provider')} API)",
+        # "also" only when configs/project.yaml makes the utility judge the frontier safety model
+        "utility_judge": f"{named} is also the pairwise utility judge."
+        if same
+        else f"The pairwise utility judge was {named}.",
         "judge_roles": role,
         "judge_rule": facts.config(
             "project", "judges.decision_rule.switch_primary_if_frontier_agreement_exceeds_by", "points"
@@ -146,7 +154,34 @@ def judges(facts: Facts) -> dict[str, str]:
     }
 
 
+BT_CHECK = "back-translated"  # P07's judge_sensitivity rows of the ar/th check start with this
+
+
+def backtranslation(facts: Facts) -> dict[str, str]:
+    """The ar/th back-translation sentences, only as far as final_report.json supports them: claimed when
+    P07's judge_sensitivity table has back-translation rows, "not run" when it has none, pending while the
+    table is not there."""
+    rows = facts.table_rows("judge_sensitivity")
+    if rows is None:
+        line = facts._missing("whether the Arabic and Thai back-translation check ran", report_path(), P07)
+        return {"nllb": f" ({line})", "backtranslation_limit": line}
+    if any(str(r.get("check", "")).startswith(BT_CHECK) for r in rows):
+        return {
+            "nllb": " and **NLLB-200-distilled-600M** (CC-BY-NC-4.0) for the Arabic and Thai "
+            "back-translation check",
+            "backtranslation_limit": "For Arabic and Thai, a sample of the outputs was also judged after "
+            "back-translation into English (judge sensitivity table).",
+        }
+    return {
+        "nllb": "; the Arabic and Thai back-translation check was not run (see Not run)",
+        "backtranslation_limit": "The Arabic and Thai back-translation check was not run, so those "
+        "languages rest on the judge alone.",
+    }
+
+
 def context(facts: Facts) -> dict[str, str]:
+    from lift.publish import acceptance
+
     cfg = settings.load()
     links = read_links()
     gh = settings.github_repo()
@@ -172,6 +207,8 @@ def context(facts: Facts) -> dict[str, str]:
         "base_id": config.get("models.base.id"),
         "base_rev": config.get("models.base.revision"),
         **judges(facts),
+        **backtranslation(facts),
+        "notebook_runtime": acceptance.runtime_text(facts),
         **sizes,
         "rule_overrefusal": facts.config("repairs", "selection.max_overrefusal_increase", "points"),
         "rule_gain": facts.config("repairs", "selection.min_gain_retained", "pct"),
