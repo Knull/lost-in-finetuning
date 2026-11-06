@@ -661,6 +661,8 @@ def test_the_frontier_judge_prefills_exactly_the_request_set_it_then_judges(worl
     assert (doc["status"], doc["judge"], doc["n_pairs"], doc["n_requests"], doc["devices"]) == (
         "ok", JUDGE_ID, 6, 12, 0)
     assert doc["prefill_summary"]["mode"] == "sync" and doc["failed_orders"] == 0
+    # XB2-04: the verdict file is named relative to the repo, never by the laptop's absolute path.
+    assert doc["out_path"].startswith("outputs/utility/") and doc["out_path"].endswith("utility_hi_dev.jsonl")
 
 
 def test_no_prefill_with_sync_or_for_the_fallback_judge(world, audited):

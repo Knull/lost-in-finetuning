@@ -190,7 +190,9 @@ def _fit_cast(args: argparse.Namespace) -> int:
     from lift.repair.sweep import write_json
 
     write_json(path.parent / cast.REPORT, report)
-    finish_run(manifest, status="ok", artifact=str(out), sha256=report["sha256"])
+    from lift.train.lora import _shown
+
+    finish_run(manifest, status="ok", artifact=_shown(out), sha256=report["sha256"])
     _print_fit(args.adapter, report)
     return 0
 
@@ -389,5 +391,7 @@ def register(sub: argparse._SubParsersAction) -> None:
                    help="default: generation.dtype")
     p.add_argument("--refreeze", action="store_true",
                    help="replace a recipe already frozen in configs/frozen_recipe.json (needs a dated "
-                        "docs/decisions.md entry)")
+                        "docs/decisions.md entry; refused while a recipe-frozen-* tag exists, which must be "
+                        "deleted or replaced by hand first). The replaced selection.json is kept as "
+                        "selection.<sha12>.json")
     p.set_defaults(func=_select)

@@ -73,8 +73,11 @@ Item 75 is the orchestrator's call, **pending team confirmation**.
       recipe-frozen-YYYYMMDD && git push && git push --tags`), so the tag names a concrete recipe the final
       guard can compare with selection.json. A recipe is frozen once: while the file exists, `lift select`
       refuses a run that would change it or the selection.json it pins (an undecided run included) and
-      writes nothing; the same inputs again keep both files. Re-freezing means deleting the file and a
-      dated entry here (`--refreeze` does it in one step).
+      writes nothing; the same inputs again keep both files (the run date and which seeds are
+      registered don't count as a change). Re-freezing means deleting the file and a dated entry here
+      (`--refreeze` does it in one step, but only while no `recipe-frozen-*` tag exists: after the tag
+      it refuses, and the tag must be removed by hand with its own dated entry). A pinned selection.json
+      is copied to `selection.<first 12 hex of its sha256>.json` before it is replaced.
 
 ## Nov 6, 2026: P07 final evaluation, statistics and report details, before any final run
 

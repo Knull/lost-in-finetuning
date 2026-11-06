@@ -35,7 +35,16 @@ adapter, the overall winner, the frozen map {family: setting} and the sha256 of 
 just written, which Gate 3 commits and tags and the final guard compares with selection.json. A recipe is
 frozen once: while the file exists, a run that would write another one or another selection.json (other
 numbers, or an undecided run) is refused before anything is written (``RecipeFrozen``) unless
-``refreeze``; the same inputs again keep both files as they are. An undecided run never writes it.
+``refreeze``; the same inputs again keep both files as they are. "The same" is the decision's content:
+the "created" time and the freeze plan (which seeds are registered yet, today's date in the tag line) are
+left out of the comparison. ``refreeze`` itself is refused while a local ``recipe-frozen-*`` tag exists
+(``frozen_tags``): after Gate 3's tag, re-freezing needs a dated docs/decisions.md entry and the tag
+deleted or replaced by hand. A selection.json that is replaced while a recipe or a tag stands is first
+copied to outputs/metrics/selection.<sha12>.json, so the pinned bytes are never lost. An undecided run never
+writes the recipe.
+
+selection.json names paths relative to the repo (outputs/..., configs/...), never the machine's absolute
+paths (``_unrooted``): it is published with the logs.
 
 The command then prints the freeze steps: the commit-and-tag command, the configs/variants.yaml entries
 of the frozen settings on seeds 1-3 (seed 2 and 3 adapters must be registered; CAST needs its artifact,
@@ -49,6 +58,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -69,6 +79,7 @@ Read = tuple[DevScores | None, list[str], dict[str, Any]]
 
 
 RECIPE = "configs/frozen_recipe.json"
+TAG_PATTERN = "recipe-frozen-*"
 
 
 class RecipeFrozen(RuntimeError):
@@ -361,8 +372,9 @@ def run(adapter: str, *, families: Sequence[str] = rs.FAMILIES, dtype: str | Non
         refreeze: bool = False) -> dict[str, Any]:
     """Collect, decide (when complete) and write outputs/metrics/selection.json and .md, and when decided
     the frozen recipe (module docstring). Raises RecipeFrozen, writing nothing, when a recipe is frozen
-    and this run would change it or its selection.json, unless ``refreeze``. The returned doc is the one
-    written, plus "recipe" (the recipe written, when decided)."""
+    and this run would change it or its selection.json, unless ``refreeze``; ``refreeze`` is refused while a
+    recipe-frozen-* tag exists (or git cannot list the tags). The returned doc is the one written, plus
+    "recipe" (the recipe written, when decided)."""
     dtype = dtype or config.get("generation.dtype")
     rules = config.get("selection", name="repairs")
     c = collect(adapter, families, dtype, reader=reader)
@@ -374,6 +386,9 @@ def run(adapter: str, *, families: Sequence[str] = rs.FAMILIES, dtype: str | Non
         "adapter_scores": _nan_safe(asdict(c.adapter)) if c.adapter else None,
         "missing": c.missing, "problems": problems, "details": _nan_safe(c.details),
     }
+    tags = frozen_tags()
+    if refreeze and (tags is None or tags):
+        raise RecipeFrozen(_tagged_message(tags))
     if c.missing or problems or c.stock is None or c.adapter is None:
         doc["status"] = "incomplete"
     else:
@@ -385,14 +400,17 @@ def run(adapter: str, *, families: Sequence[str] = rs.FAMILIES, dtype: str | Non
         frozen = {fam: sel["winner"] for fam, sel in doc["families"].items()}
         doc["frozen"] = frozen
         doc["freeze"] = freeze_plan(adapter, frozen, date=date)
+    doc = _unrooted(doc)
     path = paths.frozen_recipe_path()
     held = path.read_text(encoding="utf-8") if path.is_file() else None
     text = selection_text(doc)
-    if held is not None:
+    if held is not None or tags:
         text = _unchanged(doc) or text
     recipe = recipe_doc(doc, text) if doc["status"] == "decided" else None
     if held is not None and not refreeze and (recipe is None or recipe_text(recipe) != held):
-        raise RecipeFrozen(_frozen_message(path, held, recipe))
+        raise RecipeFrozen(_frozen_message(path, held, recipe, tags))
+    if held is not None or tags is None or tags:
+        _keep_copy(text)
     write(doc, json_text=text)
     if recipe is not None and recipe_text(recipe) != held:
         write_recipe(recipe)
@@ -404,8 +422,13 @@ def selection_text(doc: Mapping[str, Any]) -> str:
     return json.dumps(_nan_safe(dict(doc)), indent=1, ensure_ascii=False) + "\n"
 
 
+# Left out when two selections are compared: not the decision, only when it was made and what can be
+# registered yet (the freeze plan's entries, its tag line's date).
+NOT_DECISION = ("created", "freeze")
+
+
 def _unchanged(doc: Mapping[str, Any]) -> str | None:
-    """selection.json's text on disk when it says what ``doc`` says (its "created" time apart), else None:
+    """selection.json's text on disk when it says what ``doc`` says (``NOT_DECISION`` apart), else None:
     the same inputs again keep the bytes a frozen recipe pins."""
     path = report_paths()[0]
     try:
@@ -416,9 +439,69 @@ def _unchanged(doc: Mapping[str, Any]) -> str | None:
     new = json.loads(selection_text(doc))
     if not isinstance(old, dict):
         return None
-    old.pop("created", None)
-    new.pop("created", None)
+    for key in NOT_DECISION:
+        old.pop(key, None)
+        new.pop(key, None)
     return text if old == new else None
+
+
+def _keep_copy(text: str) -> Path | None:
+    """Copy selection.json to selection.<sha12>.json beside it before ``text`` replaces it (a recipe or a
+    tag may pin those bytes); None when nothing would change."""
+    path = report_paths()[0]
+    try:
+        old = path.read_bytes()
+    except OSError:
+        return None
+    if old == text.encode("utf-8"):
+        return None
+    copy = path.with_name(f"{path.stem}.{hashlib.sha256(old).hexdigest()[:12]}{path.suffix}")
+    if not copy.is_file():
+        copy.write_bytes(old)
+    return copy
+
+
+def frozen_tags(cwd: Path | None = None) -> list[str] | None:
+    """The local ``recipe-frozen-*`` tags (``git tag -l``), sorted; None when git cannot answer there."""
+    try:
+        out = subprocess.run(["git", "tag", "-l", TAG_PATTERN], cwd=cwd or paths.REPO_ROOT,
+                             capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return sorted(out.stdout.split())
+
+
+def _tagged_message(tags: Sequence[str] | None) -> str:
+    if tags is None:
+        where = "git could not list this checkout's tags, so a recipe-frozen-* tag cannot be ruled out"
+    else:
+        where = f"the recipe is tagged ({', '.join(tags)})"
+    return (f"--refreeze refused: {where}. Nothing was written. Re-freezing after the tag needs a dated "
+            "docs/decisions.md entry saying why, and the tag deleted or replaced by hand (git tag -d "
+            f"<tag>, and git push --delete origin <tag> if it was pushed); then lift select --refreeze. "
+            "The same inputs again need no --refreeze")
+
+
+def _unrooted(obj: Any) -> Any:
+    """``obj`` with every absolute path under the repo, outputs/ or data/ written relative to the repo."""
+    if isinstance(obj, str):
+        return _relative(obj)
+    if isinstance(obj, dict):
+        return {k: _unrooted(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_unrooted(v) for v in obj]
+    return obj
+
+
+def _relative(text: str) -> str:
+    from lift import gates
+
+    text = gates._scrub(text)                     # the (movable) outputs and data roots
+    root = paths.REPO_ROOT
+    for form in (str(root).replace("\\", "\\\\"), str(root), root.as_posix()):
+        for sep in ("\\\\", "\\", "/"):
+            text = text.replace(form + sep, "")
+    return text
 
 
 def recipe_doc(doc: Mapping[str, Any], selection_json: str) -> dict[str, Any]:
@@ -442,7 +525,8 @@ def write_recipe(recipe: Mapping[str, Any]) -> Path:
     return path
 
 
-def _frozen_message(path: Path, held: str, recipe: Mapping[str, Any] | None) -> str:
+def _frozen_message(path: Path, held: str, recipe: Mapping[str, Any] | None,
+                    tags: Sequence[str] | None = ()) -> str:
     try:
         old = json.loads(held)
         what = (f"overall winner {old.get('overall_winner')} on {old.get('adapter')}, selection.json sha256 "
@@ -456,9 +540,15 @@ def _frozen_message(path: Path, held: str, recipe: Mapping[str, Any] | None) -> 
                   f"{', '.join(recipe['frozen'].values())})")
     else:
         change = "this run would write another selection.json (other numbers, same frozen settings)"
-    return (f"a recipe is already frozen in {path} ({what}); {change}. Nothing was written. Re-freezing "
-            f"needs deleting {RECIPE} and a dated docs/decisions.md entry saying why, then lift select "
-            "again (or --refreeze)")
+    if tags is None or tags:
+        how = ("Re-freezing after the tag (" + (", ".join(tags) if tags else "git could not list the tags")
+               + ") needs a dated docs/decisions.md entry saying why and the tag deleted or replaced by hand "
+               "(git tag -d <tag>), then lift select --refreeze")
+    else:
+        how = (f"Re-freezing needs deleting {RECIPE} and a dated docs/decisions.md entry saying why, then "
+               "lift select again (or --refreeze)")
+    return (f"a recipe is already frozen in {_relative(str(path))} ({what}); {change}. Nothing was written. "
+            f"{how}")
 
 
 def _nan_safe(obj: Any) -> Any:
