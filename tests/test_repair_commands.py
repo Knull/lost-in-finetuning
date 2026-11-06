@@ -243,3 +243,55 @@ def test_read_scores_names_every_missing_input_with_its_remedy(registry):
     scores, missing, details = select.read_scores(ADAPTER, "adapter", "bf16")
     assert [m.split(":")[0] for m in missing] == ["harmful_hi", "overrefusal_hard_hi", "win_rate"]
     assert "note" in details["belebele_hi"]           # the adapter's Belebele is not required
+
+
+def test_select_refuses_safety_and_belebele_cells_of_a_replaced_cast_entry(registry, monkeypatch):
+    """After lift fit-cast --refit and register-repairs --replace, cells made under the old entry are
+    stale: lift select names each with its restart line instead of selecting from them."""
+    from lift.cachekey import intervention_digest
+    from lift.io import write_jsonl
+    from lift.judge import pipeline
+    from lift.models import loglik
+    from lift.models.generate import generations_path
+
+    params = {"layer": 2, "threshold": 0.1, "comparator": "smaller", "pool": "last", "behavior_layers": [2]}
+    old, new = (rs.spec_for(rs.Setting("cast", 1.0), ADAPTER, cast=(params, c * 64)) for c in "12")
+    name = new.name
+    config.load("variants")["variants"].append(rs.entry(new))          # the refit artifact, registered
+    # The other inputs read fine (each has its own tests): only the cells' entry is in question here.
+    monkeypatch.setattr(pipeline, "paired_labels", lambda *a, **k: ({"p0": "refusal"}, {"p0": "refusal"}))
+    monkeypatch.setattr(loglik, "belebele_metrics", lambda *a, **k: {
+        "langs": {"hi": {"accuracy": 0.6, "n": 1}}, "adapter_hash": DIGEST, "model_rev": "r" * 40})
+    monkeypatch.setattr(select, "_win_rate", lambda *a, **k: (0.66, {}))
+
+    def cells(spec, intervention=True):
+        meta = {"dtype": "bf16", **({"intervention": intervention_digest(spec)} if intervention else {})}
+        for set_name in ("harmful", "hard_benign"):
+            path = generations_path(name, set_name, "hi", "dev")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_jsonl(path, [{"key": "k0", "variant": name, "pid": "p0", "lang": "hi", "set": set_name,
+                                "split": "dev", "prompt_sha": "s", "output": "", "n_prompt_tokens": 1,
+                                "n_new_tokens": 1, "hit_cap": False, "seconds": 0.1, "meta": meta}])
+        path = loglik.belebele_scores_path(name, "hi", "dev", dtype="bf16")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_jsonl(path, [{"key": "k0", "pid": "p0", "task": "belebele", "meta": meta}])
+
+    cells(old)
+    scores, missing, _ = select.read_scores(name, "cast", "bf16")
+    assert scores is None and [m.split(":")[0] for m in missing] == ["harmful_hi", "overrefusal_hard_hi",
+                                                                      "belebele_hi"]
+    assert f"lift restart --variant {name} --split dev --sets harmful --langs hi" in missing[0]
+    assert "--sets hard_benign" in missing[1] and "another registry entry" in missing[0]
+    assert f"lift belebele --variant {name} --split dev --langs hi --restart" in missing[2]
+    cells(new, intervention=False)          # a repair's records must name the entry they were made under
+    assert select.read_scores(name, "cast", "bf16")[0] is None
+    cells(new)
+    scores, missing, _ = select.read_scores(name, "cast", "bf16")
+    assert missing == [] and scores is not None and scores.win_rate == 0.66
+    # Stock's and the adapter's records from before records named their entry are read as they are.
+    stock_cell = generations_path("stock", "harmful", "hi", "dev")
+    stock_cell.parent.mkdir(parents=True)
+    write_jsonl(stock_cell, [{"meta": {"dtype": "bf16"}}])
+    assert select._stale("stock", stock_cell) is None
+    write_jsonl(stock_cell, [{"meta": {"dtype": "bf16", "intervention": "0" * 64}}])
+    assert "another registry entry" in select._stale("stock", stock_cell)
