@@ -78,6 +78,9 @@ def fit_prompts() -> dict[str, list[Any]]:
     from lift import config
     from lift.prompts import load
 
+    if config.get("cast.language_aware", name="repairs") is not False:
+        raise SystemExit("configs/repairs.yaml cast.language_aware must be false: language-aware CAST is cut "
+                         "(docs/decisions.md item 2)")
     fit = config.get("cast.fit", name="repairs")
     sources = {"harmful": [fit["harmful"]], "benign": list(fit["benign"])}
     out: dict[str, list[Any]] = {"harmful": [], "benign": []}
@@ -268,8 +271,14 @@ def _sweep(args: argparse.Namespace) -> int:
         return 2
     keys = ["models.global"] + (["models.base"] if "resta" in families else [])
     run.require_pinned(*keys)
-    return sweep.gpu(args.adapter, families=families, device=args.device, judge_device=args.judge_device,
-                     dtype=args.dtype, batch_size=args.batch_size, recheck=args.recheck)
+    from lift.train.lora import RegistryConflict
+
+    try:
+        return sweep.gpu(args.adapter, families=families, device=args.device, judge_device=args.judge_device,
+                         dtype=args.dtype, batch_size=args.batch_size, recheck=args.recheck)
+    except (FileNotFoundError, ValueError, RegistryConflict) as exc:
+        print(f"lift sweep: {exc}", file=sys.stderr)
+        return 2
 
 
 # --- lift select ----------------------------------------------------------------------------------------

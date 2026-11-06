@@ -261,5 +261,14 @@ six languages, so pairing, splitting and clustering all go by pid.
   - `lift gate 1|2 [--dtype D]` (lift.gates; outputs/metrics/gate{1,2}[-{dtype}].json and .md; Gate 1
     counts only utility metrics that still describe the current answers, verdicts and adapter).
     Decisions 50-55.
+- **P05 (repairs, sweep, selection).** Implemented and tested offline: repair.wiseft, repair.resta and
+  repair.cast (SafeTune's apply_wise_ft with alpha = 1 - lambda, apply_resta with dare=False on CPU
+  references, fit_cast_condition + extract_caa_vectors + a CASTModel subclass whose gate is recorded per
+  row), their builders in repair.build (registered in lift.models.variants' table), the settings and
+  their registry entries (repair.settings), `lift fit-cast` (outputs/artifacts/cast/{adapter}/),
+  `lift register-repairs` (laptop), `lift sweep` (run-dev, utility --generate-only and belebele hi per
+  setting, resumable; `--judge-only` on the laptop) and `lift select` (outputs/metrics/selection.json and
+  .md, overall and per family, then the freeze steps). A sweep line goes last in its job: the runners do
+  not go past its partial exit. Decisions 66-68.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

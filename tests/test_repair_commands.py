@@ -222,3 +222,10 @@ def test_cost_summary_reads_the_gate_apart(registry):
     assert gen["n"] == 4 and gen["seconds_per_generated_token"] == pytest.approx(0.1)
     assert gen["gate_share"] == pytest.approx(0.25) and gen["gate_fire_rate"] == pytest.approx(0.25)
     assert sweep.cost_summary("v", "fp16")["generation"]["n"] == 0
+
+
+def test_sweep_refuses_cast_without_its_artifact(registry, capsys):
+    view = config.load("project")
+    view["models"]["global"]["revision"] = "e" * 40
+    assert cli.main(["sweep", "--adapter", ADAPTER, "--repairs", "cast"]) == 2
+    assert "lift fit-cast" in capsys.readouterr().err
