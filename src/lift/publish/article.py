@@ -36,7 +36,12 @@ PERSON = "a person"
 
 def placeholders(text: str) -> list[str]:
     """The distinct ``[PENDING: ...]`` placeholders in a rendered text."""
-    return sorted(set(re.findall(r"\[PENDING: ([^\]]*)\]", text)))
+    found = set(re.findall(r"\[PENDING: ([^\]]*)\]", text))
+    if settings.PLACEHOLDER_NAMESPACE in text:
+        found.add(
+            f"the HF namespace in the repo links ({settings.PLACEHOLDER_NAMESPACE}: set LIFT_HF_NAMESPACE)"
+        )
+    return sorted(found)
 
 
 def article_path() -> Path:

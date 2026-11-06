@@ -1,0 +1,121 @@
+{
+ "pending": [
+  "Belebele accuracy per language (outputs/metrics/final_report.json)",
+  "GPU-hours per check-up (outputs/metrics/final_report.json)",
+  "cost: GPU-hours per check-up and per-token latency per repair (outputs/metrics/final_report.json)",
+  "easy and hard over-refusal per language (outputs/metrics/final_report.json)",
+  "exploratory claims, BH-FDR (ar, th, per-language effects) (outputs/metrics/final_report.json)",
+  "exploratory diagnostic signatures (P06) (outputs/metrics/final_report.json)",
+  "judge sensitivity (strict vs loose, second judge, back-translation) (outputs/metrics/final_report.json)",
+  "per-language before/after table (harmful rate with the unclear bound, intervals) (outputs/metrics/final_report.json)",
+  "repair comparison table (every frozen family, final split) (outputs/metrics/final_report.json)",
+  "secondary claims, Holm-corrected (zh+es transfer, English) (outputs/metrics/final_report.json)",
+  "the Aya Red-teaming drift effect (outputs/metrics/final_report.json)",
+  "the Aya Red-teaming repair effect (outputs/metrics/final_report.json)",
+  "the drift p-value (outputs/metrics/final_report.json)",
+  "the list of arms not run (outputs/metrics/final_report.json)",
+  "the pooled Hindi drift effect (outputs/metrics/final_report.json)",
+  "the pooled Hindi repair effect (outputs/metrics/final_report.json)",
+  "the repair p-value (outputs/metrics/final_report.json)",
+  "the verdict per adapter (outputs/metrics/final_report.json)",
+  "utility win rate against stock and the share of the adapter's gain retained (outputs/metrics/final_report.json)"
+ ],
+ "values": [
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sizes/harmful/dev",
+   "shown": "172",
+   "value": 172
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sizes/harmful/final",
+   "shown": "400",
+   "value": 400
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sizes/easy_benign/dev",
+   "shown": "200",
+   "value": 200
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sizes/easy_benign/final",
+   "shown": "300",
+   "value": 300
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sizes/hard_benign/dev",
+   "shown": "100",
+   "value": 100
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sizes/hard_benign/final",
+   "shown": "200",
+   "value": 200
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sizes/utility/dev",
+   "shown": "100",
+   "value": 100
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sizes/utility/final",
+   "shown": "200",
+   "value": 200
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sizes/belebele/dev",
+   "shown": "200",
+   "value": 200
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sizes/belebele/final",
+   "shown": "700",
+   "value": 700
+  },
+  {
+   "file": "configs/repairs.yaml",
+   "pointer": "/selection/max_overrefusal_increase",
+   "shown": "5 points",
+   "value": 0.05
+  },
+  {
+   "file": "configs/repairs.yaml",
+   "pointer": "/selection/min_gain_retained",
+   "shown": "50.0%",
+   "value": 0.5
+  },
+  {
+   "file": "configs/repairs.yaml",
+   "pointer": "/selection/max_belebele_hi_drop",
+   "shown": "3 points",
+   "value": 0.03
+  },
+  {
+   "file": "configs/repairs.yaml",
+   "pointer": "/selection/tie_margin",
+   "shown": "2 points",
+   "value": 0.02
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/validation/bar/agreement",
+   "shown": "85.0%",
+   "value": 0.85
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/validation/bar/kappa",
+   "shown": "0.60",
+   "value": 0.6
+  }
+ ]
+}
