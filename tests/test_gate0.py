@@ -9,9 +9,10 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("transformers")
 pytest.importorskip("peft")
 
-from fakes import make_prompt  # noqa: E402
+from fakes import TINY_CHAT_TEMPLATE, TINY_PREAMBLE, build_tiny_tokenizer, make_prompt  # noqa: E402
 
 from lift import gate0  # noqa: E402
+from lift.judge.labels import rules_tag  # noqa: E402
 from lift.prompts import SAFETY_SETS  # noqa: E402
 from lift.schemas import LANGS  # noqa: E402
 
@@ -63,12 +64,19 @@ class FakeJudge:
 
 
 class HarmfulJudge(FakeJudge):
-    """The same judge id, but every output is harmful: no label agrees with FakeJudge's."""
+    """The same judge id, but every output is harmful: no label agrees with FakeJudge's. ``fail_every``
+    makes every n-th item a judge failure instead, as in FakeJudge."""
 
     def judge(self, items):
         from lift.judge.pipeline import JudgeOutcome
 
-        return [JudgeOutcome("harmful", {}, "Safety: Unsafe") for _ in items]
+        out = []
+        for _ in items:
+            self.calls += 1
+            failed = self.fail_every and self.calls % self.fail_every == 0
+            out.append(JudgeOutcome("unclear", {"judge_failure": "unparseable"}, "x") if failed
+                       else JudgeOutcome("harmful", {}, "Safety: Unsafe"))
+        return out
 
 
 @pytest.fixture
@@ -164,6 +172,63 @@ def test_preamble_check_fails_on_a_prompt_that_cannot_fit(stock, prompt_store):
     long = make_prompt("har-9999", "en", "harmful", "final", text="x" * 900)
     out = gate0.check_preamble(stock, gate0.all_prompts() + [long])
     assert not out["pass"] and out["n_too_long"] == 1 and out["too_long_examples"] == ["harmful/en/har-9999"]
+
+
+# R1-23: the tiny template, and broken copies a changed Tiny Aya revision could ship. Each broken one keeps
+# everything Gate 0 checked before (one BOS, a non-empty first system block, the same prefix, every prompt
+# fitting, the reference tokenizer agreeing), so only the new rules can catch it.
+PREAMBLE_SOURCE = TINY_PREAMBLE.replace("\n", "{{ '\\n' }}")          # how TINY_CHAT_TEMPLATE writes it
+GENERATION_PROMPT = "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|><|START_RESPONSE|>"
+TEMPLATES = {
+    "unchanged": TINY_CHAT_TEMPLATE,
+    "preamble-twice": TINY_CHAT_TEMPLATE.replace(          # a second system turn before the user's
+        "{% for message in loop_messages %}",
+        f"<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>{PREAMBLE_SOURCE}<|END_OF_TURN_TOKEN|>"
+        "{% for message in loop_messages %}", 1),
+    "no-preamble": TINY_CHAT_TEMPLATE.replace(PREAMBLE_SOURCE, "Hi.", 1),       # the system turn kept
+    "no-safety-mode": TINY_CHAT_TEMPLATE.replace("contextual safety mode", "unrestricted mode", 1),
+    "no-generation-prompt": TINY_CHAT_TEMPLATE.replace(
+        "{% if add_generation_prompt %}" + GENERATION_PROMPT + "{% endif %}", "", 1),
+}
+
+
+@pytest.mark.parametrize("name", list(TEMPLATES))
+def test_the_preamble_check_needs_one_default_preamble_and_the_generation_prompt(prompt_store, tmp_path,
+                                                                                  name):
+    """R1-23: decisions.md 27 and this module's docstring: the template renders the default preamble block
+    once (the contextual-safety-mode one, CLAUDE.md) and ends in the generation prompt. The check only asked
+    for a non-empty first system block, so a doubled preamble, a gutted or replaced one, or a template that
+    ignores add_generation_prompt passed. Run as run_gate0 runs it: the tokenizer saved and reloaded, its
+    reference read from the same tokenizer.json."""
+    from types import SimpleNamespace
+
+    from lift.models import load
+
+    template = TEMPLATES[name]
+    assert name == "unchanged" or template != TINY_CHAT_TEMPLATE, "the mutation applied"
+    build_tiny_tokenizer(template).save_pretrained(tmp_path)
+    tok = load.load_tokenizer(str(tmp_path), "local")
+    variant = SimpleNamespace(tokenizer=tok,
+                              hf_model=SimpleNamespace(config=SimpleNamespace(max_position_embeddings=1024)))
+    out = gate0.check_preamble(variant, gate0.all_prompts(),
+                               reference_tokenizer=gate0.reference_tokenizer(str(tmp_path), "local"))
+    text = load.chat_text(tok, "probe")
+    shape = {"unchanged": (1, True, True), "preamble-twice": (2, True, True), "no-preamble": (1, False, True),
+             "no-safety-mode": (1, False, True), "no-generation-prompt": (1, True, False)}[name]
+    first_block = text.split("<|SYSTEM_TOKEN|>", 1)[1].split("<|END_OF_TURN_TOKEN|>", 1)[0]
+    assert (text.count("<|SYSTEM_TOKEN|>"), "contextual safety mode" in first_block,
+            text.endswith(GENERATION_PROMPT)) == shape                  # broken the way its name says
+    assert out["bos_count"] == 1 and out["starts_with_bos"] and out["system_block_tokens"] > 0
+    assert out["preamble_identical_across_prompts"] and out["n_too_long"] == 0
+    assert set(out["reference_tokenizer_agreement"].values()) == {1.0}  # and in no other way
+
+    numbers = {k: v for k, v in out.items() if k != "too_long_examples"}
+    assert out["pass"] is (name == "unchanged"), (name, numbers)
+    new = (out.get("system_blocks"), out.get("safety_preamble"), out.get("ends_with_generation_prompt"))
+    assert new == shape, numbers
+    summary = gate0._summary("preamble", out)
+    assert f"system blocks {shape[0]}" in summary and f"safety preamble {shape[1]}" in summary
+    assert f"generation prompt at the end {shape[2]}" in summary
 
 
 def test_activation_scan_covers_every_layer(stock):
@@ -332,10 +397,36 @@ def test_reference_gate_problem_names_what_is_wrong():
         "the bf16 Gate 0 (gate0.json) cannot be read (JSONDecodeError)"
 
 
-def test_run_gate0_end_to_end_on_cpu(stock, prompt_store, tiny_model_dir, isolated_dirs, cpu_sized):
+def test_run_gate0_end_to_end_on_cpu(stock, prompt_store, tiny_model_dir, isolated_dirs, cpu_sized,
+                                     monkeypatch):
+    # R2-24: every sample a check draws is dev (CLAUDE.md rule 1; prompt_store holds final prompts too): the
+    # splits of what each mixed_sample call returned, of what the parity check decoded (it keeps no records)
+    # and of every generation the precision and dry-run checks wrote.
+    from lift import prompts
+    from lift.io import read_jsonl
+
+    drawn, decoded = [], []
+    real_sample, real_parity = prompts.mixed_sample, gate0.check_parity
+
+    def mixed_sample(*args, **kwargs):
+        out = real_sample(*args, **kwargs)
+        drawn.append({p.split for p in out})
+        return out
+
+    def check_parity(model_id, revision, sample, **kwargs):
+        decoded.extend(p.split for p in sample)
+        return real_parity(model_id, revision, sample, **kwargs)
+
+    monkeypatch.setattr(prompts, "mixed_sample", mixed_sample)
+    monkeypatch.setattr(gate0, "check_parity", check_parity)
     result = gate0.run_gate0(device="cpu", model_id=str(tiny_model_dir), revision="local", judge=FakeJudge(),
                              lid=FakeLID(), n_precision=18, n_dry=1, batch_sizes=(2,), n_throughput=4,
                              max_new_tokens=6, resolve_pins=False)
+    assert drawn == [{"dev"}] * 4                     # throughput, precision, dry run, parity
+    assert decoded == ["dev"] * gate0.N_PARITY
+    for check in ("precision", "dry_run"):
+        files = sorted((gate0.gate0_dir("bf16") / check / "generations").glob("*.jsonl"))
+        assert [r["split"] for path in files for r in read_jsonl(path)] == ["dev"] * 18, check
     assert set(result["checks"]) == {"preamble", "precision", "throughput", "dry_run", "parity"}
     assert result["pass"], {k: v.get("pass") for k, v in result["checks"].items()}
     assert result["checks"]["parity"]["all_match"]
@@ -564,6 +655,80 @@ def test_one_gpu_without_room_for_the_judge_decides_nothing(prompt_store, tiny_m
     gate0.write_report(result, name=name)
     assert json.loads(full.read_text(encoding="utf-8"))["pass"] is True
     assert kept.exists()                              # a check that did not run discards nothing
+
+
+class OneGPU:
+    """torch.cuda's calls on one card (an L4 by default), with memory answered as the driver and PyTorch's
+    caching allocator answer it: mem_get_info counts the blocks the allocator keeps for freed tensors as
+    used, until empty_cache hands them back. Each decoded batch leaves CACHED_GB there: an ESTIMATE of what
+    throughput's batch-32 run leaves with Tiny Aya (about 120 MB per sequence), not a measurement."""
+
+    GB = 1e9
+    USED_GB = 6.7 + 0.5           # Global's bf16 weights and the CUDA context
+    CACHED_GB = 3.84
+
+    def __init__(self, total_gb: float = 23.65):         # an L4: torch reports 22.03 GiB
+        self.total, self.cached, self.peak_cached = total_gb * self.GB, 0.0, 0.0
+
+    def decode(self) -> None:
+        self.cached = max(self.cached, self.CACHED_GB * self.GB)
+        self.peak_cached = max(self.peak_cached, self.cached)
+
+    def free(self) -> int:
+        return int(self.total - self.USED_GB * self.GB - self.cached)
+
+    def install(self, monkeypatch, name: str = "NVIDIA L4", capability: tuple = (8, 9)) -> "OneGPU":
+        calls = {"is_available": lambda: True, "device_count": lambda: 1,
+                 "get_device_capability": lambda device=None: capability,
+                 "get_device_name": lambda device=None: name, "synchronize": lambda device=None: None,
+                 "reset_peak_memory_stats": lambda device=None: None,
+                 "max_memory_allocated": lambda device=None: int(self.USED_GB * self.GB + self.peak_cached),
+                 "mem_get_info": lambda device=None: (self.free(), int(self.total)),
+                 "empty_cache": lambda: setattr(self, "cached", 0.0)}
+        for attr, value in calls.items():
+            monkeypatch.setattr(torch.cuda, attr, value)
+        return self
+
+
+def test_one_gpu_measures_the_judge_room_with_the_throughput_cache_released(
+        prompt_store, stock, tiny_model_dir, fp32_configured, cpu_sized, monkeypatch):
+    """R1-47: `lift remote --gpu L4 --job "lift sync pull; lift smoke"`: one GPU, so the judge loads on
+    cuda:0 beside the generator, where it fits (16.45 GB free, 13 GB needed). The throughput check runs
+    first, and the blocks its batches leave in PyTorch's cache read as used to mem_get_info (12.6 GB), so
+    precision and dry_run were NOT RUN and the reference Gate 0 on an L4 INCOMPLETE. The judge's own
+    allocations would reuse those blocks, so the cache is released before the judge's room is measured.
+    Global is the tiny model: lift sees it on cuda:0 while it computes on the CPU."""
+    import dataclasses
+
+    from lift.models import generate
+
+    card = OneGPU().install(monkeypatch)
+    assert gate0._judge_memory_problem("cuda:0", "cuda:0") is None           # nothing cached: the judge fits
+    real_batch, real_scan = generate.greedy_batch, gate0.activation_scan
+
+    def greedy_batch(model, rows, **kw):
+        out = real_batch(model, rows, **{**kw, "device": "cpu"})
+        card.decode()
+        return out
+
+    monkeypatch.setattr("lift.models.variants.build_variant",
+                        lambda spec, *, device, dtype, **kw: dataclasses.replace(stock, device=device))
+    monkeypatch.setattr(generate, "greedy_batch", greedy_batch)
+    monkeypatch.setattr(gate0, "activation_scan",
+                        lambda model, tok, pairs, *, device: real_scan(model, tok, pairs, device="cpu"))
+    monkeypatch.setattr("lift.judge.pipeline.make_judge", lambda role, **kw: FakeJudge())
+    result = gate0.run_gate0(model_id=str(tiny_model_dir), judge_device="cuda:0", skip=["preamble", "parity"],
+                             **{**GATE, "device": "cuda:0"})
+    checks = result["checks"]
+    assert result["gpu"] == "NVIDIA L4" and checks["throughput"]["pass"], checks
+    assert card.peak_cached == OneGPU.CACHED_GB * OneGPU.GB             # its batches left their blocks cached
+    for name in ("precision", "dry_run"):
+        c = checks[name]
+        assert not c.get("not_run"), f"{name} is NOT RUN on one L4 the judge fits on: {c.get('reason')}"
+        assert c["pass"], (name, c.get("error"), c.get("problems"))
+    assert result["judge"]["id"] == FakeJudge.judge_id and result["failed"] == []
+    OneGPU(16.0).install(monkeypatch)                                    # a 16 GB card is still refused
+    assert gate0._judge_memory_problem("cuda:0", "cuda:0").startswith("only 8.8 GB free on cuda:0")
 
 
 # --- the reference Gate 0 never runs on a T4 (V1, V8, V9; contract F) -------------------------------------
@@ -891,9 +1056,221 @@ def test_a_reduced_reference_run_is_incomplete_and_leaves_gate0_json(prompt_stor
     assert doc["pass"] is False and json.loads(record.read_text(encoding="utf-8")) == doc
 
 
+# --- the fp16 run is the generator's and the judge's (R1-46) ------------------------------------------------
+
+N_COMPARED = 20      # decisions.md 27's 200 precision prompts on CPU: one pair in 20 is the 5% tolerated
+GUARD_ID, GUARD_REV = "Qwen/Qwen3Guard-Gen-4B", "f" * 40
+VERDICT = "Safety: Unsafe\nCategories: Violent\nRefusal: No"         # strict: harmful, whatever the flags
+
+
+@pytest.fixture
+def twenty_compared(monkeypatch, fake_prompt_files, fp32_configured):
+    """decisions.md 27's sizes scaled to N_COMPARED precision prompts (the licence's too) and one dry-run
+    prompt per set and language, and a prompt store whose every text is unique (its tag), so a judge can
+    fail or overflow on exactly one pair."""
+    from lift.judge import pipeline
+
+    monkeypatch.setattr(gate0, "N_PRECISION", N_COMPARED)
+    monkeypatch.setattr(gate0, "N_DRY", 1)
+    monkeypatch.setattr(pipeline, "LICENCE_MIN_PROMPTS", N_COMPARED)
+    for set_name in SAFETY_SETS:
+        for lang in LANGS:
+            pids = [f"{set_name[:3]}-{i:04d}" for i in range(6)]
+            fake_prompt_files[(set_name, lang)] = [
+                make_prompt(pid, lang, set_name, "dev" if i < 4 else "final",
+                            text=f"{TEXTS[lang]} [{set_name}/{lang}/{pid}]") for i, pid in enumerate(pids)]
+
+
+def _licensed(rev):
+    """Whether lift.judge.pipeline would read bf16 (the T4's fp16, in this analogue) cells of ``rev``."""
+    from lift.judge import pipeline
+
+    try:
+        pipeline.check_dtype_licence("bf16", rev)
+    except ValueError:
+        return False
+    return True
+
+
+def _holds(row, part):
+    return any(row[i:i + len(part)] == part for i in range(len(row) - len(part) + 1))
+
+
+def scripted_guard(dtype, overflow_on=None):
+    """The primary judge as make_judge builds it, Qwen3GuardAdapter(Qwen3GuardJudge), on a tiny random
+    Qwen3ForCausalLM (Qwen3Guard-Gen's architecture) in ``dtype``, its head scripted to answer VERDICT and
+    stop on every row, as a healthy guard does at either precision. With ``overflow_on`` (a prompt text), a
+    row holding that text overflows as fp16 does past 65,504: decoder layer 0's output is inf there and the
+    head is left alone, so its later states and logits are NaN, greedy decoding never stops and the pair is
+    a judge failure ("unclear"). Returns the adapter and a counter of the passes that overflowed."""
+    import transformers
+
+    from lift.judge import pipeline
+    from lift.judge import qwen3guard as qg
+
+    tok = build_tiny_tokenizer()
+    eot = tok.eos_token_id
+    cfg = transformers.Qwen3Config(
+        vocab_size=len(tok), hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=4,
+        num_key_value_heads=2, head_dim=8, max_position_embeddings=1024, tie_word_embeddings=True,
+        pad_token_id=tok.pad_token_id, bos_token_id=tok.bos_token_id, eos_token_id=eot)
+    torch.manual_seed(0)
+    model = transformers.Qwen3ForCausalLM(cfg).eval().to(torch.float32 if dtype == "fp32" else torch.bfloat16)
+    model.generation_config = transformers.GenerationConfig(bos_token_id=tok.bos_token_id, eos_token_id=eot,
+                                                            pad_token_id=tok.pad_token_id)
+    script = list(tok(VERDICT, add_special_tokens=False)["input_ids"]) + [eot]
+    marker = list(tok(overflow_on, add_special_tokens=False)["input_ids"]) if overflow_on else None
+    state = {"step": 0, "rows": [], "overflows": 0}
+
+    def read_input(_module, args, kwargs):
+        ids = kwargs.get("input_ids", args[0] if args else None)
+        if ids is None:
+            return
+        if ids.shape[1] > 1:                     # a prefill or a teacher-forced pass: new sequences
+            state["step"] = 0
+            state["rows"] = [r for r, row in enumerate(ids.tolist()) if marker and _holds(row, marker)]
+        else:                                    # one decoding step of the same batch
+            state["step"] += 1
+
+    def overflow(_module, _args, output):
+        if state["rows"]:
+            hidden = output[0] if isinstance(output, tuple) else output
+            hidden[state["rows"]] = float("inf")
+            state["overflows"] += 1
+
+    def speak(_module, _args, _kwargs, output):
+        token = script[min(state["step"], len(script) - 1)]
+        for r in range(output.logits.shape[0]):
+            if r not in state["rows"]:
+                output.logits[r, -1] = 0
+                output.logits[r, -1, token] = 1
+
+    model.register_forward_pre_hook(read_input, with_kwargs=True)
+    model.model.layers[0].register_forward_hook(overflow)
+    model.register_forward_hook(speak, with_kwargs=True)
+    guard = qg.Qwen3GuardJudge(GUARD_ID, GUARD_REV, device="cpu", dtype=dtype, model=model, tokenizer=tok)
+    return pipeline.Qwen3GuardAdapter(guard, strict=True, device="cpu", dtype=dtype), state
+
+
+def test_an_fp16_judge_that_is_not_finite_is_the_fp16_failure(twenty_compared, tiny_model_dir):
+    """R1-46 (b): decisions.md 27: "the fp16 run (generator and judge both fp16 on the T4) must be finite".
+    Only the generator was scanned, so a guard overflowing on one of the precision pairs (which becomes a
+    judge failure, within the 5% the agreement bar tolerates) passed the fp16 check and licensed T4 numbers.
+    The comparison now scans its local judge too, teacher-forced over its own input and raw output for each
+    pair it judged: a non-finite judge is "fp16 failed". The comparison skips the dry run, which is not a
+    required check (and when it runs, it draws other prompts). Analogue: fp32 plays bf16 and bf16 fp16."""
+    from lift.io import read_jsonl
+    from lift.prompts import mixed_sample
+    from lift.schemas import JudgementRecord
+
+    target = mixed_sample(N_COMPARED, split="dev", seed=gate0.SEED)[0]           # one of the precision pairs
+    healthy, _ = scripted_guard("fp32")
+    _, name, _ = _gate(tiny_model_dir, judge=healthy, n_precision=N_COMPARED)
+    assert name == "gate0"                                                   # the reference passed
+    overflowing, state = scripted_guard("bf16", overflow_on=target.text)
+    cand, name, written = _gate(tiny_model_dir, judge=overflowing, compare_dtype="bf16", skip=NON_REQUIRED,
+                                n_precision=N_COMPARED)
+    root = gate0.gate0_dir("bf16") / "precision"
+    judged = [JudgementRecord.model_validate(r) for p in sorted((root / "judgements").glob("*.jsonl"))
+              for r in read_jsonl(p)]
+    assert state["overflows"] > 0 and len(judged) == N_COMPARED
+    assert [(r.set, r.lang, r.pid) for r in judged if r.native.get("judge_failure")] == [
+        (target.set, target.lang, target.pid)]                            # the overflow's one judge failure
+    precision, fp = cand["checks"]["precision"], cand["checks"]["fp16"]
+    assert fp["n"] == N_COMPARED and fp["invalid"] == {} and not fp["missing_labels"], fp    # validly paired
+    assert fp["label_agreement"] >= gate0.FP16_MIN_LABEL_AGREEMENT, fp          # where the bar alone passes
+    assert precision["hidden_nonfinite"] == precision["logits_nonfinite"] == 0    # the generator is finite
+
+    assert fp["pass"] is False and not fp.get("not_run"), (
+        f"the compared run's judge overflowed, yet the fp16 check passed: {fp}")
+    assert fp["failure"] == "non-finite values in the fp16 run (judge)"
+    assert cand["decision"] == gate0.DECISION["fp16_fail"] and cand["failed"] == ["fp16", "precision"]
+    assert name == "gate0-bf16" and written["pass"] is False and not _licensed(cand["revisions"]["global"])
+    scan = precision["judge_scan"]
+    assert precision["all_finite"] is False and scan["all_finite"] is False and scan["n_skipped"] == 0
+    assert scan["n_sequences"] == N_COMPARED and scan["hidden_nonfinite"] > 0 and scan["logits_nonfinite"] > 0
+    assert "; judge non-finite hidden" in gate0._summary("precision", precision)
+
+
+def test_a_judge_failure_in_the_compared_run_fails_it(twenty_compared, tiny_model_dir):
+    """R1-46 (a): decisions.md 27's dry run allows no judge failure ("a parse failure stops the gate until it
+    is understood"), but the compared run counted its judge failures only as label changes, so up to 5% of
+    them cleared the agreement bar and licensed T4 numbers. Any judge failure in the compared run now fails
+    its precision check: a full FAIL (gate0-bf16.json here), and no licence."""
+    _, name, _ = _gate(tiny_model_dir, n_precision=N_COMPARED)
+    assert name == "gate0"
+    cand, name, written = _gate(tiny_model_dir, judge=HarmfulJudge(fail_every=N_COMPARED),
+                                compare_dtype="bf16", skip=NON_REQUIRED, n_precision=N_COMPARED)
+    precision, fp = cand["checks"]["precision"], cand["checks"]["fp16"]
+    assert precision["counts"]["judge_failures"] == 1 and precision["all_finite"]
+    assert not precision["problems"] and "judge_scan" not in precision               # a fake: nothing to scan
+    assert fp["comparable"] and fp["pass"], fp                   # 19 or 20 of 20 labels agree: the bar passes
+
+    assert precision["pass"] is False, f"a judge failure in the compared run passed its precision check: {fp}"
+    assert precision["failure"] == "1 judge failures (the compared run, like the dry run, allows none)"
+    assert cand["failed"] == ["precision"] and cand["decision"] == gate0.DECISION["fail"]
+    assert name == "gate0-bf16" and written["pass"] is False and not _licensed(cand["revisions"]["global"])
+    assert "; 1 judge failures" in gate0._summary("precision", precision)
+
+
+def goes_non_finite(monkeypatch):
+    """The next generation's first batch decodes non-finite in its first row (an fp16 overflow, as
+    greedy_batch's check marks it), so generate refuses it with NonFiniteOutputError."""
+    from dataclasses import replace
+
+    from lift.models import generate
+
+    real, state = generate.greedy_batch, {"marked": []}
+
+    def greedy_batch(model, rows, **kw):
+        outs = real(model, rows, **kw)
+        if state["marked"]:
+            return outs
+        state["marked"].append(len(rows))
+        return [replace(outs[0], nonfinite=True), *outs[1:]]
+
+    monkeypatch.setattr(generate, "greedy_batch", greedy_batch)
+    return state
+
+
+def test_a_compared_run_whose_decoding_goes_non_finite_is_the_fp16_failure(prompt_store, tiny_model_dir,
+                                                                          fp32_configured, cpu_sized,
+                                                                          monkeypatch):
+    """W2-02 (R1-25 follow-up): generate now refuses a batch that decodes non-finite (NonFiniteOutputError).
+    Raised inside the fp16 run's precision check, it made the check an error, the fp16 check NOT RUN ("the
+    precision run did not finish") and the decision "Fix first". It is decisions item 27's real result: the
+    precision check records all_finite False and the pids, so the verdict is "fp16 failed: T4 runs are never
+    reported". A reference run that goes non-finite fails its precision check the same way, not as an
+    error."""
+    _, name, _ = _gate(tiny_model_dir)
+    assert name == "gate0"
+    state = goes_non_finite(monkeypatch)
+    cand, name, written = _gate(tiny_model_dir, compare_dtype="bf16", skip=NON_REQUIRED)
+    precision, fp = cand["checks"]["precision"], cand["checks"]["fp16"]
+    assert state["marked"], "the decode never went non-finite"
+    assert "error" not in precision and precision["pass"] is False and precision["all_finite"] is False
+    [pid] = precision["decoding_nonfinite"]
+    assert isinstance(pid, str) and pid in precision["failure"]
+    assert fp["pass"] is False and not fp.get("not_run") and fp["failure"] == (
+        "non-finite values in the fp16 run (generator)")
+    assert cand["decision"] == gate0.DECISION["fp16_fail"] and cand["failed"] == ["fp16", "precision"]
+    assert name == "gate0-bf16" and written["pass"] is False
+
+    goes_non_finite(monkeypatch)                                       # and the reference run, on the A100
+    skip = ["preamble", "throughput", "dry_run", "parity"]
+    reference = gate0.run_gate0(model_id=str(tiny_model_dir), **{**GATE, "judge": HarmfulJudge(),
+                                                                  "skip": skip})
+    precision = reference["checks"]["precision"]
+    assert "error" not in precision and precision["pass"] is False and precision["all_finite"] is False
+    assert precision["decoding_nonfinite"] and reference["failed"] == ["precision"]
+    assert reference["decision"] == gate0.DECISION["fail"]
+    assert "decoding went non-finite" in gate0._summary("precision", precision)
+
+
 # --- judge identity in the fp16 comparison (R28) ----------------------------------------------------------
 
 GUARD = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
+RULES = rules_tag()                     # the labelling rules' tag every judge id carries (lift.judge.labels)
 
 
 def _write_run(root, judge_id, n=4, harness=1):
@@ -920,13 +1297,15 @@ def _write_run(root, judge_id, n=4, harness=1):
 
 
 @pytest.mark.parametrize("candidate, same", [
-    (f"{GUARD}#fp16#strict", True),                       # only the precision differs: comparable
-    (f"{GUARD}#fp16#loose", False),                       # another Controversial mapping
-    ("Qwen/Qwen3Guard-Gen-4B@" + "c" * 40 + "#fp16#strict", False),   # another judge revision
-    ("Qwen/Qwen3Guard-Gen-8B@" + "a" * 40 + "#fp16#strict", False),   # another judge model
-], ids=["dtype-only", "mode", "revision", "model"])
+    (f"{GUARD}#{RULES}#fp16#strict", True),               # only the precision differs: comparable
+    (f"{GUARD}#{RULES}#fp16#loose", False),               # another Controversial mapping
+    (f"{GUARD}#rules-00000000#fp16#strict", False),       # R1-12: labelled under other labelling rules
+    ("Qwen/Qwen3Guard-Gen-4B@" + "c" * 40 + f"#{RULES}#fp16#strict", False),   # another judge revision
+    ("Qwen/Qwen3Guard-Gen-8B@" + "a" * 40 + f"#{RULES}#fp16#strict", False),   # another judge model
+], ids=["dtype-only", "mode", "rules", "revision", "model"])
 def test_compare_runs_lets_only_the_judge_precision_differ(tmp_path, tiny_tokenizer, candidate, same):
-    _write_run(tmp_path / "ref", f"{GUARD}#bf16#strict")
+    assert RULES != "rules-00000000"
+    _write_run(tmp_path / "ref", f"{GUARD}#{RULES}#bf16#strict")
     _write_run(tmp_path / "cand", candidate)
     cmp = gate0.compare_runs(tmp_path / "ref", tmp_path / "cand", tiny_tokenizer)
     assert cmp["n"] == 4 and cmp["label_agreement"] == 1.0
@@ -937,8 +1316,8 @@ def test_compare_runs_lets_only_the_judge_precision_differ(tmp_path, tiny_tokeni
 def test_compare_runs_names_no_setting_its_pairs_do_not_share(tmp_path, tiny_tokenizer):
     """Contract J: the comparison records the one harness and decoding of its pairs (the licence pins them);
     pairs made under different ones are invalid and name none."""
-    _write_run(tmp_path / "ref", f"{GUARD}#bf16#strict", harness=0)
-    _write_run(tmp_path / "cand", f"{GUARD}#fp16#strict")
+    _write_run(tmp_path / "ref", f"{GUARD}#{RULES}#bf16#strict", harness=0)
+    _write_run(tmp_path / "cand", f"{GUARD}#{RULES}#fp16#strict")
     cmp = gate0.compare_runs(tmp_path / "ref", tmp_path / "cand", tiny_tokenizer)
     assert cmp["invalid"] == {"harness": 4} and cmp["harness"] is None and cmp["decoding"] == "d" * 16
 
@@ -950,7 +1329,7 @@ def test_precision_digest_names_the_outputs_and_labels_of_a_run(tmp_path):
     from lift.io import read_jsonl, sha256_obj, sha256_text, write_jsonl
 
     root = tmp_path / "run"
-    _write_run(root, f"{GUARD}#bf16#strict")
+    _write_run(root, f"{GUARD}#{RULES}#bf16#strict")
     gpath, jpath = (root / sub / "harmful_en_dev.jsonl" for sub in ("generations", "judgements"))
     gens, juds = list(read_jsonl(gpath)), list(read_jsonl(jpath))
     digest = gate0.precision_digest(root)

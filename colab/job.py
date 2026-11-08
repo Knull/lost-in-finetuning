@@ -44,6 +44,11 @@ and how long the command has been silent, to the kernel's output and to the log,
 tell a quiet job from a dead one, and a push still running from a stopped job. In push mode (spec
 "mode": "push") the file instead runs one more `lift sync push` for a job whose final push failed,
 and ends with its own @@LIFT_DONE line tagged with the attempt id.
+
+The monitor signals a command's whole process group (SIGINT, then SIGKILL after KILL_GRACE_SECONDS),
+and polices it until the command's output pipe closes, not only while its own process lives: a child
+that still holds the pipe after that process exited would otherwise hold up the line, the remaining
+lines and the final push for as long as it lives.
 """
 
 import base64
@@ -682,11 +687,12 @@ class Job:
 
     def _check(self, now):
         """One tick: notice a stop request, SIGINT a command that must not go on, and SIGKILL one that
-        ignored its SIGINT for KILL_GRACE_SECONDS."""
+        ignored its SIGINT for KILL_GRACE_SECONDS. A command runs until _stream has read its pipe to EOF,
+        so its process group is policed after its leader exited too (_signal copes with a gone leader)."""
         self._stopping()
         with self._lock:
             run = self._running
-        if run is None or run.proc.poll() is not None:
+        if run is None:
             return
         if run.killed is None:
             why = self._why_stop(run, now)

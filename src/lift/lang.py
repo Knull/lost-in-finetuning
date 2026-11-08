@@ -83,7 +83,13 @@ from lift.schemas import LidInfo
 
 _PREFIX = "__label__"
 
+# BLANK, has_visible, space_han (with _HAN and _KANA) and model_line (with one_line) decide what LangID.top
+# returns, and with it the stored flags.lid_top and the garbled, wrong_lang and code_mixed flags. A change
+# to any of them changes stored labels: bump lift.judge.labels.LABELS_VERSION with it.
 BLANK: tuple[str, float] = ("und_Zyyy", 0.0)   # top() of text with no visible character
+# The labels ``is_lang`` sums and the unclear flags read (lift.judge.labels.unclear_flags): GlotLID's top 5,
+# so garbled means exactly "not is_lang" for an output whose top label is accepted (decisions item 43).
+LID_TOP_K = 5
 
 # CJK unified ideographs: Extension A, the main block, the compatibility ideographs, Extensions B-F
 # and the compatibility supplement. Kana, Hangul, bopomofo and CJK punctuation are not spaced.
@@ -104,6 +110,8 @@ class LangIdentifier(Protocol):
     def is_lang(self, text: str, lang: str) -> bool: ...
 
 
+# one_line, has_visible, space_han and model_line are LangID.top's input handling, like BLANK: a change to
+# any of them changes stored labels and needs a lift.judge.labels.LABELS_VERSION bump.
 def one_line(text: str) -> str:
     """The text as one fastText input line: inner line breaks become spaces, plus the final newline."""
     return text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ") + "\n"
@@ -181,13 +189,13 @@ class LangID:
         return [(label.removeprefix(_PREFIX), min(1.0, max(0.0, float(prob)))) for prob, label in preds]
 
     def is_lang(self, text: str, lang: str) -> bool:
-        """True if the top label is accepted for ``lang`` and the accepted labels among the top 5
-        hold at least min_prob between them.
+        """True if the top label is accepted for ``lang`` and the accepted labels among the top
+        ``LID_TOP_K`` (5) hold at least min_prob between them.
 
         Summing matters for languages GlotLID splits into varieties: genuine Modern Standard
         Arabic often comes back as arb_Arab 0.45 + ars_Arab 0.40, which is Arabic at 0.85.
         """
-        return accepted(self.top(text, 5), self.accept_labels, lang, self.min_prob)
+        return accepted(self.top(text, LID_TOP_K), self.accept_labels, lang, self.min_prob)
 
 
 def accepted(preds: Sequence[tuple[str, float]], accept_labels: Mapping[str, Sequence[str]], lang: str,

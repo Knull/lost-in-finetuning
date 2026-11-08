@@ -11,7 +11,14 @@ answer and the candidate adapter's answer to the same instruction.
   columns, never which model wrote which. The reader puts A, B or tie in ``preference``.
 - Pairs whose stock or candidate output was remade after the sheet was made are left out of the
   score and counted, since verdicts are joined by pid and would be about answers the reader never
-  saw.
+  saw. A generations or prompt file that is missing here proves nothing, but a prompt file that is
+  here and refused (lift.validation.outputs.PromptFileError: a stale or foreign copy) stops the
+  score, whether or not the generations files are here. A sheet drawn in another precision than
+  ``generation.dtype`` (``--dtype``) is drawn and scored only while Gate 0's licence covers both
+  cells (lift.validation.outputs.check_licence).
+- The import records its warnings with the preferences (labels/utility_hi.meta.json), and the
+  score reports them (``import_warnings``), so a sheet imported with one is never scored as if
+  clean (lift.validation.score.import_warnings).
 - Scoring turns the reader's preference into the candidate's score (win 1, tie 0.5, loss 0) and
   compares it with the utility judge's UtilityVerdict, whose score averages both presentation
   orders (above 0.5 is a win, 0.5 a tie, below 0.5 a loss). Reported: agreement and kappa on
@@ -21,9 +28,11 @@ answer and the candidate adapter's answer to the same instruction.
   bootstrap interval; and the confusion matrix.
 
 Verdicts are found by scanning outputs/ for UtilityVerdict records of the candidate (P03 decides
-where they live), or read from the files given. A UtilityVerdict carries no generation key, so the
-sha256 of every verdict file read is recorded with the score. HumanPreference is defined here
-because schemas.HumanLabel only takes the four safety classes.
+where they live), except generations and what lift sync never syncs (outputs/.aside,
+outputs/.sync-backup, caches: superseded or local-only copies), or read from the files given. A
+UtilityVerdict carries no generation key, so the sha256 of every verdict file read is recorded with
+the score. HumanPreference is defined here because schemas.HumanLabel only takes the four safety
+classes.
 """
 
 from __future__ import annotations
@@ -31,6 +40,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from datetime import UTC, date, datetime
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Literal
 
@@ -43,9 +53,18 @@ from lift.schemas import UtilityVerdict
 from lift.stats.agreement import cohens_kappa, percent_agreement
 from lift.stats.paired import paired_bootstrap, win_rate
 from lift.validation.labels import parse_filled
-from lift.validation.outputs import Prompts, fields_of, load_pool, read_records, variant_info
+from lift.validation.outputs import (
+    LicenceError,
+    PromptFileError,
+    Prompts,
+    check_licence,
+    fields_of,
+    load_pool,
+    read_records,
+    variant_info,
+)
 from lift.validation.sample import DEFAULT_SEED, archive, blind_id, rank
-from lift.validation.score import confusion
+from lift.validation.score import confusion, import_warnings
 from lift.validation.store import (
     ValidateError,
     check_writable,
@@ -228,7 +247,7 @@ def import_preferences(file: Path, *, annotator: str = "hi-a") -> dict:
                "rows": parsed["rows"], "items_on_sheet": parsed["items_on_sheet"],
                "labelled": len(records), "skipped": parsed["skipped"],
                "unlabelled": parsed["unlabelled"], "missing": parsed["missing"],
-               "changed_text": parsed["changed"],
+               "changed_text": parsed["changed"], "warnings": parsed["warnings"],   # the score reports them
                "preference_counts": {k: counts.get(k, 0) for k in ("A", "B", "tie")}}
     write_json(utility_meta_path(), summary)
     return {**summary, "labels_path": str(utility_labels_path()), "warnings": parsed["warnings"]}
@@ -254,14 +273,23 @@ def _first_record_safe(path: Path) -> dict | None:
 
 
 def find_verdict_files() -> list[Path]:
-    """Every JSONL file under outputs/ (except generations) whose records are UtilityVerdicts."""
+    """Every JSONL file under outputs/ whose records are UtilityVerdicts, except under generations and
+    what lift sync never syncs: outputs/.aside (the files lift restart set aside), outputs/.sync-backup
+    (the local copies a forced pull replaced) and the rest of lift.sync.IGNORE_PATTERNS (caches, Gate 0's
+    staging). Those hold superseded or local-only copies, and a UtilityVerdict names no generation key
+    that could tell them apart. A file given to ``load_verdicts`` is read wherever it is."""
+    from lift.models.generate import ASIDE_DIR  # noqa: PLC0415 (outside the core of lift.validation)
+    from lift.sync import BACKUP_DIR, IGNORE_PATTERNS  # noqa: PLC0415
+
     root = paths.output_dir()
     if not root.is_dir():
         return []
     gens = paths.generations_dir()
     out = []
     for path in sorted(root.rglob("*.jsonl")):
-        if gens in path.parents:
+        rel = path.relative_to(root).as_posix()        # as lift.sync matches IGNORE_PATTERNS in outputs/
+        if gens in path.parents or rel.split("/", 1)[0] in (ASIDE_DIR, BACKUP_DIR) or any(
+                fnmatchcase(rel, pattern) for pattern in IGNORE_PATTERNS):
             continue
         first = _first_record_safe(path)
         if first is not None and _VERDICT_FIELDS <= set(first):
@@ -340,12 +368,21 @@ def score_utility(*, verdict_files: list[Path] | None = None, judge_id: str | No
     # A verdict is joined by pid alone, so a pair whose outputs were remade after the sheet was made
     # would be scored against answers the reader never saw: leave it out and count it.
     prompts, current = Prompts(), {}
+    if prompts.exists("utility", "hi"):
+        prompts.get("utility", "hi")       # here but refused: a PromptFileError, generations here or not
+    dtype = doc.get("dtype") or str(config.get("generation.dtype"))
     for name in ("stock", doc["candidate"]):
+        cell = (name, "utility", "hi", doc["split"])
         try:
-            pool = load_pool(name, "utility", "hi", doc["split"], prompts,
-                             prompt_check=doc.get("prompt_check", True), dtype=doc.get("dtype"))
-        except ValidateError:
+            pool = load_pool(*cell, prompts, prompt_check=doc.get("prompt_check", True),
+                             dtype=doc.get("dtype"))
+        except (LicenceError, PromptFileError):  # a prompt file here but refused is never "unreadable"
+            raise
+        except ValidateError:          # a missing prompt file, or a generations file not readable now
             pool = None
+        # A sheet drawn in another precision than generation.dtype is scored only while Gate 0's licence
+        # covers both cells: load_pool checks the records it keeps, and this also a file not readable here.
+        check_licence(dtype, [] if pool is None else pool.records, [], cell)
         current[name] = None if pool is None else ({r.pid: r for r in pool.records}, set(pool.missing))
 
     def remade(it: dict) -> bool:
@@ -378,6 +415,9 @@ def score_utility(*, verdict_files: list[Path] | None = None, judge_id: str | No
         "n_sheet": len(items), "n_labelled": len(labelled), "n_judged": len(pairs),
         "n_missing": len(labelled) - len(pairs), "n_superseded": len(superseded),
         "complete": bool(labelled) and len(pairs) == len(labelled),
+        # the import's warnings: a sheet imported with one is never scored as if clean
+        "import_warnings": import_warnings(meta if utility_meta_path().is_file() else None,
+                                           utility_meta_path().name),
         "created": date.today().isoformat(),
     }
     if pairs:
@@ -430,6 +470,9 @@ def render_utility(out: dict) -> str:
         + (f" Left out because their outputs were remade after the sheet was made: {out['n_superseded']}."
            if out["n_superseded"] else ""),
     ]
+    if out.get("import_warnings"):
+        lines += ["", "Imported with warnings, which this score does not correct (check the sheet before "
+                      "trusting it): " + "; ".join(out["import_warnings"]) + "."]
     if out["n_judged"]:
         hw, jw, d = out["human_win_rate"], out["judge_win_rate"], out["judge_minus_human"]
         lines += [

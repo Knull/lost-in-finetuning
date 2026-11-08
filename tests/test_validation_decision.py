@@ -41,6 +41,7 @@ from validation_fakes import (
     World,
     build_world,
     fill_sheet,
+    frontier_judge_id,
     judgement,
     make_generation,
     other_label,
@@ -614,13 +615,20 @@ def test_a_different_decision_needs_force_and_keeps_the_old_one(world, monkeypat
 def test_the_fallback_judge_never_becomes_primary(world, monkeypatch, named):
     qwen_wrong, frontier_wrong = wrong_keys(frontier_only=0)      # 170 vs 144: 14.4 points ahead
     if named == "fallback_judge":
+        # W2-05: under the fallback model's own id it is not the frontier judge the config names, so its
+        # judgements are never read (skipped and counted), and nothing can be decided on them.
         second = f"{config.get('judges.safety_fallback.id')}@0123abcd"
         judge(world, "qwen3guard", PRIMARY_ID, qwen_wrong)
         judge(world, "fallback", second, frontier_wrong)
-    else:
-        patch_config(monkeypatch, {"judges.safety_fallback.id": FRONTIER_ID.split("@", 1)[0]})
-        second = FRONTIER_ID
-        judge_round(world, qwen_wrong, frontier_wrong)
+        import_round(world)
+        with pytest.raises(ValidateError, match="both judges must cover"):
+            scoring.decide_primary_judge()
+        assert scoring.score(1, write=False)["checks"]["other_judges"] == {second: N}
+        assert not decision_file(world).exists()
+        return
+    patch_config(monkeypatch, {"judges.safety_fallback.id": FRONTIER_ID.split("@", 1)[0]})
+    second = FRONTIER_ID
+    judge_round(world, qwen_wrong, frontier_wrong)
     import_round(world)
     doc = scoring.decide_primary_judge()
     assert doc["frontier_judge"] == second
@@ -653,7 +661,8 @@ def test_the_decision_stands_after_the_judge_blocks_are_swapped(world, monkeypat
 
 
 def test_several_frontier_judges_need_one_named(world):
-    other = "otherprovider/other-model@2026-11-02"
+    # The configured frontier judge over two API versions (a newer SDK): both fit its configured rule.
+    other = frontier_judge_id(api="2026-11-02")
     judge_round(world, *wrong_keys())
     judge(world, "frontier-other", other, set())          # right on every item
     import_round(world)
@@ -661,9 +670,11 @@ def test_several_frontier_judges_need_one_named(world):
         scoring.decide_primary_judge()
     doc = scoring.decide_primary_judge(frontier_judge=FRONTIER_ID)
     assert (doc["frontier_judge"], doc["n_agree"]["frontier"]) == (FRONTIER_ID, 153)
-    for named in (other, other.split("@", 1)[0]):          # id@revision, or the id alone
+    for named in (other, other.split("#", 1)[0]):          # the whole id, or the FrontierJudge id
         pick = scoring.decide_primary_judge(frontier_judge=named, dry_run=True)
         assert (pick["frontier_judge"], pick["n_agree"]["frontier"]) == (other, N)
+    with pytest.raises(ValidateError, match="several frontier judges"):     # provider/model names both
+        scoring.decide_primary_judge(frontier_judge=other.split("@", 1)[0], dry_run=True)
 
 
 @pytest.mark.parametrize(("frontier_only", "switch", "boundary"), [
