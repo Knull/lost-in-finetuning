@@ -20,11 +20,12 @@ the first failure, with a `lift sync push` checkpoint after every line except sy
 one; then, in `finally`, run the final `lift sync push` and write the status and the marker. The final
 push runs once a line other than a lift sync line ran: nothing else leaves new files on the VM. A
 generate, judge, run-dev, utility, belebele or heldout-loss line that exits 3 (done, but some cells
-were skipped: stale, made in another precision or judged by another judge; or their AuditKIT record
-was refused; or they are left for a rerun, such as a Message Batch still running; each listed with its
-remedy) does not end the job: it is reported, the next lines run (they do not depend on those cells),
-and the job fails at the end ("partial_lines" in the status). Any other command's exit 3 (lift train
-and lift gate never exit 3) is a failure like any other.
+were skipped: stale, made in another precision, judged by another judge, short of their frozen split,
+or with decoding that went non-finite; or their AuditKIT record was refused; or they are left for a
+rerun, such as a Message Batch still running; each listed with its remedy) does not end the job: it
+is reported, the next lines run (they do not depend on those cells), and the job fails at the end
+("partial_lines" in the status). Any other command's exit 3 (lift train and lift gate never exit 3)
+is a failure like any other.
 
 lift sync's exit code decides what follows. A pull or push that exits 1 (an error), or a push killed
 for running too long, is tried again, 4 tries in about 10 minutes; a pull killed for silence is not,
@@ -87,10 +88,11 @@ SYNC_CONFLICT_RC = 3  # lift sync: done, but conflicts (copies kept) or unpaired
 PUSHED = (0, SYNC_CONFLICT_RC)
 SETUP_FAILED_RC = 3  # lift remote's exit code for "the job could not be set up on the VM"
 # The commands whose exit 3 means done, but some cells were skipped (stale, made in another precision,
-# judged by another judge), had their AuditKIT record refused, or are left for a rerun (lift utility
-# --no-wait while its Message Batch runs), each listed with its remedy. The job goes on with its next
-# lines and fails at the end; any other command's 3 is a failure as before (lift train and lift gate
-# never exit 3). kaggle/runner.ipynb (CELL_COMMANDS) and colab/README.md (PARTIAL) hold the same list.
+# judged by another judge, short of their frozen split, decoding that went non-finite: lift.commands.run
+# SKIPPED), had their AuditKIT record refused, or are left for a rerun (lift utility --no-wait while its
+# Message Batch runs), each listed with its remedy. The job goes on with its next lines and fails at the
+# end; any other command's 3 is a failure as before (lift train and lift gate never exit 3).
+# kaggle/runner.ipynb (CELL_COMMANDS) and colab/README.md (PARTIAL) hold the same list.
 PARTIAL_RC = 3
 PARTIAL_COMMANDS = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss")
 REF_HINT = "GPU jobs need a ref with both P01 and P02 (colab/README.md, 'Code version')"

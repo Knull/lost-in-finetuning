@@ -94,10 +94,10 @@ lift info
 - The first failing line stops the job, with three exceptions. One is a push: see below. Another is
   a `lift generate`, `lift judge`, `lift run-dev`, `lift utility`, `lift belebele` or
   `lift heldout-loss` line that exits 3: it is done, but skipped some cells (stale, made in another
-  precision, or judged by another judge), had their AuditKIT record refused, or left some for a
-  rerun (`lift utility --no-wait` while its Message Batch runs), and it lists each with its remedy
-  (Troubleshooting). Its checkpoint push and the next lines still run, and the cell raises at the
-  end. The third is a `lift sync` line that exits 3 (below): the next lines still run too. Any other
+  precision, judged by another judge, short of their frozen split, or with decoding that went
+  non-finite), had their AuditKIT record refused, or left some for a rerun (`lift utility --no-wait`
+  while its Message Batch runs), and it lists each with its remedy (Troubleshooting). Its checkpoint
+  push and the next lines still run, and the cell raises at the end. The third is a `lift sync` line that exits 3 (below): the next lines still run too. Any other
   line's exit 3 stops the job (`lift train` and `lift gate` never exit 3).
 - After every line that succeeds (or exits 3, as above), `lift sync ...` lines excepted, the runner
   runs `lift sync push` as a checkpoint. It pushes once more in `finally`, even after a failure or
