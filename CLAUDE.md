@@ -228,18 +228,19 @@ six languages, so pairing, splitting and clustering all go by pid.
   - Read prompts with `lift.data.build.load_prompts(set, lang, split)`.
   - Each module's docstring holds the verified facts about its source.
   - The splits are frozen in `data/splits/` (Nov 4). The 8 files that need Google Translate
-    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) wait for
-    `lift data build --only harmful easy_benign hard_benign` with `GOOGLE_TRANSLATE_API_KEY` set
-    (about 15 minutes on the laptop, no GPU). The SFT variants are aya/dedup (677 rows),
-    indicalign/dedup (3,000) and indicalign/raw (3,000, the stress recipe), in
-    `data/sft/{cand}/{variant}/sft_messages.jsonl`; the counts are `decision.rows_by_variant` in
-    `data/sft/report.json` (decisions items 47 and 57). The built files still hold the Nov 4
-    pools (aya/dedup 679) until `lift data build --only sft` rebuilds them with the R1 fixes.
+    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) were built on Nov 4
+    through the Cloud Translation API (decisions item 48) and pushed to the runs repo. The SFT
+    variants are aya/dedup (677 rows), indicalign/dedup (3,000) and indicalign/raw (3,000, the
+    stress recipe), in `data/sft/{cand}/{variant}/sft_messages.jsonl`; the counts are
+    `decision.rows_by_variant` in `data/sft/report.json` (decisions items 47 and 57). The built
+    files still hold the Nov 4 pools (aya/dedup 679) until `lift data build --only sft` rebuilds
+    them with the R1 fixes; `lift train` refuses them until then.
 - **P02 (harness).** models.load/generate/variants (stock, adapter), train.merge, prompts,
   judge.qwen3guard, judge.frontier (safety), judge.pipeline, audit.record_safety, sync, gate0, and
   `lift smoke|generate|judge|run-dev|restart|sync|remote`, with colab/job.py and kaggle/runner.ipynb.
   - Gate 0 passed on Nov 4 (bf16, Colab A100) and the three revisions are pinned in
-    configs/project.yaml (decisions item 49).
+    configs/project.yaml (decisions item 49). It runs again before the stock dev eval: the Nov 4
+    run predates the labelling-rules tag and the preamble rule (decisions item 60).
 - **P03 (training and gain).** Implemented and tested offline:
   - `lift train` (train.lora: TRL SFTTrainer + PEFT LoRA on pre-tokenized rows, loss on
     `models.load.encode_chat_turn`'s answer tokens only, rows with no supervised token refused
