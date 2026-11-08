@@ -18,9 +18,11 @@ import pydantic
 import pytest
 from fakes import make_prompt
 
-from lift import config, gates, utility
+from lift import config, gates, splits, utility
+from lift.cachekey import intervention_digest
 from lift.cli import main
 from lift.io import read_jsonl, sha256_file, sha256_obj, sha256_text, write_jsonl
+from lift.judge import labels as judge_labels
 from lift.judge import pipeline
 from lift.models import variants
 from lift.models.generate import generations_path
@@ -32,7 +34,9 @@ from lift.validation.store import write_json
 AYA, IND, STRESS = "adapter-aya-std-s1", "adapter-indicalign-std-s1", "adapter-indicalign-stress-s1"
 UTILITY_JUDGE = ("anthropic/claude-sonnet-5-5@utility_v1:0123456789ab+provider-default+effort-low+max1024"
                  "+api2026-10-21")
-GUARD = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40 + "#bf16#strict"
+# The primary judge as lift.judge.qwen3guard names it: model@revision, the labelling rules' tag
+# (lift.judge.labels.rules_tag, R1), then #dtype#mode.
+GUARD = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40 + f"#{judge_labels.rules_tag()}#bf16#strict"
 SECRET = "placeholder output that must never reach a report"
 ADAPTER_HASH = {AYA: "1" * 64, IND: "2" * 64, STRESS: "3" * 64}       # what the test registry pins
 REV, DECODING, DIGEST = "c" * 40, "d" * 16, "e" * 64
@@ -97,12 +101,20 @@ def utility_text(pid: str) -> str:
     return f"निर्देश {pid}: एक छोटा अनुच्छेद लिखिए"
 
 
+@pytest.fixture(autouse=True)
+def own_splits(tmp_path, monkeypatch):
+    """The committed split files the test's prompt files are stamped from (R1's split-stamp check reads
+    lift.splits.SPLITS_DIR): a folder of the test's own, which write_utility_prompts fills."""
+    monkeypatch.setattr(splits, "SPLITS_DIR", tmp_path / "splits")
+
+
 def write_utility_prompts(texts: dict[str, str] | None = None, pids: list[str] = UTILITY_PIDS) -> None:
     """data/prompts/utility_hi.jsonl as lift data build writes it: the dev utility prompts (``texts``
-    overrides a pid's text)."""
+    overrides a pid's text), and the test's committed utility split, which holds exactly these pids."""
     texts = {p: (texts or {}).get(p, utility_text(p)) for p in pids}
     write_jsonl(prompts_dir() / "utility_hi.jsonl",
                 [make_prompt(p, "hi", "utility", "dev", text=texts[p]).model_dump() for p in pids])
+    splits.save_split("utility", dict.fromkeys(pids, "dev"), seed=0, sizes={"dev": len(pids)}, overwrite=True)
 
 
 def write_answers(variant: str, *, meta: dict | None = None, outputs: dict[str, str] | None = None) -> Path:
@@ -184,10 +196,12 @@ def write_licence(*, digest: str = DIGEST) -> None:
             "decoding": DECODING}
     write_json(metrics_dir() / "gate0-fp16.json",
                {"dtype": "fp16", "reference_dtype": "bf16", "pass": True, "gpu_capability": "7.5",
+                "judge": {"id": GUARD.replace("#bf16#", "#fp16#")},     # the judge the comparison ran (R1)
                 "checks": {"precision": {"pass": True, "digest": "f" * 64}, "fp16": fp16},
                 "revisions": {"global": REV, "judge": "a" * 40}})
     write_json(metrics_dir() / "gate0.json",
-               {"dtype": "bf16", "pass": True, "checks": {"precision": {"pass": True, "digest": digest}},
+               {"dtype": "bf16", "pass": True, "judge": {"id": GUARD},
+                "checks": {"precision": {"pass": True, "digest": digest}},
                 "revisions": {"global": REV, "judge": "a" * 40}})
 
 
@@ -844,7 +858,12 @@ def write_cell(variant: str, harmful: set[str], pids: list[str], *, model_rev: s
                t4: bool = False) -> None:
     """A reportable harmful_hi_dev cell: generations of every prompt and primary-judge judgements, made and
     judged on an A100 in bf16, or with ``t4`` on a Kaggle T4 in fp16."""
-    meta = {**META, "run_config": "rc0", "model_rev": model_rev, **(T4 if t4 else {})}
+    spec = variants.get_spec(variant)
+    meta = {**META, "run_config": "rc0", "model_rev": model_rev, **(T4 if t4 else {}),
+            "max_new_tokens": config.get("generation.max_new_tokens"),
+            "intervention": intervention_digest(spec)}
+    if spec.method == "adapter":
+        meta["adapter_hash"] = ADAPTER_HASH[variant]
     gpu_class = meta["gpu_capability"]
     judge = GUARD.replace("#bf16#", f"#{meta['dtype']}#")
     gens, judgements = [], []
@@ -1039,10 +1058,13 @@ class NotInstalled:
 
 sys.meta_path.insert(0, NotInstalled())
 
-from lift import cli, config
+from pathlib import Path
+
+from lift import cli, config, splits
 
 with open(sys.argv[2], encoding="utf-8") as f:
     views = json.load(f)
+splits.SPLITS_DIR = Path(sys.argv[4])      # the test's committed splits (R1's split-stamp check reads them)
 real = config.load
 config.load = lambda name="project": views[name] if name in views else real(name)
 codes = [cli.main(argv) for argv in json.loads(sys.argv[3])]
@@ -1064,6 +1086,7 @@ def test_both_gates_run_in_a_fresh_interpreter_without_the_gpu_stack(tmp_path):
     config.load("project")["sizes"]["harmful"]["dev"] = 25
     write_jsonl(prompts_dir() / "harmful_hi.jsonl",
                 [make_prompt(p, "hi", text=f"prompt {p}").model_dump() for p in pids])
+    splits.save_split("harmful", dict.fromkeys(pids, "dev"), seed=0, sizes={"dev": len(pids)}, overwrite=True)
     write_cell("stock", set(pids[:1]), pids)
     for name in (AYA, IND, STRESS):
         write_cell(name, set(pids[:7]), pids)
@@ -1074,7 +1097,8 @@ def test_both_gates_run_in_a_fresh_interpreter_without_the_gpu_stack(tmp_path):
     env = {**os.environ, "PYTHONIOENCODING": "utf-8",
            "PYTHONPATH": os.pathsep.join([src, *filter(None, [os.environ.get("PYTHONPATH")])])}
     runs = [["gate", "1"], ["gate", "2"], ["gate", "2", "--candidate", "aya"]]
-    argv = [sys.executable, "-c", GATES_PROBE, ",".join(HEAVY), str(views), json.dumps(runs)]
+    argv = [sys.executable, "-c", GATES_PROBE, ",".join(HEAVY), str(views), json.dumps(runs),
+            str(splits.SPLITS_DIR)]
     done = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8",
                           timeout=300)
     assert done.returncode == 0, done.stderr[-3000:]
