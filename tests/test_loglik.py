@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from lift import splits
 from lift.cli import main
 from lift.io import read_jsonl, sha256_file, write_jsonl
 from lift.models import loglik
@@ -46,10 +47,25 @@ def bel_rows(n: int = 5, **kw) -> list[dict]:
     return [bel_row(i, answer=1 + i % 4, **kw) for i in range(n)]
 
 
+@pytest.fixture(autouse=True)
+def own_splits(tmp_path, monkeypatch):
+    """The committed split files these tests' prompt files are stamped from (R1's split-stamp check reads
+    lift.splits.SPLITS_DIR): a folder of the test's own, which write_belebele fills."""
+    monkeypatch.setattr(splits, "SPLITS_DIR", tmp_path / "splits")
+
+
 def write_belebele(lang: str, rows: list[dict]) -> None:
     """A real data/prompts/belebele_{lang}.jsonl in the test's LIFT_DATA_DIR (fake_prompt_files holds
-    PromptRecords only)."""
+    PromptRecords only), and its pids in the test's committed Belebele split, each with the split its row
+    carries (a pid keeps one split in every language, as lift data build freezes it)."""
     write_jsonl(prompts_dir() / f"belebele_{lang}.jsonl", rows)
+    try:
+        frozen = splits.load_split("belebele")
+    except FileNotFoundError:
+        frozen = {}
+    frozen.update({r["pid"]: r["split"] for r in rows})
+    sizes = {s: sum(v == s for v in frozen.values()) for s in set(frozen.values())}
+    splits.save_split("belebele", frozen, seed=0, sizes=sizes, overwrite=True)
 
 
 def utility(i: int, source: str = "aya", *, split: str = "dev", reference: str | None = None) -> PromptRecord:
@@ -662,7 +678,14 @@ def test_belebele_metrics_cover_every_complete_language_and_list_the_rest(stock)
     assert f"| en | 4 | {en['n_correct']} |" in md and "- hi: incomplete" in md
     assert en["n_outside_split"] == 0
     # An item that left the split (an exclusion) is left aside and counted; the other three are the split.
+    # Its report lists the exclusion, as lift data apply-spotchecks records a reader's bad verdict: since R1
+    # a prompt file short of its frozen split is refused unless its report explains every missing pid.
     write_belebele("en", bel_rows(4, lang="en")[1:])
+    shown = prompts_dir() / "belebele_en.jsonl"
+    report = {"set": "belebele", "lang": "en", "file": shown.name, "sha256": sha256_file(shown),
+              "translation_failures": [], "exclusions": [{"pid": "bel-000", "reason": "spotcheck:bad"}]}
+    (prompts_dir() / "reports").mkdir(parents=True, exist_ok=True)
+    (prompts_dir() / "reports" / "belebele_en.json").write_text(json.dumps(report), encoding="utf-8")
     en = loglik.belebele_metrics("stock", "dev", dtype="fp32")["langs"]["en"]
     assert en["n"] == 3 and en["n_outside_split"] == 1
     assert en["n_correct"] == sum(r["pred"] == r["gold"] for r in records if r["pid"] != "bel-000")
