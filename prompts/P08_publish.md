@@ -37,9 +37,34 @@ Every command does a dry run by default, printing what it would upload, and uplo
    - Upload the unrepaired adapters as gated repos (automatic approval, with a terms note
      saying they are research artifacts that drifted on safety). docs/decisions.md item 14.
 2. **`lift publish datasets`.**
-   - The logs dataset (public): prompt ids, labels, metadata, refusal texts and aggregate
-     tables. Assert that no public text carries a harmful label from either judge or a human.
-   - The raw completions (gated, manual approval).
+   - The logs dataset (public): prompt ids, labels, flags, generation keys, output hashes (the
+     redacted AuditKIT records), metadata and aggregate tables; no output text, and no judge text.
+     A judgement goes in without `JudgementRecord.raw`, `native.reason` and the text of
+     `native.judge_failure` (the judges' replies, a frontier judge's reason, and the part of a
+     reply a failure quotes: up to 200 characters of a frontier provider's refusal, up to 40 of a
+     Qwen3Guard reply that did not parse): they stay out with every output text, as CLAUDE.md
+     rule 6 gates judge logs, so a judgements file never goes up as it is. A failed judgement
+     keeps only that its judge failed, and the failure's kind
+     (`lift.validation.score.failure_kind`: the text before its first ":" or quote). The
+     validation reports (`outputs/metrics/validation/*.json`, `checks.failure_reasons`) and
+     `outputs/metrics/judge_decision.json` (`failure_reasons`) already count failures by that
+     kind, so they go in as they are. Upload files by name, never a folder: a `*.full.json`
+     AuditKIT record, which holds every completion, can sit beside the public one in
+     `outputs/metrics/auditkit/`. An AuditKIT record goes in only while
+     `lift.judge.pipeline.load_records` (`complete=True`, with the judge role and precision its
+     `metadata.lift` names) accepts its cell as it stands, and only if that read is the record's:
+     its labels and keys hash to the record's `labels_sha256` and `keys_sha256` (as
+     `lift.audit.record_safety` computes them) and its judge id is the record's `judge_id`; every
+     other record is dropped and listed with the reason (`lift.audit.load_record` reads a retired
+     one as None). A record outlives a change that makes its cell unreportable (a fixed prompt
+     text, other labelling rules, a re-registered variant, a re-pinned Global, a harness bump)
+     until that cell's `lift restart` retires it, so a record on disk proves nothing.
+   - The raw completions (gated, manual approval): every judged output, refusals and benign
+     answers included. Most outputs carry only Qwen3Guard's label, so no output is made public
+     because of its label.
+   - The guard reads content, not labels: `lift publish datasets` (its dry run too) and
+     `lift publish preflight` fail if any public file contains any generation's output text, or a
+     long substring of it (more than the ~10 words a Space example keeps), whatever its label.
    - The translated prompt sets (public), with native-check notes and the OR-Bench CC-BY-4.0
      attribution.
 3. **`lift publish collections`.** Two HF collections, model artifacts and data artifacts,
@@ -76,15 +101,18 @@ Every command does a dry run by default, printing what it would upload, and uplo
    Write it plainly: short sentences, no hype, and claims only where there's an interval.
 6. **Space: `hf/space/app.py` (Gradio), if time allows.** It's "if relevant" and sits first in
    the cut order.
-   - It reads only the public aggregate dataset.
-   - It shows the verdict, per-language heatmaps, utility retained, and redacted examples:
-     refusals only, or harmful examples cut to about 10 words plus `[redacted]`.
+   - It reads only the public aggregate dataset, plus a few examples cut from the gated
+     completions when the Space is built.
+   - It shows the verdict, per-language heatmaps, utility retained, and those examples, each cut
+     to about 10 words plus `[redacted]` whatever its label, refusals included. No other output
+     text: the content guard of step 2 covers the Space's files too.
    - No model loading.
 7. **`hf/auditkit_issue.md`.** A minimal reproduction of the `paired_bootstrap` bug, for the
    human to file upstream.
 8. **Making the repo public.** Write a pre-flight check (`lift publish preflight`) that fails if
-   any tracked file contains a raw completion, a secret or a token, then list the steps to make
-   the GitHub repo public.
+   any tracked file, in any commit (a public repo shows its history), contains a generation's
+   output text or a long substring of it (step 2's content guard), a secret or a token, then list
+   the steps to make the GitHub repo public.
 
 ## Done when
 

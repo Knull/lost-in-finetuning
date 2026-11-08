@@ -1,8 +1,14 @@
 """Prompt records as the harness sees them. Every GPU stage reads prompts through ``load``.
 
-The file format belongs to P01 (``lift.data.build.load_prompts`` reads data/prompts/{set}_{lang}.jsonl);
-this module only checks what it gets back, so a mislabelled or duplicated record fails here instead
-of producing a wrong denominator downstream.
+The file format belongs to P01: ``lift.data.build.load_prompts`` reads data/prompts/{set}_{lang}.jsonl
+and checks every record's split stamp against the committed data/splits/{set}.json first (ValueError
+for a stamp the committed split does not give, or a missing split file), so dev/final membership never
+comes from a synced file alone. A read of one split also refuses a cell short of its frozen split
+(``lift.data.build.ShortCellError``, a ValueError naming the remedy: most often a translation failure
+that awaits a reader's verdict on the failures sheet); every stage that makes or reports a cell reads
+its split. A read of every split (``texts_by_pid``) checks the stamps only. This module checks what it
+gets back, so a mislabelled or duplicated record fails here instead of producing a wrong denominator
+downstream.
 """
 
 from __future__ import annotations
@@ -17,11 +23,17 @@ from lift.schemas import LANGS, PromptRecord
 SAFETY_SETS: tuple[str, ...] = ("harmful", "easy_benign", "hard_benign")
 
 
-def load(set_name: str, lang: str, split: str | None = None) -> list[PromptRecord]:
-    """PromptRecords of one set and language (optionally one split), sorted by pid."""
+def load(set_name: str, lang: str, split: str | None = None, *,
+         allow_short: bool = False) -> list[PromptRecord]:
+    """PromptRecords of one set and language (optionally one split), sorted by pid. The split is the
+    committed one (build.load_prompts refuses a file whose stamps differ from data/splits), and with
+    ``split`` every frozen pid of it is there, unless the file's report lists it as left out on purpose
+    (a reader's bad verdict; a fit record whose text a dev/final record has): ShortCellError otherwise.
+    ``allow_short`` (passed on to build.load_prompts) returns the split as the file holds it, for a caller
+    that only pools pids (lift.judge.pipeline.second_judge_pids)."""
     from lift.data import build
 
-    rows = build.load_prompts(set_name, lang, split)
+    rows = build.load_prompts(set_name, lang, split, allow_short=allow_short)
     records = [r if isinstance(r, PromptRecord) else PromptRecord.model_validate(r) for r in rows]
     wrong = [r.pid for r in records
              if r.set != set_name or r.lang != lang or (split is not None and r.split != split)]
@@ -35,7 +47,9 @@ def load(set_name: str, lang: str, split: str | None = None) -> list[PromptRecor
 
 
 def texts_by_pid(set_name: str, lang: str) -> dict[str, str]:
-    """{pid: text} for every split of one set and language (what the judge needs)."""
+    """{pid: text} for every split of one set and language (what the judge needs, and Gate 0's precision
+    pairs). A read of every split: the stamps are checked, not the frozen sizes, so a split of the set and
+    language short of its frozen split (whose own read refuses it) never stops a lookup."""
     return {r.pid: r.text for r in load(set_name, lang)}
 
 

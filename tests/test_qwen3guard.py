@@ -3,6 +3,7 @@ on the offline tiny tokenizer with greedy_batch replaced by canned outputs (one 
 tiny random cohere2 for real). Nothing is downloaded; every text is a benign placeholder."""
 
 import copy
+import json
 import logging
 import re
 import sys
@@ -133,10 +134,12 @@ class StubModel:
 
 class CannedGreedy:
     """Stands in for greedy_batch: finds the item marker ``#i#`` in each input row and returns item
-    i's canned guard output, encoded with the tiny tokenizer. Records every call."""
+    i's canned guard output, encoded with the tiny tokenizer. Records every call. The items in
+    ``nonfinite`` decoded non-finite (as greedy_batch marks an fp16 overflow): marked, and never stopped."""
 
-    def __init__(self, tok, outputs, *, stopped=True, oom_above=None):
+    def __init__(self, tok, outputs, *, stopped=True, oom_above=None, nonfinite=()):
         self.tok, self.outputs, self.stopped, self.oom_above = tok, outputs, stopped, oom_above
+        self.nonfinite = set(nonfinite)
         self.calls, self.kwargs, self.handling = [], [], []
 
     def __call__(self, model, rows, **kwargs):
@@ -148,8 +151,11 @@ class CannedGreedy:
             raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 1.00 GiB (mock)")
         outs = []
         for row in rows:
-            ids = self.tok(self.outputs[item_of(self.tok, row)], add_special_tokens=False)["input_ids"]
-            outs.append(GreedyOutput(ids=ids, stopped=self.stopped, n_generated=len(ids) + self.stopped))
+            item = item_of(self.tok, row)
+            ids = self.tok(self.outputs[item], add_special_tokens=False)["input_ids"]
+            stopped = self.stopped and item not in self.nonfinite
+            outs.append(GreedyOutput(ids=ids, stopped=stopped, n_generated=len(ids) + stopped,
+                                     nonfinite=item in self.nonfinite))
         return outs
 
 
@@ -285,6 +291,23 @@ def test_an_output_that_never_stops_is_a_failure_even_if_it_parses(tok, monkeypa
 
 
 @pytest.mark.torch
+def test_an_output_whose_decoding_went_non_finite_is_a_failure_with_that_reason(tok, monkeypatch):
+    # W2-02 (R1-25 follow-up): greedy_batch marks a row whose scores held a NaN or +inf before it stopped (an
+    # fp16 overflow): from then on it decodes garbage (argmax over NaN picks id 0), and it never stops. That
+    # surfaced as a cap hit or a parse failure, or as a label when its text happened to parse. It is a judge
+    # failure that says why now.
+    fake = CannedGreedy(tok, [CARD, "<PAD><PAD><PAD>", CARD], nonfinite={1, 2})
+    monkeypatch.setattr(qg, "greedy_batch", fake)
+    judge = make_judge(tok)
+    got = judge.judge(*make_pairs(3))
+    reason = "decoding went non-finite (a NaN or +inf score before the end-of-turn token)"
+    assert got[0]["error"] is None and got[0]["safety"] == "Safe"
+    assert got[1] == failure(reason, raw="<PAD><PAD><PAD>") and got[2] == failure(reason, raw=CARD)
+    assert (judge.stats["nonfinite"], judge.stats["cap_hits"], judge.stats["unparseable"]) == (2, 0, 0)
+    assert qg.NONFINITE_ERROR == reason
+
+
+@pytest.mark.torch
 def test_control_tokens_in_the_judged_text_are_a_failure_not_a_label(tok, monkeypatch):
     fake = CannedGreedy(tok, [CARD] * 4)
     monkeypatch.setattr(qg, "greedy_batch", fake)
@@ -365,7 +388,7 @@ def test_judge_checks_its_inputs_and_logs_no_text(tok, monkeypatch, caplog):
 
 
 @pytest.mark.torch
-def test_id_info_and_the_tied_lm_head_check(tok, tiny_guard, caplog):
+def test_id_info_and_the_tied_lm_head_check(tok, tiny_guard):
     torch = pytest.importorskip("torch")
     judge = make_judge(tok, tiny_guard)
     assert judge.judge_id == f"{MODEL_ID}@{REV}" and judge.dtype == "fp32"
@@ -376,9 +399,57 @@ def test_id_info_and_the_tied_lm_head_check(tok, tiny_guard, caplog):
     untied = build_tiny_cohere2(tok)
     untied.generation_config = copy.deepcopy(tiny_guard.generation_config)
     untied.lm_head.weight = torch.nn.Parameter(untied.lm_head.weight.detach().clone())
-    with caplog.at_level(logging.WARNING, logger=qg.__name__):
-        assert make_judge(tok, untied).info["tied_lm_head"] is False
-    assert "untied" in caplog.text
+    with pytest.raises(ValueError, match=r"lm_head\.weight.*embed_tokens"):    # its config ties them: refused
+        make_judge(tok, untied)
+    untied.config.tie_word_embeddings = False                     # a config that unties them: its own head
+    assert make_judge(tok, untied).info["tied_lm_head"] is False
+
+
+@pytest.fixture
+def tied_config_other_head(tmp_path, monkeypatch):
+    """A tiny Qwen3Guard-shaped checkpoint (Qwen3ForCausalLM) whose config.json ties the output head to the
+    input embeddings while model.safetensors stores an lm_head.weight that differs from
+    model.embed_tokens.weight, configured as judges.safety_primary (the id names a Qwen3Guard, as
+    make_judge requires)."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from safetensors.torch import load_file
+
+    from lift import config
+
+    tok = build_tiny_tokenizer()
+    cfg = transformers.Qwen3Config(
+        vocab_size=len(tok), hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=4,
+        num_key_value_heads=2, head_dim=8, max_position_embeddings=512, tie_word_embeddings=False,
+        pad_token_id=tok.pad_token_id, bos_token_id=tok.bos_token_id,
+        eos_token_id=tok.convert_tokens_to_ids("<|END_OF_TURN_TOKEN|>"))
+    torch.manual_seed(0)
+    model = transformers.Qwen3ForCausalLM(cfg).eval()
+    with torch.no_grad():                            # a head trained apart from the input embeddings
+        head = model.lm_head.weight
+        head.copy_(model.model.embed_tokens.weight + 0.5 * torch.randn_like(head))
+    path = tmp_path / "Qwen3Guard-Gen-tiny"
+    model.save_pretrained(path)
+    tok.save_pretrained(path)
+    conf = json.loads((path / "config.json").read_text(encoding="utf-8"))
+    conf["tie_word_embeddings"] = True               # the config ties the head; the file holds both tensors
+    (path / "config.json").write_text(json.dumps(conf), encoding="utf-8", newline="\n")
+    stored = load_file(path / "model.safetensors")
+    assert not torch.equal(stored["lm_head.weight"], stored["model.embed_tokens.weight"])
+    monkeypatch.setitem(config.load("project")["judges"]["safety_primary"], "id", str(path))
+    return path
+
+
+@pytest.mark.torch
+def test_a_checkpoint_whose_config_ties_the_head_but_stores_another_is_refused(tied_config_other_head):
+    # R1-11: transformers 5.x keeps the checkpoint's own lm_head.weight when the config ties it to
+    # embed_tokens but the stored values differ, so the judge would run another head than the stacks the
+    # release was evaluated with (transformers 4.5x, vLLM). Built through lift's own path (make_judge ->
+    # Qwen3GuardJudge -> load_model), the primary judge is refused, never built with only a warning.
+    from lift.judge import pipeline
+
+    with pytest.raises(ValueError, match=r"lm_head\.weight.*embed_tokens"):
+        pipeline.make_judge("primary", device="cpu", dtype="fp32")
 
 
 @pytest.mark.torch

@@ -27,9 +27,12 @@ wandb/
 *.gguf
 checkpoints/
 adapters/
-validation/sheets/
-validation/labels/
-validation/keys/
+# Validation sheets hold full prompts and responses: everything under validation/ but the guidelines
+# stays out (validation/*, since git cannot re-include a file under an excluded folder), and so does
+# a returned sheet saved in the root, where `--file filled.csv` is read.
+validation/*
+!validation/guidelines.md
+/*.csv
 
 # Notebooks' scratch
 .ipynb_checkpoints/

@@ -409,3 +409,30 @@ def test_sheets_keys_and_labels_default_to_gitignored_folders(monkeypatch):
     if out.returncode == 128:
         pytest.skip("not a git checkout")
     assert out.stdout.split() == private          # and guidelines.md, which readers get, is not
+
+
+# R1-13: .gitignore listed only the three folders the code writes to, so a returned sheet saved anywhere
+# else under validation/, or as the usage line's `--file filled.csv` in the repo root lift runs from,
+# could be committed with its full prompts and responses.
+def test_a_returned_sheet_outside_the_sheets_folder_or_in_the_root_is_gitignored():
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is not installed")
+
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([git, *args], cwd=paths.REPO_ROOT, capture_output=True, text=True)
+
+    sheet, utility_sheet = store.sheet_file("round1_hi"), store.sheet_file("utility_hi")
+    returned = [f"validation/{sheet}",                          # saved back next to guidelines.md
+                f"validation/filled/{sheet}",                   # a folder of its own for returned sheets
+                "validation/validation_round1_hi_filled.csv",
+                f"validation/returned/{utility_sheet}",
+                "filled.csv", sheet, utility_sheet]             # the root, where --file filled.csv is read
+    # --no-index judges guidelines.md, which is tracked, by the rules alone.
+    out = run("check-ignore", "--no-index", *returned, store.GUIDELINES)
+    if out.returncode == 128:
+        pytest.skip("not a git checkout")
+    assert out.returncode in (0, 1), out.stderr
+    assert out.stdout.split() == returned         # and guidelines.md, which readers get, is not
+    assert run("ls-files", "--error-unmatch", store.GUIDELINES).returncode == 0  # it stays tracked
+    assert run("ls-files", "-ci", "--exclude-standard").stdout.split() == []     # no tracked file is ignored

@@ -10,7 +10,8 @@ hard benign) within each language.
   from their dev and final outputs, the adapters and stock from their final outputs. 60 hi, 20
   each zh, es and en.
 - Together that is configs/project.yaml ``validation.per_language``: 120 Hindi in two rounds of
-  60, and 60 each in zh, es and en.
+  60, and 60 each in zh, es and en. A round is drawn or checked only while the two agree, languages
+  and counts (``check_plan``): an edit to one of them alone is refused, naming both.
 
 How a round is drawn:
 
@@ -25,6 +26,8 @@ How a round is drawn:
   seen in the translation spot checks are left out too, since those sheets show the set: the ones
   marked ``translation.checked``, and the ones on P01's spot-check sheets in validation/sheets/
   that have not been applied yet. That also keeps a spot-check fix from remaking a drawn output.
+  A spot-check sheet of P01's that cannot be read (a header edited away, a workbook saved under
+  the .csv name) stops the draw, since its prompts could not be left out.
 - Garbled and empty outputs stay in, since unclear is a label. Outputs left stale by a fixed
   translation are left out (lift.validation.outputs).
 - A sheet shows only the blind id, the prompt, the response and empty label and note columns,
@@ -44,7 +47,7 @@ from __future__ import annotations
 
 import re
 import shutil
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
@@ -129,6 +132,24 @@ ROUNDS: dict[int, RoundPlan] = {
                          Group("adapter", ("adapter",), ("final",)),
                          Group("stock", ("stock",), ("final",)))),
 }
+
+
+def check_plan() -> None:
+    """The round sizes (``ROUNDS``), added up per language, must be configs/project.yaml
+    ``validation.per_language``, keys and values: otherwise a ValidateError naming both, before anything
+    is drawn. The two change together, in one dated docs/decisions.md entry."""
+    totals: Counter[str] = Counter()
+    for plan in ROUNDS.values():
+        totals.update(plan.sizes)
+    configured = config.get("validation.per_language", None)
+    if configured != dict(totals):
+        shown = ("configs/project.yaml has no validation.per_language" if configured is None
+                 else f"configs/project.yaml validation.per_language is {configured}")
+        rounds = ", ".join(f"round {r} {plan.sizes}" for r, plan in sorted(ROUNDS.items()))
+        raise ValidateError(f"the validation rounds add up to {dict(totals)} items per language ({rounds}: "
+                            f"lift.validation.sample.ROUNDS), but {shown}. No round is drawn until they "
+                            "agree: the round sizes change with the config, in the same dated "
+                            "docs/decisions.md entry")
 
 
 def rank(seed: int, *parts: object) -> str:
@@ -243,6 +264,7 @@ def survey(round_no: int, *, variants: Sequence[str] | None = None, prompt_check
            prompts: Prompts | None = None, dtype: str | None = None) -> Survey:
     if round_no not in ROUNDS:
         raise ValidateError(f"there is no validation round {round_no} (rounds: {sorted(ROUNDS)})")
+    check_plan()
     plan = ROUNDS[round_no]
     groups, ignored = _pick_variants(plan, variants)
     prompts = prompts or Prompts()
@@ -278,32 +300,37 @@ def survey(round_no: int, *, variants: Sequence[str] | None = None, prompt_check
     return out
 
 
-SPOTCHECK_COLUMNS = ("item_id", "translation")      # P01's spot-check sheets (lift data spotcheck-sheets)
+SPOTCHECK_COLUMNS = ("item_id", "translation")      # what makes another CSV in sheets/ a spot-check sheet
 
 
 def spotcheck_pids(prompts: Prompts) -> tuple[dict[str, set[str]], list[str]]:
     """({lang: pids}, unmatched sheet names) for P01's translation spot-check sheets in
     validation/sheets/, whether or not their fixes have been applied yet.
 
-    P01 writes spotcheck_{lang}.csv and spotcheck_{lang}_failures.csv with item_id "{lang}-{pid}".
-    A bare pid also counts, for the language whose prompt text equals the translation cell (before
-    apply-spotchecks) or that the file name names. Sheets with rows that match nothing are returned
-    so the caller can say so.
+    P01 writes spotcheck_{lang}.csv and spotcheck_{lang}_failures.csv with item_id "{lang}-{pid}",
+    so a sheet whose name starts with "spotcheck" needs only its item_id column; any other CSV
+    counts if it has item_id and translation columns. A bare pid also counts, for the language whose
+    prompt text equals the translation cell (before apply-spotchecks) or that the file name names.
+    Sheets with rows that match nothing are returned so the caller can say so. A "spotcheck" sheet
+    that cannot be read raises ValidateError, naming it: its prompts could not be left out.
     """
     found: dict[str, set[str]] = defaultdict(set)
-    unmatched = []
+    unmatched, unreadable = [], []
     langs = list(config.get("languages.google_translate"))
     for path in sorted(sheets_dir().glob("*.csv")):
         if path.name.startswith("validation_"):
             continue
+        p01 = path.stem.lower().startswith("spotcheck")
         try:
-            filled = read_sheet(path, required=SPOTCHECK_COLUMNS)
-        except ValidateError:
+            filled = read_sheet(path, required=("item_id",) if p01 else SPOTCHECK_COLUMNS)
+        except ValidateError as e:
+            if p01:
+                unreadable.append(str(e))
             continue                                     # not a spot-check sheet
         tokens = set(re.split(r"[^a-z0-9]+", path.stem.lower()))
         matched = 0
         for _, row in filled.rows:
-            item_id, text = row["item_id"].strip(), normalise(row["translation"])
+            item_id, text = row["item_id"].strip(), normalise(row.get("translation", ""))
             lang_of, _, rest = item_id.partition("-")
             if lang_of in langs and any(prompts.exists(s, lang_of) and rest in prompts.get(s, lang_of)
                                         for s in SET_PRIORITY):
@@ -321,6 +348,12 @@ def spotcheck_pids(prompts: Prompts) -> tuple[dict[str, set[str]], list[str]]:
                         matched += 1
         if filled.rows and not matched:
             unmatched.append(path.name)
+    if unreadable:
+        raise ValidateError("a translation spot-check sheet of P01's cannot be read, so the prompts on it "
+                            "could not be kept off its reader's sheets (it shows their set): "
+                            + "; ".join(unreadable) + ". Restore its header row as P01 wrote it, save it "
+                            "again as 'CSV UTF-8', or move it out of validation/sheets/ once its fixes are "
+                            "applied (lift data apply-spotchecks)")
     return dict(found), unmatched
 
 
@@ -424,6 +457,7 @@ def build_round(round_no: int, *, seed: int = DEFAULT_SEED, variants: Sequence[s
                 "dtype": dtype_of(rec.meta), "prompt_sha": rec.prompt_sha,
                 "shown_prompt_sha": sha256_text(normalise(prompt)),
                 "shown_response_sha": sha256_text(normalise(rec.output)),
+                "output_sha": sha256_text(rec.output),   # what a judgement of this item must be of
                 "shown_non_ascii": {"prompt": not prompt.isascii(), "response": not rec.output.isascii()},
             })
             rows[name].append([item_id, prompt, rec.output, "", ""])
