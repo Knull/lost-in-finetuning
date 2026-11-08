@@ -31,6 +31,7 @@ from fakes import make_prompt  # noqa: E402
 
 from lift import config, gate0, sync  # noqa: E402
 from lift.cli import main  # noqa: E402
+from lift.data import sft  # noqa: E402
 from lift.io import sha256_file, sha256_text, write_jsonl  # noqa: E402
 from lift.models import variants  # noqa: E402
 from lift.models.load import encode_chat  # noqa: E402
@@ -98,6 +99,19 @@ def hub(monkeypatch):
     monkeypatch.setattr(sync, "push", recorder.push)
     monkeypatch.setattr(sync, "preflight", recorder.preflight)
     return recorder
+
+
+REAL_EXPORT_PROBLEMS = sft.export_problems        # before the autouse fixture below replaces it
+
+
+@pytest.fixture(autouse=True)
+def export_problems(monkeypatch):
+    """lift.data.sft.export_problems as most tests need it: write_sft's exports (a report.json with no rules
+    stamp and no selection.json) may be trained on. A test appends reasons to the list returned to refuse
+    them; test_exports_that_export_problems_flags_are_never_trained_on runs the real check (R2-01)."""
+    problems: list[str] = []
+    monkeypatch.setattr(sft, "export_problems", lambda **kw: list(problems))
+    return problems
 
 
 @pytest.fixture(autouse=True)
@@ -275,6 +289,41 @@ def test_stale_or_malformed_training_files_are_refused():
     data = lora.load_training_data("aya", cfg)
     assert (data.key, data.sha256, len(data.rows)) == ("aya/dedup", sha256_file(path), 3)
     assert data.repo_path == "data/sft/aya/dedup/sft_messages.jsonl"
+
+
+def test_exports_that_export_problems_flags_are_never_trained_on(tiny_model_dir, utility, hub,
+                                                                 export_problems, monkeypatch, capsys):
+    """R2-01: while lift.data.sft.export_problems lists a reason, the trainer refuses before it reads a row
+    or loads the tokenizer, naming every reason with its remedy, and so does lift train --check (one code
+    path); nothing is pushed or registered. The real check refuses write_sft's exports, which carry no
+    rules stamp."""
+    path = write_sft(rows(3))
+    cfg = lora.recipe_config("standard")
+    stale = "data/sft/report.json was built under other rules than the current code and configs give (x)"
+    export_problems.append(stale)
+    refusal = (r"the SFT exports must not be trained on \(1 problem, lift\.data\.sft\.export_problems\): "
+               r"data/sft/report\.json was built under other rules")
+    with pytest.raises(lora.TrainRefused, match=refusal):
+        lora.load_training_data("aya", cfg)
+    with monkeypatch.context() as m:
+        m.setattr("lift.models.load.load_tokenizer", lambda *a, **k: pytest.fail("the tokenizer was loaded"))
+        with pytest.raises(lora.TrainRefused, match="must not be trained on"):
+            lora.check_training("aya", "standard", 1, model_id=str(tiny_model_dir), device="cpu",
+                                dtype="fp32")
+        with pytest.raises(lora.TrainRefused, match="must not be trained on"):
+            train(tiny_model_dir)
+    assert not hub.pushes and not adapters_dir().joinpath(NAME).exists()
+    export_problems.clear()
+    assert lora.load_training_data("aya", cfg).sha256 == sha256_file(path)
+
+    monkeypatch.setattr(sft, "export_problems", REAL_EXPORT_PROBLEMS)
+    with pytest.raises(lora.TrainRefused, match="carries no rules stamp") as refused:
+        lora.load_training_data("aya", cfg)
+    assert "lift data build --only sft" in str(refused.value)
+    config.load("project")["models"]["global"]["revision"] = SHA         # the pin a GPU line needs
+    assert main(["train", "--candidate", "aya", "--recipe", "standard", "--seed", "1", "--device", "cpu",
+                 "--dtype", "fp32", "--check"]) == 2
+    assert "carries no rules stamp" in capsys.readouterr().err
 
 
 def test_a_training_row_equal_to_a_held_out_prompt_is_refused(utility):
