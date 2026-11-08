@@ -4,7 +4,9 @@ harness's judge ids. Fake worlds only (tests/validation_fakes.py), all under tmp
 """
 
 import copy
+import json
 import re
+import shutil
 
 import pytest
 from validation_fakes import (
@@ -12,7 +14,10 @@ from validation_fakes import (
     PRIMARY_ID,
     build_world,
     fill_sheet,
+    frontier_judge_id,
     make_generation,
+    other_label,
+    qwen_judge_id,
     truth,
     use_world,
     write_generations,
@@ -21,7 +26,10 @@ from validation_fakes import (
     write_verdicts,
 )
 
+from lift import paths
+from lift.data import build
 from lift.io import read_jsonl, sha256_text, write_jsonl
+from lift.models.generate import HARNESS_VERSION
 from lift.schemas import JudgementRecord, PromptRecord
 from lift.validation import outputs
 from lift.validation import score as scoring
@@ -82,13 +90,15 @@ def test_round_keys_are_the_item_id_map_that_p02_reads(tmp_path, monkeypatch):
     assert keys == {it["key"] for it in load_round(1)["items"]}
 
 
-def spotcheck(path, rows):
+P01_HEADER = ["item_id", "set", "english", "translation", "verdict", "corrected", "note"]
+
+
+def spotcheck(path, rows, *, header=P01_HEADER, above=()):
     import csv
 
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, lineterminator="\n")
-        writer.writerow(["item_id", "set", "english", "translation", "verdict", "corrected", "note"])
-        writer.writerows(rows)
+        writer.writerows([*above, header, *rows])
 
 
 def test_prompts_on_spot_check_sheets_are_kept_off_their_readers_sheets(tmp_path, monkeypatch):
@@ -168,6 +178,27 @@ def test_gate1_is_written_whenever_round_1_is_scored_and_waits_for_unfinished_ro
     assert read_json(scoring.gate1_path())["status"] == "pass"
 
 
+def test_gate1_tells_when_a_hindi_output_it_scored_was_generated_again(tmp_path, monkeypatch):
+    # R2-12: an output regenerated with other text under its key leaves its item superseded and its
+    # judgements about another text. gate1.json was scored before that: gate1_stale says it no longer
+    # holds, and the next score counts the item as superseded.
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    import_truth(world)
+    scoring.score(1)
+    gate = read_json(scoring.gate1_path())
+    assert (gate["status"], gate["superseded"], scoring.gate1_stale(gate)) == ("pass", 0, [])
+    item = next(it for it in load_round(1)["items"] if it["lang"] == "hi")
+    cell = (item["variant"], item["set"], "hi", item["split"])
+    write_generations(world, *cell, [g.model_copy(update={"output": g.output + " (regenerated)"})
+                                     if g.key == item["key"] else g for g in world.generations[cell]])
+    stale = scoring.gate1_stale(gate)
+    assert len(stale) == 1 and "generated again" in stale[0]
+    scoring.score(1)
+    gate = read_json(scoring.gate1_path())
+    assert (gate["superseded"], scoring.gate1_stale(gate)) == (1, [])
+
+
 def test_redteam_keys_get_their_own_judge_command(tmp_path, monkeypatch):
     world = world_for(tmp_path, monkeypatch)
     red = write_prompts(world, "redteam", "hi", {"final": 30})
@@ -205,22 +236,33 @@ def test_a_refused_redraw_names_the_option_that_differs(tmp_path, monkeypatch):
 
 
 def test_judge_pins_match_the_harness_id_forms():
-    qwen_a = "Qwen/Qwen3Guard-Gen-4B@aaaa#bf16"
-    qwen_b = "Qwen/Qwen3Guard-Gen-4B@bbbb#bf16"
+    # Two revisions of the configured Qwen3Guard both fit its rule while the config pins none.
+    qwen_a, qwen_b = qwen_judge_id(revision="a" * 40), qwen_judge_id(revision="b" * 40)
     assert judge_kind(qwen_a) == judge_kind(qwen_b) == "qwen3guard"
     assert judge_kind(FRONTIER_ID) == "frontier"
-    for pin in (qwen_a, "Qwen/Qwen3Guard-Gen-4B@aaaa"):            # with or without the #dtype
+    for pin in (qwen_a, qwen_a.split("#", 1)[0]):                  # the whole id, or model@revision
         assert judge_kind(qwen_a, qwen3guard_judge=pin) == "qwen3guard"
         assert judge_kind(qwen_b, qwen3guard_judge=pin) is None     # never relabelled as frontier
         assert judge_kind(FRONTIER_ID, qwen3guard_judge=pin) == "frontier"
-    assert judge_kind(FRONTIER_ID, frontier_judge=FRONTIER_ID.split("@")[0]) == "frontier"
+    # The whole id, the FrontierJudge id (up to the rules tag), or provider/model alone.
+    for pin in (FRONTIER_ID, FRONTIER_ID.split("#", 1)[0], FRONTIER_ID.split("@", 1)[0]):
+        assert judge_kind(FRONTIER_ID, frontier_judge=pin) == "frontier"
+    assert judge_kind(frontier_judge_id(api="2026-11-02"), frontier_judge=FRONTIER_ID) is None
+    # W2-05: harness ids of judges the config does not name are no kind, whatever a pin says: another
+    # mode, precision, labelling rules or rubric, another model, or an id without the rules tag.
+    for other in (qwen_judge_id(mode="loose"), qwen_judge_id(dtype="fp16"),
+                  qwen_judge_id(rules="rules-0000abcd"), frontier_judge_id(rubric="safety_v0:0123456789ab"),
+                  "Qwen/Qwen3Guard-Gen-4B@aaaa#bf16#strict", "otherprovider/other-model@2026-11-02"):
+        assert judge_kind(other) is judge_kind(other, qwen3guard_judge=other, frontier_judge=other) is None
+    assert judge_kind(qwen_judge_id(dtype="fp16"), dtype="fp16") == "qwen3guard"     # outputs drawn in fp16
 
 
 def test_a_pin_that_matches_no_judgement_is_an_error(tmp_path, monkeypatch):
     world_for(tmp_path, monkeypatch)
     make_sheets(1)
     it = load_round(1)["items"][0]
-    target = outputs.Target(it["key"], it["variant"], it["set"], it["lang"], it["split"], it["pid"])
+    target = outputs.Target(it["key"], it["variant"], it["set"], it["lang"], it["split"], it["pid"],
+                            it["output_sha"])
     assert load_judgements([target]).qwen3guard_id == PRIMARY_ID
     with pytest.raises(ValidateError, match="no qwen3guard judgement matches"):
         load_judgements([target], qwen3guard_judge="Qwen/Qwen3Guard-Gen-4B@nope")
@@ -293,6 +335,36 @@ def test_p01s_own_spot_check_sheets_keep_their_prompts_off_the_sheets(tmp_path, 
     assert not seen & set(hi) and not doc["warnings"]
 
 
+@pytest.mark.parametrize("how", ["translation header renamed", "line typed above the header",
+                                 "workbook saved as csv"])
+def test_a_spot_check_sheet_handed_back_unreadable_never_lets_its_prompts_through(tmp_path, monkeypatch, how):
+    # R1-45: P01's spot-check sheet, not applied yet, as its reader may hand it back. A renamed translation
+    # header is still read (the ids say which prompts it shows); a sheet that cannot be read at all stops
+    # the draw, naming the file, since its prompts could not be kept off its reader's sheets.
+    world_for(tmp_path, monkeypatch)
+    prompts = Prompts()
+    hi = sorted(p for p, r in prompts.get("harmful", "hi").items() if r.split == "dev")[:5]
+    sheets_dir().mkdir(parents=True, exist_ok=True)
+    path = sheets_dir() / "spotcheck_hi.csv"
+    rows = [[f"hi-{p}", "harmful", "x", prompts.get("harmful", "hi")[p].text, "ok", "", ""] for p in hi]
+    if how == "translation header renamed":
+        spotcheck(path, rows, header=["hindi translation" if c == "translation" else c for c in P01_HEADER])
+        make_sheets(1)
+        doc = load_round(1)
+        assert not {it["pid"] for it in doc["items"] if it["lang"] in ("hi", "en")} & set(hi)
+        assert doc["excluded_seen_pids"]["hi"] == doc["excluded_seen_pids"]["en"] == len(hi)
+        return
+    if how == "line typed above the header":
+        spotcheck(path, rows, above=[["checked by the hindi reader"]])
+    else:
+        path.write_bytes(b"PK\x03\x04" + bytes(64))              # how every .xlsx (a zip file) starts
+    with pytest.raises(ValidateError, match=r"spotcheck_hi\.csv") as refused:
+        make_sheets(1)
+    assert "apply-spotchecks" in str(refused.value)               # the remedy: fix it, or apply and move it
+    assert not round_keys_path(1).exists() and not draw_path(1).exists()
+    assert any("spotcheck_hi.csv" in p for p in check_round(1)["problems"])
+
+
 def test_an_output_that_changed_under_its_key_is_superseded_even_with_judgements(tmp_path, monkeypatch):
     world = world_for(tmp_path, monkeypatch)
     make_sheets(1)
@@ -354,17 +426,66 @@ def test_records_are_split_at_newlines_only_and_a_cut_last_line_is_told_by_its_m
         list(outputs.read_records(path))                         # a damaged line that is not cut short
 
 
+HINDI_WORD = "उत्तर"          # a neutral Devanagari word ("answer"): 3 bytes a character in UTF-8
+
+
+def test_a_line_cut_inside_a_character_is_skipped_only_as_the_last_line_without_its_newline(tmp_path):
+    # R2-28: the lines are split as bytes and each is decoded on its own, so a last line cut inside a
+    # multi-byte character is a cut line like any other, not a whole file that is not UTF-8.
+    path = tmp_path / "x.jsonl"
+    write_jsonl(path, [{"key": "a", "output": HINDI_WORD}, {"key": "b", "output": HINDI_WORD}])
+    data = path.read_bytes()
+    cut = data.rindex(HINDI_WORD.encode("utf-8")) + 1             # one byte into the last line's word
+    path.write_bytes(data[:cut])
+    assert [r["key"] for _, r in outputs.read_records(path)] == ["a"]
+    path.write_bytes(data[:cut] + b"\n")                          # the same line with its newline: damaged
+    with pytest.raises(ValidateError, match=r"x\.jsonl:2: not UTF-8"):
+        list(outputs.read_records(path))
+    first = data.index(HINDI_WORD.encode("utf-8")) + 1
+    path.write_bytes(data[:first] + data[first + 1:])             # a broken character on the first line
+    with pytest.raises(ValidateError, match=r"x\.jsonl:1: not UTF-8"):
+        list(outputs.read_records(path))
+
+
+def test_a_generations_file_cut_inside_a_hindi_character_counts_its_pid_as_missing(tmp_path, monkeypatch):
+    # R2-28: a killed append most likely cuts a Hindi, Chinese or Thai record inside its output, so inside
+    # a character. The file is read as any file whose last line was cut: the pid counts as missing (an
+    # unfinished run), and second-judge-sample lists the file as incomplete instead of stopping on it.
+    world = world_for(tmp_path, monkeypatch, judgements=False)
+    cell = ("stock", "harmful", "hi", "dev")
+    recs = world.generations[cell]
+    last = recs[-1].model_copy(update={"output": f"{HINDI_WORD} {recs[-1].output}"})
+    path = write_generations(world, *cell, [*recs[:-1], last])
+    data = path.read_bytes()
+    start = data.rindex(b"\n", 0, len(data) - 1) + 1              # where the last record begins
+    path.write_bytes(data[: data.index(HINDI_WORD.encode("utf-8"), start) + 1])
+    with pytest.raises(UnicodeDecodeError):
+        path.read_bytes().decode("utf-8")
+    pool = load_pool(*cell, Prompts())
+    assert [g.pid for g in pool.records] == sorted(g.pid for g in recs[:-1])
+    assert pool.missing == [last.pid] and "unfinished" in pool.problem()
+    doc = second_judge_sample(require_validated=False)
+    assert doc["incomplete_files"] == [f"stock/{path.name}"]
+
+
 def test_the_fallback_judge_never_switches_and_its_decision_is_robust(tmp_path, monkeypatch):
     world = world_for(tmp_path, monkeypatch, judgements=False)
     make_sheets(1)
     keys = [it["key"] for it in load_round(1)["items"]]
     world.primary_flip |= set(keys[:40])
     write_judgements(world)
-    for path in (world.outputs / "judgements" / "frontier").rglob("*.jsonl"):
-        write_jsonl(path, [{**r, "judge": "CohereLabs/aya-expanse-8b@abc123"} for r in read_jsonl(path)])
     hi = [it["item_id"] for it in load_round(1)["items"] if it["sheet"] == "round1_hi"]
     import_truth(world, leave=set(hi[:2]))
+    # Only a configured judge's judgements are read (W2-05), so the fallback is in play once the frontier
+    # judge the config names is the fallback model (judges.safety_fallback names it).
+    from lift import config
+
+    load = config.load
+    changed = copy.deepcopy(load("project"))
+    changed["judges"]["safety_fallback"]["id"] = FRONTIER_ID.split("@", 1)[0]
+    monkeypatch.setattr(config, "load", lambda name="project": changed if name == "project" else load(name))
     doc = scoring.decide_primary_judge(dry_run=True, allow_incomplete=True)
+    assert doc["frontier_kind"] == "fallback"
     assert doc["rule_met"] and not doc["rule_applies"] and not doc["switch_primary"]
     assert doc["diagnostics"]["skips"]["robust_to_skips"] is True
 
@@ -444,13 +565,126 @@ def test_the_decision_texts_use_the_configured_threshold(tmp_path, monkeypatch):
     assert "switches at 10 points" in entry and "exactly 10 points" in entry and "5 points" not in entry
 
 
+# --- R1-16: outputs in another precision than generation.dtype need Gate 0's licence ------------
+
+T4_REV, T4_DECODING, T4_DIGEST = "c" * 40, "d" * 16, "e" * 64   # Global's sha, decoding digest, the bf16 run
+T4_STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "7.5"}
+QWEN_FP16 = qwen_judge_id(dtype="fp16")         # the harness's id for Qwen3Guard run in fp16, strict mapping
+
+
+def t4_run(world, *, made_on="7.5", judged_on=None):
+    """Every output of ``world`` as a Kaggle job makes it: in fp16 on GPU class ``made_on``, with the
+    provenance lift.models.generate records, and judged by Qwen3Guard in fp16 on ``judged_on`` (the same
+    GPU unless given). The frontier judge is an API: its judgements carry no stack."""
+    meta = {"dtype": "fp16", "model_rev": T4_REV, "harness": HARNESS_VERSION, "decoding": T4_DECODING,
+            **T4_STACK, "gpu_capability": made_on}
+    for cell, gens in list(world.generations.items()):
+        write_generations(world, *cell, [g.model_copy(update={"meta": dict(meta)}) for g in gens])
+    stack = {**T4_STACK, "gpu_capability": judged_on or made_on}
+    for path in (world.outputs / "judgements" / "qwen3guard").rglob("*.jsonl"):
+        write_jsonl(path, [{**r, "judge": QWEN_FP16, "native": {**r["native"], "stack": stack}}
+                           for r in read_jsonl(path)])
+
+
+def write_gate0(*, passed=True):
+    """Gate 0's two reports, reduced to what its fp16 licence reads (as tests/test_pipeline.py writes
+    them): gate0-fp16.json, the T4 comparison on 200 prompts against the bf16 run T4_DIGEST under this
+    harness and these decoding settings, judged by Qwen3Guard in fp16 (``passed`` its verdict), and
+    gate0.json, that bf16 Gate 0."""
+    folder = paths.metrics_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    revisions = {"global": T4_REV, "judge": "a" * 40}
+    fp16 = {"pass": passed, "comparable": True, "n": 200, "reference_digest": T4_DIGEST,
+            "harness": HARNESS_VERSION, "decoding": T4_DECODING}
+    (folder / "gate0-fp16.json").write_text(json.dumps(
+        {"dtype": "fp16", "reference_dtype": "bf16", "pass": passed, "gpu_capability": "7.5",
+         "judge": {"id": QWEN_FP16},
+         "checks": {"precision": {"pass": True, "digest": "f" * 64}, "fp16": fp16},
+         "revisions": revisions}), encoding="utf-8")
+    (folder / "gate0.json").write_text(json.dumps(
+        {"dtype": "bf16", "pass": True, "checks": {"precision": {"pass": True, "digest": T4_DIGEST}},
+         "revisions": revisions}), encoding="utf-8")
+
+
 def test_a_t4_run_gate0_cleared_can_be_drawn_with_its_dtype(tmp_path, monkeypatch):
     world = world_for(tmp_path, monkeypatch)
-    for cell, gens in list(world.generations.items()):
-        write_generations(world, *cell, [g.model_copy(update={"meta": {"dtype": "fp16"}}) for g in gens])
+    t4_run(world)
+    write_gate0()
     assert check_round(1)["problems"]                            # bf16 asked for: nothing to draw
+    assert check_round(1, dtype="fp16")["problems"] == []
     make_sheets(1, dtype="fp16")
     assert load_round(1)["dtype"] == "fp16"
+
+
+@pytest.mark.parametrize("unlicensed", ["no comparison yet", "fp16 failed", "made on another GPU class"])
+def test_an_fp16_run_gate0_has_not_licensed_is_never_drawn(tmp_path, monkeypatch, unlicensed):
+    # R1-16: naming --dtype fp16 licenses nothing. A T4 run Gate 0 has not licensed (no comparison yet,
+    # a failed one, cells made on another GPU class than the comparison's) is refused for the readers'
+    # sheets, the utility sheet and the second judge's lists, naming the licence.
+    world = world_for(tmp_path, monkeypatch, utility=True)
+    t4_run(world, made_on="6.0" if unlicensed == "made on another GPU class" else "7.5")
+    if unlicensed != "no comparison yet":
+        write_gate0(passed=unlicensed != "fp16 failed")
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        make_sheets(1, dtype="fp16")
+    assert not round_keys_path(1).exists() and not draw_path(1).exists()
+    assert not list(world.validation.rglob("*.csv"))
+    assert any("gate0-fp16.json" in p for p in check_round(1, dtype="fp16")["problems"])
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        make_utility_sheet("adapter-aya-std-s1", n=10, dtype="fp16")
+    assert not (world.validation / "keys" / "utility.json").exists()
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        second_judge_sample(require_validated=False, dtype="fp16")
+
+
+def test_a_t4_round_is_scored_only_while_gate0s_licence_covers_it(tmp_path, monkeypatch):
+    # R1-16: score and decide-judge read the precision the round was drawn in, and must refuse (before
+    # writing anything) once Gate 0's licence no longer covers its cells, never score them as unknown.
+    world = world_for(tmp_path, monkeypatch)
+    t4_run(world)
+    write_gate0()
+    make_sheets(1, dtype="fp16")
+    import_truth(world)
+    assert scoring.score(1, write=False)["judges"]["qwen3guard_strict"]["judge_id"] == QWEN_FP16
+    assert scoring.decide_primary_judge(dry_run=True)["n"] == 180          # licensed: scored and decided
+    written = (scoring.gate1_path(), scoring.gate1_path().with_name("round1.json"), scoring.decision_path())
+    # Qwen3Guard judged the round on another GPU class than the comparison's: its labels are not covered.
+    t4_run(world, judged_on="6.0")
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json") as refused:
+        scoring.score(1)
+    assert "GPU class" in str(refused.value)
+    t4_run(world)
+    # A later comparison fails and replaces the report (decisions.md 27): T4 runs are never reported.
+    write_gate0(passed=False)
+    for step in (lambda: scoring.score(1), lambda: scoring.decide_primary_judge(dry_run=True),
+                 scoring.decide_primary_judge):
+        with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+            step()
+    # Also when the generations files cannot be read here: the licence is asked for all the same.
+    shutil.rmtree(world.outputs / "generations")
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        scoring.score(1)
+    assert not [p for p in written if p.exists()]
+
+
+def test_a_t4_utility_sheet_is_scored_only_while_gate0s_licence_covers_it(tmp_path, monkeypatch):
+    # R1-16: utility-score reads the precision the sheet was drawn in, as score does.
+    world = world_for(tmp_path, monkeypatch, utility=True)
+    t4_run(world)
+    write_gate0()
+    sheet = make_utility_sheet("adapter-aya-std-s1", n=10, dtype="fp16")
+    doc = read_json(world.validation / "keys" / "utility.json")
+    import_preferences(fill_sheet(sheet, world.root / "u.csv", {it["item_id"]: "tie" for it in doc["items"]},
+                                  column="preference"))
+    write_verdicts(world, "adapter-aya-std-s1", {it["pid"]: 0.5 for it in doc["items"]})
+    assert score_utility(write=False)["complete"]                          # licensed: scored
+    write_gate0(passed=False)
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        score_utility()
+    shutil.rmtree(world.outputs / "generations")                          # unreadable here: still asked
+    with pytest.raises(ValidateError, match=r"gate0-fp16\.json"):
+        score_utility()
+    assert not (paths.metrics_dir() / "validation" / "utility.json").exists()
 
 
 def test_decide_judge_says_when_the_config_disagrees_with_a_decision_to_keep_qwen3guard(
@@ -469,3 +703,206 @@ def test_decide_judge_says_when_the_config_disagrees_with_a_decision_to_keep_qwe
     assert main(["validate", "decide-judge", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "makes the frontier judge primary" in out and "swaps the blocks back" in out
+
+
+def stale_judgement(world, item, dirname, output_sha):
+    """The judgement of ``item`` under outputs/judgements/{dirname}/, made of another output than the one
+    now under its key (a run judged before the harness regenerated the file), with the other label."""
+    path = (world.outputs / "judgements" / dirname / item["variant"]
+            / f"{item['set']}_{item['lang']}_{item['split']}.jsonl")
+    rows = [JudgementRecord.model_validate(r) for r in read_jsonl(path)]
+    write_jsonl(path, [(r.model_copy(update={"output_sha": output_sha, "label": other_label(r.label),
+                                             "judge_label": other_label(r.judge_label)})
+                        if r.key == item["key"] else r).model_dump() for r in rows])
+
+
+@pytest.mark.parametrize("output_sha", [sha256_text("an earlier output"), None], ids=["another", "unsaid"])
+def test_a_judgement_of_another_output_than_the_one_under_its_key_is_never_scored(
+        tmp_path, monkeypatch, output_sha):
+    # R1 post-merge item 1: P02 records the output each judgement judged (output_sha); a judgement of
+    # another output (or one that does not say) is about text the reader never saw, so it is skipped and
+    # counted, and the item waits for its judge like one never judged.
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    import_truth(world)
+    item = next(it for it in load_round(1)["items"] if it["lang"] == "hi")
+    for dirname in ("qwen3guard", "frontier"):
+        stale_judgement(world, item, dirname, output_sha)
+    out = scoring.score(1)
+    for view in ("qwen3guard_strict", "frontier"):
+        hi = out["judges"][view]["langs"]["hi"]
+        assert (hi["status"], hi["n_missing"], hi["agreement"]) == ("pending_judge", 1, 1.0)
+    assert out["checks"]["superseded"] == 0                     # the output itself is still the one shown
+    assert out["checks"]["stale_judgements"] == {"qwen3guard": 1, "frontier": 1}
+
+
+def test_load_judgements_pairs_a_judgement_only_with_the_output_it_judged(tmp_path, monkeypatch):
+    world = world_for(tmp_path, monkeypatch)
+    gens = world.generations[("stock", "harmful", "hi", "dev")][:3]
+    rows = [JudgementRecord.model_validate(r) for r in
+            read_jsonl(world.outputs / "judgements" / "qwen3guard" / "stock" / "harmful_hi_dev.jsonl")]
+    by_key = {r.key: r for r in rows}
+    targets = [outputs.Target(g.key, g.variant, g.set, g.lang, g.split, g.pid, sha256_text(g.output))
+               for g in gens[:2]]
+    targets.append(outputs.Target(gens[2].key, "stock", "harmful", "hi", "dev", gens[2].pid,
+                                  sha256_text("not the output that was judged")))
+    judged = load_judgements(targets)
+    assert set(judged.qwen3guard) == {g.key for g in gens[:2]}
+    assert judged.qwen3guard[gens[0].key] == by_key[gens[0].key]
+    assert judged.stale == {"qwen3guard": 1, "frontier": 1}
+    # A caller that cannot say which output it wants (no generation to compare with) gets no judgement.
+    unknown = load_judgements([outputs.Target(gens[0].key, "stock", "harmful", "hi", "dev", gens[0].pid)])
+    assert unknown.qwen3guard == {} and unknown.stale == {"qwen3guard": 1, "frontier": 1}
+
+
+# --- W2-06 (R1-19 follow-up): the prompt files are read through the build's own reader ----------
+
+
+def test_a_prompt_file_stamped_from_another_split_assignment_is_refused(tmp_path, monkeypatch):
+    # dev/final membership is the committed split's (data/splits), never the stamp a synced prompt file
+    # carries: a file whose stamps swap a dev and a final pid (every split keeps its size) is refused by
+    # every validation read, as lift.data.build.load_prompts refuses it for every other stage.
+    world = world_for(tmp_path, monkeypatch)
+    path = world.data / "prompts" / "harmful_hi.jsonl"
+    records = [PromptRecord.model_validate(r) for r in read_jsonl(path)]
+    dev = next(r.pid for r in records if r.split == "dev")
+    final = next(r.pid for r in records if r.split == "final")
+    swapped = {dev: "final", final: "dev"}
+    write_jsonl(path, [r.model_copy(update={"split": swapped.get(r.pid, r.split)}).model_dump()
+                       for r in records])
+    with pytest.raises(ValidateError, match=dev) as refused:
+        Prompts().get("harmful", "hi")
+    assert final in str(refused.value) and "lift data build --only harmful" in str(refused.value)
+    assert isinstance(refused.value, outputs.PromptFileError)       # W3-05: never "missing here"
+    with pytest.raises(ValidateError, match="harmful_hi"):           # the draw stops on it, writing nothing
+        make_sheets(1)
+    assert not round_keys_path(1).exists() and not draw_path(1).exists()
+    # A missing committed split file: the stamps cannot be checked, so nothing is read either.
+    write_jsonl(path, [r.model_dump() for r in records])
+    (world.splits_dir / "harmful.json").unlink()
+    with pytest.raises(outputs.PromptFileError, match=r"harmful\.json is missing"):
+        Prompts().get("harmful", "hi")
+    (world.data / "prompts" / "harmful_en.jsonl").unlink()
+    with pytest.raises(ValidateError, match="is missing") as missing:        # a prompt file missing here
+        Prompts().get("harmful", "en")
+    assert not isinstance(missing.value, outputs.PromptFileError)
+
+
+def swap_stamps(path):
+    """Rewrite the prompt file at ``path`` stamped from another assignment: a dev and a final pid swap
+    splits (every split keeps its size). Returns the records as they were."""
+    records = [PromptRecord.model_validate(r) for r in read_jsonl(path)]
+    dev = next(r.pid for r in records if r.split == "dev")
+    final = next(r.pid for r in records if r.split == "final")
+    swapped = {dev: "final", final: "dev"}
+    write_jsonl(path, [r.model_copy(update={"split": swapped.get(r.pid, r.split)}).model_dump()
+                       for r in records])
+    return records
+
+
+def test_the_scores_stop_on_a_refused_prompt_file_and_count_only_a_missing_one(tmp_path, monkeypatch):
+    # W3-05 (W2-06 follow-up): a prompt file stamped from another split assignment, or one whose committed
+    # split file is missing, is a stale or foreign copy (lift.data.build.SplitStampError). The scores stop
+    # on it instead of taking it for a prompt file that is missing here, as the draw does. Only a missing
+    # prompt file keeps the lenient path: its items are scored and counted (checks.prompt_file_missing).
+    world = world_for(tmp_path, monkeypatch, utility=True)
+    make_sheets(1)
+    import_truth(world)
+    sheet = make_utility_sheet("adapter-aya-std-s1", n=10)
+    doc = read_json(world.validation / "keys" / "utility.json")
+    prefs = {it["item_id"]: it["candidate_is"] for it in doc["items"]}
+    import_preferences(fill_sheet(sheet, world.root / "u.csv", prefs, column="preference"))
+    write_verdicts(world, "adapter-aya-std-s1", {it["pid"]: 1.0 for it in doc["items"]})
+    assert scoring.score(1)["checks"]["prompt_file_missing"] == 0
+    assert score_utility()["n_judged"] == 10
+    metrics = world.outputs / "metrics" / "validation"
+    written = {p.name: p.read_bytes() for p in metrics.iterdir()}
+    prompts = world.data / "prompts"
+
+    records = swap_stamps(prompts / "harmful_hi.jsonl")
+    stamped = r"harmful_hi: 2 records of harmful_hi\.jsonl carry another split than the committed split"
+    with pytest.raises(ValidateError, match=stamped):
+        scoring.score(1)
+    with pytest.raises(ValidateError, match=stamped):
+        scoring.decide_primary_judge(dry_run=True)
+    write_jsonl(prompts / "harmful_hi.jsonl", [r.model_dump() for r in records])
+    utility = swap_stamps(prompts / "utility_hi.jsonl")
+    with pytest.raises(ValidateError, match=r"utility_hi: 2 records of utility_hi\.jsonl carry another"):
+        score_utility()
+    write_jsonl(prompts / "utility_hi.jsonl", [r.model_dump() for r in utility])
+    split_file = world.splits_dir / "harmful.json"
+    frozen = split_file.read_bytes()
+    split_file.unlink()                                           # the stamps cannot be checked
+    with pytest.raises(ValidateError, match=r"harmful\.json is missing"):
+        scoring.score(1)
+    split_file.write_bytes(frozen)
+    write_jsonl(prompts / "harmful_hi.jsonl", [{**r.model_dump(), "text": None} for r in records])
+    with pytest.raises(ValidateError, match=r"harmful_hi\.jsonl: a record is not a PromptRecord \(text\)"):
+        scoring.score(1)                                          # nor is a file that does not parse
+    assert {p.name: p.read_bytes() for p in metrics.iterdir()} == written
+
+    (prompts / "harmful_hi.jsonl").unlink()                       # missing here: scored, and counted
+    labelled = sum(1 for it in load_round(1)["items"] if (it["set"], it["lang"]) == ("harmful", "hi")
+                   and it["slot"] == "a")
+    out = scoring.score(1)
+    assert out["checks"]["prompt_file_missing"] == labelled > 0
+    assert out["judges"]["qwen3guard_strict"]["langs"]["hi"]["status"] == "ok"
+    (prompts / "utility_hi.jsonl").unlink()
+    assert score_utility()["n_judged"] == 10
+
+
+def test_the_scores_stop_on_a_refused_prompt_file_whose_generations_files_are_all_missing(tmp_path,
+                                                                                        monkeypatch):
+    # W3-05 follow-up: with no generations file of the set and language here, load_pool never reads the
+    # prompt file (a missing generations file proves nothing), so the scores' own read of it for each
+    # labelled item is the one that sees it is here and refused: that stops them too, never counted as a
+    # prompt file missing here.
+    world = world_for(tmp_path, monkeypatch)
+    make_sheets(1)
+    import_truth(world)
+    assert scoring.score(1)["checks"]["prompt_file_missing"] == 0
+    swap_stamps(world.data / "prompts" / "harmful_hi.jsonl")
+    gone = sorted((world.outputs / "generations").rglob("harmful_hi_*.jsonl"))
+    assert len(gone) == 3                                # stock and the adapter on dev, stock on final
+    for path in gone:
+        path.unlink()
+    stamped = r"harmful_hi: 2 records of harmful_hi\.jsonl carry another split than the committed split"
+    with pytest.raises(outputs.PromptFileError, match=stamped):
+        scoring.score(1, write=False)
+    with pytest.raises(outputs.PromptFileError, match=stamped):
+        scoring.decide_primary_judge(dry_run=True)
+
+
+def test_the_utility_score_stops_on_a_refused_prompt_file_whose_generations_files_are_missing(tmp_path,
+                                                                                            monkeypatch):
+    # W3-05 follow-up: the utility score reads its prompt file itself too, so a refused one stops it even
+    # when neither utility generations file is here (load_pool then reads no prompt file), as it stops
+    # lift validate score.
+    world = world_for(tmp_path, monkeypatch, utility=True)
+    sheet = make_utility_sheet("adapter-aya-std-s1", n=10)
+    doc = read_json(world.validation / "keys" / "utility.json")
+    prefs = {it["item_id"]: it["candidate_is"] for it in doc["items"]}
+    import_preferences(fill_sheet(sheet, world.root / "u.csv", prefs, column="preference"))
+    write_verdicts(world, "adapter-aya-std-s1", {it["pid"]: 1.0 for it in doc["items"]})
+    gone = sorted((world.outputs / "generations").rglob("utility_hi_*.jsonl"))
+    assert len(gone) == 2                                # stock and the candidate
+    for path in gone:
+        path.unlink()
+    assert score_utility(write=False)["n_judged"] == 10            # missing generations prove nothing
+    swap_stamps(world.data / "prompts" / "utility_hi.jsonl")
+    stamped = r"utility_hi: 2 records of utility_hi\.jsonl carry another split"
+    with pytest.raises(outputs.PromptFileError, match=stamped):
+        score_utility(write=False)
+
+
+def test_a_cell_short_of_its_frozen_split_is_still_read_for_the_sheets(tmp_path, monkeypatch):
+    # A translation failure leaves its pid out of the prompt file until a reader's verdict resolves it.
+    # Every run refuses the short cell, but the validation reads it (allow_short): a sheet may show the
+    # cell's prompts meanwhile, and its outputs are then made again in full before they are reported.
+    world = world_for(tmp_path, monkeypatch)
+    path = world.data / "prompts" / "harmful_hi.jsonl"
+    records = [PromptRecord.model_validate(r) for r in read_jsonl(path)]
+    write_jsonl(path, [r.model_dump() for r in records[1:]])
+    with pytest.raises(ValueError, match="short of its frozen split"):
+        build.load_prompts("harmful", "hi", "dev")
+    assert set(Prompts().get("harmful", "hi")) == {r.pid for r in records[1:]}

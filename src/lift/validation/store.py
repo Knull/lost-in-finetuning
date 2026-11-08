@@ -15,8 +15,9 @@ row numbers and counts.
     validation/keys/second_judge/                       keys the second judge must cover
     validation/keys/archive/, sheets/archive/           what --force replaced
 
-``LIFT_VALIDATION_DIR`` moves the whole tree. It is for tests: ``lift sync`` only knows the
-default location.
+``LIFT_VALIDATION_DIR`` moves the whole tree (``lift.paths.validation_dir``): the tests use it, and so
+do remote runtimes (the Kaggle runner puts it under /kaggle/temp), where ``lift sync`` carries
+sheets/, keys/ and labels/ from wherever it points. P01's spot-check sheets live in the same sheets/.
 """
 
 from __future__ import annotations
@@ -45,8 +46,7 @@ class ValidateError(RuntimeError):
 
 
 def validation_dir() -> Path:
-    value = os.environ.get("LIFT_VALIDATION_DIR")
-    return Path(value).expanduser().resolve() if value else paths.REPO_ROOT / "validation"
+    return paths.validation_dir()
 
 
 def sheets_dir() -> Path:

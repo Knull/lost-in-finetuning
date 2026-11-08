@@ -54,6 +54,9 @@ Each language gets two sheets:
     the whole sheet back.
   - Use `ok` when the translation is correct, `fixed` (filling `corrected`) when you can repair
     it, and `bad` otherwise.
+  - Give every row of this sheet a verdict. A failed translation of a fit, dev or final prompt
+    (one the study fits or tests on) keeps that prompt's whole set and split, in your language,
+    out of every run until its row has `ok`, `fixed` or `bad`.
 - An item is on one of the two sheets only. A sample item carries no note, even when an
   automatic check rejected it: judge the translation itself.
 
@@ -62,7 +65,8 @@ Column rules, so the sheet can be read back:
 - Leave `item_id`, `set`, `english` and `translation` exactly as they are. A correction goes in
   `corrected`, never in `translation`.
 - Use `corrected` only with `fixed`.
-- An empty `verdict` means "not checked", which is fine.
+- An empty `verdict` means "not checked", which is fine on the sample sheet, not on the failures
+  sheet (see above).
 
 Save as **CSV UTF-8**:
 - **Google Sheets:** File > Download > Comma-separated values.

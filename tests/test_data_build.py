@@ -18,20 +18,21 @@ from fake_build import (
     fixture_cfg,
     fixture_ctx,
     fixture_hub,
+    fixture_train_cfg,
     isolate,
     read_sheet,
     repo_state,
     snapshot,
     write_sheet,
 )
-from fake_sft import QUIRK_DRAW, aya_dataset_rows, near
+from fake_sft import QUIRK_DRAW, aya_dataset_rows, dolly_rows, indicalign_rows, near
 from fake_sources import belebele_rows_by_config, orbench_rows, redteam_rows
 
-from lift import config, manifest, splits
-from lift.data import build, polyrefuse, sources, translate
+from lift import config, manifest, prompts, splits
+from lift.data import build, polyrefuse, sft, sources, translate
 from lift.data.build import SheetError
-from lift.data.text import clean_text
-from lift.io import read_jsonl, sha256_file, sha256_text, write_jsonl
+from lift.data.text import char_ngrams, clean_text, dup_key, jaccard
+from lift.io import read_jsonl, sha256_file, sha256_text, stable_json, write_jsonl
 from lift.schemas import PromptRecord
 
 FIX = runpy.run_path(str(POLYREFUSE_FIXTURE.parent / "make_fixture.py"))    # the texts the tree holds
@@ -75,7 +76,8 @@ def split_file(dirs, name):
 
 
 def by_pid(set_name, lang):
-    items = build.load_prompts(set_name, lang)
+    """The file as it stands, a cell short of its frozen split too (the stages refuse that one)."""
+    items = build.load_prompts(set_name, lang, allow_short=True)
     return {x["pid"]: x for x in items} if set_name == "belebele" else {r.pid: r for r in items}
 
 
@@ -194,6 +196,7 @@ def test_fixture_build_without_translation(dirs, caplog):
         # the same-text check runs on PromptRecord files only, and only they carry its key
         has_key = ("cross_split_duplicates" in rep, "cross_split_duplicates" in summary["files"][name])
         assert has_key == ((True, True) if set_name != "belebele" else (False, False)), name
+        assert rep.get("awaiting_review", "none") == ({} if set_name != "belebele" else "none"), name
     assert {r.lid.label for r in en.values()} == {"eng_Latn"}
     dumps = [p.read_text(encoding="utf-8") for p in (dirs.data / "prompts" / "reports").glob("*.json")]
     leaked = [t for t in fixture_texts() if any(t in d for d in [*dumps, caplog.text])]
@@ -276,6 +279,135 @@ def test_training_rows_never_near_duplicate_a_utility_record(dirs):
             assert not [r.pid for r in util if near(user, assistant, r.text, r.extra["reference"])], row["id"]
 
 
+# R2-01: an Aya row the held-out draw takes (fixture idx 7, one of the two the project seed draws), its text
+# replaced by a question with a short answer, and a later row that rewords the question and copies the answer,
+# as aya-00017 copies utl-aya-00922's 11-character answer; and a Dolly_T row whose Hindi pair is answer first
+# (the shape of rows 635, 2496, 5630). Benign placeholder text.
+HELD_IDX, COPY_IDX, REV_ROW = 7, 18, 19
+HELD_Q = "भारत की राजधानी किस शहर में स्थित है, कृपया केवल शहर का नाम बताइए।"
+COPY_Q = "हमारे देश की सरकार कहाँ से चलती है, उस जगह का नाम क्या है?"
+ANSWER = "नई दिल्ली।"
+EN_Q = "Why do leaves change colour in autumn?"
+EN_A = ("As the days grow shorter and cooler, trees stop making chlorophyll, the green pigment; once it "
+        "breaks down, the yellow and orange pigments that were there all along show through.")
+HI_Q = "पतझड़ में पत्तों का रंग क्यों बदल जाता है?"
+HI_A = ("जैसे-जैसे दिन छोटे और ठंडे होते जाते हैं, पेड़ हरा रंग देने वाला क्लोरोफ़िल बनाना बंद कर देते हैं; उसके टूटने "
+        "पर पहले से मौजूद पीले और नारंगी रंग दिखने लगते हैं।")
+HELD_PID, COPY_ID, REV_ID = f"utl-aya-{HELD_IDX:05d}", f"aya-{COPY_IDX:05d}", f"ind-{REV_ROW:05d}"
+# what the Nov 4 build wrote (keys and file names read off the real data/sft)
+NOV4_REPORT = {"decision", "seed", "sources", "variants"}
+NOV4_DECISION = {"equal_size", "limited_by", "rows", "rows_by_variant", "rows_target"}
+NOV4_SOURCE = {"dropped", "held_out", "loaded", "near_dup_excluded", "near_dup_of", "pool", "train_pool"}
+NOV4_SELECTION = {"candidate", "counts", "curatorkit", "dedup", "ids", "rows", "rows_target", "seed",
+                  "sha256", "tag", "variant"}
+NOV4_FILES = {"report.json", "selection.json", "sft_messages.jsonl", "curatorkit_summary.json",
+              "lexsi_provenance.json", "manifest.json", "rejected.jsonl"}
+
+
+def nov4_sources():
+    aya = aya_dataset_rows()
+    aya[HELD_IDX] = {**aya[HELD_IDX], "inputs": HELD_Q, "targets": ANSWER}
+    aya.append({**aya[0], "inputs": COPY_Q, "targets": ANSWER, "_row": max(r["_row"] for r in aya) + 10})
+    ind, dolly = indicalign_rows(), dolly_rows()
+    ind.append({"doc_id": "doc-rev", "eng_Latn": [[EN_Q, EN_A]], "hin_Deva": [[HI_A, HI_Q]], "_row": REV_ROW})
+    dolly.append({"instruction": EN_Q, "context": "", "response": EN_A, "category": "open_qa",
+                  "_row": len(dolly)})
+    return {"aya_dataset": aya, "indicalign": ind, "dolly": dolly}
+
+
+def pre_r1_grams(instruction, response, nd):
+    """sft._grams before R1-20: an answer under 20 characters had no grams, so the answer rule never fired."""
+    kept = response if len(dup_key(response)) >= 20 else ""
+    return sft._Grams(char_ngrams(instruction, nd.ngram), char_ngrams(kept, nd.ngram))
+
+
+def as_of_nov4(data):
+    """Cut data/sft back to the keys and files the Nov 4 build wrote (no rules stamp, no hindi_reversed)."""
+    root = data / "sft"
+    for path in [p for p in root.rglob("*") if p.is_file() and p.name not in NOV4_FILES]:
+        path.unlink()
+
+    def cut(path, keys):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        return {k: v for k, v in doc.items() if k in keys}
+
+    report = cut(root / "report.json", NOV4_REPORT)
+    report["decision"] = {k: v for k, v in report["decision"].items() if k in NOV4_DECISION}
+    for name, src in report["sources"].items():
+        src = {k: v for k, v in src.items() if k in NOV4_SOURCE}
+        src["dropped"] = {k: v for k, v in src["dropped"].items() if k != "hindi_reversed"}
+        report["sources"][name] = src
+    report["variants"] = {k: {f: v[f] for f in v if f in NOV4_SELECTION - {"ids"}}
+                          for k, v in report["variants"].items()}
+    for path, doc in [(root / "report.json", report),
+                      *((p, cut(p, NOV4_SELECTION)) for p in root.rglob("selection.json"))]:
+        path.write_text(json.dumps(doc, indent=1, ensure_ascii=False, sort_keys=True) + "\n",
+                        encoding="utf-8", newline="\n")
+
+
+def sft_view(cfg, **train):
+    """What `lift data stats` says about the SFT build: its JSON entry and its lines of text (``train``:
+    a train_cfg; by default stats reads configs/train.yaml, as the command does)."""
+    st = build.stats(cfg=cfg, **train)
+    lines = build.format_stats(st).splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("sft"))
+    end = next((i for i, line in enumerate(lines) if line.startswith("last build")), len(lines))
+    return json.dumps(st["sft"], sort_keys=True, ensure_ascii=False) + "\n" + "\n".join(lines[start:end])
+
+
+def test_an_sft_export_built_under_the_pre_r1_rules_is_marked_stale(dirs, monkeypatch):
+    """R2-01: the Nov 4 exports (the pre-R1 rules: a copy of a final utility answer and a reversed Dolly_T
+    pair kept) carry no rules stamp, and their selection.json still matches each export. They must not pass
+    for a current build: lift data stats marks them stale and the trainer's check refuses them, until a
+    rebuild under the current rules, which drops both rows."""
+    committed = fixture_train_cfg(rows=3000)                           # configs/train.yaml as it stands
+    assert committed == config.load("train")
+    ctx = fixture_ctx(hub=fixture_hub(nov4_sources()), train_cfg=committed)
+    assert jaccard(char_ngrams(HELD_Q), char_ngrams(COPY_Q)) < 0.7 and len(dup_key(ANSWER)) < 20
+    with monkeypatch.context() as m:                                   # the Nov 4 build
+        m.setattr(sft, "_grams", pre_r1_grams)
+        m.setattr(sft, "_hindi_reversed", lambda eng, hin: False)
+        build.build_all(ctx=ctx, only=["utility", "sft"], langs=["hi"])
+    as_of_nov4(dirs.data)
+
+    def export_ids():
+        return {p.parent.relative_to(dirs.data / "sft").as_posix(): [r["id"] for r in read_jsonl(p)]
+                for p in sorted((dirs.data / "sft").rglob("sft_messages.jsonl"))}
+
+    # the held-out row is a FINAL utility item, the Aya export trains on a copy of its answer, the IndicAlign
+    # exports on the reversed pair, and every selection.json matches its export
+    utility = {r.pid: r for r in build.load_prompts("utility", "hi")}
+    stale = export_ids()
+    assert splits.load_split("utility")[HELD_PID] == "final"
+    assert utility[HELD_PID].extra["reference"] == ANSWER and COPY_ID in stale["aya/dedup"]
+    assert REV_ID in stale["indicalign/dedup"] and REV_ID in stale["indicalign/raw"]
+    for key in stale:
+        sel = json.loads((dirs.data / "sft" / key / "selection.json").read_text(encoding="utf-8"))
+        assert sel["sha256"] == sha256_file(dirs.data / "sft" / key / "sft_messages.jsonl")
+    assert sft.near_duplicates([sft.SftRow("aya", COPY_IDX, 0, COPY_Q, ANSWER)], utility.values(),
+                               cfg=ctx.cfg) == {COPY_ID: HELD_PID}
+    assert sft._hindi_reversed([EN_Q, EN_A], [HI_A, HI_Q])
+
+    shown = sft_view(ctx.cfg)
+    assert re.search(r"\bstale\b", shown), (
+        f"data/sft was built under the pre-R1 rules: aya/dedup trains on {COPY_ID}, a copy of the answer of "
+        f"the FINAL utility item {HELD_PID}, and both IndicAlign exports on the reversed pair {REV_ID}; yet "
+        f"lift data stats shows it as built, with no stale mark:\n{shown}")
+    [problem] = sft.export_problems(cfg=ctx.cfg, train_cfg=ctx.train_cfg)
+    assert problem.startswith("data/sft/report.json carries no rules stamp")
+    assert '"status": "stale"' in shown and f"\n  stale: {problem}" in shown
+
+    # a rebuild under the current rules drops both rows and is not marked stale
+    build.build_all(ctx=ctx, only=["utility", "sft"], langs=["hi"])
+    fresh = export_ids()
+    assert COPY_ID not in fresh["aya/dedup"]
+    assert REV_ID not in fresh["indicalign/dedup"] and REV_ID not in fresh["indicalign/raw"]
+    assert sft.export_problems(cfg=ctx.cfg, train_cfg=ctx.train_cfg) == []
+    assert not re.search(r"\bstale\b", sft_view(ctx.cfg), re.I)
+    # under another train config (a target of 1,000 rows) the same exports are stale
+    assert "train.rows 3000, now 1000" in sft_view(ctx.cfg, train_cfg=fixture_train_cfg(rows=1000))
+
+
 def test_sft_checks_the_frozen_utility_split_before_writing(dirs, caplog):
     caplog.set_level(logging.WARNING)
     summary = build.build_all(ctx=fixture_ctx(), only=["sft"], langs=["hi"])       # no utility file built
@@ -335,6 +467,9 @@ def test_texts_a_translation_makes_equal_are_caught_in_that_language(dirs, caplo
     assert summary["files"]["hard_benign_hi"]["cross_split_duplicates"] == 1
     assert summary["files"]["hard_benign_en"]["cross_split_duplicates"] == 0
     assert "1 texts repeat across splits of the frozen hard_benign split" in caplog.text
+    # the fit record the same-text rule left out does not leave its cell short (R1-01)
+    assert summary["short_cells"] == {} and report(dirs, "hard_benign_hi")["awaiting_review"] == {}
+    assert fit not in {r.pid for r in build.load_prompts("hard_benign", "hi", "fit")}
     # stats: the count per PromptRecord file, exclusions by reason type, a note per file
     st = build.stats(cfg=CFG)
     assert st["files"]["hard_benign_hi"]["cross_split_duplicates"] == 1
@@ -428,6 +563,29 @@ def test_build_state_reads_new_and_old_summaries():
     assert build.build_state({"complete": True, "rerun_needed": False, "skipped": []}) == "complete"
     assert build.build_state({"complete": False, "rerun_needed": False, "skipped": skipped}).startswith(
         "built; 1 files left out by --skip-translation")
+    short = {"easy_benign_zh": {"final": ["prb-test-0002", "prb-test-0003"]},
+             "hard_benign_hi": {"fit": ["orb-0001"]}}
+    awaiting = {"complete": False, "rerun_needed": False, "skipped": [], "short_cells": short}
+    # W2-01: the remedy names each language's --langs (the default sheets cover hi zh es only) and the
+    # failures sheet a reader may be filling already (spotcheck-sheets never overwrites one without
+    # --overwrite)
+    assert build.build_state(awaiting) == (
+        "built; 3 fit/dev/final items await a reader's verdict on the failures sheet (fill in each "
+        "language's failures sheet if it exists (lift data spotcheck-sheets does not overwrite a sheet "
+        "without --overwrite), else make it: hi validation/sheets/spotcheck_hi_failures.csv (`lift data "
+        "spotcheck-sheets --langs hi`), zh validation/sheets/spotcheck_zh_failures.csv (`lift data "
+        "spotcheck-sheets --langs zh`); then `lift data apply-spotchecks --file <each filled sheet>`, then "
+        "`lift sync push`)")
+    assert build.reader_remedy(["ar"]) == (
+        "fill in its failures sheet, validation/sheets/spotcheck_ar_failures.csv, if it exists (lift data "
+        "spotcheck-sheets does not overwrite it without --overwrite), else make it with `lift data "
+        "spotcheck-sheets --langs ar`; then `lift data apply-spotchecks --file <the filled sheet>`, then "
+        "`lift sync push`")
+    assert build.build_state({"complete": False, "rerun_needed": False, "skipped": skipped,
+                              "short_cells": short}).startswith(
+        "built; 1 files left out by --skip-translation (run without it to translate them); 3 fit/dev/final")
+    assert build.build_state({"complete": False, "rerun_needed": True, "skipped": [],
+                              "short_cells": short}).startswith("INCOMPLETE")
     assert build.build_state({"complete": False, "rerun_needed": True, "skipped": skipped}).startswith(
         "INCOMPLETE")
     old = {"complete": False, "blocked": True, "skipped": [{**skipped[0], "reason": "translation blocked"}]}
@@ -501,6 +659,33 @@ def test_a_split_file_covering_other_pids_stops_the_build_and_is_kept(dirs):
     assert (dirs.splits / "harmful.json").read_bytes() == edited
 
 
+def test_a_split_file_with_other_counts_than_the_locked_sizes_stops_the_build_and_is_kept(dirs):
+    """R1-17: a committed split file whose per-split counts are not cfg sizes (a hand edit or a bad merge
+    that moved a pid between splits, or sizes changed after the freeze) stops the build before any file is
+    stamped from it; a count-preserving reassignment only warns (the test above)."""
+    build.build_all(ctx=fixture_ctx(), only=["hard_benign"], langs=["en"])
+    prompt_file = dirs.data / "prompts" / "hard_benign_en.jsonl"
+    stamped = prompt_file.read_bytes()
+    frozen = split_file(dirs, "hard_benign")["assignments"]
+    moved = min(p for p, s in frozen.items() if s == "final")             # same pids, same split names
+    edited = edit_split(dirs, "hard_benign", lambda a: a.update({moved: "dev"}))
+    message = (r"hard_benign.json holds \{'dev': 3, 'final': 1, 'fit': 2\} pids per split but "
+               r"sizes.hard_benign is \{'fit': 2, 'dev': 2, 'final': 2\}: split files are frozen and the "
+               r"sizes are locked; a change needs a docs/decisions.md entry and a new split file")
+    with pytest.raises(ValueError, match=message):
+        build.build_all(ctx=fixture_ctx(), only=["hard_benign"], langs=["en"])
+    assert (dirs.splits / "hard_benign.json").read_bytes() == edited           # never rewritten
+    assert prompt_file.read_bytes() == stamped                                 # nothing stamped from it
+
+    edit_split(dirs, "hard_benign", lambda a: a.update({moved: "final"}))    # the frozen file again
+    cfg = fixture_cfg()
+    cfg["sizes"]["hard_benign"] = {"fit": 2, "dev": 1, "final": 3}            # changed after the freeze
+    with pytest.raises(ValueError, match=r"holds \{'dev': 2, 'final': 2, 'fit': 2\} pids per split but "
+                                         r"sizes.hard_benign is \{'fit': 2, 'dev': 1, 'final': 3\}"):
+        build.freeze_split("hard_benign", frozen, cfg=cfg)
+    assert build.freeze_split("hard_benign", frozen, cfg=CFG) == frozen
+
+
 def test_a_split_file_with_other_assignments_is_kept_and_followed(dirs, caplog):
     build.build_all(ctx=fixture_ctx(), only=["hard_benign"], langs=["en"])
     frozen = split_file(dirs, "hard_benign")["assignments"]
@@ -523,7 +708,14 @@ def test_translation_failures_are_listed_and_left_out_of_the_file(dirs):
     harmless = FIX["HARMLESS_TEST"][1]                                     # prb-test-0001
     ctx = fixture_ctx(translator=FakeTranslator(empty_for=[harmless], english_for=[ORB[0].text]))
     summary = build.build_all(ctx=ctx)
-    assert summary["complete"]                     # listed failures are expected, not an incomplete build
+    # listed failures are expected and a rerun cannot add them, but each leaves a frozen pid out of its file:
+    # those cells are short of their frozen split until a reader's verdict, so the build is not complete
+    assert not summary["complete"] and summary["rerun_needed"] is False and summary["incomplete"] == []
+    easy, hard = (split_file(dirs, s)["assignments"] for s in ("easy_benign", "hard_benign"))
+    assert summary["short_cells"] == {
+        **{f"easy_benign_{lang}": {easy["prb-test-0001"]: ["prb-test-0001"]} for lang in ("hi", "zh")},
+        **{f"hard_benign_{lang}": {hard[ORB[0].pid]: [ORB[0].pid]} for lang in LANGS[1:]}}
+    assert build.build_state(summary).startswith("built; 7 fit/dev/final items await a reader's verdict")
     for lang in ("hi", "zh"):
         assert report(dirs, f"easy_benign_{lang}")["translation_failures"] == [
             {"pid": "prb-test-0001", "rule": "empty", "detail": "blank", "engine": "google",
@@ -536,6 +728,108 @@ def test_translation_failures_are_listed_and_left_out_of_the_file(dirs):
         assert failure["detail"].startswith("top=eng_Latn") and ORB[0].pid not in by_pid("hard_benign", lang)
     assert summary["files"]["hard_benign_hi"]["open_failures"] == 1
     assert summary["totals"]["translation_failures"] == 2 + 5
+
+
+def test_a_cell_short_of_its_frozen_split_is_flagged_and_refused_until_a_reader_decides(dirs):
+    """R1-01: GlotLID reads a cached zh translation of a frozen final pid as Japanese (as it read the short
+    all-Han outputs of prb-test-0240, 0484 and 0499 on the real build), so easy_benign_zh final is short of
+    its frozen split. A rerun cannot add the item (rerun_needed stays False), but the build is not complete
+    and says what awaits a reader's verdict, and prompts.load of that split, which generate, run-dev and the
+    reported reads go through, refuses the short cell until the failures sheet resolves it (W2-01: a
+    ShortCellError, which lift generate and run-dev list with its remedy)."""
+    from lift import gate0
+    from lift.judge import pipeline
+
+    build.build_all(ctx=fixture_ctx())                        # freezes the splits, caches every translation
+    final = sorted(p for p, s in split_file(dirs, "easy_benign")["assignments"].items() if s == "final")
+    pid = final[0]
+    zh_out = fake_translation(by_pid("easy_benign", "zh")[pid].text_en, "zh")     # its cached engine output
+    lid = FakeLID(overrides={text: ("jpn_Jpan", 0.99) for text in {zh_out, clean_text(zh_out)}})
+    summary = build.build_all(ctx=fixture_ctx(lid=lid))
+
+    assert pid not in by_pid("easy_benign", "zh") and pid in by_pid("easy_benign", "hi")
+    assert (summary["complete"], summary["rerun_needed"], summary["incomplete"]) == (False, False, [])
+    assert summary["short_cells"] == {"easy_benign_zh": {"final": [pid]}}
+    assert report(dirs, "easy_benign_zh")["awaiting_review"] == {"final": [pid]}
+    assert report(dirs, "easy_benign_hi")["awaiting_review"] == {}
+    state = ("built; 1 fit/dev/final items await a reader's verdict on the failures sheet "
+             f"({build.reader_remedy(['zh'])})")
+    assert build.build_state(summary) == build.build_state(report(dirs, "build")) == state
+    lines = build.format_stats(build.stats(cfg=CFG)).splitlines()
+    assert f"last build {summary['run_id']}: {state}" in lines
+    assert "  short of their frozen split: easy_benign_zh (final 1)" in lines
+    assert (f"  easy_benign_zh: failures wrong_lang 1; 1 fit/dev/final items await a reader's verdict "
+            f"(failures sheet): final {pid}") in lines
+
+    assert {r.pid for r in prompts.load("easy_benign", "hi", "final")} == set(final)     # a full cell reads
+    assert {r.split for r in prompts.load("easy_benign", "zh", "dev")} == {"dev"}       # and so does zh dev
+    with pytest.raises(build.ShortCellError) as e:                     # the short cell's own split is refused
+        prompts.load("easy_benign", "zh", "final")
+    remedy = (f"1 translation failures await a reader's verdict on the failures sheet, e.g. ['{pid}']: "
+              + build.reader_remedy(["zh"]))
+    assert str(e.value) == (f"easy_benign_zh: easy_benign_zh.jsonl is short of its frozen split: final "
+                            f"misses 1 of its {len(final)} frozen pids; {remedy}")
+    assert (e.value.set_name, e.value.lang, e.value.missing, e.value.remedy) == (
+        "easy_benign", "zh", {"final": [pid]}, remedy)
+    assert "validation/sheets/spotcheck_zh_failures.csv" in remedy and "--langs zh`" in remedy
+    # W2-01: a read of every split only looks texts up by pid, so the short final does not stop judging the zh
+    # dev cell (texts_by_pid), Gate 0 (all_prompts) or the second judge's draw, which pools final's pids
+    every = prompts.load("easy_benign", "zh")
+    assert pid not in {r.pid for r in every} and {"dev", "final"} <= {r.split for r in every}
+    assert set(prompts.texts_by_pid("easy_benign", "zh")) == {r.pid for r in every}
+    framed = {("easy_benign", "zh", r.pid) for r in every if r.split in ("dev", "final")}
+    assert framed <= {(p.set, p.lang, p.pid) for p in gate0.all_prompts()}
+    assert pid in pipeline.second_judge_pids("easy_benign", "final", 1.0, 0)        # hi has it
+
+    # the remedy works on the short cell: the failures sheet lists the item, and a reader's ok puts it back
+    _, failures = build.write_spotcheck_sheets(ctx=fixture_ctx(lid=lid), langs=["zh"])
+    assert f"zh-{pid}" in {row["item_id"] for row in read_sheet(failures)}
+    fill(failures, {f"zh-{pid}": {"verdict": "ok"}})
+    build.apply_spotchecks(failures, ctx=fixture_ctx(lid=lid))
+    assert {r.pid for r in prompts.load("easy_benign", "zh", "final")} == set(final)
+    assert report(dirs, "easy_benign_zh")["awaiting_review"] == {}
+    # W2-01: lift data stats lists the short cells the prompt files' reports hold now, not build.json's, so
+    # the cell apply-spotchecks completed is no longer listed, and the state of the last build reads complete
+    st = build.stats(cfg=CFG)
+    assert st["short_cells"] == {} and st["build"]["short_cells"] == {"easy_benign_zh": {"final": [pid]}}
+    lines = build.format_stats(st).splitlines()
+    assert f"last build {summary['run_id']}: complete" in lines
+    assert not [line for line in lines if "short of their frozen split" in line or "await" in line]
+    summary = build.build_all(ctx=fixture_ctx(lid=lid))
+    assert summary["complete"] and summary["short_cells"] == {} and build.build_state(summary) == "complete"
+
+
+def test_a_frozen_pid_missing_for_another_reason_is_refused_with_its_remedy(dirs, monkeypatch):
+    """R1-01: the reader names the remedy of each frozen pid a file lacks from the file's report: a rerun
+    for one that failed with an error (the build calls the file incomplete, not short), a rebuild for one
+    the report does not explain (a report from another build of the file explains nothing)."""
+    monkeypatch.setattr(translate, "translate_records",                 # no backoff sleeps in a test
+                        functools.partial(translate.translate_records, sleep=lambda _: None))
+    hard = {"only": ["hard_benign"], "langs": ["en", "hi"]}
+    summary = build.build_all(ctx=fixture_ctx(translator=FakeTranslator(always_raise=[ORB[2].text])), **hard)
+    frozen = split_file(dirs, "hard_benign")["assignments"]
+    split = frozen[ORB[2].pid]
+    assert summary["incomplete"] == ["hard_benign_hi"] and summary["rerun_needed"]
+    assert summary["short_cells"] == {}                                  # a rerun adds it: not a reader's
+    rerun = (rf"{split} misses 1 of its 2 frozen pids; 1 failed with an error a rerun translates, e.g. "
+             rf"\['{ORB[2].pid}'\]: `lift data build --only hard_benign --langs hi`, then `lift sync push`")
+    with pytest.raises(ValueError, match=rerun):
+        build.load_prompts("hard_benign", "hi", split)
+    assert len(build.load_prompts("hard_benign", "hi", split, allow_short=True)) == 1
+
+    path = dirs.data / "prompts" / "hard_benign_hi.jsonl"
+    rows = list(read_jsonl(path))
+    write_jsonl(path, [r for r in rows if r["pid"] != ORB[0].pid])       # the report no longer fits the file
+    gone: dict[str, list[str]] = {}
+    for pid in sorted([ORB[0].pid, ORB[2].pid]):
+        gone.setdefault(frozen[pid], []).append(pid)
+    for split, pids in gone.items():                                     # a read of one split names its own
+        rebuild = (rf"{len(pids)} are not explained \(its report is from another build of the file\), e.g. "
+                   rf"\[{', '.join(repr(p) for p in pids)}\]: rebuild it \(`lift data build --only "
+                   r"hard_benign`\), then `lift sync push`")
+        with pytest.raises(build.ShortCellError, match=rebuild):
+            build.load_prompts("hard_benign", "hi", split)
+    assert len(build.load_prompts("hard_benign", "hi")) == len(rows) - 1   # every split: the stamps only
 
 
 def test_a_blocked_translator_stops_all_translation_and_the_rest_is_built(dirs):
@@ -717,7 +1011,7 @@ def test_spotcheck_sheets_sample_dev_and_final_machine_translations(dirs, spot):
 
     [sample, _] = build.write_spotcheck_sheets(ctx=spot, langs=["hi"], n=100, out_dir=dirs.data / "all")
     every = read_sheet(sample)
-    expected = {f"hi-{r.pid}" for s in build.TRANSLATED_SETS for r in build.load_prompts(s, "hi")
+    expected = {f"hi-{r.pid}" for s in build.TRANSLATED_SETS for r in by_pid(s, "hi").values()
                 if r.split in ("dev", "final")}
     assert {r["item_id"] for r in every} == expected                   # never train, val or fit
     with pytest.raises(ValueError, match="no machine translations"):
@@ -764,6 +1058,7 @@ def test_apply_spotchecks_round_trip(dirs, spot):
     build.apply_spotchecks(es_sheet, ctx=spot_ctx())
     bad_pid = bad_row["item_id"][3:]
     assert bad_pid not in by_pid("easy_benign", "es")
+    assert bad_pid not in {r.pid for r in build.load_prompts("easy_benign", "es")}   # left out on purpose
     [excluded] = [PromptRecord.model_validate(r) for r in read_jsonl(dirs.data / "prompts" / "excluded" /
                                                                        "easy_benign_es.jsonl")]
     assert excluded.pid == bad_pid and excluded.extra["excluded"] is True
@@ -842,12 +1137,44 @@ def test_a_half_written_verdict_line_is_ignored_then_closed_off(dirs, caplog):
                     newline="\n")
     caplog.set_level(logging.WARNING)
     assert list(build._read_verdicts()) == [("hi", "orb-0004")] and "spotchecks.jsonl:2" in caplog.text
-    build._append_verdicts([{**row, "pid": "orb-0006"}])                # the cut line is closed off first
+    build._append_verdicts([{**row, "pid": "orb-0006"}])     # the cut line, which does not parse, is dropped
     assert list(build._read_verdicts()) == [("hi", "orb-0004"), ("hi", "orb-0006")]
-    assert len(path.read_text(encoding="utf-8").splitlines()) == 3
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
     path.write_text(json.dumps({**row, "verdict": "maybe"}) + "\n", encoding="utf-8", newline="\n")
     with pytest.raises(ValueError, match="spotchecks.jsonl:1: not a verdict row"):
         build._read_verdicts()
+
+
+def test_a_verdict_line_cut_inside_a_character_is_skipped_then_dropped(dirs, caplog):
+    """R2-27: a kill inside _append_verdicts can cut a row inside a multi-byte character of a reader's
+    corrected text. _read_verdicts decoded the whole file first, so every lift data build and apply-spotchecks
+    stopped on a UnicodeDecodeError instead of skipping the line with a warning; and _append_verdicts closed
+    the cut tail off with a bare newline, keeping the undecodable bytes in the (synced) file for good."""
+    path = dirs.data / "interim" / "translations" / "spotchecks.jsonl"
+    path.parent.mkdir(parents=True)
+    row = {"lang": "hi", "pid": "orb-0004", "set": "hard_benign", "verdict": "ok", "corrected": None,
+           "note": None, "source_sha": "0" * 64, "seen_sha": "1" * 64, "sheet": "s.csv",
+           "applied": "2026-11-03"}
+    fixed = {**row, "pid": "orb-0005", "verdict": "fixed", "corrected": "नकली सुधारा हुआ अनुरोध"}
+    line = (stable_json(fixed) + "\n").encode("utf-8")
+    at = line.index(fixed["corrected"].encode("utf-8")) + len(fixed["corrected"][0].encode("utf-8")) + 1
+    with pytest.raises(UnicodeDecodeError):                # the cut really ends inside a UTF-8 sequence
+        line[:at].decode("utf-8")
+    path.write_bytes((stable_json(row) + "\n").encode("utf-8") + line[:at])
+
+    def read_verdicts():                                   # the error by its message (its repr holds bytes)
+        try:
+            return build._read_verdicts()
+        except UnicodeDecodeError as e:
+            problem = str(e)
+        pytest.fail(f"_read_verdicts raised UnicodeDecodeError ({problem}) on a verdict line cut inside a "
+                    "multi-byte character, instead of skipping it with a warning")
+
+    caplog.set_level(logging.WARNING)
+    assert read_verdicts() == {("hi", "orb-0004"): row} and "spotchecks.jsonl:2" in caplog.text
+    build._append_verdicts([fixed])                        # applying the sheet again stores the verdict anew
+    assert read_verdicts() == {("hi", "orb-0004"): row, ("hi", "orb-0005"): fixed}
+    assert path.read_bytes().decode("utf-8").splitlines() == [stable_json(row), stable_json(fixed)]
 
 
 def test_apply_spotchecks_rejects_a_bad_sheet_before_writing_anything(dirs, spot):
@@ -915,7 +1242,7 @@ def test_an_item_is_on_one_sheet_only_and_the_sample_stays_blind_and_unbiased(di
     assert set(failures) == {f"es-{ORB[1].pid}"} and not set(sample) & set(failures)
     for set_name in build.TRANSLATED_SETS:
         tag = f"spotcheck:es:{set_name}"
-        candidates = [r.pid for r in build.load_prompts(set_name, "es")
+        candidates = [r.pid for r in by_pid(set_name, "es").values()
                       if r.translation and not r.translation.checked and r.split in ("dev", "final")]
         drawn = sorted(candidates, key=lambda pid, tag=tag: sha256_text(f"{SEED}:{tag}:{pid}"))[:3]
         assert sorted(k[3:] for k, r in sample.items() if r["set"] == set_name) == sorted(drawn), set_name
@@ -997,6 +1324,95 @@ def test_reapplying_a_sheet_changes_nothing_and_revised_verdicts_on_fixed_items_
                                     "the build holds, not the engine output a verdict is given on: restore "
                                     "the cell (a correction goes in corrected)"], verdict
     assert snapshot(dirs.data) == before
+
+
+CORRECTED = "पाठक का नकली सुधार"                    # a reader's (fake) corrected Hindi translation
+
+
+def unapplied(dirs, verdicts):
+    """The verdicts ({item_id: (set, cells)}) the hi prompt files do not hold, as 'file: verdict pid'."""
+    out = []
+    for item_id, (set_name, cells) in verdicts.items():
+        pid, name = item_id[3:], f"{set_name}_hi"
+        records = by_pid(set_name, "hi")
+        path = dirs.data / "prompts" / "excluded" / f"{name}.jsonl"
+        excluded = {row["pid"] for row in read_jsonl(path)} if path.exists() else set()
+        if cells["verdict"] == "bad" and (pid in records or pid not in excluded):
+            out.append(f"{name}: bad {pid} (still in the prompt file, not in prompts/excluded)")
+        elif cells["verdict"] == "fixed" and (pid not in records or records[pid].text != CORRECTED
+                                              or not records[pid].translation.checked):
+            out.append(f"{name}: fixed {pid} (the record still holds the engine output, unchecked)")
+        elif cells["verdict"] == "ok" and (pid not in records or not records[pid].translation.checked):
+            out.append(f"{name}: ok {pid} (unchecked)")
+    return out
+
+
+@pytest.mark.parametrize("cut", [KeyboardInterrupt, PermissionError], ids=["ctrl_c", "oserror"])
+def test_applying_a_sheet_again_finishes_a_rebuild_that_was_cut_short(dirs, monkeypatch, cut):
+    """R2-02: apply_spotchecks stores a sheet's verdicts, then rebuilds their files; a rebuild cut short in
+    the second file (Ctrl+C, an OSError) left easy_benign_hi and hard_benign_hi without them, and the same
+    sheet applied again found every row unchanged and rebuilt nothing. Each report now records the digest
+    of the stored verdicts its build applied, so the retry rebuilds every file that does not hold them yet
+    (resumed, listed on a dry run too), and a report from before the digest is rebuilt once."""
+    sets = ("harmful", "easy_benign", "hard_benign")
+    assert build.build_all(ctx=fixture_ctx(), only=list(sets), langs=["en", "hi"])["complete"]
+    build.write_spotcheck_sheets(ctx=fixture_ctx(), langs=["hi"])
+    sheet = dirs.sheets / "spotcheck_hi.csv"
+    ids = {s: [r["item_id"] for r in read_sheet(sheet) if r["set"] == s] for s in sets}
+    verdicts = {ids["harmful"][0]: ("harmful", {"verdict": "bad"}),
+                ids["easy_benign"][0]: ("easy_benign", {"verdict": "bad"}),
+                ids["easy_benign"][1]: ("easy_benign", {"verdict": "fixed", "corrected": CORRECTED}),
+                ids["hard_benign"][0]: ("hard_benign", {"verdict": "bad"})}
+    fill(sheet, {item_id: cells for item_id, (_, cells) in verdicts.items()})
+    real, calls = build._build_file, []
+
+    def cut_short(at):
+        def rebuild(run, src, set_name, lang):
+            calls.append(f"{set_name}_{lang}")
+            if len(calls) == at:
+                raise cut("simulated: the rebuild is cut short")
+            return real(run, src, set_name, lang)
+        return rebuild
+
+    monkeypatch.setattr(build, "_build_file", cut_short(2))
+    with pytest.raises(cut):
+        build.apply_spotchecks(sheet, ctx=fixture_ctx())
+    assert calls == ["harmful_hi", "easy_benign_hi"], "setup: the cut must hit the second file's rebuild"
+    monkeypatch.setattr(build, "_build_file", real)
+    again = build.apply_spotchecks(sheet, ctx=fixture_ctx())     # the operator's retry: the very same sheet
+    missing = unapplied(dirs, verdicts)
+    assert not missing, (f"re-applying the sheet returned new={again['new']} unchanged={again['unchanged']} "
+                         f"rebuilt={again['rebuilt']}, yet {len(missing)} of its {len(verdicts)} stored "
+                         "verdicts never reached their files: " + "; ".join(missing))
+    owed = ["easy_benign_hi", "hard_benign_hi"]
+    assert (again["new"], again["unchanged"], again["rebuilt"], again["resumed"]) == (0, 4, owed, owed)
+    assert all(report(dirs, f"{s}_hi")["spotchecks"]["verdicts_sha"] for s in sets)
+    assert build.apply_spotchecks(sheet, ctx=fixture_ctx())["rebuilt"] == []          # nothing owed now
+
+    # a new verdict whose own rebuild is cut short: a dry run lists its file as resumed, the apply resumes it
+    verdicts[ids["hard_benign"][1]] = ("hard_benign", {"verdict": "ok"})
+    fill(sheet, {ids["hard_benign"][1]: {"verdict": "ok"}})
+    calls.clear()
+    monkeypatch.setattr(build, "_build_file", cut_short(1))
+    with pytest.raises(cut):
+        build.apply_spotchecks(sheet, ctx=fixture_ctx())
+    monkeypatch.setattr(build, "_build_file", real)
+    before = snapshot(dirs.data)
+    dry = build.apply_spotchecks(sheet, ctx=fixture_ctx(), dry_run=True)
+    assert (dry["new"], dry["unchanged"], dry["rebuilt"], dry["resumed"]) == (0, 5, [], ["hard_benign_hi"])
+    assert snapshot(dirs.data) == before
+    resumed = build.apply_spotchecks(sheet, ctx=fixture_ctx())
+    assert (resumed["new"], resumed["rebuilt"], resumed["resumed"]) == (0, ["hard_benign_hi"],
+                                                                        ["hard_benign_hi"])
+    assert unapplied(dirs, verdicts) == []
+
+    # a report from before the digest, on a file with stored verdicts, is rebuilt once
+    path = dirs.data / "prompts" / "reports" / "harmful_hi.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    del doc["spotchecks"]["verdicts_sha"]
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    assert build.apply_spotchecks(sheet, ctx=fixture_ctx())["resumed"] == ["harmful_hi"]
+    assert build.apply_spotchecks(sheet, ctx=fixture_ctx())["resumed"] == []
 
 
 def test_a_fixed_verdict_whose_english_changed_is_stored_again(dirs):
@@ -1109,7 +1525,7 @@ def test_the_apply_rebuild_keeps_failures_the_cache_cannot_hold(dirs, monkeypatc
     failures = {(x["pid"], x["rule"], x["detail"])
                 for x in report(dirs, "hard_benign_hi")["translation_failures"]}
     assert failures == {(ORB[1].pid, "empty", "blank"), (ORB[2].pid, "error", "ConnectionError x5")}
-    rec = build.load_prompts("hard_benign", "hi")[0]
+    rec = build.load_prompts("hard_benign", "hi", allow_short=True)[0]
     sheet = dirs.sheets / "spotcheck_hi.csv"
     sheet.parent.mkdir(parents=True)
     write_sheet(sheet, [{"item_id": f"hi-{rec.pid}", "set": "hard_benign", "english": rec.text_en,
@@ -1131,8 +1547,10 @@ def test_the_apply_rebuild_keeps_failures_the_cache_cannot_hold(dirs, monkeypatc
         return {x["pid"]: (x["rule"], x["detail"]) for x in failed}
 
     assert rules() == {ORB[1].pid: ("empty", "blank"), ORB[2].pid: ("wrong_lang", "top=eng_Latn 0.95")}
-    build.build_all(ctx=fixture_ctx(cache_only=True), **hard)          # a cache-only build says what it saw
+    summary = build.build_all(ctx=fixture_ctx(cache_only=True), **hard)    # says what it saw in the cache
     assert rules() == {ORB[1].pid: ("error", "not cached"), ORB[2].pid: ("wrong_lang", "top=eng_Latn 0.95")}
+    # so the cache-only line a stopped apply names exits 3 on such a file, as its message says (W3)
+    assert summary["rerun_needed"] and summary["incomplete"] == ["hard_benign_hi"]
 
 
 def test_apply_refuses_to_run_without_the_translation_cache(dirs, spot, tmp_path):
@@ -1149,7 +1567,7 @@ def test_apply_refuses_to_run_without_the_translation_cache(dirs, spot, tmp_path
     shutil.copytree(google, tmp_path / "google")
     shutil.rmtree(google)
     before = snapshot(dirs.data)
-    hard = sorted({r.pid for r in build.load_prompts("hard_benign", "hi")} | {ORB[0].pid})   # + its failure
+    hard = sorted(set(by_pid("hard_benign", "hi")) | {ORB[0].pid})                     # + its failure
     for path, problem in ((sheet, "harmful_hi: 10 items (e.g. prh-test-0000, prh-test-0001, prh-test-0002, "
                                   "prh-test-0003, prh-test-0004)"),
                           (failures_sheet, f"hard_benign_hi: 5 items (e.g. {', '.join(hard)})")):
@@ -1220,8 +1638,8 @@ def no_fasttext(cfg=None):
 
 
 def test_apply_loads_what_the_rebuild_needs_before_storing_a_verdict(dirs, spot, monkeypatch):
-    """GlotLID cannot load on this machine: the apply stops before a verdict is stored, so the same sheet
-    applies in full once it can (a stored verdict would count as unchanged and never be rebuilt)."""
+    """GlotLID cannot load on this machine: the apply stops before a verdict is stored, so it writes nothing
+    and the same sheet applies in full once it can."""
     build.write_spotcheck_sheets(ctx=spot)
     sheet = dirs.sheets / "spotcheck_hi.csv"
     hard = [r["item_id"] for r in read_sheet(sheet) if r["set"] == "hard_benign"]
@@ -1439,9 +1857,13 @@ def test_stats_count_files_failures_and_exclusions(dirs, spot):
     assert st["files"]["easy_benign_es"]["lid_failures"] == ["prb-test-0002"]
     assert st["files"]["redteam_hi"]["by_split"] == {"final": 4}
     assert st["sft"]["decision"] == FULL and set(st["sft"]["variants"]) == set(VARIANTS)
-    assert st["build"]["complete"] is True
     b = st["build"]
-    assert (b["rerun_needed"], b["blocked"], b["blocked_kind"]) == (False, False, None)
+    assert (b["complete"], b["rerun_needed"], b["blocked"], b["blocked_kind"]) == (False, False, False, None)
+    assert sorted(p for pids in hard["awaiting_review"].values() for p in pids) == sorted([ORB[0].pid,
+                                                                                          ORB[1].pid])
+    assert b["short_cells"]["hard_benign_hi"] == hard["awaiting_review"]   # ORB[1] is empty everywhere
+    assert {name: sum(map(len, cells.values())) for name, cells in b["short_cells"].items()} == {
+        f"hard_benign_{lang}": 2 if lang == "hi" else 1 for lang in LANGS[1:]}
     assert st["files"]["harmful_hi"]["cross_split_duplicates"] == 0
     assert all("cross_split_duplicates" not in st["files"][f"belebele_{lang}"] for lang in LANGS)
     text = build.format_stats(st)
@@ -1450,7 +1872,9 @@ def test_stats_count_files_failures_and_exclusions(dirs, spot):
     assert "hard_benign_hi" in text and sft_line in text and "failures empty 1, wrong_lang 1" in text
     assert ("excluded = copies of a test prompt or a red-teaming repeat (duplicate_of, near_duplicate_of), "
             "train/val/fit texts a dev/final record has (same_text_as) and spot-check bad") in text
-    assert f"last build {st['build']['run_id']}: complete" in text.splitlines()
+    assert st["short_cells"] == b["short_cells"]                       # nothing applied since the build
+    assert (f"last build {st['build']['run_id']}: built; 6 fit/dev/final items await a reader's verdict on "
+            f"the failures sheet ({build.reader_remedy(LANGS[1:])})") in text.splitlines()
     assert "  harmful_en: exclusions duplicate_of 1" in text.splitlines()
     assert not [t for t in fixture_texts() if t in text]
 
