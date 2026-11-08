@@ -29,7 +29,7 @@ from lift.models.generate import generations_path
 from lift.paths import REPO_ROOT, data_dir, judgements_dir, metrics_dir, output_dir, prompts_dir
 from lift.schemas import GenerationRecord, JudgementRecord, UnclearFlags, UtilityVerdict
 from lift.validation import score as validation
-from lift.validation.store import write_json
+from lift.validation.store import ValidateError, draw_path, round_keys_path, write_json
 
 AYA, IND, STRESS = "adapter-aya-std-s1", "adapter-indicalign-std-s1", "adapter-indicalign-stress-s1"
 UTILITY_JUDGE = ("anthropic/claude-sonnet-5-5@utility_v1:0123456789ab+provider-default+effort-low+max1024"
@@ -45,6 +45,7 @@ META = {"dtype": "bf16", "model_rev": REV, "harness": 1, "template": "9" * 16, "
         "torch": "2.15.0", "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB", "gpu_capability": "8.0"}
 T4 = {"dtype": "fp16", "gpu": "Tesla T4", "gpu_capability": "7.5"}
 UTILITY_PIDS = ["utl-aya-00001", "utl-aya-00002", "utl-ind-00001", "utl-ind-00002"]
+REAL_GATE1_STALE = validation.gate1_stale          # before the autouse fixture below replaces it
 # The packages a laptop without the GPU stack lacks (tests/test_cli_help.py keeps the same list out of every
 # command module's import).
 HEAVY = ("torch", "transformers", "tokenizers", "safetensors", "peft", "trl", "accelerate", "datasets",
@@ -62,6 +63,17 @@ def registry(monkeypatch):
     served = config.load
     monkeypatch.setattr(config, "load", lambda name="project": doc if name == "variants" else served(name))
     return doc
+
+
+@pytest.fixture(autouse=True)
+def gate1_stale(monkeypatch):
+    """lift.validation.score.gate1_stale as most tests need it: P04's gate1.json (write_validation, which
+    records none of the inputs a real score does) still holds for the files here. A test appends reasons to
+    the list returned to make it stale (R2-12); the real check runs in
+    test_a_gate1_json_that_no_longer_holds_is_stale and in the fresh-interpreter test."""
+    problems: list[str] = []
+    monkeypatch.setattr(validation, "gate1_stale", lambda doc: list(problems))
+    return problems
 
 
 def entry(registry: dict, name: str) -> dict:
@@ -95,6 +107,15 @@ def write_validation(status: str, **over: Any) -> None:
            "agreement": {"pass": 0.9, "fail": 0.7, "pending": None}[status],
            "kappa": {"pass": 0.8, "fail": 0.4, "pending": None}[status], "created": "2026-11-05", **over}
     write_json(validation.gate1_path(), doc)
+
+
+def write_current_validation() -> None:
+    """write_validation's passing gate1.json over a round 1 drawn here with no items (its keys and draw
+    files), with the inputs P04's score of that round records, so the real gate1_stale finds it current."""
+    write_json(round_keys_path(1), {})
+    write_json(draw_path(1), {"round": 1, "sheets": {}})
+    scored = validation.gate1(validation.collect(1), dict(config.get("validation.bar")), "2026-11-05")
+    write_validation("pass", **{k: scored[k] for k in ("inputs", "judgements_digest", "judge_pins")})
 
 
 def utility_text(pid: str) -> str:
@@ -277,6 +298,49 @@ def test_p04s_verdict_scored_for_another_primary_judge_is_pending_until_scored_a
     judge = gates.gate1()["checks"]["judge"]
     assert judge["status"] == "pending" and judge["primary_view"] == "qwen3guard_strict"
     assert "scored for frontier" in judge["reason"]
+
+
+def test_a_gate1_json_that_no_longer_holds_is_stale(gate1_stale, monkeypatch):
+    """R2-12: while lift.validation.score.gate1_stale lists anything for P04's gate1.json, the judge check is
+    stale, with the reasons and the rescore remedy, never the status the file holds, and Gate 1 is pending.
+    The real check runs too: a gate1.json that names none of its inputs never holds, and one whose inputs
+    are the files here does. A check that cannot run leaves the judge check incomplete."""
+    write_validation("pass")
+    write_utility(AYA, 0.62)
+    write_utility(IND, 0.50)
+    changed = "round1_main_hi.jsonl has changed (imported or drawn again)"
+    gate1_stale.append(changed)
+    result = gates.gate1()
+    judge = result["checks"]["judge"]
+    assert (result["verdict"], judge["status"], judge["stale"]) == ("PENDING", "stale", [changed])
+    assert f"no longer holds for the files here ({changed}): run `lift validate score --round 1` again" in \
+        judge["reason"]
+    assert "the judge check is stale" in result["decision"]
+    assert "| validation round 1 meets the bar in Hindi | STALE |" in gates.render(result)
+    gate1_stale.clear()
+    assert gates.gate1()["verdict"] == "PASS"
+
+    monkeypatch.setattr(validation, "gate1_stale", REAL_GATE1_STALE)
+    judge = gates.gate1()["checks"]["judge"]
+    assert (judge["status"], judge["stale"]) == (
+        "stale", ["gate1.json names none of its inputs (written before they were recorded)"])
+    write_current_validation()
+    assert gates.gate1()["verdict"] == "PASS"
+    write_json(draw_path(1), {"round": 1, "sheets": {}, "seed": 7})          # round 1 drawn again since
+    judge = gates.gate1()["checks"]["judge"]
+    assert (judge["status"], judge["stale"]) == (
+        "stale", ["draw1.json has changed (imported or drawn again)"])
+
+    def unreadable(doc):
+        raise ValidateError(f"{output_dir() / 'generations'} cannot be read")
+
+    monkeypatch.setattr(validation, "gate1_stale", unreadable)
+    result = gates.gate1()
+    judge = result["checks"]["judge"]
+    assert (result["verdict"], judge["status"]) == ("INCOMPLETE", "incomplete")
+    assert "still holds for the files here cannot be checked" in judge["reason"]
+    assert "ValidateError: outputs/generations cannot be read" in judge["error"]
+    assert_no_machine_paths(result)
 
 
 @pytest.mark.parametrize("broken, expected", [
@@ -1077,9 +1141,10 @@ def test_both_gates_run_in_a_fresh_interpreter_without_the_gpu_stack(tmp_path):
     """Review C12: `lift gate 1|2` runs on a laptop installed without torch or the rest of the GPU stack. The
     check runs in a new interpreter, as in this process other tests may have imported torch already (which
     would hide a top-level import), on real inputs that take Gate 1 through every check of both adapters
-    (the files, the registry pin, the pair read again) to PASS and Gate 2 through paired_labels on real
-    cells to decided drifts: a top-level or a lazy heavy import anywhere on those paths fails it."""
-    write_validation("pass")
+    (the files, the registry pin, the pair read again) and the real gate1_stale (P04's collect of round 1)
+    to PASS and Gate 2 through paired_labels on real cells to decided drifts: a top-level or a lazy heavy
+    import anywhere on those paths fails it."""
+    write_current_validation()
     write_utility(AYA, 0.62)
     write_utility(IND, 0.40)
     pids = [pid(i) for i in range(25)]
