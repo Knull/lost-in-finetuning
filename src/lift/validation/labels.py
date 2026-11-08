@@ -16,10 +16,17 @@
   A few differences are warnings (an edited cell); many mean the file is another version of the
   sheet or its id column was sorted on its own, and the import stops. A cell whose script came
   back as "?" (Excel's plain CSV) is a warning of its own. A label column that comes back in
-  alphabetical order, either way round (sorted on its own), is a warning.
+  alphabetical order, either way round, while the ids are still in the order the sheet was made
+  was sorted on its own: its labels no longer sit next to their items, which the text check
+  cannot see, so the import stops too. With the ids in item_id order instead (either way round:
+  the sheet sorted by item_id, then the label column alone) it is a warning. A whole sheet sorted
+  by label, rows kept together, leaves the ids in neither order and is fine.
 - Which sheet a file belongs to (the main one or the Hindi overlap) follows from its ids.
 - Re-importing a sheet replaces its labels. The import records which draw of the round it
-  belongs to, so a later re-draw cannot be scored against old labels.
+  belongs to, so a later re-draw cannot be scored against old labels, and every warning it gave
+  (labels/{sheet}.meta.json ``warnings``), which every score reports by sheet
+  (lift.validation.score: ``checks.import_warnings``), so a sheet imported with one is never scored
+  as if clean.
 
 Messages carry row numbers, ids and counts, never sheet text.
 """
@@ -91,15 +98,29 @@ def _sorted_on_its_own(values: list[str]) -> bool:
                                                                      sorted(values, reverse=True))
 
 
+def _in_order_made(ids: list[str], items: dict[str, dict], sheet: str) -> bool:
+    """Whether a file's ``ids`` (in row order) keep the order of ``sheet`` as made: ``items`` holds each
+    sheet's ids in its row order, as its keys file does (lift.validation.sample.load_round)."""
+    made = {i: n for n, i in enumerate(i for i, it in items.items() if it["sheet"] == sheet)}
+    rows = [made[i] for i in ids]
+    return rows == sorted(rows)
+
+
+def _in_id_order(ids: list[str]) -> bool:
+    """Whether a file's ``ids`` (in row order) are in item_id order, either way round: the sheet was sorted
+    by its id column, rows kept together (a sheet is made in a seeded random order, never this one)."""
+    return ids in (sorted(ids), sorted(ids, reverse=True))
+
 
 def parse_filled(file: Path, items: dict[str, dict], *, value_column: str,
                  allowed: dict[str, str], what: str) -> dict:
     """Shared by the safety and utility imports. ``items`` maps the item ids this file may contain
-    to their keys entries (with a "shown" map of column -> sha256 of the normalised text);
-    ``allowed`` maps a normalised cell value to the stored value. A cell whose shown text had
-    non-ASCII characters (the entry's "shown_non_ascii") and that comes back as ASCII with "?" in
-    it lost its script to a code-page save (Excel's plain CSV writes Devanagari and most Han as
-    "?", which is still valid UTF-8): a warning, not an edited cell.
+    to their keys entries (with a "shown" map of column -> sha256 of the normalised text), each
+    sheet's ids in the order its rows were made; ``allowed`` maps a normalised cell value to the
+    stored value. A cell whose shown text had non-ASCII characters (the entry's "shown_non_ascii")
+    and that comes back as ASCII with "?" in it lost its script to a code-page save (Excel's plain
+    CSV writes Devanagari and most Han as "?", which is still valid UTF-8): a warning, not an
+    edited cell.
 
     Returns {"sheet", "values": {item_id: (value, note)}, "skipped", "unlabelled", "missing",
     "changed", "warnings", "rows", "items_on_sheet"}; raises ValidateError listing every problem.
@@ -172,6 +193,12 @@ def parse_filled(file: Path, items: dict[str, dict], *, value_column: str,
     if not sheets_in_file:
         raise ValidateError(f"{file}: no item id of {what} in the file; is it the right sheet?")
     sheet = next(iter(sheets_in_file))
+    values_sorted = _sorted_on_its_own(in_order)
+    if values_sorted and _in_order_made(list(seen), items, sheet):
+        raise ValidateError(f"{file}: the {value_column} column is in alphabetical order while the item ids "
+                            "are still in the order the sheet was made, so it was sorted on its own and its "
+                            "values no longer sit next to their items. Nothing imported: undo the sort (or "
+                            "fill in a fresh copy of the sheet) and import the file again")
     on_sheet = sorted(i for i, it in items.items() if it["sheet"] == sheet)
     missing = [i for i in on_sheet if i not in seen]
     warnings = []
@@ -186,9 +213,10 @@ def parse_filled(file: Path, items: dict[str, dict], *, value_column: str,
     if changed:
         warnings.append(f"{len(changed)} row(s) show a prompt or response that differs from the sheet "
                         f"as made (an edited cell?): {', '.join(sorted(changed)[:MAX_LISTED])}")
-    if _sorted_on_its_own(in_order):
-        warnings.append(f"the {value_column} column is in alphabetical order: if it was sorted on its "
-                        "own, the values no longer sit next to their items. Check before scoring")
+    if values_sorted and _in_id_order(list(seen)):
+        warnings.append(f"the {value_column} column is in alphabetical order and the item ids in item_id "
+                        f"order: if the sheet was sorted by item_id and then the {value_column} column on "
+                        "its own, the values no longer sit next to their items. Check before scoring")
     if unlabelled:
         warnings.append(f"{len(unlabelled)} row(s) have no {value_column} and no 'skipped' note "
                         f"(unfinished?): {', '.join(sorted(unlabelled)[:MAX_LISTED])}")
@@ -234,6 +262,7 @@ def import_labels(round_no: int, lang: str, file: Path, *, annotator: str | None
         "rows": parsed["rows"], "items_on_sheet": parsed["items_on_sheet"],
         "labelled": len(records), "skipped": parsed["skipped"], "unlabelled": parsed["unlabelled"],
         "missing": parsed["missing"], "changed_text": parsed["changed"],
+        "warnings": parsed["warnings"],           # every score reports them (checks.import_warnings)
         "label_counts": {c: counts.get(c, 0) for c in LABELS},
         "replaced": None if previous is None else {
             "labels": len(previous),

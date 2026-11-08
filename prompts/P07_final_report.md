@@ -22,8 +22,12 @@ record into the results tables, figures, verdicts and the cost section.
    - the primary judge on everything, plus the ar/th back-translation sample (20%);
    - the second-judge 10% sample, queued for the API.
 
-   It resumes after a crash and uses both GPUs. Each manifest records GPU-hours. It refuses to
-   run unless both of these hold (this protects the final split):
+   It resumes after a crash and uses both GPUs. Each manifest records GPU-hours. A cell short of
+   its frozen split (`lift.data.build.ShortCellError`: a translation failure still waiting for
+   a reader's verdict) is skipped and listed with its remedy, in judging as well as generation.
+   Since R1, `lift generate` and `lift run-dev` do this, but `lift judge` over every cell stops
+   on the missing generations file. It refuses to run unless both of these hold (this protects
+   the final split):
    - the variant is frozen: listed in `selection.json`, or it is stock or an adapter seed;
    - a `recipe-frozen-*` git tag exists.
 2. **`lift final --all`.** Runs the 13 core variants, in an order that completes the primary
@@ -45,6 +49,14 @@ record into the results tables, figures, verdicts and the cost section.
    - the verdict per adapter;
    - judge sensitivity: strict vs loose, the second judge vs the primary on its sample, and
      back-translation agreement for ar/th.
+
+   The second judge's cells can only be read with `load_records(judge="second",
+   complete=False)`, which checks that what is there is current but not that the sample is whole
+   (R1-10). A stopped frontier run leaves items unjudged on purpose, and they are simply absent.
+   So the second-judge numbers check coverage themselves: every key on P04's lists
+   (`validation/keys/second_judge/`, random.txt included) must have a judgement, and a missing one
+   is reported, never silently dropped from the denominator. The same goes for Qwen3Guard if the
+   decision rule moves it to the second role.
 4. **`lift report`.**
    - Markdown tables and CSV in `outputs/metrics/`.
    - Figures in `outputs/figures/`:

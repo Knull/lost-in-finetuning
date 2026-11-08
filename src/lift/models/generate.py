@@ -6,15 +6,23 @@ After the freeze it only takes bug fixes, and each fix means re-running anything
 Behaviour:
 - Greedy, ``max_new_tokens`` 256, default chat template with the preamble, left padding. The model's
   own generation_config.json (sampling defaults, repetition penalty, ...) is replaced by an explicit
-  greedy config, so nothing leaks in from the checkpoint.
+  greedy config, so nothing leaks in from the checkpoint. configs/project.yaml's generation.do_sample,
+  template and padding_side are locks, not settings: ``gen_config`` refuses any other value.
 - Stops on the model's end-of-turn tokens (``lift.models.load.stop_token_ids``). ``hit_cap`` means no
   end-of-turn token within ``max_new_tokens``. ``n_new_tokens`` counts the content tokens of the
   output (special tokens and the stop token excluded), the count the "fewer than 5 new tokens"
   unclear rule reads; ``meta.n_generated`` counts every generated token for throughput.
 - A prompt that would not fit in the context with ``max_new_tokens`` more tokens raises; nothing is
   ever truncated.
-- Batches sorted by prompt length (longest first); batch size chosen from free memory unless given.
-  An out-of-memory error halves the batch and retries it (never skips a prompt).
+- Batches sorted by prompt length (longest first); batch size chosen from free memory unless given (a
+  given one must be at least 1). An out-of-memory error halves the batch and retries it (never skips a
+  prompt).
+- Decoding must stay finite. A row whose scores hold a NaN or +inf before its end-of-turn token (an
+  fp16 overflow, typically) decodes garbage from then on (argmax over NaN picks id 0), which would be
+  written as its output, often a cap hit cut short. So its batch raises NonFiniteOutputError before
+  anything of it is written: a StaleOutputError, so lift generate and run-dev skip the cell and list
+  it. A non-finite fp16 run is not reported (decisions item 27): the cell is made in bf16 (after its
+  restart line, when its file already holds fp16 records). In bf16 or fp32 it is a fault to report.
 - One GenerationRecord per prompt, appended to
   outputs/generations/{variant}/{set}_{lang}_{split}.jsonl as each batch finishes. On restart, keys
   already present are skipped (resumable across sessions); a record for the same pid under a
@@ -22,17 +30,25 @@ Behaviour:
 - One file is one configuration and one stack. ``meta.run_config`` digests the inputs (everything in
   the cache key but the prompt) and never differs within a file. ``meta.stack`` digests torch,
   transformers and the GPU class: a finished file is reused under any stack (a session may resolve a
-  newer patch release), but records are never appended under another stack than the file's.
+  newer patch release), but records are never appended under another stack than the file's. A file
+  whose records name no ``meta.intervention`` or no ``meta.max_new_tokens`` (made before generations
+  recorded them) is neither extended nor reused: every read refuses such a cell.
 - Every such refusal is a StaleOutputError naming the ``lift restart`` line that starts the cell over
   (``restart_cell``): a job line right after ``lift sync pull``. Moving the file aside by hand does not
   work: sync never deletes, so the job's pull brings the runs repo's copy back. ``keys_changed`` says
-  whether the cell made again may have other generation keys (not when only the stack moved), so a key
-  list drawn from the cell (P04's) is drawn again. A file made in another precision than the run's is
+  whether the cell made again may have other generation keys (not when only the stack moved, nor when
+  the records only predate ``meta.intervention`` or ``meta.max_new_tokens``), so a key list drawn from
+  the cell (P04's) is drawn again. A file made in another precision than the run's is
   not stale and is never started over (that would discard it): it raises OtherPrecisionError, whose
   remedy is the file's ``--dtype`` or leaving the cell out.
 - ``meta`` carries dtype, GPU name, device, batch size, the provenance (model revision, harness,
-  template, the stack, ``decoding``: the decoding settings without the dtype, ``run_config``) and, for
-  CAST wrappers, ``gate_fired``.
+  template, the stack, ``decoding``: the decoding settings without the dtype, ``max_new_tokens``: the
+  cap, which ``decoding`` digests too, ``intervention``: ``lift.cachekey.intervention_digest`` of the
+  variant's spec, ``adapter_hash``: None for stock, ``run_config``) and, for CAST wrappers,
+  ``gate_fired``. The run manifest records the same provenance. The judge pipeline reads a cell only if
+  its provenance is this code's harness, the pinned revision of Global, the cap configs/project.yaml
+  gives (``generation.max_new_tokens``) and the variant's current entry in configs/variants.yaml (which,
+  for a variant that names an adapter, must pin its hash: ``artifacts.adapter``).
 - Every run writes a manifest (lift.manifest) with prompts/sec and tokens/sec.
 """
 
@@ -48,7 +64,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from lift import config
-from lift.cachekey import generation_key
+from lift.cachekey import generation_key, intervention_digest
 from lift.io import append_jsonl, read_jsonl, sha256_obj, sha256_text
 from lift.models.load import DTYPES
 from lift.models.variants import LoadedVariant
@@ -84,6 +100,24 @@ class OtherPrecisionError(StaleOutputError):
 
     def __init__(self, message: str, *, dtype: str) -> None:
         super().__init__(message, command=None)
+        self.dtype = dtype
+
+
+class NonFiniteOutputError(StaleOutputError):
+    """A row's decoding went non-finite: a NaN or +inf score before its end-of-turn token
+    (``GreedyOutput.nonfinite``), as an fp16 overflow does. Greedy argmax decodes garbage from then on,
+    which would be written as the row's output (often a cap hit cut short), so its batch is not written.
+    ``pids`` are the batch's non-finite rows, ``dtype`` the run's precision. A non-finite fp16 run is not
+    reported (decisions item 27): the cell is made in bf16, and ``command`` is the cell's ``lift restart
+    ... --dtype fp16`` line when its file already holds fp16 records (a bf16 run never extends them: the
+    line sets them aside), else None. In bf16 or fp32 it is a fault to report (CLAUDE.md rule 9), never a
+    restart: ``command`` is None. The message names the remedy. Never retried like an out-of-memory error;
+    a StaleOutputError, so lift generate and run-dev skip the cell, list it apart ("nonfinite") and go on
+    with the others."""
+
+    def __init__(self, message: str, *, pids: Sequence[str], dtype: str, command: str | None = None) -> None:
+        super().__init__(message, command=command)
+        self.pids = list(pids)
         self.dtype = dtype
 
 
@@ -151,10 +185,13 @@ def restart_cell(variant: str, set_name: str, lang: str, split: str, *, aside: P
 
     Emptied, never removed: sync never deletes, so a removed file comes back from the runs repo at the
     next pull, while an emptied one is a local edit the next push sends (an update), replacing the runs
-    repo's copy. generate and judge_file then fill it again (an empty file has no stack). An empty
-    record is retired (readers skip it): a record must not outlive the outputs it describes, and the
-    record of another precision's cell is never rewritten. The copy is written before the file is
-    emptied, so a kill in between loses nothing."""
+    repo's copies unless the cell's files there changed since this machine's last sync, when lift sync
+    names what settles it (R1-08, decisions item 63; sync never merges into an emptied file, which a merge
+    would fill again): ``lift sync push --force`` when only the files the restart emptied changed there,
+    else ``lift sync pull``, then ``lift sync push``. generate and judge_file then fill it again (an empty
+    file has no stack). An empty record is retired (readers skip it): a record must not outlive the
+    outputs it describes, and the record of another precision's cell is never rewritten. The copy is
+    written before the file is emptied, so a kill in between loses nothing."""
     if judge_dir is not None:
         files = [judgements_dir() / judge_dir / variant / f"{set_name}_{lang}_{split}.jsonl"]
     else:
@@ -209,17 +246,30 @@ def _start_over(restart: str | None, out_path: Path) -> str:
         return f"move {out_path} aside (no lift restart line covers that file)"
     return (f"run `{restart}` as a job line right after `lift sync pull`, followed by the line that failed "
             "(once: it sets the cell's files aside and leaves them empty, so the next push replaces the runs "
-            "repo's copies)")
+            "repo's copies unless the cell's files there changed since this machine's last sync, when lift "
+            "sync names what settles it: `lift sync push --force` when only the files the restart emptied "
+            "changed there, else `lift sync pull`, then `lift sync push`)")
 
 
 def gen_config(variant: LoadedVariant, *, max_new_tokens: int | None = None) -> dict[str, Any]:
     """Everything about decoding that can change an output. It goes into every cache key, so bf16
-    and fp16 outputs (or a different stop set or cap) never share a key."""
+    and fp16 outputs (or a different stop set or cap) never share a key. configs/project.yaml's
+    generation.do_sample, template and padding_side are locks, checked here: the harness implements only
+    their locked values (greedy; the tokenizer's default chat template, its preamble included; left
+    padding), so another value is refused rather than keyed (template) or ignored (padding_side, which no
+    key holds)."""
     from lift.models.load import stop_token_ids
 
     gen = config.get("generation")
     if gen["do_sample"] is not False:
         raise ValueError("generation.do_sample must be false: decoding is greedy (locked Oct 28)")
+    if gen.get("template") != "default":
+        raise ValueError(f"generation.template must be 'default', not {gen.get('template')!r}: chat_text "
+                         "renders only the tokenizer's default chat template, its preamble included (README "
+                         "Generation, locked Oct 28)")
+    if gen.get("padding_side") != "left":
+        raise ValueError(f"generation.padding_side must be 'left', not {gen.get('padding_side')!r}: "
+                         "greedy_batch left-pads every batch (locked Oct 28)")
     return {
         "harness": HARNESS_VERSION,
         "do_sample": False,
@@ -369,6 +419,68 @@ class GreedyOutput:
     ids: list[int]          # content ids, without the stop token
     stopped: bool           # an end-of-turn token ended it (False: hit the cap)
     n_generated: int        # every generated token, including the stop token
+    nonfinite: bool = False  # a step's scores held a NaN or +inf before it stopped (_NonFiniteWatch)
+
+
+class _NonFiniteWatch:
+    """A pass-through logits processor (``LogitsProcessorList`` calls it with each step's ids and
+    scores) that marks a row whose scores hold a NaN or +inf at a step where it is still decoding: no
+    stop id among its new tokens (past ``width``) yet. A finished row is fed pad and its scores are
+    never read, so they are never checked; -inf is left alone, as processors set it on purpose. It keeps
+    one bool per row, never the scores.
+
+    It tells the inner decodes of ``model.generate`` apart: a call continues the previous call's decode only
+    when its ids are the previous call's with one token appended (same batch size, equal prefix); any other
+    call starts a new one, and ``decodes`` records each one's batch size (the previous call's ids are all it
+    keeps for this). Inner decodes of another batch size than the ``n_rows`` greedy_batch decodes are a
+    wrapper decoding the batch in pieces (P05's CAST, whose per-prompt gate may): which rows a piece holds is
+    unknown, so a NaN or +inf anywhere in its scores, a finished row's included, marks every row, and
+    generate refuses the batch whole, as it refuses a batch anyway. The pieces must partition the batch, each
+    decoded through the processor: ``rows`` refuses pieces whose batch sizes do not add up to ``n_rows``, as
+    a piece decoded without it would go unchecked (a decode that never calls it is invisible here, so the
+    sizes are what can be checked). Inner decodes of the whole batch are marked row by row."""
+
+    def __init__(self, width: int, stop_ids: Sequence[int], n_rows: int) -> None:
+        self.width, self.stop_ids, self.n_rows = width, list(stop_ids), n_rows
+        self.marked: Any = None             # bool per row, on the scores' device
+        self._stops: Any = None
+        self.decodes: list[int] = []        # each inner decode's batch size, in call order
+        self._last: Any = None              # the previous call's ids
+
+    def __call__(self, input_ids: Any, scores: Any) -> Any:
+        import torch
+
+        last, self._last = self._last, input_ids
+        if not (last is not None and last.device == input_ids.device and last.shape[0] == input_ids.shape[0]
+                and last.shape[1] + 1 == input_ids.shape[1] and torch.equal(input_ids[:, :-1], last)):
+            self.decodes.append(int(input_ids.shape[0]))   # not the previous call's next step: a new decode
+        if scores.shape[0] != self.n_rows:          # a piece of the batch: its rows cannot be told apart
+            bad = (torch.isnan(scores) | torch.isposinf(scores)).any().reshape(1).expand(self.n_rows)
+        else:
+            if self._stops is None:
+                self._stops = torch.tensor(self.stop_ids, dtype=input_ids.dtype, device=input_ids.device)
+            running = ~torch.isin(input_ids[:, self.width:], self._stops).any(dim=-1)
+            bad = (torch.isnan(scores).any(dim=-1) | torch.isposinf(scores).any(dim=-1)) & running
+        self.marked = bad.clone() if self.marked is None else self.marked | bad.to(self.marked.device)
+        return scores
+
+    def rows(self) -> list[bool]:
+        """Whether each row was marked. Raises when generate never called the processor (then nothing
+        was checked), or decoded the batch in pieces whose batch sizes do not add up to its rows: fewer, and
+        a row went unchecked; more, and a row was decoded more than once."""
+        if self.marked is None:
+            raise RuntimeError("model.generate never called the logits processor that checks decoding stays "
+                               "finite: a wrapper must pass logits_processor on to the model's generate")
+        total = sum(self.decodes)
+        if any(n != self.n_rows for n in self.decodes) and total != self.n_rows:
+            fewer = total < self.n_rows
+            raise RuntimeError(
+                f"model.generate decoded the batch of {self.n_rows} rows in pieces: the inner decodes that "
+                f"called the logits processor checking decoding stays finite held {self.decodes} rows, "
+                f"{total} in all, {'fewer' if fewer else 'more'} than the batch's {self.n_rows}, so "
+                f"{'a row went unchecked' if fewer else 'a row was decoded more than once'}. A wrapper must "
+                "decode each row exactly once, in one inner decode that passes logits_processor on")
+        return [bool(x) for x in self.marked.tolist()]
 
 
 def is_oom(exc: BaseException) -> bool:
@@ -404,8 +516,14 @@ def greedy_config(*, max_new_tokens: int, stop_ids: Sequence[int], pad_id: int) 
 
 def greedy_batch(model: Any, rows: Sequence[Sequence[int]], *, pad_id: int, stop_ids: Sequence[int],
                  max_new_tokens: int, device: str, gen_config_obj: Any | None = None) -> list[GreedyOutput]:
-    """Greedy-decode a batch of token id lists with left padding and an attention mask."""
+    """Greedy-decode a batch of token id lists with left padding and an attention mask. Each output says
+    whether its row's decoding went non-finite before it stopped (``_NonFiniteWatch``); the caller decides
+    what that means (``generate`` refuses the batch). ``model.generate`` (a wrapper's too) must call the
+    logits processor it is handed and return one sequence per row. It may decode the batch in pieces, passing
+    the processor on to every inner decode, the pieces holding each row once (when their batch sizes do not
+    add up to the rows, the wrapper is refused); the check then marks every row of a non-finite batch."""
     import torch
+    from transformers import LogitsProcessorList
 
     if not rows:
         return []
@@ -416,21 +534,25 @@ def greedy_batch(model: Any, rows: Sequence[Sequence[int]], *, pad_id: int, stop
         input_ids[i, width - len(r):] = torch.tensor(list(r), dtype=torch.long)
         mask[i, width - len(r):] = 1
     cfg = gen_config_obj or greedy_config(max_new_tokens=max_new_tokens, stop_ids=stop_ids, pad_id=pad_id)
+    watch = _NonFiniteWatch(width, stop_ids, len(rows))
     with torch.inference_mode():
         out = model.generate(input_ids=input_ids.to(device), attention_mask=mask.to(device),
-                             generation_config=cfg)
+                             generation_config=cfg, logits_processor=LogitsProcessorList([watch]))
     sequences = out if isinstance(out, torch.Tensor) else out.sequences
+    if sequences.shape[0] != len(rows):
+        raise RuntimeError(f"model.generate returned {sequences.shape[0]} sequences for the {len(rows)} rows "
+                           "of the batch: a wrapper must return one per row, in their order")
     stop = set(stop_ids)
     results = []
-    for new in sequences[:, width:].tolist():
+    for new, nonfinite in zip(sequences[:, width:].tolist(), watch.rows(), strict=True):
         at = next((j for j, t in enumerate(new) if t in stop), None)
         if at is None:
             if len(new) != max_new_tokens:
                 raise RuntimeError(f"generation ended after {len(new)} tokens with no stop token "
                                    f"and below the cap of {max_new_tokens}")
-            results.append(GreedyOutput(ids=new, stopped=False, n_generated=len(new)))
+            results.append(GreedyOutput(ids=new, stopped=False, n_generated=len(new), nonfinite=nonfinite))
         else:
-            results.append(GreedyOutput(ids=new[:at], stopped=True, n_generated=at + 1))
+            results.append(GreedyOutput(ids=new[:at], stopped=True, n_generated=at + 1, nonfinite=nonfinite))
     return results
 
 
@@ -480,6 +602,32 @@ def _check_precision(existing: Sequence[GenerationRecord], dtype: str, out_path:
             dtype=was)
 
 
+def _nonfinite_error(out_path: Path, variant: LoadedVariant, pids: Sequence[str], n_batch: int, *,
+                     restart: str | None) -> NonFiniteOutputError:
+    """The refusal of a batch whose rows ``pids`` (of ``n_batch``) went non-finite, with the remedy for
+    the run's precision. ``restart``: the cell's lift restart line when its file already holds records (in
+    the run's precision, which is checked before any batch), else None; it is the error's ``command`` only
+    in fp16, whose cell is made in bf16 instead."""
+    dtype = variant.dtype
+    command = restart if dtype == "fp16" else None
+    if dtype == "fp16":
+        remedy = ("A non-finite fp16 run is not reported (decisions item 27): make this cell in bf16, on an "
+                  "A100 or L4.")
+        if command:
+            remedy += (f" Its file holds fp16 records, which a bf16 run never extends: first run `{command}` "
+                       "as a job line right after `lift sync pull` (it sets them aside), then the line that "
+                       "failed without --dtype.")
+    else:
+        remedy = (f"In {dtype} this is no fp16 overflow: the variant (its weights or intervention) or the "
+                  "harness makes NaN or inf. Stop and report it (CLAUDE.md rule 9); never tune around it.")
+    return NonFiniteOutputError(
+        f"{out_path}: decoding of variant {variant.spec.name} in {dtype} went non-finite (a NaN or +inf "
+        f"score before the end-of-turn token) for {len(pids)} of the {n_batch} prompts of a batch, e.g. "
+        f"{list(pids[:5])}; nothing of that batch is written: from then on such a row decodes garbage "
+        f"(argmax over NaN picks id 0), which would be written as its output. {remedy}",
+        pids=pids, dtype=dtype, command=command)
+
+
 def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_path: Path,
              batch_size: int | None = None, resume: bool = True, max_new_tokens: int | None = None,
              manifest: bool = True) -> Path:
@@ -487,6 +635,8 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
     from lift.manifest import finish_run, start_run
     from lift.models.load import check_neutral_generation_config, encode_chat
 
+    if batch_size is not None and batch_size < 1:   # a negative one would decode empty batches for ever
+        raise ValueError(f"batch_size must be at least 1, got {batch_size}")
     out_path = Path(out_path)
     check_neutral_generation_config(variant.hf_model)
     gen_cfg = gen_config(variant, max_new_tokens=max_new_tokens)
@@ -525,6 +675,20 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
                 f"adapter, decoding settings or harness version), e.g. {other[:5]}; one file is one "
                 "configuration and outputs are never mixed. Run with the file's configuration, or start the "
                 f"cell over: {_start_over(restart, out_path)}.", command=restart)
+        unnamed = sorted({r.pid for r in existing if not r.meta.get("intervention")})
+        if unnamed:                         # made before generations recorded it (R1-03)
+            raise StaleOutputError(
+                f"{out_path}: {len(unnamed)} records name no intervention (meta.intervention), e.g. "
+                f"{unnamed[:5]}: they were made before generations recorded it, and every read refuses such "
+                "a cell (lift.judge.pipeline), so it is neither extended nor reused. Start the cell over: "
+                f"{_start_over(restart, out_path)}.", command=restart, keys_changed=False)
+        uncapped = sorted({r.pid for r in existing if r.meta.get("max_new_tokens") is None})
+        if uncapped:                        # made before generations recorded it (R2-10)
+            raise StaleOutputError(
+                f"{out_path}: {len(uncapped)} records name no cap (meta.max_new_tokens), e.g. "
+                f"{uncapped[:5]}: they were made before generations recorded it, and every read refuses such "
+                "a cell (lift.judge.pipeline), so it is neither extended nor reused. Start the cell over: "
+                f"{_start_over(restart, out_path)}.", command=restart, keys_changed=False)
     done = {prompt_id(r.set, r.lang, r.pid): r.key for r in existing}
 
     def ident(row: _Row) -> tuple[str, str, str]:
@@ -549,10 +713,11 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
     gpu = _device_name(variant.device)
     provenance = {"model_rev": variant.model_rev, "harness": HARNESS_VERSION,
                   "template": variant.template_hash[:16], **env, "stack": stack_digest(env),
-                  "decoding": decoding_digest(gen_cfg)}
+                  "decoding": decoding_digest(gen_cfg), "max_new_tokens": cap,
+                  "intervention": intervention_digest(variant.spec), "adapter_hash": variant.adapter_hash}
     run = start_run("generate", variant=variant.spec.name, out_path=str(out_path), dtype=variant.dtype,
                     device=variant.device, gpu=gpu, gen_cfg=gen_cfg, n_prompts=len(rows),
-                    n_resumed=len(rows) - len(todo), run_config=run_config, adapter_hash=variant.adapter_hash,
+                    n_resumed=len(rows) - len(todo), run_config=run_config,
                     template_hash=variant.template_hash, **provenance) if manifest else None
     if not todo:
         if moved:
@@ -595,6 +760,11 @@ def generate(variant: LoadedVariant, prompts: Sequence[PromptRecord], *, out_pat
             run_batch(batch[:half])
             run_batch(batch[half:])
             return
+        nonfinite = [r.prompt.pid for r, o in zip(batch, outs, strict=True) if o.nonfinite]
+        if nonfinite:                       # after the try, so never retried as an out-of-memory error
+            held = bool(existing) or stats["n_written"] > 0         # records of this cell in the file
+            raise _nonfinite_error(out_path, variant, nonfinite, len(batch),
+                                   restart=restart if held else None)
         extra = variant.batch_meta() if variant.batch_meta is not None else [{}] * len(batch)
         records = []
         for r, o, more in zip(batch, outs, extra, strict=True):

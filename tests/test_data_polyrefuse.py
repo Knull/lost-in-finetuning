@@ -505,10 +505,11 @@ def test_spot_rows_and_correlation_helpers():
 # --- clone and commit ----------------------------------------------------------------------------
 
 class FakeGit:
-    """Stands in for subprocess.run: records each call; ``init`` makes .git; rev-parse prints ``head``."""
+    """Stands in for subprocess.run: records each call; ``init`` makes .git; rev-parse prints ``head``,
+    status prints ``status`` (porcelain lines; "" is a clean working tree)."""
 
-    def __init__(self, head=PIN, fail=None):
-        self.head, self.fail, self.calls = head, fail, []
+    def __init__(self, head=PIN, fail=None, status=""):
+        self.head, self.fail, self.status, self.calls = head, fail, status, []
 
     def __call__(self, argv, **kw):
         self.calls.append((argv, kw))
@@ -517,8 +518,8 @@ class FakeGit:
             raise subprocess.CalledProcessError(128, argv, output="", stderr="fatal: placeholder failure\n")
         if step == "init":
             (Path(argv[4]) / ".git").mkdir(parents=True)
-        return subprocess.CompletedProcess(argv, 0, stdout=self.head + "\n" if step == "rev-parse" else "",
-                                           stderr="")
+        stdout = {"rev-parse": self.head + "\n", "status": self.status}.get(step, "")
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
 
 def test_ensure_clone_runs_the_pinned_git_steps(monkeypatch, tmp_path):
@@ -534,13 +535,15 @@ def test_ensure_clone_runs_the_pinned_git_steps(monkeypatch, tmp_path):
         [*prefix, "fetch", "-q", "--depth", "1", "origin", PIN],
         [*prefix, "checkout", "-q", "FETCH_HEAD"],
         [*prefix, "rev-parse", "--verify", "HEAD"],
+        [*prefix, "status", "--porcelain", "--untracked-files=all"],
     ]
     for argv, kw in git.calls:
         assert type(argv) is list and not kw.get("shell") and kw["check"] is True
         assert kw["env"]["GIT_TERMINAL_PROMPT"] == "0"
     git.calls.clear()
     assert pr.ensure_clone(root, cfg=CFG) == root                  # an existing clone is only checked
-    assert [argv[5:] for argv, _ in git.calls] == [["rev-parse", "--verify", "HEAD"]]
+    assert [argv[5:] for argv, _ in git.calls] == [["rev-parse", "--verify", "HEAD"],
+                                                    ["status", "--porcelain", "--untracked-files=all"]]
 
 
 def test_ensure_clone_never_moves_an_existing_clone(monkeypatch, tmp_path):
@@ -579,6 +582,18 @@ def test_check_commit(monkeypatch, tmp_path):
         pr.check_commit(root, cfg=CFG)
     monkeypatch.setattr(pr.subprocess, "run", FakeGit(fail="rev-parse"))
     with pytest.raises(CommitMismatch, match="no checked-out commit"):
+        pr.check_commit(root, cfg=CFG)
+    # R1-18: HEAD at the pin is not enough; the working tree, untracked files included, must be its tree
+    dirty = " M PolyRefuse/harmful_test_translated_zh.json\n?? PolyRefuse/harmful_test_translated_hi.json\n"
+    monkeypatch.setattr(pr.subprocess, "run", FakeGit(status=dirty))
+    with pytest.raises(CommitMismatch) as e:
+        pr.check_commit(root, cfg=CFG)
+    assert (f"is at the pinned commit {PIN[:12]}, but its working tree differs from it in 2 paths (e.g. "
+            "['PolyRefuse/harmful_test_translated_zh.json', 'PolyRefuse/harmful_test_translated_hi.json']): "
+            "edited or added files would reach the prompt files; delete the clone and rerun") in str(e.value)
+    monkeypatch.setattr(pr.subprocess, "run", FakeGit(fail="status"))
+    with pytest.raises(CommitMismatch, match=r"git status failed \(exit 128: fatal: placeholder failure\); "
+                                             r"delete the clone and rerun"):
         pr.check_commit(root, cfg=CFG)
 
 
@@ -628,3 +643,50 @@ def test_ensure_clone_with_real_git_keeps_upstream_bytes(monkeypatch, tmp_path):
     with pytest.raises(CommitMismatch):
         pr.ensure_clone(root, cfg=fixture_cfg(repo=upstream.as_uri(), commit="0" * 40))
     pr.check_alignment(root, LANGS, lid=FakeLID(), cfg=cfg)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_a_clone_whose_working_tree_is_not_the_pinned_commit_is_refused(monkeypatch, tmp_path):
+    """R1-18: a clone at the pinned HEAD whose tracked file was edited after checkout, or which gained a
+    file the pinned commit lacks under a name the build reads (a Hindi test file, which has_file would then
+    report and the build load in place of the translation from English), would reach the prompt files while
+    build.json names the pinned commit. ensure_clone (the build's check) and check_commit refuse it, naming
+    the paths, never their text; the alignment checks would not have noticed."""
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text("[core]\n\tautocrlf = true\n[user]\n\tname = Placeholder\n"
+                         "\temail = placeholder@example.com\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    upstream = tmp_path / "upstream"
+    shutil.copytree(POLYREFUSE_FIXTURE, upstream)
+    for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "-m", "placeholder")):
+        subprocess.run(["git", "-C", str(upstream), *args], check=True, capture_output=True)
+    sha = subprocess.run(["git", "-C", str(upstream), "rev-parse", "HEAD"], check=True, capture_output=True,
+                         text=True).stdout.strip()
+    cfg = fixture_cfg(repo=upstream.as_uri(), commit=sha)
+    root = tmp_path / "raw" / "Multilingual-Refusal"
+    assert pr.ensure_clone(root, cfg=cfg) == root
+    assert pr.ensure_clone(root, cfg=cfg) == root                             # the clean clone passes
+
+    def refused(path):
+        for check in (pr.check_commit, pr.ensure_clone):
+            with pytest.raises(CommitMismatch) as e:
+                check(root, cfg=cfg)
+            message = str(e.value)
+            assert (f"is at the pinned commit {sha[:12]}, but its working tree differs from it in 1 paths "
+                    f"(e.g. ['{path}'])") in message and "delete the clone and rerun" in message
+            assert_no_row_text(message, root)
+
+    edited = "PolyRefuse/harmful_test_translated_zh.json"
+    original = (root / edited).read_bytes()
+    mutate(root, edited, set_field(2, "placeholder edit", "instruction_translated"))
+    assert pr.head_commit(root) == sha
+    pr.check_alignment(root, LANGS, lid=FakeLID(), cfg=cfg)                   # nothing else notices it
+    refused(edited)
+    (root / edited).write_bytes(original)
+    assert pr.check_commit(root, cfg=cfg) == sha                              # the pinned tree again
+
+    added = "PolyRefuse/harmful_test_translated_hi.json"
+    shutil.copyfile(root / "PolyRefuse" / "harmful_test_translated_es.json", root / added)
+    assert pr.has_file(root, "harmful", "test", "hi", cfg=cfg)                # the build would read it
+    refused(added)

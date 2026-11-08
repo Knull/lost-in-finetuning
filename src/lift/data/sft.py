@@ -12,14 +12,21 @@ verified on Nov 3 at the revisions pinned in configs/project.yaml (``sources.sft
   context passage from every closed_qa, information_extraction and summarization row, which then
   asks about a text the model never sees. A row is kept only if its English instruction (NFC,
   whitespace collapsed; 19 rows match only after that) equals a databricks-dolly-15k instruction
-  and no record with that instruction has a context: 10,526 kept, 4,482 had a context, 3 match none.
+  and no record with that instruction has a context (10,526 rows; 4,482 had a context, 3 match
+  none), and its Hindi pair is in its English pair's order. hin_Deva[0] is answer first in 5 rows,
+  635, 2496, 5630, 7510 and 13137 (checked Nov 5, all 15,011 rows being 1 turn of 2 parts): their
+  "?" endings mirror the English pair's and, in all but 13137, so do their lengths (both ratios
+  over 3, in opposite directions). ``_hindi_reversed`` flags exactly these; 7510 and 13137 had a
+  context, the other 3 are dropped as hindi_reversed: 10,523 kept.
 
-Pipeline (build.py drives it; ``build_candidate`` does one candidate end to end), with the Nov 3
-counts as aya / indicalign:
+Pipeline (build.py drives it; ``build_candidate`` does one candidate end to end), with the counts
+of the pinned sources under the Nov 5 rules as aya / indicalign (sft/report.json holds each
+build's counts; the Nov 4 build, before two R1 fixes took 3 more rows out of each pool, counted
+10,526 / 10,322 / 10,144 / 9,958 for indicalign and 790 / 679 for aya):
 1. ``load_pools``: ``clean_pool`` applies clean_text to both fields and drops, counting the reason,
    empty fields, an instruction or response GlotLID does not read as Hindi, and a response whose
    character 10-gram repetition exceeds unclear.max_repetition_ratio (the judge's "repetitive"
-   rule): 1,153 -> 1,000 / 10,526 -> 10,322.
+   rule): 1,153 -> 1,000 / 10,523 -> 10,319.
 2. ``build_utility_heldout``: ``heldout.per_source`` (150) rows per source, ranked by
    sha256(seed, tag, row id) among rows whose instruction occurs once in the pool and that
    CuratorKIT's schema gate keeps (10-2,048 tokens), with no two near-duplicates among the 300 (the
@@ -31,35 +38,53 @@ counts as aya / indicalign:
    ``build_candidate`` (``check_frozen_heldout``) stop with ValueError before writing a training
    row unless the draw gives exactly its pids.
 3. ``exclude_heldout``: removes the held-out rows, and every row that near-duplicates a held-out row
-   of EITHER source, from BOTH training pools: 1,000 -> 790 / 10,322 -> 10,144. Near-duplicate
+   of EITHER source, from BOTH training pools: 1,000 -> 787 / 10,319 -> 10,141. Near-duplicate
    (``heldout.near_dup``): exact character 3-gram Jaccard (the quantity MinHash estimates) of the
-   instructions >= 0.7, or of the responses >= 0.85 when both normalised responses have >= 20
-   characters; empty texts never match.
+   instructions >= 0.7, or of the responses >= 0.85, at any length (decisions item 24; a text
+   under 3 characters is its own single gram); empty texts never match. Until Nov 5 answers under
+   20 characters were skipped, a minimum item 24 never had: without it 3 more aya rows match (two
+   copy the 11- and 13-character answers of final utility items), so 63 rows go, not 60.
 4. ``build_candidates``: CuratorKIT's no-API path on each training pool (``run_curatorkit``): schema
    gate, exact then MinHash dedup (0.85 on character 3-grams; the first copy in row-id order stays;
    the ``raw`` stress pool skips dedup), cleaning with strip_html and collapse_whitespace off:
-   790 -> 679 (raw 788) / 10,144 -> 9,958. Then the row counts: since Nov 4 (decisions item 47,
-   ``equal_size: false``) each variant takes min(train.yaml rows, its own curated rows) by sha256
-   rank, so aya trains on 679 and indicalign on 3,000, and the stress recipe's raw sample is
-   indicalign's. The Nov 3 rule (``equal_size: true``: every variant takes min(rows, aya dedup,
-   indicalign dedup) = 679) stays available. report.json records the decision.
+   787 -> 677 (raw 785) / 10,141 -> 9,955 (raw 9,982). Then the row counts: since Nov 4
+   (decisions item 47, ``equal_size: false``) each variant takes min(train.yaml rows, its own
+   curated rows) by sha256 rank, so aya trains on 677 and indicalign on 3,000, and the stress
+   recipe's raw sample is indicalign's. The Nov 3 rule (``equal_size: true``: every variant takes
+   min(rows, aya dedup, indicalign dedup) = 677) stays available. report.json records the decision.
 
 Files under the data dir (training rows use the messages format TRL's SFTTrainer reads):
     interim/sft/{cand}/{variant}/input.jsonl             CuratorKIT input {id, instruction, output}
     interim/sft/{cand}/{variant}/curatorkit/             CuratorKIT's own output folder (CRLF on Windows)
     interim/sft/{cand}/{variant}/curatorkit_summary.json stage counts, rejected and deduplicated ids
     sft/{cand}/{variant}/sft_messages.jsonl              the N rows {"id", "messages"}, by id (LF)
-    sft/{cand}/{variant}/selection.json                  ids, counts, seed, sha256 of the export
+    sft/{cand}/{variant}/selection.json                  ids, counts, seed, sha256 of the export, rules
     sft/{cand}/{variant}/curatorkit/                     LF copies of CuratorKIT's manifest.json,
                                                          rejected.jsonl, lexsi_provenance.json + summary
-    sft/report.json                                      every stage count and the N decision
-variant is ``dedup`` (both candidates) or ``raw`` (the stress candidate,
-train.yaml ``stress.candidate``). The utility records go to
+    sft/report.json                                      every stage count, the N decision, the rules
+variant is ``dedup`` (both candidates, the standard recipe: train.yaml ``standard.dedup: true``)
+or ``raw`` (the stress candidate, ``stress.candidate``: ``stress.dedup: false``). The plan is
+fixed, so ``build_candidates`` refuses any other dedup setting (ValueError naming the keys), and a
+train.yaml without ``equal_size`` (KeyError), before anything is written. It leaves sft/ holding
+exactly the variants report.json lists: after its checks pass it removes every sft/{cand}/{variant} and
+interim/sft/{cand}/{variant} folder the plan does not make (such as the Nov 3 aya/raw once item 47
+moved the raw sample to indicalign), and a {cand} folder left empty. lift sync deletes nothing,
+so a removed variant must also be deleted from the runs repo by hand. The utility records go to
 prompts/utility_hi.jsonl through build.py. CuratorKIT's own files carry run timestamps (manifest.json:
 run_timestamp, wall_clock_seconds and its provenance's created_at; lexsi_provenance.json:
 created_at; rejected.jsonl: each row's provenance_chain timestamps), so interim/sft/ and the
 sft/{cand}/{variant}/curatorkit/ copies of those three files change on every run; everything else
 this module writes is byte-identical on a rebuild (checked Nov 4 on the pinned data).
+
+The rules a build applied travel with the exports: report.json and every selection.json hold its
+``rules_stamp`` ("rules": RULES_VERSION, the project and train settings that shape the rows, the
+sha256 of data/splits/utility.json). ``export_problems`` lists every reason the exports on disk must
+not be trained on: a report.json that is missing, has no stamp (the Nov 4 build, RULES_VERSION 1,
+whose aya/dedup holds two copies of final utility answers) or another stamp than the current code
+and configs give; a variant folder it does not list (the Nov 3 aya/raw); an export that does not
+match its selection.json. A trainer (P03's) must call it before it reads an export and refuse while
+it is not empty; ``lift data stats`` prints each problem as stale. Each names its remedy, most often
+``lift data build --only sft`` then ``lift sync push``.
 """
 
 from __future__ import annotations
@@ -100,6 +125,12 @@ SCHEMA_MAX_TOKENS = 2048
 # flattens code indentation. NFC, encoding fixes, control-character removal and strip stay on.
 CLEAN_TRANSFORMS = {"strip_html": False, "collapse_whitespace": False}
 CURATORKIT_FILES = ("manifest.json", "rejected.jsonl", "lexsi_provenance.json")
+# The rules this code applies to decide which rows an export holds (``rules_stamp``): bump it with any
+# change here that changes them. 1: the Nov 4 build (the held-out near-duplicate rule skipped answers
+# under 20 characters; Dolly_T rows whose Hindi pair is answer first were kept). 2: R1-20 (answers of
+# any length are compared) and R1-21 (those Dolly_T rows are dropped).
+RULES_VERSION = 2
+_REBUILD = "rebuild with `lift data build --only sft`, then `lift sync push`"
 
 
 @dataclass(frozen=True)
@@ -143,17 +174,36 @@ def _dolly_key(text: str) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text or "")).strip()
 
 
+def _hindi_reversed(eng: Sequence[str | None], hin: Sequence[str | None]) -> bool:
+    """Is a Dolly_T row's Hindi pair in the reverse order of its English (instruction, response)
+    pair? Either sign is enough: the "?" endings are mirrored (the English instruction ends in "?"
+    and its response does not, while Hindi part 0 does not and part 1 does), or log(len0 / len1) of
+    the English pair and of the Hindi pair both exceed log 3, with opposite signs. Texts are
+    compared after clean_text; a pair without exactly 2 parts is never called reversed."""
+    if len(eng) != 2 or len(hin) != 2:
+        return False
+    e0, e1, h0, h1 = (clean_text(t or "") for t in (*eng, *hin))
+    if e0.endswith("?") and not e1.endswith("?") and not h0.endswith("?") and h1.endswith("?"):
+        return True
+    if not (e0 and e1 and h0 and h1):
+        return False
+    en, hi = math.log(len(e0) / len(e1)), math.log(len(h0) / len(h1))
+    return min(abs(en), abs(hi)) > math.log(3) and (en > 0) != (hi > 0)
+
+
 def indicalign_rows(rows: Iterable[Mapping[str, Any]],
                     dolly_rows: Iterable[Mapping[str, Any]]) -> tuple[list[SftRow], Counter[str]]:
     """Hub "indicalign" rows (Dolly_T: doc_id, eng_Latn, hin_Deva, _row) -> SftRow, applying the
     Dolly context rule. Counts: kept, had_context (some matching Dolly record has a context),
-    no_match (the English instruction matches no Dolly record)."""
+    no_match (the English instruction matches no Dolly record), hindi_reversed (hin_Deva[0] is in
+    the reverse order of eng_Latn[0], ``_hindi_reversed``: dropped rather than swapped, as both of
+    its signs are heuristics)."""
     has_context: dict[str, bool] = {}
     for d in dolly_rows:
         key = _dolly_key(d["instruction"])
         has_context[key] = has_context.get(key, False) or bool((d.get("context") or "").strip())
     out: list[SftRow] = []
-    counts: Counter[str] = Counter(dict.fromkeys(("kept", "had_context", "no_match"), 0))
+    counts: Counter[str] = Counter(dict.fromkeys(("kept", "had_context", "no_match", "hindi_reversed"), 0))
     for r in sorted(rows, key=lambda r: int(r["_row"])):
         key = _dolly_key(r["eng_Latn"][0][0])
         if key not in has_context:
@@ -165,6 +215,9 @@ def indicalign_rows(rows: Iterable[Mapping[str, Any]],
         turn = r["hin_Deva"][0]
         if len(turn) != 2:
             raise ValueError(f"Dolly_T row {r['_row']}: hin_Deva turn has {len(turn)} parts, expected 2")
+        if _hindi_reversed(r["eng_Latn"][0], turn):
+            counts["hindi_reversed"] += 1
+            continue
         out.append(SftRow("indicalign", int(r["_row"]), int(r["_row"]), turn[0] or "", turn[1] or "",
                           {"doc_id": r["doc_id"]}))
         counts["kept"] += 1
@@ -201,7 +254,8 @@ def clean_pool(rows: Iterable[SftRow], lid: Any, *,
 def load_pools(*, cfg: Mapping[str, Any] | None = None, hub: Any = None,
                lid: Any = None) -> dict[str, tuple[list[SftRow], Counter[str]]]:
     """The two cleaned pools with their counts: loaded, every drop reason (indicalign also
-    had_context and no_match), kept. hub None -> sources.HFHub(cfg); lid None -> LangID(cfg=cfg)."""
+    had_context, no_match and hindi_reversed), kept. hub None -> sources.HFHub(cfg); lid None ->
+    LangID(cfg=cfg)."""
     cfg = cfg if cfg is not None else config.load("project")
     if hub is None:
         from lift.data.sources import HFHub
@@ -217,7 +271,8 @@ def load_pools(*, cfg: Mapping[str, Any] | None = None, hub: Any = None,
     pools: dict[str, tuple[list[SftRow], Counter[str]]] = {}
     for name, rows, before in (("aya", aya, Counter()),
                                ("indicalign", ind, Counter(had_context=ctx["had_context"],
-                                                           no_match=ctx["no_match"]))):
+                                                           no_match=ctx["no_match"],
+                                                           hindi_reversed=ctx["hindi_reversed"]))):
         pool, counts = clean_pool(rows, lid, cfg=cfg)
         loaded = len(rows) + sum(before.values())
         pools[name] = (pool, Counter({"loaded": loaded, **before, **counts}))
@@ -238,12 +293,11 @@ class _NearDup(NamedTuple):
     ngram: int
     instruction: Fraction        # thresholds as exact fractions (0.7 -> 7/10)
     response: Fraction
-    min_chars: int
 
 
 class _Grams(NamedTuple):
     ins: frozenset[str]
-    res: frozenset[str]          # empty when the response is too short to compare
+    res: frozenset[str]          # empty only for an empty response, which never matches
 
 
 def _near_cfg(cfg: Mapping[str, Any] | None) -> _NearDup:
@@ -252,13 +306,11 @@ def _near_cfg(cfg: Mapping[str, Any] | None) -> _NearDup:
     thresholds = Fraction(str(nd["instruction"])), Fraction(str(nd["response"]))
     if not all(0 < t <= 1 for t in thresholds):
         raise ValueError(f"near_dup thresholds must lie in (0, 1], got {nd}")
-    return _NearDup(int(nd["ngram"]), *thresholds, int(nd["response_min_chars"]))
+    return _NearDup(int(nd["ngram"]), *thresholds)
 
 
 def _grams(instruction: str, response: str, nd: _NearDup) -> _Grams:
-    long_enough = len(dup_key(response)) >= nd.min_chars
-    return _Grams(char_ngrams(instruction, nd.ngram),
-                  char_ngrams(response, nd.ngram) if long_enough else frozenset())
+    return _Grams(char_ngrams(instruction, nd.ngram), char_ngrams(response, nd.ngram))
 
 
 def _at_least(a: frozenset[str], b: frozenset[str], t: Fraction) -> bool:
@@ -509,8 +561,20 @@ def run_curatorkit(rows: list[dict], out_dir: Path, *, dedup: bool) -> list[dict
 
 
 def _variants(train_cfg: Mapping[str, Any]) -> list[tuple[str, str]]:
-    """(candidate, variant): every candidate deduplicated, plus the stress candidate raw."""
-    return [(name, "dedup") for name in train_cfg["candidates"]] + [(train_cfg["stress"]["candidate"], "raw")]
+    """(candidate, variant): every candidate deduplicated (the standard recipe), plus the stress
+    candidate raw (the stress recipe). The plan is fixed, as README pre-registers the recipes, so
+    train.yaml must say so: ValueError naming the keys unless standard.dedup is true and stress.dedup
+    false (a missing stress.dedup would inherit true), raised before anything is written."""
+    std, stress = train_cfg["standard"], train_cfg["stress"]
+    wrong = [f"{key} is {'missing' if value is None else json.dumps(value)}, not {json.dumps(want)}"
+             for key, value, want in (("standard.dedup", std.get("dedup"), True),
+                                      ("stress.dedup", stress.get("dedup"), False)) if value is not want]
+    if wrong:
+        raise ValueError(f"configs/train.yaml: {'; '.join(wrong)}. lift.data.sft deduplicates every "
+                         "candidate (the standard recipe) and gives the stress candidate its raw rows (the "
+                         "stress recipe trains on undeduplicated rows, README): another plan needs a code "
+                         "change and a docs/decisions.md entry; nothing was written")
+    return [(name, "dedup") for name in train_cfg["candidates"]] + [(stress["candidate"], "raw")]
 
 
 def _curate(name: str, variant: str, rows: Sequence[SftRow],
@@ -536,10 +600,31 @@ def _curate(name: str, variant: str, rows: Sequence[SftRow],
     return out, summary
 
 
+def _remove_other_variants(plan: Iterable[tuple[str, str]]) -> None:
+    """Remove every {cand}/{variant} folder of sft_dir() and of interim/sft that ``plan`` does not
+    make (a variant train.yaml no longer asks for), then each {cand} folder left empty."""
+    keep, exports = set(plan), sft_dir()
+    for root in (exports, interim_dir() / "sft"):
+        if not root.is_dir():
+            continue
+        for cand in sorted(p for p in root.iterdir() if p.is_dir()):
+            for folder in sorted(p for p in cand.iterdir() if p.is_dir()):
+                if (cand.name, folder.name) in keep:
+                    continue
+                shutil.rmtree(folder)
+                if root == exports:
+                    log.warning("sft %s/%s: removed, the current plan does not make it; lift sync deletes "
+                                "nothing, so delete data/sft/%s/%s from the runs repo by hand",
+                                cand.name, folder.name, cand.name, folder.name)
+            if not any(cand.iterdir()):
+                cand.rmdir()
+
+
 def _write_variant(name: str, variant: str, curated: Sequence[dict], n: int, *, rows_target: int,
-                   seed: int, train_pool: int, summary: dict | None) -> dict:
+                   seed: int, train_pool: int, summary: dict | None, rules: Mapping[str, Any]) -> dict:
     """Sample ``n`` curated rows by sha256 rank, write the export, the CuratorKIT copies and
-    selection.json into sft_dir()/name/variant (rebuilt from scratch). Returns selection.json."""
+    selection.json (with ``rules``, the build's ``rules_stamp``) into sft_dir()/name/variant (rebuilt
+    from scratch). Returns selection.json."""
     tag = f"sft:{name}:{variant}"
     ranked = sorted(curated, key=lambda r: sha256_text(f"{seed}:{tag}:{r['id']}"))
     chosen = sorted(ranked[:n], key=lambda r: r["id"])
@@ -561,6 +646,7 @@ def _write_variant(name: str, variant: str, curated: Sequence[dict], n: int, *, 
         "counts": {"train_pool": train_pool, "curated": len(curated), "sampled": n},
         "curatorkit": ck,
         "sha256": sha256_file(out / "sft_messages.jsonl"),
+        "rules": dict(rules),
     }
     _write_json(out / "selection.json", selection)
     log.info("sft %s/%s: train pool %d, curated %d, sampled %d", name, variant, train_pool, len(curated), n)
@@ -588,29 +674,36 @@ def build_candidates(train_pools: Mapping[str, Any], *,
                      cfg: Mapping[str, Any] | None = None, train_cfg: Mapping[str, Any] | None = None,
                      curate: Curate | None = None) -> dict:
     """Curate and sample every variant (each candidate deduplicated, plus the stress candidate raw),
-    write sft_dir()/report.json and return it.
+    write sft_dir()/report.json and return it. Once every variant is curated and its count checked
+    (a refused build changes nothing under sft_dir()), it removes every variant folder of
+    sft_dir() and interim/sft the plan does not make, so sft_dir() holds exactly the report's variants.
 
-    Row counts (train.yaml): with ``equal_size`` true, every variant takes N = min(rows, each
-    candidate's deduplicated count), the Nov 3 rule. With ``equal_size`` false (the default since
-    Nov 4, decisions item 47), each variant takes min(rows, its own curated count).
+    The plan (``_variants``) is fixed: train.yaml standard.dedup must be true and stress.dedup false
+    (ValueError otherwise). Row counts (train.yaml ``equal_size``, a required key: a train config
+    without it is refused with KeyError, never given the rule item 47 replaced): with ``equal_size``
+    true, every variant takes N = min(rows, each candidate's deduplicated count), the Nov 3 rule. With
+    ``equal_size`` false (the committed value since Nov 4, decisions item 47), each variant takes
+    min(rows, its own curated count). Both checks run before anything is written.
 
     ``train_pools`` is exclude_heldout's result; ``pool_counts`` (load_pools' counters, by source)
     fills the loaded and dropped counts of the report. curate None -> run_curatorkit. The report:
     {"decision": {"rows_target", "equal_size", "rows": N | None (None unless equal_size),
                   "rows_by_variant": {"aya/dedup": n, ...},
                   "limited_by": candidate | None (equal_size) or [variants under the target] | None},
+     "rules": ``rules_stamp`` (also in every selection.json; ``export_problems`` compares it),
      "seed",
      "sources": {name: {loaded, dropped, pool, held_out, near_dup_excluded, near_dup_of, train_pool}},
-     "variants": {"aya/dedup": selection.json without ids, ...}}.
+     "variants": {"aya/dedup": selection.json without ids and rules, ...}}.
     """
     cfg = cfg if cfg is not None else config.load("project")
     train_cfg = train_cfg if train_cfg is not None else config.load("train")
     curate = curate if curate is not None else run_curatorkit
     target, seed = int(train_cfg["rows"]), int(cfg["split_seed"])
+    equal = bool(train_cfg["equal_size"])           # required: no fallback to the replaced Nov 3 rule
     plan = _variants(train_cfg)
+    stamp = rules_stamp(cfg=cfg, train_cfg=train_cfg)
     curated = {(name, variant): _curate(name, variant, _rows(train_pools[name]), curate)
                for name, variant in plan}
-    equal = bool(train_cfg.get("equal_size", True))
     if equal:
         sizes = {name: len(curated[(name, "dedup")][0]) for name in train_cfg["candidates"]}
         n = min(target, *sizes.values())
@@ -636,16 +729,19 @@ def build_candidates(train_pools: Mapping[str, Any], *,
         if short:
             log.warning("SFT variants below the target %d rows (no equal-size rule): %s", target,
                         ", ".join(f"{name}/{variant} {c}" for (name, variant), c in counts.items()))
+    _remove_other_variants(plan)
     variants = {}
     for name, variant in plan:
         rows, summary = curated[(name, variant)]
         selection = _write_variant(name, variant, rows, counts[(name, variant)], rows_target=target,
-                                   seed=seed, train_pool=len(_rows(train_pools[name])), summary=summary)
-        variants[f"{name}/{variant}"] = {k: v for k, v in selection.items() if k != "ids"}
+                                   seed=seed, train_pool=len(_rows(train_pools[name])), summary=summary,
+                                   rules=stamp)
+        variants[f"{name}/{variant}"] = {k: v for k, v in selection.items() if k not in ("ids", "rules")}
     report = {
         "decision": {"rows_target": target, "equal_size": equal, "rows": n,
                      "rows_by_variant": {f"{name}/{variant}": c for (name, variant), c in counts.items()},
                      "limited_by": limited_by},
+        "rules": stamp,
         "seed": seed,
         "sources": {name: _source_report(_rows(pool), pool[1] if isinstance(pool, tuple) else [],
                                          (pool_counts or {}).get(name))
@@ -679,10 +775,10 @@ def build_candidate(name: str, *, dedup: bool = True, rows: int = 3000, cfg: Map
                     train_cfg: Mapping[str, Any] | None = None, curate: Curate | None = None,
                     pools: Mapping[str, Any] | None = None) -> Path:
     """One candidate end to end (held-out set and exclusion included) with min(rows, curated) rows,
-    no equal-size rule and no report.json; build.py uses build_candidates. pools None ->
-    load_pools(cfg=cfg). A frozen utility split must hold exactly the held-out pids
-    (``check_frozen_heldout``, before anything is written). Returns the directory holding
-    sft_messages.jsonl and the CuratorKIT copies."""
+    no equal-size rule and no report.json (so ``export_problems`` lists its folder: it is no training
+    export); build.py uses build_candidates. pools None -> load_pools(cfg=cfg). A frozen utility split
+    must hold exactly the held-out pids (``check_frozen_heldout``, before anything is written). Returns
+    the directory holding sft_messages.jsonl and the CuratorKIT copies."""
     cfg = cfg if cfg is not None else config.load("project")
     train_cfg = train_cfg if train_cfg is not None else config.load("train")
     if name not in train_cfg["candidates"]:
@@ -695,5 +791,153 @@ def build_candidate(name: str, *, dedup: bool = True, rows: int = 3000, cfg: Map
     pool = train[name][0]
     curated, summary = _curate(name, variant, pool, curate if curate is not None else run_curatorkit)
     _write_variant(name, variant, curated, min(rows, len(curated)), rows_target=rows,
-                   seed=int(cfg["split_seed"]), train_pool=len(pool), summary=summary)
+                   seed=int(cfg["split_seed"]), train_pool=len(pool), summary=summary,
+                   rules=rules_stamp(cfg=cfg, train_cfg=train_cfg))
     return sft_dir() / name / variant
+
+
+# ---------------------------------------------------------------- the rules stamp and the trainer's check
+
+
+def rules_stamp(*, cfg: Mapping[str, Any] | None = None,
+                train_cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The rules a build of the exports applies besides the pinned data: RULES_VERSION (this code's),
+    the settings that shape the rows (configs/project.yaml: sources.sft, its pins and heldout;
+    unclear.max_repetition_ratio; languages.accept_labels.hi; langid; split_seed, which ranks the
+    held-out draw and the samples; configs/train.yaml: rows, equal_size, candidates and
+    stress.candidate) and the sha256 of the frozen data/splits/utility.json (lift.splits.SPLITS_DIR;
+    None while it does not exist). JSON values, so a stamp read back from a file compares equal.
+    build_candidates writes it into sft/report.json and every selection.json ("rules");
+    ``export_problems`` compares them with the stamp the current code and configs give. KeyError for
+    a config that lacks one of these settings."""
+    cfg = cfg if cfg is not None else config.load("project")
+    train_cfg = train_cfg if train_cfg is not None else config.load("train")
+    utility = splits.SPLITS_DIR / "utility.json"
+    stamp = {
+        "version": RULES_VERSION,
+        "sources_sft": cfg["sources"]["sft"],
+        "max_repetition_ratio": cfg["unclear"]["max_repetition_ratio"],
+        "accept_labels_hi": cfg["languages"]["accept_labels"][LANG],
+        "langid": cfg["langid"],
+        "split_seed": int(cfg["split_seed"]),
+        "train": {"rows": int(train_cfg["rows"]), "equal_size": bool(train_cfg["equal_size"]),
+                  "candidates": list(train_cfg["candidates"]),
+                  "stress_candidate": train_cfg["stress"]["candidate"]},
+        "utility_split_sha256": sha256_file(utility) if utility.exists() else None,
+    }
+    return json.loads(json.dumps(stamp))
+
+
+def export_problems(*, cfg: Mapping[str, Any] | None = None,
+                    train_cfg: Mapping[str, Any] | None = None) -> list[str]:
+    """Every reason the exports under sft_dir() must not be trained on, each with its remedy; empty
+    when they may be. A trainer calls it before it reads an export and refuses unless it is empty. No
+    torch and no network: it reads the configs, data/splits/utility.json and the files under sft_dir().
+    The reasons:
+    - sft/report.json is missing or cannot be read (then nothing else is checked);
+    - it carries no rules stamp (a build from before the stamp, such as the Nov 4 one, which applied
+      RULES_VERSION 1), or another stamp than ``rules_stamp`` gives now (the settings that differ are
+      named), or the configs give none (a missing key; a dedup setting the plan refuses);
+    - it does not list a variant train.yaml's plan makes;
+    - a {cand}/{variant} folder on disk that it does not list (a variant the plan no longer makes, such
+      as the Nov 3 aya/raw: lift sync deletes nothing, so a pull brings it back until it is deleted from
+      the runs repo by hand);
+    - a variant it lists whose sft_messages.jsonl or selection.json is missing, whose selection.json is
+      not the one it lists (another sha256 or stamp: a build cut short, a folder from another build), or
+      whose export does not match its selection.json's sha256 (edited, or synced in part)."""
+    cfg = cfg if cfg is not None else config.load("project")
+    train_cfg = train_cfg if train_cfg is not None else config.load("train")
+    root = sft_dir()
+    path = root / "report.json"
+    if not path.exists():
+        return [f"data/sft/report.json is missing: {_REBUILD}"]
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        listed = dict(report["variants"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return [f"data/sft/report.json cannot be read ({type(e).__name__}): {_REBUILD}"]
+    problems: list[str] = []
+    stamp = report.get("rules")
+    try:
+        now, plan = rules_stamp(cfg=cfg, train_cfg=train_cfg), _variants(train_cfg)
+    except (KeyError, ValueError) as e:
+        now, plan = None, []
+        problems.append(f"the configs give no rules stamp or plan to check the exports against "
+                        f"({type(e).__name__}: {e})")
+    if stamp is None:
+        problems.append("data/sft/report.json carries no rules stamp: it was built before lift.data.sft "
+                        "recorded the rules a build applies (the Nov 4 build applied RULES_VERSION 1: "
+                        "answers under 20 characters were never compared with the held-out set, and reversed "
+                        f"Dolly_T pairs were kept), so its exports may hold rows the current rules drop: "
+                        f"{_REBUILD}")
+    elif now is not None and stamp != now:
+        problems.append("data/sft/report.json was built under other rules than the current code and configs "
+                        f"give ({_stamp_diff(stamp, now)}): {_REBUILD}")
+    problems += [f"data/sft/report.json does not list {name}/{variant}, which train.yaml's plan makes: "
+                 f"{_REBUILD}" for name, variant in plan if f"{name}/{variant}" not in listed]
+    for key in sorted(f"{c.name}/{v.name}" for c in root.iterdir() if c.is_dir()
+                      for v in c.iterdir() if v.is_dir()):
+        if key not in listed:
+            problems.append(f"data/sft/{key} is on disk, but data/sft/report.json does not list it (a "
+                            "variant the plan no longer makes, such as the Nov 3 aya/raw, or a folder from "
+                            f"another build): delete data/sft/{key} from the runs repo by hand (lift sync "
+                            "deletes nothing), and here (a rebuild removes it too)")
+    for key, entry in sorted(listed.items()):
+        problems += _variant_problems(key, entry, stamp)
+    return problems
+
+
+def _variant_problems(key: str, entry: Any, stamp: Any) -> list[str]:
+    """What keeps the variant ``key`` that report.json lists (as ``entry``, under the report's rules
+    ``stamp``) from being trained on: a missing file, a selection.json that is not the listed one, an
+    export whose sha256 is not its selection.json's."""
+    folder = sft_dir() / key
+    export, sel_path = folder / "sft_messages.jsonl", folder / "selection.json"
+    missing = [p.name for p in (export, sel_path) if not p.is_file()]
+    if missing:
+        return [f"data/sft/{key}: data/sft/report.json lists it, but its {' and '.join(missing)} is missing "
+                f"(synced in part, or a build cut short): `lift sync pull` again, or {_REBUILD}"]
+    try:
+        selection = json.loads(sel_path.read_text(encoding="utf-8"))
+        recorded = selection["sha256"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return [f"data/sft/{key}/selection.json cannot be read ({type(e).__name__}): {_REBUILD}"]
+    out = []
+    listed_sha = entry.get("sha256") if isinstance(entry, dict) else None
+    if recorded != listed_sha or selection.get("rules") != stamp:
+        out.append(f"data/sft/{key}/selection.json is not the one data/sft/report.json lists (another "
+                   f"sha256 or rules stamp: a build cut short, or a folder from another build): {_REBUILD}")
+    actual = sha256_file(export)
+    if actual != recorded:
+        out.append(f"data/sft/{key}/sft_messages.jsonl does not match its selection.json (sha256 "
+                   f"{actual[:12]}, recorded {str(recorded)[:12]}): edited by hand, or synced in part: "
+                   f"{_REBUILD}")
+    return out
+
+
+def _stamp_diff(old: Any, new: Mapping[str, Any], n: int = 6) -> str:
+    """The settings two rules stamps disagree on, "key old, now new" with dotted keys (at most ``n``)."""
+    a, b = _flat(old if isinstance(old, dict) else {}), _flat(new)
+    keys = sorted(k for k in a.keys() | b.keys() if k not in a or k not in b or a[k] != b[k])
+
+    def shown(d: Mapping[str, Any], k: str) -> str:
+        if k not in d:
+            return "missing"
+        text = json.dumps(d[k], ensure_ascii=False)
+        return text if len(text) <= 40 else text[:37] + "..."
+
+    if not keys:
+        return "they differ"
+    parts = [f"{k} {shown(a, k)}, now {shown(b, k)}" for k in keys[:n]]
+    return "; ".join(parts) + (f"; and {len(keys) - n} more" if len(keys) > n else "")
+
+
+def _flat(d: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
+    """A nested dict as {dotted key: leaf value}."""
+    out: dict[str, Any] = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out.update(_flat(v, f"{prefix}{k}."))
+        else:
+            out[f"{prefix}{k}"] = v
+    return out

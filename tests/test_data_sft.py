@@ -6,6 +6,7 @@ import json
 import logging
 import random
 import re
+import shutil
 import string
 import subprocess
 import sys
@@ -130,6 +131,58 @@ def test_indicalign_rows_apply_the_dolly_context_rule():
     bad[0]["hin_Deva"] = [["केवल एक भाग"]]
     with pytest.raises(ValueError, match="row 0"):
         sft.indicalign_rows(bad, dolly_rows())
+
+
+# R1-21: Dolly_T rows whose Hindi pair is answer first while the English pair is in Dolly's order, and
+# in-order controls. Placeholder text; each long part is about 10x its short one.
+SHORT_EN, LONG_EN = "Placeholder request about kites", "Placeholder answer about kites. " * 10
+SHORT_HI, LONG_HI = "पतंग के बारे में नमूना अनुरोध", "पतंग के बारे में नमूना उत्तर। " * 10
+REVERSED_PAIRS = {       # Dolly_T row: (English pair, Hindi pair)
+    635: ((SHORT_EN + "?", LONG_EN), (LONG_HI, SHORT_HI + "?")),          # both signs, like row 635
+    636: (("Placeholder question about tea?", "Placeholder answer about tea."),
+          ("चाय के बारे में नमूना उत्तर।", "चाय के बारे में नमूना प्रश्न?")),   # the "?" endings only
+    637: ((SHORT_EN, LONG_EN), (LONG_HI, SHORT_HI)),                       # the lengths only
+}
+IN_ORDER_PAIRS = {
+    640: ((SHORT_EN + "?", LONG_EN), (SHORT_HI + "?", LONG_HI)),
+    641: ((SHORT_EN + "?", LONG_EN), (SHORT_HI, LONG_HI)),                 # the Hindi lost its "?"
+    642: ((SHORT_EN, LONG_EN), ("पतंग के बारे में नमूना उत्तर। " * 2, SHORT_HI)),  # 2x the other way, under 3x
+}
+
+
+def dolly_t(row, en, hi):
+    """A Dolly_T hub row (English pair ``en``, Hindi pair ``hi``) and the context-free
+    databricks-dolly-15k record its English instruction matches."""
+    return ({"doc_id": f"doc-{row:04d}", "eng_Latn": [list(en)], "hin_Deva": [list(hi)], "_row": row},
+            {"instruction": en[0], "context": "", "response": en[1], "category": "open_qa", "_row": row})
+
+
+def test_indicalign_rows_drop_a_hindi_pair_reversed_against_its_english():
+    """R1-21: in 5 rows of the pinned Dolly_T hin_Deva[0] is answer first; such a row is dropped and
+    counted, never kept with the answer as its instruction (nor swapped: both signs are heuristics)."""
+    made = [dolly_t(row, en, hi) for row, (en, hi) in {**REVERSED_PAIRS, **IN_ORDER_PAIRS}.items()]
+    rows, counts = sft.indicalign_rows([r for r, _ in made], [d for _, d in made])
+    assert {r.hf_row: [r.instruction, r.response] for r in rows} == {
+        row: list(hi) for row, (_, hi) in IN_ORDER_PAIRS.items()}
+    assert counts == Counter(kept=3, hindi_reversed=3, had_context=0, no_match=0)
+
+
+def test_reversed_rows_are_counted_in_the_report_and_reach_no_export(data_dir):
+    """R1-21: loaded stays every hub row (kept plus every drop reason), the report lists
+    hindi_reversed, and no training export holds a reversed pair."""
+    made = [dolly_t(row, en, hi) for row, (en, hi) in REVERSED_PAIRS.items()]
+    hub_rows = indicalign_rows() + [r for r, _ in made]
+    hub = SftHub({"aya_dataset": aya_dataset_rows(), "indicalign": hub_rows,
+                  "dolly": dolly_rows() + [d for _, d in made]})
+    pools = sft.load_pools(cfg=CFG, hub=hub, lid=FakeLID())
+    counts = pools["indicalign"][1]
+    assert (counts["loaded"], counts["hindi_reversed"], counts["kept"]) == (len(hub_rows), 3, 14)
+    assert counts["loaded"] == sum(v for k, v in counts.items() if k != "loaded")
+    report, _, _ = build(pools, rows=1000)
+    assert report["sources"]["indicalign"]["loaded"] == len(hub_rows)
+    assert report["sources"]["indicalign"]["dropped"]["hindi_reversed"] == 3
+    exported = {r["id"] for p in (data_dir / "sft").rglob("sft_messages.jsonl") for r in read_jsonl(p)}
+    assert exported and exported.isdisjoint(f"ind-{row:05d}" for row in REVERSED_PAIRS)
 
 
 def test_clean_pool_counts_every_drop_reason():
@@ -275,16 +328,42 @@ def test_near_duplicate_instruction_threshold_is_inclusive():
                                                          "aya-00001": "utl-ind-00007"}
 
 
-def test_near_duplicate_response_threshold_and_minimum_length():
+def test_near_duplicate_response_threshold_has_no_minimum_length():
     r = ALPHA
     assert jaccard(char_ngrams(r), char_ngrams(r[:36])) == 0.85
     h = held("मूल प्रश्न का पाठ यहाँ है", r)
     rows = [cand(0, "बिल्कुल अलग पहला प्रश्न", r[:36]), cand(1, "बिल्कुल अलग दूसरा प्रश्न", r[:35])]
     assert sft.near_duplicates(rows, [h], cfg=CFG) == {"aya-00000": "utl-ind-00007"}
-    # both responses need at least response_min_chars (20) characters
-    assert sft.near_duplicates([cand(2, "अलग प्रश्न", r[:19])], [held("मूल प्रश्न", r[:19])], cfg=CFG) == {}
-    assert sft.near_duplicates([cand(3, "अलग प्रश्न", r[:20])], [held("मूल प्रश्न", r[:20])], cfg=CFG) == {
+    # R1-20: decisions item 24 sets no length minimum, so short answers are compared too (a 20-character
+    # minimum once kept copies of short held-out answers in training); a text under 3 characters is
+    # its own single gram, and empty texts still never match
+    assert sft.near_duplicates([cand(2, "अलग प्रश्न", r[:19])], [held("मूल प्रश्न", r[:19])], cfg=CFG) == {
+        "aya-00002": "utl-ind-00007"}
+    assert sft.near_duplicates([cand(3, "अलग प्रश्न", r[:2])], [held("मूल प्रश्न", r[:2])], cfg=CFG) == {
         "aya-00003": "utl-ind-00007"}
+    assert sft.near_duplicates([cand(4, "अलग प्रश्न", r[1:3])], [held("मूल प्रश्न", r[:2])], cfg=CFG) == {}
+    assert sft.near_duplicates([cand(5, "अलग प्रश्न", "")], [held("मूल प्रश्न", "")], cfg=CFG) == {}
+
+
+def test_exclude_heldout_drops_copies_of_a_short_held_out_answer():
+    """R1-20: a reworded question (instruction Jaccard under 0.7) whose short answer equals or nearly
+    equals a held-out row's leaves both training pools. The real Aya pool kept two such copies of
+    final utility answers (11 and 13 characters) under a 20-character minimum item 24 does not have."""
+    question, reworded = "सौरमंडल का सबसे बड़ा ग्रह कौन सा है?", "सौरमंडल में सबसे बड़ा ग्रह कौन है?"
+    answer, other = "बृहस्पति ग्रह।", cand(4, "पृथ्वी पर सबसे लंबी नदी का नाम लिखिए।", "नील नदी।")
+    assert jaccard(char_ngrams(question), char_ngrams(reworded)) < 0.7 and len(dup_key(answer)) < 20
+    assert jaccard(char_ngrams(answer), char_ngrams(answer[:-1])) >= 0.85
+    assert jaccard(char_ngrams(question), char_ngrams(other.instruction)) < 0.7
+    assert jaccard(char_ngrams(answer), char_ngrams(other.response)) < 0.85
+    h = SftRow("aya", 40, 140, question, answer)
+    pools = {"aya": [h, cand(2, reworded, answer), cand(3, reworded, answer[:-1]), other],
+             "indicalign": [SftRow("indicalign", 9, 9, reworded, answer, {"doc_id": "doc-9"})]}
+    train = sft.exclude_heldout(pools, [sft.heldout_record(h)], cfg=CFG)
+    assert [r.row_id() for r in train["aya"][0]] == ["aya-00004"]
+    assert train["aya"][1] == [{"id": "aya-00002", "reason": "near_dup:utl-aya-00040"},
+                               {"id": "aya-00003", "reason": "near_dup:utl-aya-00040"},
+                               {"id": "aya-00040", "reason": "heldout"}]
+    assert train["indicalign"] == ([], [{"id": "ind-00009", "reason": "near_dup:utl-aya-00040"}])
 
 
 @pytest.mark.parametrize("thresholds", [(0.7, 0.85), (0.3, 0.5), (0.95, 0.6), (1.0, 1.0)])
@@ -454,10 +533,76 @@ def test_build_candidates_without_equal_size_each_variant_keeps_its_own_count(da
     assert any("no equal-size rule" in r.getMessage() for r in caplog.records)
 
 
+def test_build_candidates_removes_the_variants_the_plan_no_longer_makes(data_dir, pools, caplog):
+    """R1-02: the Nov 4 rebuild (decisions item 47: the stress raw sample moved from aya to indicalign)
+    left the Nov 3 aya/raw export in data/sft, valid-looking and synced. After build_candidates,
+    data/sft holds exactly the variants report.json lists; a refused build removes nothing."""
+    heldout = sft.build_utility_heldout(pools, cfg=CFG)
+    train = sft.exclude_heldout(pools, heldout, cfg=CFG)
+    root, work = data_dir / "sft", data_dir / "interim" / "sft"
+
+    def exports():
+        return {p.parent.relative_to(root).as_posix() for p in root.rglob("sft_messages.jsonl")}
+
+    sft.build_candidates(train, cfg=CFG, train_cfg=training_cfg(5), curate=FakeCurate())      # the Nov 3 plan
+    assert exports() == set(VARIANTS)
+    nov4 = training_cfg(5, equal_size=False, stress="indicalign")
+    before = snapshot(root)
+    with pytest.raises(ValueError, match="no SFT rows left"):
+        sft.build_candidates({**train, "indicalign": ([], [])}, cfg=CFG, train_cfg=nov4, curate=FakeCurate())
+    assert snapshot(root) == before
+    with caplog.at_level(logging.WARNING, logger="lift.data.sft"):
+        report = sft.build_candidates(train, cfg=CFG, train_cfg=nov4, curate=FakeCurate())
+    assert exports() == set(report["variants"]) == {"aya/dedup", "indicalign/dedup", "indicalign/raw"}
+    assert not (root / "aya" / "raw").exists() and not (work / "aya" / "raw").exists()
+    assert any(r.getMessage().startswith("sft aya/raw: removed") for r in caplog.records)
+    only = {**nov4, "candidates": ["indicalign"]}                  # a candidate dropped altogether
+    report = sft.build_candidates(train, cfg=CFG, train_cfg=only, curate=FakeCurate())
+    assert exports() == set(report["variants"]) == {"indicalign/dedup", "indicalign/raw"}
+    assert sorted(p.name for p in root.iterdir()) == ["indicalign", "report.json"]
+    assert sorted(p.name for p in work.iterdir()) == ["indicalign"]
+
+
 def test_the_committed_training_config_drops_the_equal_size_rule():
     cfg = config.load("train")
     assert cfg["equal_size"] is False and cfg["stress"]["candidate"] == "indicalign"
     assert cfg["rows"] == 3000
+
+
+@pytest.mark.parametrize(("section", "value", "key"), [("standard", False, "standard.dedup is false"),
+                                                       ("stress", True, "stress.dedup is true"),
+                                                       ("stress", None, "stress.dedup is missing")],
+                         ids=["standard-raw", "stress-dedup", "stress-inherits"])
+def test_build_candidates_refuses_a_dedup_setting_its_fixed_plan_does_not_make(data_dir, pools, section,
+                                                                              value, key):
+    """R2-18: the plan is fixed (every candidate deduplicated, the stress candidate raw, as README
+    pre-registers the recipes), so a train.yaml whose standard.dedup is not true or whose stress.dedup is
+    not false (missing: it would inherit standard's true) is refused, naming the key, before anything is
+    written; it never builds the fixed plan against the config."""
+    heldout = sft.build_utility_heldout(pools, cfg=CFG)
+    train = sft.exclude_heldout(pools, heldout, cfg=CFG)
+    train_cfg = training_cfg(5, equal_size=False, stress="indicalign")
+    if value is None:
+        del train_cfg[section]["dedup"]
+    else:
+        train_cfg[section]["dedup"] = value
+    curate = FakeCurate()
+    with pytest.raises(ValueError, match=re.escape(f"configs/train.yaml: {key}, not ")):
+        sft.build_candidates(train, cfg=CFG, train_cfg=train_cfg, curate=curate)
+    assert curate.calls == [] and not data_dir.exists()
+
+
+def test_build_candidates_needs_equal_size_in_the_train_config(data_dir, pools):
+    """R2-18: equal_size is read with no fallback: a train config without it is an error before anything
+    is written, never the Nov 3 equal-size rule decisions item 47 replaced."""
+    heldout = sft.build_utility_heldout(pools, cfg=CFG)
+    train = sft.exclude_heldout(pools, heldout, cfg=CFG)
+    train_cfg = training_cfg(5, equal_size=False, stress="indicalign")
+    del train_cfg["equal_size"]
+    curate = FakeCurate()
+    with pytest.raises(KeyError, match="equal_size"):
+        sft.build_candidates(train, cfg=CFG, train_cfg=train_cfg, curate=curate)
+    assert curate.calls == [] and not data_dir.exists()
 
 
 def test_build_candidates_files_and_reports(data_dir, pools):
@@ -493,7 +638,8 @@ def test_build_candidates_files_and_reports(data_dir, pools):
         assert sel["counts"] == {"train_pool": len(train[name][0]), "curated": len(curated), "sampled": 5}
         assert sel["curatorkit"]["stage_counts"]["FakeDedup"]["input_count"] == len(train[name][0])
         assert sel["sha256"] == sha256_file(out / "sft_messages.jsonl")
-        assert report["variants"][key] == {k: v for k, v in sel.items() if k != "ids"}
+        assert sel["rules"] == report["rules"] == sft.rules_stamp(cfg=CFG, train_cfg=training_cfg(5))
+        assert report["variants"][key] == {k: v for k, v in sel.items() if k not in ("ids", "rules")}
         for f in ("manifest.json", "rejected.jsonl", "lexsi_provenance.json", "curatorkit_summary.json"):
             assert b"\r" not in (out / "curatorkit" / f).read_bytes()      # FakeCurate wrote CRLF
         assert json.loads((out / "curatorkit" / "manifest.json").read_text(encoding="utf-8"))["placeholder"]
@@ -564,6 +710,103 @@ def test_build_candidate_follows_a_frozen_utility_split(data_dir, pools):
     splits.save_split("utility", frozen, seed=SEED, sizes=sizes, overwrite=True)
     out = sft.build_candidate("aya", cfg=CFG, train_cfg=training_cfg(), curate=FakeCurate(), pools=pools)
     assert {"utl-" + r["id"] for r in read_jsonl(out / "sft_messages.jsonl")}.isdisjoint(frozen)
+
+
+# ---------------------------------------------------------------- the rules stamp and the trainer's check
+
+REBUILD = "rebuild with `lift data build --only sft`, then `lift sync push`"
+
+
+def problems(train_cfg=None):
+    """sft.export_problems under the mechanics configs (``build``'s train config by default)."""
+    return sft.export_problems(cfg=CFG, train_cfg=train_cfg or training_cfg(5))
+
+
+def test_a_build_records_its_rules_and_passes_the_trainers_check(data_dir, pools):
+    """R2-01: report.json and every selection.json carry the build's rules stamp (RULES_VERSION and the
+    settings that shape the rows); exports built under the current code and configs have no problem."""
+    report, _, _ = build(pools)
+    stamp = report["rules"]
+    assert stamp == sft.rules_stamp(cfg=CFG, train_cfg=training_cfg(5))
+    assert stamp["version"] == sft.RULES_VERSION == 2                # R1-20 and R1-21
+    assert stamp["train"] == {"rows": 5, "equal_size": True, "candidates": ["aya", "indicalign"],
+                              "stress_candidate": "aya"}
+    assert stamp["sources_sft"] == CFG["sources"]["sft"] and stamp["langid"] == CFG["langid"]
+    assert (stamp["max_repetition_ratio"], stamp["split_seed"]) == (0.5, SEED)
+    assert stamp["accept_labels_hi"] == CFG["languages"]["accept_labels"]["hi"]
+    assert stamp["utility_split_sha256"] is None                     # no frozen utility split in tmp
+    assert problems() == []
+
+
+def test_the_trainers_check_refuses_exports_made_under_other_rules(data_dir, pools, monkeypatch):
+    """R2-01: the Nov 4 exports carry no stamp (RULES_VERSION 1: two copies of final utility answers and
+    three reversed Dolly_T pairs kept), so the trainer's check refuses them; so it does exports built
+    under another RULES_VERSION, train config or frozen utility split, naming what differs."""
+    build(pools)
+    root = data_dir / "sft"
+    fresh = snapshot(root)
+    for path in [root / "report.json", *root.rglob("selection.json")]:      # as the Nov 4 build wrote them
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        del doc["rules"]
+        path.write_text(json.dumps(doc), encoding="utf-8")
+    assert problems() == [
+        "data/sft/report.json carries no rules stamp: it was built before lift.data.sft recorded the rules a "
+        "build applies (the Nov 4 build applied RULES_VERSION 1: answers under 20 characters were never "
+        "compared with the held-out set, and reversed Dolly_T pairs were kept), so its exports may hold rows "
+        f"the current rules drop: {REBUILD}"]
+    for name, data in fresh.items():
+        (root / name).write_bytes(data)
+    with monkeypatch.context() as m:
+        m.setattr(sft, "RULES_VERSION", 3)
+        assert problems(training_cfg(6)) == [
+            "data/sft/report.json was built under other rules than the current code and configs give "
+            f"(train.rows 5, now 6; version 2, now 3): {REBUILD}"]
+    frozen = splits.assign_splits([r.pid for r in sft.build_utility_heldout(pools, cfg=CFG)],
+                                  CFG["sizes"]["utility"], SEED)
+    splits.save_split("utility", frozen, seed=SEED, sizes=CFG["sizes"]["utility"])
+    sha = sha256_file(splits.SPLITS_DIR / "utility.json")
+    assert problems() == ["data/sft/report.json was built under other rules than the current code and "
+                          f'configs give (utility_split_sha256 null, now "{sha[:36]}...): {REBUILD}']
+    unplanned = training_cfg(5)
+    unplanned["stress"]["dedup"] = True                               # a plan build_candidates refuses
+    assert problems(unplanned)[0].startswith("the configs give no rules stamp or plan to check the exports "
+                                             "against (ValueError: configs/train.yaml: stress.dedup is true")
+
+
+def test_the_trainers_check_lists_every_folder_and_file_the_report_does_not_vouch_for(data_dir, pools):
+    """R2-01 (and R1-02): a variant folder report.json does not list (the Nov 3 aya/raw a pull brings back),
+    an export edited or synced in part, a folder from another build, a missing file or report."""
+    build(pools)
+    root = data_dir / "sft"
+    shutil.copytree(root / "aya" / "raw", root / "indicalign" / "raw")
+    assert problems() == [
+        "data/sft/indicalign/raw is on disk, but data/sft/report.json does not list it (a variant the plan "
+        "no longer makes, such as the Nov 3 aya/raw, or a folder from another build): delete "
+        "data/sft/indicalign/raw from the runs repo by hand (lift sync deletes nothing), and here (a "
+        "rebuild removes it too)"]
+    shutil.rmtree(root / "indicalign" / "raw")
+    export, selection = (root / "aya" / "dedup" / name for name in ("sft_messages.jsonl", "selection.json"))
+    recorded = json.loads(selection.read_text(encoding="utf-8"))
+    export.write_bytes(export.read_bytes() + b"\n")
+    [problem] = problems()
+    assert problem == (f"data/sft/aya/dedup/sft_messages.jsonl does not match its selection.json (sha256 "
+                       f"{sha256_file(export)[:12]}, recorded {recorded['sha256'][:12]}): edited by hand, or "
+                       f"synced in part: {REBUILD}")
+    selection.write_text(json.dumps({**recorded, "sha256": sha256_file(export)}), encoding="utf-8")
+    assert problems() == ["data/sft/aya/dedup/selection.json is not the one data/sft/report.json lists "
+                          "(another sha256 or rules stamp: a build cut short, or a folder from another "
+                          f"build): {REBUILD}"]
+    export.unlink()
+    assert problems() == ["data/sft/aya/dedup: data/sft/report.json lists it, but its sft_messages.jsonl is "
+                          "missing (synced in part, or a build cut short): `lift sync pull` again, or "
+                          f"{REBUILD}"]
+    report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+    del report["variants"]["aya/dedup"]
+    (root / "report.json").write_text(json.dumps(report), encoding="utf-8")
+    assert problems()[0] == (f"data/sft/report.json does not list aya/dedup, which train.yaml's plan makes: "
+                             f"{REBUILD}")
+    (root / "report.json").unlink()
+    assert problems() == [f"data/sft/report.json is missing: {REBUILD}"]
 
 
 # ---------------------------------------------------------------- the real CuratorKIT
