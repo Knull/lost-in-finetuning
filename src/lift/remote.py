@@ -105,7 +105,7 @@ SYNC_REFUSED = 2  # lift sync: a problem no retry can fix (the token, the runs r
 SETUP_STEPS = ("spec", "secrets", "python", "fetch", "install", "sync-check")  # job.py's, before any line
 # The commands that refuse a revision that is not a commit sha (lift.commands.run.require_pinned), and
 # the config entry of each judge role; pinned_entries says which entries each line needs.
-PINNED_COMMANDS = ("generate", "judge", "run-dev")
+PINNED_COMMANDS = ("generate", "judge", "run-dev", "train", "utility", "belebele", "heldout-loss")
 JUDGE_ENTRIES = {"primary": "judges.safety_primary", "second": "judges.safety_second"}
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 _NO_REVISION = object()  # config.get's default: an entry without a revision key has nothing to pin
@@ -115,10 +115,10 @@ EXIT_CODES = """\
 exit codes:
   0    the job succeeded, its outputs are pushed and the VM is released (a push that hit
        conflicts counts: the VM's copies are under conflicts/ in the runs repo, and it says so)
-  1    a job line failed, or a generate, judge or run-dev line exited 3 (done, but some cells were
-       skipped: the job ran its other lines, and its log lists each cell with its remedy); or the
-       job's status is unknown; or the runs repo check met a transient error (nothing was created:
-       try again)
+  1    a job line failed, or a generate, judge, run-dev, utility, belebele or heldout-loss line
+       exited 3 (done, but some cells were skipped or left for a rerun: the job ran its other lines,
+       and its log lists each cell with its remedy); or the job's status is unknown; or the runs
+       repo check met a transient error (nothing was created: try again)
   2    lift remote refused to start: bad options, no login, a missing secret, a runs repo that is
        missing, not private or not writable with this token, or a job that another lift remote on
        this machine follows already (nothing was created or changed)
@@ -875,15 +875,16 @@ def rescuable(status: dict[str, Any]) -> bool:
 
 
 def partial_lines(status: dict[str, Any]) -> list[int]:
-    """The lines (0-based, as job.py counts them) that exited 3: done, but some cells were skipped."""
+    """The lines (0-based, as job.py counts them) that exited 3: done, but some cells were skipped or left
+    for a rerun (job.py's PARTIAL_COMMANDS)."""
     lines = status.get("partial_lines")
     return [i for i in lines if isinstance(i, int)] if isinstance(lines, list) else []
 
 
 def lines_ok(status: dict[str, Any]) -> bool:
-    """Every line ran and succeeded, none of them with cells skipped (exit 3). job.py turns a failed
-    push into the job's rc, so a status whose only failure is the push counts too: the push is judged
-    on its own."""
+    """Every line ran and succeeded, none of them with cells skipped or left for a rerun (exit 3). job.py
+    turns a failed push into the job's rc, so a status whose only failure is the push counts too: the
+    push is judged on its own."""
     if status.get("failed_step") is not None or status.get("failed_line") is not None:
         return False
     if status.get("stopped") or status.get("sync_refused") or partial_lines(status):
@@ -901,8 +902,8 @@ def exit_code(status: dict[str, Any] | None, *, outcome: str = "done", released:
               rescue: dict[str, Any] | None = None) -> int:
     """lift remote's exit code (EXIT_CODES): 4 while the VM may run, then 5 when the outputs could not
     be pushed (``rescue`` is the push retry's status), 130 after Ctrl+C, 3 when the job could not be
-    set up or lift sync refused it (exit 2), 1 when a line failed or skipped cells (exit 3) or the
-    status is unknown, else 0."""
+    set up or lift sync refused it (exit 2), 1 when a line failed or exited 3 (cells skipped or left for
+    a rerun) or the status is unknown, else 0."""
     if released is not True:
         return EXIT_NOT_RELEASED
     if status is not None and push_failed(status) and not pushed(rescue):
@@ -935,7 +936,8 @@ def describe(status: dict[str, Any]) -> str:
     partial = partial_lines(status)
     if partial:
         parts.append(f"line{'s' if len(partial) > 1 else ''} {', '.join(str(i + 1) for i in partial)} "
-                     "exited 3: done, but some cells were skipped (the log lists each with its remedy)")
+                     "exited 3: done, but some cells were skipped or left for a rerun (the log lists each "
+                     "with its remedy)")
     if status.get("sync_refused"):
         parts.append(f"lift sync exited 2 at {status['sync_refused']}: a problem no retry can fix (the log "
                      "says which)")
@@ -1595,17 +1597,20 @@ def unpinned_warning(lines: list[str]) -> str | None:
 
 def pinned_entries(line: str) -> list[str]:
     """The config entries whose revision a job line's command refuses unless it is a commit sha, as its
-    require_pinned call checks (lift.commands.run): models.global for generate and run-dev, and the
-    entry of the judge the line runs (lift judge's --judge, primary by default; run-dev judges with the
-    primary) for judge and run-dev, only when that judge is local (Qwen3Guard): a frontier judge has no
-    revision. A line that does not parse needs none: lift refuses it before any pin check."""
+    require_pinned call checks (lift.commands.run): models.global for each command that loads Global
+    (generate, run-dev, train, belebele, heldout-loss, and utility unless --judge-only, which only judges
+    generations made before), and the entry of the judge the line runs (lift judge's --judge, primary by
+    default; run-dev judges with the primary) for judge and run-dev, only when that judge is local
+    (Qwen3Guard): a frontier judge has no revision. A line that does not parse needs none: lift refuses it
+    before any pin check."""
     from lift.judge.pipeline import judge_dir
 
     args = parse_line(line)
     if args is None:
         return []
-    entries = [] if args.command == "judge" else ["models.global"]
-    if args.command != "generate":
+    judges_generations = args.command == "utility" and getattr(args, "judge_only", False)
+    entries = [] if args.command == "judge" or judges_generations else ["models.global"]
+    if args.command in ("judge", "run-dev"):
         role = args.judge if args.command == "judge" else "primary"
         if judge_dir(role) == "qwen3guard":
             entries.append(JUDGE_ENTRIES[role])
@@ -1613,20 +1618,19 @@ def pinned_entries(line: str) -> list[str]:
 
 
 def parse_line(line: str) -> argparse.Namespace | None:
-    """A generate, judge or run-dev line as lift.commands.run's own parser reads it (defaults, ``=`` and
-    abbreviations as on the VM), or None for any other line or one that does not parse. argparse's own
+    """A line of one of PINNED_COMMANDS as lift's own parser reads it (lift.cli.build_parser, with every
+    command module's commands: defaults, ``=`` and abbreviations as on the VM), or None for any other line
+    and for one that does not parse here (a command this checkout does not have, too). argparse's own
     output (usage, help) is swallowed."""
     words = shlex.split(line)[1:]
     if not words or words[0] not in PINNED_COMMANDS:
         return None
-    from lift.commands import run
+    from lift.cli import build_parser
 
-    parser = argparse.ArgumentParser(prog="lift")
-    run.register(parser.add_subparsers(dest="command"))
     sink = io.StringIO()
     try:
         with redirect_stdout(sink), redirect_stderr(sink):
-            return parser.parse_args(words)
+            return build_parser().parse_args(words)
     except SystemExit:
         return None
 

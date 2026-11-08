@@ -193,6 +193,46 @@ def encode_chat(tokenizer: Any, user_text: str) -> list[int]:
     return ids
 
 
+def encode_chat_turn(tokenizer: Any, user_text: str, assistant_text: str) -> tuple[list[int], int]:
+    """Token ids of one user turn followed by the assistant's answer, as the chat template renders the
+    pair, and how many of them are the prompt.
+
+    ``ids[:n_prompt]`` is exactly ``encode_chat(tokenizer, user_text)``, what the model sees at generation
+    time (BOS, the default preamble, the user turn, the generation prompt). ``ids[n_prompt:]`` is the
+    answer as the template writes it, with the tokens that close the turn (``<|END_RESPONSE|>
+    <|END_OF_TURN_TOKEN|>`` for Tiny Aya), the tokens the model emits before it stops. Training
+    supervises exactly ``ids[n_prompt:]`` (lift.train.lora) and the held-out loss scores exactly them
+    (lift.models.loglik), so the two can never disagree on what "assistant tokens" are.
+
+    The ids are the template's own tokenization of the whole conversation, so the answer is tokenized in
+    context. Raises if either text holds a control-token string, if the template does not render the
+    answer right after the generation prompt, if the conversation's ids do not start with exactly the
+    prompt's ids (a merge across the boundary would make the supervised tokens differ from what the
+    model sees at generation time), or if the answer renders to no tokens."""
+    found = sorted(t for t in control_tokens(tokenizer) if t in assistant_text)
+    if found:
+        raise ValueError(f"the answer text contains control tokens {found}; the chat template would treat "
+                         "them as turn markers")
+    prompt_ids = encode_chat(tokenizer, user_text)
+    prompt_text = chat_text(tokenizer, user_text)
+    full = tokenizer.apply_chat_template(
+        [{"role": "user", "content": user_text}, {"role": "assistant", "content": assistant_text}],
+        tokenize=False, add_generation_prompt=False)
+    if not isinstance(full, str):
+        raise TypeError(f"apply_chat_template(tokenize=False) returned {type(full).__name__}, not str")
+    if not full.startswith(prompt_text):
+        raise ValueError("the chat template does not render the assistant's answer right after the "
+                         "generation prompt, so the answer tokens cannot be told from the prompt's")
+    full_ids = list(tokenizer(full, add_special_tokens=False)["input_ids"])
+    if full_ids[:len(prompt_ids)] != prompt_ids:
+        raise ValueError("the conversation's token ids do not start with the prompt's: the tokenizer merges "
+                         "across the end of the generation prompt, so the supervised tokens would not follow "
+                         "what the model sees at generation time")
+    if len(full_ids) == len(prompt_ids):
+        raise ValueError("the assistant's answer renders to no tokens")
+    return full_ids, len(prompt_ids)
+
+
 def template_hash(tokenizer: Any) -> str:
     """sha256 over the chat template source and the rendering of a fixed probe message, so a
     changed preamble or template changes every cache key."""

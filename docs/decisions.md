@@ -142,6 +142,154 @@ branch.
     column sorted on its own stops the import while the ids keep the sheet's order, and is a
     warning when they are in item_id order.
 
+## Nov 4-5, 2026 (night): P03 training, utility, Belebele and gate details, before any adapter was trained
+
+Pinned while writing and reviewing P03 (branch p03-train). No adapter, utility verdict or Belebele
+score existed yet; Gate 0 had passed on the A100. Numbered from 50 (item 49, the revision pins, came
+first on main).
+
+50. **How an adapter trains** (`lift.train.lora`, `lift train`).
+    - Assistant tokens are `lift.models.load.encode_chat_turn`'s answer part: what the template writes
+      after the generation prompt, closing tokens included (`<|END_RESPONSE|><|END_OF_TURN_TOKEN|>` for
+      Tiny Aya), so the model learns to stop. The held-out loss scores exactly these tokens.
+    - TRL 1.14.2 gets pre-tokenized rows (input_ids, labels with -100) and
+      `dataset_kwargs={"skip_prepare_dataset": True}`: left to prepare the data, it truncates and then
+      silently drops rows left with no supervised token. `loss_type` is pinned to "nll" (1.14.2's
+      default, "chunked_nll", patches the LM head's forward). trl 1.14.2 and datasets 5.1.0 are pinned
+      in constraints.txt.
+    - Rows are truncated to max_seq_len (1024), keeping the start; truncated rows are counted. A row
+      left with no supervised token (the preamble and a long user turn filling the window) stops the run
+      before the model loads, listing the rows. `--drop-unfit` drops exactly those rows and records
+      them; using it, or raising max_seq_len instead, needs its own dated entry here. `lift train
+      --check` loads only the tokenizer and lists them before any GPU run. From the data: ind-05992 (a
+      631-word user turn) is in both IndicAlign files, and the raw file holds it three times.
+    - Seeds: `set_seed(seed)` for python, numpy and torch, and the data order from
+      `data_seed = 1000 x seed`. accelerate seeds epoch e's order with data_seed + e, so data_seed = seed
+      would replay seed 2's first epoch as seed 1's second.
+    - One process on one GPU. With two GPUs visible (a Kaggle T4 x2) the Trainer would wrap the model in
+      DataParallel and double the effective batch to 32 while recording 16 (found in review). The GPU
+      count is clamped to one before the trainer is built, the per-step rows are checked against the
+      recipe's 16 before the first step, and lift_train.json records the batch actually used.
+    - Warm-up 0.03 is `warmup_steps=0.03` (transformers 5.22.1 has no warmup_ratio). The effective
+      batch is per-device batch x accumulation (A100 4 x 4, T4 1 x 16); the loss is normalised over the
+      accumulated batch's tokens, so the split does not change the update.
+    - Precision: bf16 weights and autocast on a GPU with native bf16, fp16 on a T4, fp32 only on the
+      CPU (tests); the LoRA weights stay fp32 or the run stops. A seed is refused when another seed's
+      adapter of the same candidate and recipe was trained in another precision or GPU class.
+    - After saving: the adapter hash, merge parity on 20 dev prompts drawn by Gate 0's parity rule
+      (`mixed_sample(20, split="dev", seed=20261107)`) from the dev prompts as they are now (Gate 0's own
+      sample while those pools are unchanged; the pids drawn are recorded), and a push of
+      outputs/adapters/{name} at once (a push error never fails training; the sync preflight runs
+      before GPU time). Every token must match in fp32, or the adapter is not registered (rule 9). On a
+      T4 only, where an fp32 copy may not fit, `--parity-dtype fp16` records the share that match and
+      registers the adapter with a warning. An fp32 parity recorded later for the same hash decides: if
+      it fails, the adapter is un-registered (its entry removed by lift train and, on the laptop, by
+      `lift register-adapter`), and `build_variant` and Gates 1 and 2 refuse any adapter whose
+      registration.json records a failed fp32 parity for its hash.
+    - Registration: the GPU job writes the configs/variants.yaml entry, which is lost with the VM
+      (configs/ is not synced), and outputs/adapters/{name}/registration.json, which is pushed. On the
+      laptop, `lift sync pull` then `lift register-adapter NAME` writes the same entry from the pulled
+      files (the hash recomputed and checked, the parity read), and the entry is committed before any
+      job evaluates the adapter. `location` names the path in the runs repo, never its id.
+    - The held-out guard compares user turns NFC-normalised and stripped (the SFT rows are NFC after
+      CuratorKIT, the utility texts are not).
+    - The stress adapter is adapter-indicalign-stress-s1 (item 47); prompts/P03_train.md's
+      adapter-aya-stress-s1 predates item 47.
+51. **Utility verdicts** (`lift utility`).
+    - Each pair is judged in both orders: candidate as A (order_ab) and as B (order_ba). A judge
+      failure in one order (a refusal, a reply unparseable after the reminder, an item-level API error)
+      is recorded (error_ab / error_ba) and scored as a tie in that order, so the pair stays in the
+      denominator (rule 3); every win rate is reported with the number of failed orders and its bounds
+      with failures counted as losses and as wins.
+    - UtilityVerdict gained optional fields (split, lang, both generation keys and output hashes, the
+      reasons and errors), so a verdict names the exact answers it judged. Verdicts live in
+      outputs/utility/{judge}/{variant}/utility_hi_{split}.jsonl and the AuditKIT record in
+      outputs/metrics/auditkit_utility/: lift.sync pairs anything under outputs/judgements/ or
+      outputs/metrics/auditkit/{judge}/{variant}/ with safety judgements and would hold these back.
+    - Answers are never reused on their pid coverage alone (found in review: a retrained adapter's
+      old answers would have been judged as the new one's). Without `--judge-only`, both sides go
+      through `lift.models.generate.generate`, which refuses a file made under another configuration;
+      the check it passed is recorded in outputs/utility/checked/. `--judge-only` (the laptop, no model)
+      refuses a side whose check record is missing or names another file, or whose registry entry
+      (intervention digest, pinned adapter hash), harness version or pinned models.global revision has
+      moved since. Metrics are version 2 and name the answer files, verdict file, adapter hash and
+      intervention they describe.
+    - A refused pair sets aside and empties what was derived from it (verdicts, metrics, AuditKIT
+      records), so no number outlives the answers it describes, but keeps the answer-check records:
+      check_answers re-validates them on every read, and a refusal this checkout causes (a registry
+      behind the GPU job's ref) must not destroy what only a GPU line can remake. `lift restart` of a
+      utility cell (of stock's: every candidate's) also retires the check records. A side the GPU
+      line's generate refuses as stale has its check withdrawn and the pair's derived files set aside,
+      so the job's push carries the refusal to the laptop. Sync never deletes, so the files are
+      emptied, not removed.
+    - Hindi fidelity is the share of outputs whose top GlotLID label is in accept_labels.hi (the
+      is_lang share is reported beside it), pooled and by source (Aya references are human-written,
+      IndicAlign's machine-translated).
+    - The utility judge keeps its own call cache (outputs/judge_cache/frontier/utility__{model}.jsonl).
+      The Qwen3-8B fallback runs only with `--judge fallback`; its id carries its revision sha, 4-bit and
+      compute dtype. Another precision than generation.dtype needs Gate 0's licence and names its files
+      with -{dtype}.
+52. **Message Batches.** Bulk frontier judging (the 10% second-judge sample and every utility pair)
+    goes through the Message Batches API as a cache pre-fill: one batch for a whole `lift judge` or
+    `lift utility` run (lift judge plans every selected cell first), then the existing per-item code
+    reads the cached replies, so batch and synchronous judgements are the same and the judge id does
+    not depend on the path.
+    - The rubric is sent as a cached system block, but both rubric system messages are under Sonnet
+      5.5's 512-token minimum, so no caching is expected (usage records it); the saving in item 16 is
+      the batch's 50% alone.
+    - Spend: the whole batch's worst case (input estimate, the system block as a 1-hour cache write,
+      output at max_tokens, halved for batch prices) is reserved before it is created. Results are
+      costed from usage at batch prices.
+    - A create is never retried after a failure that may have gone through (the API takes no
+      idempotency key): the run stops and a rerun sends at most that one chunk again. A batch in which
+      no request succeeded stops a pre-fill run instead of being resent one request at a time; a
+      synchronous run treats one a person canceled before any request finished as collected and sends
+      its requests itself.
+    - Resume: a state file beside the call cache (every row with a unique "key", so sync merges it)
+      lets a rerun on any machine collect a batch instead of paying for it twice. A synchronous run
+      collects an earlier batch holding its requests, or stops while it still runs. A batch still
+      running exits 3 in `lift utility` and `lift judge`: rerun the same line to collect it.
+    - A 404 for a batch another process submitted abandons it only past the API's 29-day results
+      window; younger, it means another workspace or key, and the run stops. `LIFT_ABANDON_BATCHES`
+      (batch ids) marks a batch a person knows was deleted.
+53. **Belebele and held-out loss** (`lift belebele`, `lift heldout-loss`).
+    - Belebele: exactly one BOS, then the frozen P/Q/A-D/Answer: text, no chat template. It is
+      lm-evaluation-harness's Belebele template (`_default_template_yaml`, checked Nov 5): the question
+      is stripped (`{{question.strip()}}`) and the passage and options go in as published. Item 10 said
+      "lm-eval style", and about 115 items per language have trailing spaces, so this pins which. A
+      letter's score is the log-probability of its tokens after "Answer:" (the next-token
+      log-probability when " A" is one token), with the prompt/letter boundary checked for every item;
+      ties go to the first letter and are counted.
+    - Held-out loss: the utility dev split unless --split final (rule 1), per-token NLL of the
+      reference answer's assistant tokens, never truncated, pooled and by source; against stock only
+      when stock's scores share the configuration and token counts.
+    - Score files are keyed through `lift.cachekey.generation_key`, hold one configuration and one
+      stack, and are per precision: another precision than generation.dtype is named -{dtype}, as the
+      metrics are, so a T4 run never takes a Colab cell's file and each precision pairs with its own
+      stock scores (found in review: the first precision to score a cell would otherwise have locked
+      the other out). `--restart` sets aside and empties only a stale cell; a hand-placed file holding
+      another precision's scores is refused (listed, exit 3), never started over. A language whose
+      scores no longer qualify leaves only its own numbers out.
+54. **Gates 1 and 2** (`lift gate`).
+    - Gate 1's gain check compares each seed-1 standard adapter's dev win rate (the point estimate, as
+      the README states it, exactly as k/4n; failed orders as ties) with 0.55 and prints its interval and
+      failure bounds. It counts only utility metrics that still describe the current answers, verdicts,
+      adapter and check records; others read as missing with the rerun line. The judge check reads P04's
+      outputs/metrics/validation/gate1.json: missing, or scored for another primary judge than the
+      config names now, is pending. Each candidate's win rate is listed; nothing is picked.
+    - Gate 2 reads the pair through `pipeline.paired_labels` (primary judge). n is every dev prompt the
+      cell holds; an n other than the README's 172 (a spot-check exclusion) leaves that adapter
+      incomplete for a person to decide with an entry here. "At least 8 points" is checked in exact
+      arithmetic. Without `--candidate` it prints the branch for each candidate (the candidate is chosen
+      at Gate 1), and a verdict only when both agree; the stress adapter's drift is a reported fact.
+    - `--dtype` gates another precision's cells (paired_labels enforces Gate 0's licence); its reports
+      are gate{1,2}-{dtype}. `lift gate` exits 0 whatever the verdict.
+55. **Runners.** `lift utility`, `lift belebele` and `lift heldout-loss` join generate, judge and
+    run-dev as commands whose exit 3 means "done, cells skipped or left for a rerun, each listed with
+    its remedy", in colab/job.py, the Kaggle runner and both READMEs; `lift train` and `lift gate` never
+    exit 3. `lift remote`'s advisory pin warning covers train, utility (not `--judge-only`), belebele and
+    heldout-loss.
+
 ## Nov 4, 2026 (night): model and judge revisions pinned after Gate 0
 
 49. **The three revisions are pinned to the commit shas Gate 0 resolved.** `lift generate`,

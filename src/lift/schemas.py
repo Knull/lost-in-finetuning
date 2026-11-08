@@ -118,6 +118,20 @@ class UtilityVerdict(_Record):
     order_ab: Literal["A", "B", "TIE"]   # candidate shown as A
     order_ba: Literal["A", "B", "TIE"]   # candidate shown as B
     score: float                     # candidate's score averaged over both orders: 1, 0.75, 0.5, 0.25, 0
+    # Added in P03 (all optional, so P04's readers and older files still validate). A judge failure in one
+    # order (a refusal, a reply unparseable after the reminder, an item-level API error) is recorded in
+    # error_ab / error_ba and scored as a tie in that order (order_* "TIE"), so the pair stays in the
+    # denominator; lift.utility reports how many orders failed beside every win rate.
+    split: Split | None = None
+    lang: Lang = "hi"
+    candidate_key: str | None = None     # GenerationRecord.key of the candidate's answer judged
+    stock_key: str | None = None         # GenerationRecord.key of stock's answer judged
+    candidate_sha: str | None = None     # sha256 of the candidate's answer text
+    stock_sha: str | None = None         # sha256 of stock's answer text
+    reason_ab: str | None = None
+    reason_ba: str | None = None
+    error_ab: str | None = None
+    error_ba: str | None = None
 
 
 class HumanLabel(_Record):

@@ -10,10 +10,15 @@ answer and the candidate adapter's answer to the same instruction.
 - The sheet shows the id, the instruction, the two responses and empty preference and note
   columns, never which model wrote which. The reader puts A, B or tie in ``preference``.
 - Pairs whose stock or candidate output was remade after the sheet was made are left out of the
-  score and counted, since verdicts are joined by pid and would be about answers the reader never
-  saw. A generations or prompt file that is missing here proves nothing, but a prompt file that is
-  here and refused (lift.validation.outputs.PromptFileError: a stale or foreign copy) stops the
-  score, whether or not the generations files are here. A sheet drawn in another precision than
+  score and counted (``n_superseded``): the reader's preference is about answers that are gone. A
+  verdict is found by pid, then joined only if it is about the answers the reader saw (R1-43): it
+  names the item's two generation keys (UtilityVerdict.candidate_key and stock_key, which lift utility
+  records) and, for each answer still in its file under that key, that answer's sha256
+  (candidate_sha, stock_sha). One about other answers (judged before they were made again, the same
+  key with other text) or naming no keys (written before they were recorded) is left out and counted
+  (``n_other_pair``). A generations or prompt file that is missing here proves nothing, but a prompt
+  file that is here and refused (lift.validation.outputs.PromptFileError: a stale or foreign copy)
+  stops the score, whether or not the generations files are here. A sheet drawn in another precision than
   ``generation.dtype`` (``--dtype``) is drawn and scored only while Gate 0's licence covers both
   cells (lift.validation.outputs.check_licence).
 - The import records its warnings with the preferences (labels/utility_hi.meta.json), and the
@@ -29,10 +34,9 @@ answer and the candidate adapter's answer to the same instruction.
 
 Verdicts are found by scanning outputs/ for UtilityVerdict records of the candidate (P03 decides
 where they live), except generations and what lift sync never syncs (outputs/.aside,
-outputs/.sync-backup, caches: superseded or local-only copies), or read from the files given. A
-UtilityVerdict carries no generation key, so the sha256 of every verdict file read is recorded with
-the score. HumanPreference is defined here because schemas.HumanLabel only takes the four safety
-classes.
+outputs/.sync-backup, caches: superseded or local-only copies), or read from the files given. The
+sha256 of every verdict file read is recorded with the score. HumanPreference is defined here because
+schemas.HumanLabel only takes the four safety classes.
 """
 
 from __future__ import annotations
@@ -365,8 +369,8 @@ def score_utility(*, verdict_files: list[Path] | None = None, judge_id: str | No
     if unknown:
         raise ValidateError(f"{path} has ids that are not on the utility sheet, e.g. {unknown[:5]}")
     labelled = [(items[i], p) for i, p in sorted(prefs.items())]
-    # A verdict is joined by pid alone, so a pair whose outputs were remade after the sheet was made
-    # would be scored against answers the reader never saw: leave it out and count it.
+    # A pair whose outputs were remade after the sheet was made holds answers the reader never saw: leave
+    # it out and count it. A verdict is then joined only if it is about the answers the reader saw.
     prompts, current = Prompts(), {}
     if prompts.exists("utility", "hi"):
         prompts.get("utility", "hi")       # here but refused: a PromptFileError, generations here or not
@@ -409,11 +413,27 @@ def score_utility(*, verdict_files: list[Path] | None = None, judge_id: str | No
     labelled = [(it, p) for it, p in labelled if not remade(it)]
     judge, verdicts, digests = load_verdicts(doc["candidate"], {it["pid"] for it, _ in labelled},
                                              verdict_files, judge_id)
-    pairs = [(it, p, verdicts[it["pid"]]) for it, p in labelled if it["pid"] in verdicts]
+
+    def about_shown(it: dict, v: UtilityVerdict) -> bool:
+        """True when ``v`` is a verdict on the answers the reader saw (R1-43): it names the item's two
+        generation keys and, for each answer still in its file under that key, that answer's sha256. A
+        verdict that names no keys is about no known pair; a missing file proves nothing."""
+        if (v.candidate_key, v.stock_key) != (it["candidate_key"], it["stock_key"]):
+            return False
+        for name, key, sha in ((doc["candidate"], it["candidate_key"], v.candidate_sha),
+                               ("stock", it["stock_key"], v.stock_sha)):
+            rec = None if current[name] is None else current[name][0].get(it["pid"])
+            if rec is not None and rec.key == key and sha != sha256_text(rec.output):
+                return False
+        return True
+
+    found = [(it, p, verdicts[it["pid"]]) for it, p in labelled if it["pid"] in verdicts]
+    pairs = [(it, p, v) for it, p, v in found if about_shown(it, v)]
     out: dict = {
         "candidate": doc["candidate"], "split": doc["split"], "judge_id": judge, "verdict_files": digests,
         "n_sheet": len(items), "n_labelled": len(labelled), "n_judged": len(pairs),
-        "n_missing": len(labelled) - len(pairs), "n_superseded": len(superseded),
+        "n_missing": len(labelled) - len(found), "n_other_pair": len(found) - len(pairs),
+        "n_superseded": len(superseded),
         "complete": bool(labelled) and len(pairs) == len(labelled),
         # the import's warnings: a sheet imported with one is never scored as if clean
         "import_warnings": import_warnings(meta if utility_meta_path().is_file() else None,
@@ -468,7 +488,9 @@ def render_utility(out: dict) -> str:
         f"Pairs on the sheet {out['n_sheet']}, labelled {out['n_labelled']}, with a verdict "
         f"{out['n_judged']}" + ("" if out["complete"] else " (incomplete)") + "."
         + (f" Left out because their outputs were remade after the sheet was made: {out['n_superseded']}."
-           if out["n_superseded"] else ""),
+           if out["n_superseded"] else "")
+        + (" Left out because their verdict is about other answers than the reader saw (other generation "
+           f"keys or text, or none recorded): {out['n_other_pair']}." if out.get("n_other_pair") else ""),
     ]
     if out.get("import_warnings"):
         lines += ["", "Imported with warnings, which this score does not correct (check the sheet before "

@@ -360,6 +360,164 @@ def test_a_refused_auditkit_record_is_reported_not_fatal(monkeypatch, caplog):
     assert run_cmd._refused_exit({}, {"precision": {"harmful_hi_dev": "made in fp16"}}) == 3
 
 
+# --- lift judge's bulk prefill --------------------------------------------------------------------------
+
+
+class BulkJudge:
+    """An API judge with a bulk prefill, shaped like the frontier judge's adapter: it records the order of
+    its calls (the generation keys each got) and counts its spend; ``fail`` is raised by prefill, ``reply``
+    replaces prefill's summary."""
+
+    judge_id = "anthropic/placeholder-model@x"
+    short = "frontier"
+
+    def __init__(self, *, fail=None, reply=None):
+        self.events: list[tuple[str, list[str]]] = []
+        self.stats = {"calls": 0, "usd": 0.0}
+        self.fail, self.reply = fail, reply
+
+    def prefill(self, items, *, wait=True):
+        assert wait is True                         # lift judge waits for its batches
+        self.events.append(("prefill", [i.key for i in items]))
+        if self.fail is not None:
+            raise self.fail
+        self.stats["usd"] += 0.25
+        return self.reply if self.reply is not None else {
+            "mode": "batch", "n_requests": len(items), "n_cached": 0, "n_submitted": len(items),
+            "n_collected": len(items), "n_errored": 0, "n_expired": 0, "n_canceled": 0,
+            "batch_ids": ["msgbatch_placeholder"], "usd": 0.25, "unlisted": "not a summary field"}
+
+    def judge(self, items):
+        from lift.judge.pipeline import JudgeOutcome
+
+        self.events.append(("judge", [i.key for i in items]))
+        self.stats["calls"] += len(items)
+        return [JudgeOutcome("refusal", {"label": "REFUSAL", "reason": "placeholder"}, "") for _ in items]
+
+
+def bulk_judge(monkeypatch, judge, *, texts=None):
+    """lift judge with ``judge`` as the second judge, the cells' prompt texts ``texts`` ({lang: text}; "t",
+    write_generation's, by default) and a fake LID; returns the command line without --langs."""
+    monkeypatch.setattr("lift.judge.pipeline.make_judge", lambda *a, **kw: judge)
+    monkeypatch.setattr("lift.prompts.texts_by_pid",
+                        lambda s, lang: {f"{s[:3]}-0001": (texts or {}).get(lang, "t")})
+    monkeypatch.setattr("lift.lang.LangID", FakeLID)
+    return ["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--judge", "second"]
+
+
+def prefill_manifests():
+    from lift.paths import manifests_dir
+
+    runs = [json.loads(p.read_text(encoding="utf-8")) for p in manifests_dir().glob("judge_prefill-*.json")]
+    return sorted(runs, key=lambda m: m["started"])
+
+
+def test_judge_prefills_every_cells_pending_items_at_once_then_judges_cell_by_cell(monkeypatch, caplog):
+    # P03 W: a judge with a bulk API (the frontier judge's Message Batches) gets every item the run's cells
+    # will send in one prefill, which only fills its call cache; then the cell loop runs as before. Already
+    # judged items are not sent again, and the prefill's spend is recorded in its own manifest.
+    caplog.set_level(logging.INFO, logger="lift.run")
+    keys = {lang: write_generation("harmful", lang, "dev") for lang in ("en", "hi", "zh")}
+    judge = BulkJudge()
+    argv = bulk_judge(monkeypatch, judge)
+    assert main([*argv, "--langs", "zh"]) == 0
+    assert judge.events == [("prefill", [keys["zh"]]), ("judge", [keys["zh"]])]
+
+    judge.events.clear()
+    assert main([*argv, "--langs", "en", "hi", "zh"]) == 0
+    assert judge.events == [("prefill", [keys["en"], keys["hi"]]), ("judge", [keys["en"]]),
+                            ("judge", [keys["hi"]])]                    # zh: judged already, nothing sent
+    first, second = prefill_manifests()
+    assert first["n_items"] == 1 and first["status"] == "ok"
+    assert second["cells"] == {"harmful_en_dev": 1, "harmful_hi_dev": 1, "harmful_zh_dev": 0}
+    assert second["n_items"] == 2 and second["devices"] == 0 and second["cells_left_out"] == []
+    assert second["judge"] == BulkJudge.judge_id and second["judge_dir"] == "frontier"
+    assert second["prefill"] == {"mode": "batch", "n_requests": 2, "n_cached": 0, "n_submitted": 2,
+                                 "n_collected": 2, "n_errored": 0, "n_expired": 0, "n_canceled": 0,
+                                 "batch_ids": ["msgbatch_placeholder"], "usd": 0.25}
+    assert second["judge_stats"] == {"calls": 0, "usd": 0.25}
+    assert "'n_submitted': 2" in caplog.text and "unlisted" not in caplog.text
+
+    judge.events.clear()
+    caplog.clear()
+    assert main([*argv, "--langs", "en", "hi", "zh"]) == 0             # nothing pending: no prefill at all
+    assert judge.events == [] and len(prefill_manifests()) == 2
+    assert "nothing left to judge in the 3 cells planned, so no bulk prefill" in caplog.text
+
+
+def test_the_prefill_sends_only_the_items_the_runs_key_list_selects(monkeypatch):
+    keys = {lang: write_generation("harmful", lang, "dev") for lang in ("en", "hi")}
+    listed = generations_dir().parent / "stock_dev.txt"
+    listed.write_text(keys["hi"] + "\n", encoding="utf-8")
+    judge = BulkJudge()
+    argv = bulk_judge(monkeypatch, judge)
+    assert main([*argv, "--keys", str(listed)]) == 0
+    assert judge.events == [("prefill", [keys["hi"]]), ("judge", [keys["hi"]])]
+    [run] = prefill_manifests()
+    assert run["cells"] == {"harmful_hi_dev": 1}
+
+
+def test_a_cell_its_planning_refuses_is_left_out_of_the_prefill_and_listed_as_before(monkeypatch, caplog):
+    # A stale cell (its prompt changed after generation) raises in planning as judge_file raises it: the
+    # prefill goes on without it, and the cell loop skips and lists it with its restart line, as without
+    # the prefill.
+    caplog.set_level(logging.INFO, logger="lift.run")
+    keys = {lang: write_generation("harmful", lang, "dev") for lang in ("en", "hi")}
+    judge = BulkJudge()
+    argv = bulk_judge(monkeypatch, judge, texts={"en": "a corrected translation"})
+    assert main([*argv, "--langs", "en", "hi"]) == 3
+    assert judge.events == [("prefill", [keys["hi"]]), ("judge", [keys["hi"]])]
+    assert "harmful_en_dev: left out of the bulk prefill (StaleJudgementsError)" in caplog.text
+    restart = "lift restart --variant stock --split dev --sets harmful --langs en"
+    assert f"  harmful_en_dev: {restart}\n" in listing(caplog, "were skipped as stale")
+    [run] = prefill_manifests()
+    assert run["cells"] == {"harmful_hi_dev": 1} and run["cells_left_out"] == ["harmful_en_dev"]
+    assert "corrected" not in caplog.text
+
+
+@pytest.mark.parametrize("failure, error, spent", [
+    ({"fail": RuntimeError("the batch API is down")}, RuntimeError, 0.0),
+    ({"reply": ["not", "a", "summary"]}, TypeError, 0.25),             # spent, then no summary
+])
+def test_a_failed_prefill_is_recorded_and_ends_the_line_before_any_cell(failure, error, spent, monkeypatch):
+    write_generation("harmful", "en", "dev")
+    judge = BulkJudge(**failure)
+    argv = bulk_judge(monkeypatch, judge)
+    with pytest.raises(error):
+        main([*argv, "--langs", "en"])
+    assert [kind for kind, _keys in judge.events] == ["prefill"]
+    [run] = prefill_manifests()
+    assert run["status"] == "failed" and run["error"] == error.__name__ and "prefill" not in run
+    assert run["judge_stats"] == {"calls": 0, "usd": spent}
+
+
+def test_a_batch_still_running_exits_3_and_judges_no_cell(monkeypatch, caplog):
+    # The prefill's wait ran out (or a synchronous pass met an earlier batch holding its requests): the
+    # batch goes on server-side, nothing is paid twice, and the same line collects it later.
+    from lift.judge.frontier import FrontierBatchPending
+
+    write_generation("harmful", "en", "dev")
+    judge = BulkJudge(fail=FrontierBatchPending("1 batch still in progress", batch_ids=["msgbatch_x"],
+                                                   n_pending=1, summary={}))
+    argv = bulk_judge(monkeypatch, judge)
+    assert main([*argv, "--langs", "en"]) == 3
+    assert [kind for kind, _keys in judge.events] == ["prefill"]
+    assert "rerun the same line to collect them" in caplog.text
+    [run] = prefill_manifests()
+    assert run["status"] == "failed" and run["error"] == "FrontierBatchPending"
+
+
+def test_a_judge_without_a_bulk_api_is_never_planned(monkeypatch):
+    from lift.judge import pipeline
+
+    write_generation("harmful", "en", "dev")
+    bulk_judge(monkeypatch, Frontier())                        # judge() only, as the Qwen3Guard adapter
+    monkeypatch.setattr(pipeline, "pending_items", lambda *a, **kw: pytest.fail("planned without prefill"))
+    assert main(["judge", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en",
+                 "--judge", "second"]) == 0
+    assert prefill_manifests() == []
+
+
 # --- lift restart ---------------------------------------------------------------------------------------
 
 
@@ -507,6 +665,112 @@ def test_restart_retires_the_cells_auditkit_records(judge, caplog):
     assert main([*RESTART, "--sets", "harmful", "--langs", "hi", *(["--judge", judge] if judge else [])]) == 0
     assert "AuditKIT record retired" not in caplog.text                    # already retired: nothing new
     assert len(list((output_dir() / ".aside").iterdir())) == 1
+
+
+AYA, IND = "adapter-aya-std-s1", "adapter-indicalign-std-s1"
+
+
+def utility_files(variant, split="dev", *, dtype=None):
+    """lift utility's files of ``variant``'s pair with stock on ``split`` (placeholders): a verdict file P04's
+    scan reads as one, the metrics, AuditKIT utility records of both judge dirs and both text policies, and
+    the answer check. Stock holds only its answer check. Returns {path: bytes}."""
+    from lift import audit, utility
+
+    verdict = {"pid": "utl-aya-00001", "variant": variant, "judge": "placeholder-judge", "order_ab": "A",
+               "order_ba": "B", "score": 1.0}
+    files = {utility.checked_path(variant, split, dtype=dtype): '{"kind": "utility_checked"}\n'}
+    if variant != "stock":
+        files[utility.verdicts_path("frontier", variant, split, dtype=dtype)] = json.dumps(verdict) + "\n"
+        for path in utility.metrics_paths(variant, split, dtype=dtype):
+            files[path] = '{"kind": "utility"}\n'
+        files[audit.utility_record_path("frontier", variant, split, dtype=dtype)] = '{"metadata": {}}\n'
+        files[audit.utility_record_path("fallback", variant, split, text="full", dtype=dtype)] = "{}\n"
+    for path, text in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return {path: path.read_bytes() for path in files}
+
+
+def retired_aside(files):
+    """Each of ``files`` ({path: bytes}) is empty and its bytes are under the one outputs/.aside/ stamp, a
+    verdict file's copy named *.jsonl.aside."""
+    stamp, = (output_dir() / ".aside").iterdir()
+    for path, data in files.items():
+        copy = stamp / path.relative_to(output_dir())
+        if path.suffix == ".jsonl":
+            copy = copy.with_name(copy.name + ".aside")
+        assert path.read_bytes() == b"" and copy.read_bytes() == data, path
+    return stamp
+
+
+@pytest.mark.parametrize("dtype", ["bf16", "fp16"])
+def test_restarting_stocks_utility_cell_retires_every_candidates_utility_files(dtype, caplog):
+    # C07: every candidate's verdicts, metrics, AuditKIT utility records and answer check were made from
+    # pairs with stock's answers, which the restart sets aside: they are retired with them (copied aside and
+    # left empty, never removed), in every precision, and the log names each candidate's lift utility line.
+    from lift import utility
+    from lift.validation.utility import find_verdict_files
+
+    caplog.set_level(logging.INFO, logger="lift.run")
+    write_generation("utility", "hi", "dev", dtype=dtype)                    # stock's answers
+    held = {**utility_files("stock"), **utility_files(AYA), **utility_files(IND, dtype="fp16")}
+    kept = {**utility_files(AYA, "final"), **utility_files("stock", "final")}
+    flag = "" if dtype == "bf16" else " --dtype fp16"
+    assert main([*RESTART, "--sets", "utility", "--langs", "hi", *flag.split()]) == 0
+    stamp = retired_aside(held)
+    assert generations_dir().joinpath("stock", "utility_hi_dev.jsonl").read_bytes() == b""
+    assert all(path.read_bytes() == data for path, data in kept.items())
+    assert find_verdict_files() == [utility.verdicts_path("frontier", AYA, "final")]     # no copy in .aside
+    assert caplog.text.count("lift utility's file retired") == len(held)
+    for candidate in (AYA, IND):
+        assert f"`lift utility --variant {candidate} --split dev{flag}`" in caplog.text
+    closing = f"1 file(s) emptied, 0 AuditKIT record(s) and {len(held)} of lift utility's files retired"
+    assert closing in caplog.text and str(stamp) in caplog.text
+    caplog.clear()
+    assert main([*RESTART, "--sets", "utility", "--langs", "hi", *flag.split()]) == 0      # nothing left
+    assert "lift utility's file retired" not in caplog.text
+    assert len(list((output_dir() / ".aside").iterdir())) == 1
+
+
+def test_restarting_a_candidates_utility_cell_retires_its_own_utility_files_only(monkeypatch, caplog):
+    from lift import utility
+    from lift.models import variants
+    from lift.schemas import VariantSpec
+
+    assert run_cmd.UTILITY_CELL == (utility.SET, utility.LANG)
+    monkeypatch.setattr(variants, "load_registry", lambda: {
+        "stock": VariantSpec(name="stock", method="stock"),
+        **{n: VariantSpec(name=n, method="adapter", adapter=n) for n in (AYA, IND)}})
+    caplog.set_level(logging.INFO, logger="lift.run")
+    write_generation("utility", "hi", "dev", variant=AYA)
+    mine = utility_files(AYA)
+    others = {**utility_files(IND), **utility_files("stock")}
+    argv = ["restart", "--variant", AYA, "--split", "dev", "--sets", "utility", "--langs", "hi"]
+    assert main([*argv, "--judge", "primary"]) == 0      # one judge's restart keeps the answers: files stay
+    assert all(path.read_bytes() == data for path, data in {**mine, **others}.items())
+    assert main(argv) == 0
+    retired_aside(mine)
+    assert all(path.read_bytes() == data for path, data in others.items())
+    assert f"`lift utility --variant {AYA} --split dev`" in caplog.text and IND not in caplog.text
+
+
+def test_restarting_stocks_utility_cell_with_no_candidate_names_any_candidates_line(caplog):
+    caplog.set_level(logging.INFO, logger="lift.run")
+    write_generation("utility", "hi", "dev")
+    assert main([*RESTART, "--sets", "utility", "--langs", "hi"]) == 0
+    assert ("filled again by `lift utility --variant <candidate> --split dev` (any candidate's line makes "
+            "stock's answers again)") in caplog.text
+    assert "lift run-dev" not in caplog.text                 # a utility cell's line is lift utility's
+
+
+def test_a_utility_restart_whose_answers_are_not_here_retires_nothing(caplog):
+    # Nothing was started over (lift restart runs right after lift sync pull: answers only the runs repo
+    # holds are left as they are there), so what was derived from them stays too.
+    caplog.set_level(logging.INFO, logger="lift.run")
+    held = {**utility_files("stock"), **utility_files(AYA)}
+    assert main([*RESTART, "--sets", "utility", "--langs", "hi"]) == 0
+    assert all(path.read_bytes() == data for path, data in held.items())
+    assert "utility_hi_dev.jsonl: not here, skipped" in caplog.text and not (output_dir() / ".aside").exists()
 
 
 def test_restart_refuses_a_cell_made_in_another_precision_unless_forced(caplog):

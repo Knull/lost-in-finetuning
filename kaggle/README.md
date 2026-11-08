@@ -78,7 +78,7 @@ A markdown cell on top repeats the usage and the T4 rule. Then come two code cel
 JOB = """
 lift sync pull
 lift info
-# paste the stage's commands here, one per line (on a T4, generate/judge/run-dev take --dtype fp16)
+# paste the stage's commands here, one per line (on a T4, every model line takes --dtype fp16)
 """
 ```
 
@@ -92,11 +92,13 @@ lift info
   repo root does on the laptop. A relative path such as
   `validation/keys/second_judge/stock_dev.txt` means the same file.
 - The first failing line stops the job, with three exceptions. One is a push: see below. Another is
-  a `lift generate`, `lift judge` or `lift run-dev` line that exits 3: it is done, but skipped some
-  cells (stale, made in another precision, or judged by another judge) or had their AuditKIT record
-  refused, and it lists each with its remedy (Troubleshooting). Its checkpoint push and the next
-  lines still run, and the cell raises at the end. The third is a `lift sync` line that exits 3
-  (below): the next lines still run too. Any other line's exit 3 stops the job.
+  a `lift generate`, `lift judge`, `lift run-dev`, `lift utility`, `lift belebele` or
+  `lift heldout-loss` line that exits 3: it is done, but skipped some cells (stale, made in another
+  precision, judged by another judge, short of their frozen split, or with decoding that went
+  non-finite), had their AuditKIT record refused, or left some for a rerun (`lift utility --no-wait`
+  while its Message Batch runs), and it lists each with its remedy (Troubleshooting). Its checkpoint
+  push and the next lines still run, and the cell raises at the end. The third is a `lift sync` line that exits 3 (below): the next lines still run too. Any other
+  line's exit 3 stops the job (`lift train` and `lift gate` never exit 3).
 - After every line that succeeds (or exits 3, as above), `lift sync ...` lines excepted, the runner
   runs `lift sync push` as a checkpoint. It pushes once more in `finally`, even after a failure or
   an interrupt, so the job never needs its own push line.
@@ -166,27 +168,38 @@ long stage into several lines.
 ## Jobs on a T4 x2
 
 - **fp16 everywhere.** Every `lift generate`, `lift judge` and `lift run-dev` line takes
-  `--dtype fp16`, and so does a `lift restart` line, as lift prints it here. The loader refuses
+  `--dtype fp16`, and so does a `lift restart` line, as lift prints it here. So do `lift train`
+  (with `--per-device-batch 1`, and `--parity-dtype fp16` only when the fp32 parity does not fit; all
+  three seeds of a recipe on one GPU type and precision), `lift utility --generate-only`, `lift
+  belebele` and `lift heldout-loss`. The loader refuses
   bf16 on a GPU without native bf16, so a missing flag fails loudly. The dtype is part of the cache
   key, so fp16 outputs never mix with bf16 ones. These lines are for the T4 alone: on a GPU with
-  native bf16 (compute capability 8 or more, such as Colab's A100 or L4), generate, judge and
-  run-dev refuse any `--dtype` but bf16, since fp16 runs exist only for the T4's licence.
+  native bf16 (compute capability 8 or more, such as Colab's A100 or L4), generate, judge, run-dev,
+  train, utility, belebele and heldout-loss refuse any `--dtype` but bf16, since fp16 runs exist only
+  for the T4's licence. On the laptop, a T4 pilot's answers are judged with `lift utility --variant
+  NAME --split dev --judge-only --dtype fp16` and gated with `lift gate 1 --dtype fp16` and `lift gate
+  2 --dtype fp16` (reports gate{1,2}-fp16.json and .md).
 - **Leave Colab's bf16 cells out.** Output paths hold no dtype, so an fp16 run over a variant
   Colab started meets its bf16 cells, which are the reported ones. Give the line `--sets` and
   `--langs` that leave them out, in several lines if need be: the variant's files under
   `outputs/generations/` in the runs repo show which cells exist. A bf16 cell left in is refused
   as made in another precision, listed, and the line exits 3. Never restart such a cell from here:
   a restart would discard its bf16 outputs, so `lift restart --dtype fp16` refuses it, with nothing
-  moved, unless `--force` is given, which is never right here.
+  moved, unless `--force` is given, which is never right here. The score files of `lift belebele`
+  and `lift heldout-loss` (outputs/scores/) need none of this: a precision other than bf16 gets its
+  own files (`...-fp16.jsonl`, as the metrics do), so a T4 line never meets Colab's score cells, and
+  each precision's held-out loss pairs with stock's scores in the same precision.
 - **Two GPUs.** A T4 x2 is two separate 16 GB devices. The generator runs on `cuda:0` and the judge
   on `cuda:1`: `--judge-device auto` (run-dev and smoke) and `--device auto` (judge) pick `cuda:1`
-  when there are two GPUs. In `lift run-dev`, both work at the same time.
+  when there are two GPUs. In `lift run-dev`, both work at the same time. `lift train` runs one
+  process on `cuda:0` alone and leaves `cuda:1` idle: two visible GPUs never double its batch.
 
 The first jobs go in this order:
 
 1. **The bf16 Gate 0, on Colab** (colab/README.md). It prints the revision shas to pin, and its
    outputs, which the fp16 check compares against, go to the runs repo.
-2. **The pin step**, after Gate 0 and before any `generate`, `judge` or `run-dev` line. A person
+2. **The pin step**, after Gate 0 and before any `generate`, `judge`, `run-dev`, `train`, `utility`,
+   `belebele` or `heldout-loss` line. A person
    copies the shas Gate 0 printed into `configs/project.yaml` with a dated `docs/decisions.md`
    entry, commits, and pushes to `BRANCH`. Those commands refuse a revision that is not a sha, and
    a session reads the `configs/project.yaml` of its own clone, so rerun cell 1 after the push.
@@ -354,8 +367,8 @@ secrets getter, and the `lift_env` path in cell 2.
   only in `/kaggle/temp/lift`: once it is fixed, and before the session ends, run cell 2 with `JOB`
   set to `lift sync push`.
 - **A line exits 3 and lists skipped cells.** `lift generate`, `lift judge` and `lift run-dev`
-  finish the other cells, then list each skipped cell with its remedy. The job went on with the
-  next lines.
+  finish the other cells, then list each skipped cell with its remedy; `lift utility`,
+  `lift belebele` and `lift heldout-loss` do the same. The job went on with the next lines.
   - A stale cell, started under another stack (torch, transformers or the GPU class): put its
     `lift restart` line in `JOB` right after `lift sync pull`, run the job once, then take it out
     (Habits).
@@ -378,6 +391,12 @@ secrets getter, and the `lift_env` path in cell 2.
   - A refused AuditKIT record: its error, above the list, says why; on a T4 it is most often the
     fp16 licence, which does not cover the cell (step 3 of the first jobs above). The judgements
     are written, so once that is fixed, the next run of the line writes the record.
+  - A stale scores file of `lift belebele` or `lift heldout-loss`: its listing names the line that
+    starts it over, the same line with `--restart` (it sets the file aside under `outputs/.aside/`
+    and leaves it empty, as `lift restart` does).
+  - `lift utility --no-wait` whose Message Batch is still running: the batch keeps running at
+    Anthropic, and the push sends its state file; rerun the same line in a later job, after its
+    `lift sync pull`, to collect it.
 - **`NotImplementedError: P01` in a line.** `BRANCH` lacks P01 (`p02-harness` alone). Use a ref
   with both P01 and P02 and rerun cell 1.
 - **`unpinned revisions in configs/project.yaml ...`.** The pin step has not reached this
