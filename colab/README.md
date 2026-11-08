@@ -98,10 +98,11 @@ must hold both P01 and P02 (see "Code version" below). The first jobs go in this
    lift remote --gpu A100 --job "lift sync pull; lift smoke"
    ```
 
-2. **Pin the revisions**, before any generate, judge or run-dev job. Those commands refuse a model
-   or judge revision that is not a commit sha, and on the VM the refusal comes only after its setup
-   (about 10 A100-minutes). Gate 0 ends by printing the three shas to pin; they are also under
-   `revisions` in `outputs/metrics/gate0.json`, which `lift sync pull` brings to the laptop.
+2. **Pin the revisions**, before any generate, judge, run-dev, train, utility, belebele or
+   heldout-loss job. Those commands refuse a model or judge revision that is not a commit sha, and
+   on the VM the refusal comes only after its setup (about 10 A100-minutes). Gate 0 ends by
+   printing the three shas to pin; they are also under `revisions` in
+   `outputs/metrics/gate0.json`, which `lift sync pull` brings to the laptop.
    - Copy them into `configs/project.yaml`: `models.global.revision`, `models.base.revision` and
      `judges.safety_primary.revision`.
    - Add a dated entry with the reason to `docs/decisions.md`.
@@ -109,9 +110,10 @@ must hold both P01 and P02 (see "Code version" below). The first jobs go in this
      ref's copy of `configs/project.yaml`, not your working tree's.
 
    `lift remote` (and `--dry-run`) warns when a job line would refuse a revision in your local copy,
-   checked as that line's command checks it: `models.global` for generate and run-dev, and the entry
-   of the judge a judge or run-dev line runs, when that judge is Qwen3Guard (a frontier judge has no
-   revision). It cannot see the ref's copy, so pushing the pin is up to you.
+   checked as that line's command checks it: `models.global` for generate, run-dev, train, belebele,
+   heldout-loss and utility (not `lift utility --judge-only`, which only judges generations made
+   before), and the entry of the judge a judge or run-dev line runs, when that judge is Qwen3Guard (a
+   frontier judge has no revision). It cannot see the ref's copy, so pushing the pin is up to you.
 
 3. **The stock dev eval**, then the later stages:
 
@@ -143,8 +145,8 @@ What it does:
    the ref's `constraints.txt` (`pip install -c constraints.txt -e ...`). It checks that the ref
    has `lift sync` (`lift sync --help`): a ref without `constraints.txt` or `lift sync` is a setup
    failure (exit 3), before any line. Then it runs the lines in order, stopping at the first
-   failure. A generate, judge or run-dev line that exits 3 is not such a failure: see "Skipped
-   cells" below.
+   failure. A generate, judge, run-dev, utility, belebele or heldout-loss line that exits 3 is not
+   such a failure: see "Skipped cells" below.
 4. Every `--poll` seconds (default 45), downloads `/content/lift_job.log` to
    `outputs/logs/remote-<name>.log` and prints the new lines.
 5. The job pushes outputs with `lift sync push` after every line (except sync lines and the last),
@@ -179,7 +181,7 @@ Exit codes (also in `lift remote --help`):
 | Code | Meaning |
 | --- | --- |
 | 0 | The job succeeded, its outputs are pushed, and the VM is released. A push that hit conflicts counts as pushed; `lift remote` says so. |
-| 1 | A job line failed, or a generate, judge or run-dev line exited 3 (done, but some cells were skipped: the job ran its other lines, and its log lists each cell with its remedy); or the job's status is unknown; or the runs repo check met a transient error (nothing was created: try again). |
+| 1 | A job line failed, or a generate, judge, run-dev, utility, belebele or heldout-loss line exited 3 (done, but some cells were skipped or left for a rerun: the job ran its other lines, and its log lists each cell with its remedy); or the job's status is unknown; or the runs repo check met a transient error (nothing was created: try again). |
 | 2 | `lift remote` refused to start: bad options, no login, a missing secret, a runs repo that is missing, not private or not writable with this token, or a job that another `lift remote` on this machine follows already (`watch` names its pid). Nothing was created or changed. |
 | 3 | The job could not be set up: `colab new` or the secrets upload failed, or job.py's spec, secrets, python, fetch, pip or sync-check step did; or a `lift sync` call on the VM exited 2 before anything was lost. |
 | 4 | The VM could not be confirmed released and may still be billing. This overrides every other code. `lift remote stop` returns 0 or 4. |
@@ -219,9 +221,13 @@ Afterwards, `lift sync pull` brings the results to the laptop.
 
 **Skipped cells (exit 3).** `lift generate`, `lift judge` and `lift run-dev` skip a cell they must
 not add to, go on with the other cells, and exit 3 at the end, listing each skipped cell with its
-remedy (and each cell whose AuditKIT record was refused). job.py reports a line that exits 3, the
-next lines run (they do not depend on those cells), and the job fails at the end: `lift remote`
-exits 1. Any other failing line still ends the job. A cell is skipped when:
+remedy (and each cell whose AuditKIT record was refused). `lift utility`, `lift belebele` and
+`lift heldout-loss` exit 3 the same way for a cell they skip (a stale scores file of belebele or
+heldout-loss names the same line with `--restart`) or leave for a rerun (`lift utility --no-wait`
+while its Message Batch still runs: rerun the same line to collect it). job.py reports a line that
+exits 3, the next lines run (they do not depend on those cells), and the job fails at the end:
+`lift remote` exits 1. Any other failing line still ends the job, an exit 3 of any other command
+included (`lift train` and `lift gate` never exit 3). A cell is skipped when:
 
 - **It is stale**: its file was made under another library stack, or from inputs that have changed
   since. The remedy is its restart line, such as
@@ -238,7 +244,10 @@ exits 1. Any other failing line still ends the job. A cell is skipped when:
 
 - **It was made in another precision**: its generations were made in another dtype than this run's
   (fp16 on a T4, say). Run with `--dtype <that dtype>` on the kind of GPU that made them, or leave
-  the cell out with `--sets`/`--langs`. This is never a restart, which would discard them.
+  the cell out with `--sets`/`--langs`. This is never a restart, which would discard them. The score
+  files of `lift belebele` and `lift heldout-loss` are per precision (another precision than bf16 is
+  named `-{dtype}`), so a run never meets another precision's; only a hand-placed file holding
+  another precision's scores is listed (exit 3), and `--restart` never starts it over.
 - **Its judge differs**: its judgements file was made by another judge (another judge id, which
   names the labelling rules and, for Qwen3Guard, the dtype and mode:
   `{model}@{sha}#rules-<tag>#{dtype}#{mode}`; a frontier judge's id ends in `#rules-<tag>`). Run with
@@ -271,11 +280,14 @@ records. Its log names the `lift judge ... --judge ROLE` line (with P04's `--key
 judge) that refills another judge's file it set aside: `lift run-dev` refills only the primary's. It
 refuses (exit 1, nothing moved) a cell whose generations were made in another precision than its
 `--dtype` (default: the config's `generation.dtype`, bf16), since a restart would discard them;
-`--force` restarts such a cell anyway.
+`--force` restarts such a cell anyway. A utility cell's restart (`--sets utility --langs hi`) also
+sets aside what `lift utility` derived from it: the verdicts, metrics, check records and AuditKIT
+records of that candidate (of every candidate, for stock's cell), and its log names
+`lift utility --variant <candidate> --split <split>` as the line that refills them.
 
-**fp16 runs.** `lift generate`, `lift judge` and `lift run-dev` refuse a `--dtype` other than the
-config's on a GPU with native bf16 (Colab's A100 or L4): fp16 runs exist only for the T4 licence
-(`gate0-fp16.json`, in the table above).
+**fp16 runs.** `lift generate`, `judge`, `run-dev`, `train`, `utility`, `belebele` and
+`heldout-loss` refuse a `--dtype` other than the config's on a GPU with native bf16 (Colab's A100 or
+L4): fp16 runs exist only for the T4 licence (`gate0-fp16.json`, in the table above).
 
 Notes:
 
@@ -452,11 +464,11 @@ never into the notebook (a saved notebook can be shared by accident). It pushes 
 except sync lines and the last, so a closed tab or a reclaimed runtime loses one line's work at
 most. A pull or push that exits 1 is tried again, and a failed push is reported, not fatal: a
 `lift sync push` line never stops the job. A sync call that exits 2 (a problem no retry can fix) is
-never tried again and ends the job. A generate, judge or run-dev line that exits 3 (done, but some
-cells were skipped, each listed in the log with its remedy) is reported, and the next lines run. The
-final push runs even after a failure, once a line other than a `lift sync` line ran, and the cell
-raises at the end if a line or the final push failed, or a line exited 3. Don't add your own
-trailing `lift sync push`.
+never tried again and ends the job. A generate, judge, run-dev, utility, belebele or heldout-loss
+line that exits 3 (done, but some cells were skipped or left for a rerun, each listed in the log with
+its remedy) is reported, and the next lines run. The final push runs even after a failure, once a
+line other than a `lift sync` line ran, and the cell raises at the end if a line or the final push
+failed, or a line exited 3. Don't add your own trailing `lift sync push`.
 
 ```python
 import shlex, subprocess, sys, time
@@ -467,7 +479,8 @@ lift smoke
 """
 LOG = "/content/lift_job.log"
 DELAYS = (60, 180, 360)  # as colab/job.py: 4 tries in about 10 minutes for a sync call that exits 1
-PARTIAL = ("generate", "judge", "run-dev")  # exit 3: done, but some cells were skipped (see the log)
+# exit 3: done, but some cells were skipped or left for a rerun (see the log); as job.py's PARTIAL_COMMANDS
+PARTIAL = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss")
 
 def lift(*args):
     with open(LOG, "a") as log:
@@ -499,7 +512,8 @@ try:
         if words[1:3] == ["sync", "push"] or (words[1] == "sync" and rc == 3):
             continue  # a push line never stops the job: the next push sends what it missed
         if rc == 3 and words[1] in PARTIAL:  # the next lines do not depend on the skipped cells
-            failed.append(f"{line} (rc 3: some cells were skipped, the log lists each with its remedy)")
+            failed.append(f"{line} (rc 3: some cells were skipped or left for a rerun, the log lists each "
+                          "with its remedy)")
         elif rc != 0:
             failed.append(f"{line} (rc {rc})")
             break

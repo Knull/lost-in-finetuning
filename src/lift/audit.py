@@ -28,6 +28,15 @@ Controversial harmful rate and the judge-failure count, read from the same check
   aside (sync never deletes, so the next push sends the empty file as an update). ``load_record`` reads
   it as None, so readers (P07, P08) skip it, and ``record_safety`` writes the cell's next record over it.
 
+The utility record (``record_utility``, P03) takes the same path through AuditKIT for one variant's
+Hindi utility against stock: one Sample per pair, the candidate's answer (redacted by default) as the
+output and the UtilityVerdict in the metadata, scored by our own metrics (the pair score, whose mean is the
+win rate, and the failed-order share) and checked against ``lift.stats.win_rate`` exactly. AuditKIT's
+WinRate, EloScore and PreferenceAccuracy are reference- or token-overlap-based, not judge-based, and skip
+every sample without a ``target``. It is written to outputs/metrics/auditkit_utility/{judge_dir}/
+{variant}/utility_hi_{split}.json, outside metrics/auditkit/, whose records lift.sync pairs with safety
+judgements.
+
 Do NOT use auditkit's paired_bootstrap (src/auditkit/_bootstrap.py), nor RunComparison /
 CompareResult / Experiment ``.significance()`` that call it: it resamples uncentred differences
 (p = 1.0 when every difference is equal, near 0.5 when they vary but are all positive) and returns
@@ -338,9 +347,168 @@ def record_safety(variant: str, set_name: str, lang: str, split: str, *, judge: 
     return path
 
 
-def record_utility(variant: str, split: str) -> Path:
-    """P03: one UtilityVerdict.score per pid through a custom metric like ``LabelRate`` (its mean must
-    equal ``lift.stats.paired.win_rate``). AuditKIT's WinRate/Elo/PreferenceAccuracy are reference-
-    or token-overlap-based, not judge-based; a WinRate subclass needs ``required_fields`` cleared or
-    every sample is silently skipped."""
-    raise NotImplementedError("P03")
+WIN_THRESHOLD = 0.75     # a pair scored 0.75 or 1 is the candidate's win (pair scores are quarters)
+# What the utility record keeps of each pair: AuditKIT stores a sample's scores, not its metadata, so the pair
+# score carries them. A failed order's cause is kept as its kind only (the full text stays in the verdicts).
+PAIR_FIELDS = ("order_ab", "order_ba", "failure_ab", "failure_ba", "key", "stock_key", "candidate_sha",
+               "stock_sha")
+
+
+def utility_record_path(judge_dir: str, variant: str, split: str, *, text: str = "redacted",
+                        dtype: str | None = None) -> Path:
+    """outputs/metrics/auditkit_utility/{judge_dir}/{variant}/utility_hi_{split}.json (``.full.json`` for the
+    private record that keeps the candidate's answers; ``-{dtype}`` for another precision than
+    ``generation.dtype``, as ``auditkit_path`` names it). Not under metrics/auditkit/: lift.sync pairs every
+    record there with a cell's safety judgements, and would hold this one back as unpaired."""
+    from lift import config
+    from lift.utility import JUDGE_DIRS, LANG, SET
+
+    if judge_dir not in JUDGE_DIRS:
+        raise ValueError(f"the utility judge is one of {JUDGE_DIRS}, got {judge_dir!r}")
+    if text not in TEXT_POLICIES:
+        raise ValueError(f"text must be one of {TEXT_POLICIES}, got {text!r}")
+    tag = f"-{dtype}" if dtype and dtype != config.get("generation.dtype") else ""
+    suffix = ".json" if text == "redacted" else ".full.json"
+    return metrics_dir() / "auditkit_utility" / judge_dir / variant / f"{SET}_{LANG}_{split}{tag}{suffix}"
+
+
+@cache
+def _utility_auditkit() -> SimpleNamespace:
+    """The utility record's metrics, defined on first use (``_auditkit`` imports AuditKIT and checks its
+    version). AuditKIT's WinRate, EloScore and PreferenceAccuracy compare an output with ``sample.target`` by
+    exact match or token overlap, not by a judge's verdict, and skip every sample without a target: these
+    score our verdicts instead, with no required field."""
+    _auditkit()
+    from auditkit import Direction, Score, ScoreKind
+    from auditkit.metric import Metric
+
+    from lift.utility import outcome
+
+    class PairScore(Metric):
+        """The candidate's score of one pair against stock, its two orders averaged (1, 0.75, 0.5, 0.25 or 0):
+        the run mean is the win rate. Threshold 0.75 (passed is score >= threshold for MAXIMIZE), so
+        ``Prediction.correct`` means the candidate won the pair; the label is its outcome, and the metadata
+        the pair's verdict (``PAIR_FIELDS``)."""
+
+        name = "win_rate"
+        kind = ScoreKind.JUDGE
+        direction = Direction.MAXIMIZE
+        required_fields = frozenset()
+
+        def identity(self) -> dict:
+            return {"name": self.name, "threshold": WIN_THRESHOLD, "lift_metric_version": METRIC_VERSION}
+
+        def score(self, sample: Any, output: str, context: Any = None) -> Any:
+            value = sample.metadata["score"]
+            return Score(name=self.name, value=value, kind=ScoreKind.JUDGE, label=outcome(value),
+                         threshold=WIN_THRESHOLD, metadata={k: sample.metadata[k] for k in PAIR_FIELDS})
+
+    class FailedOrders(Metric):
+        """The share of a pair's two orders the judge failed on (0, 0.5 or 1; each failed order counts as a
+        tie in the pair's score): the run mean is the failed orders over twice the pairs."""
+
+        name = "failed_order_rate"
+        kind = ScoreKind.JUDGE
+        direction = Direction.MINIMIZE
+        required_fields = frozenset()
+
+        def identity(self) -> dict:
+            return {"name": self.name, "lift_metric_version": METRIC_VERSION}
+
+        def score(self, sample: Any, output: str, context: Any = None) -> Any:
+            failed = sum(sample.metadata[k] is not None for k in ("failure_ab", "failure_ba"))
+            return Score(name=self.name, value=failed / 2, kind=ScoreKind.JUDGE)
+
+    return SimpleNamespace(utility_metrics=lambda: [PairScore(), FailedOrders()])
+
+
+def _check_utility(result: Any, pids: list[str], expected: dict[str, float], metric_names: list[str]) -> None:
+    """AuditKIT must have scored every pair with every metric and agree with lift exactly (``_check``'s rules,
+    on the utility numbers)."""
+    n = len(pids)
+    problems = []
+    if sorted(result.stats) != sorted(metric_names):
+        problems.append(f"metrics {sorted(result.stats)}, expected {sorted(metric_names)}")
+    if result.failed_count or result.errors or result.unscored:
+        problems.append(f"{result.failed_count} failed, {len(result.errors)} errors, "
+                        f"{len(result.unscored)} unscored")
+    if [p.sample_id for p in result.predictions] != pids:
+        problems.append("the predictions are not one per pair in pid order")
+    counts = {name: stat.count for name, stat in result.stats.items() if stat.count != n}
+    if counts:
+        problems.append(f"metric counts {counts}, expected {n}")
+    diffs = {k: (result.headline.get(k), v) for k, v in expected.items() if result.headline.get(k) != v}
+    if diffs:
+        problems.append(f"headline differs from lift.stats.win_rate and the verdicts: {diffs}")
+    if problems:
+        raise RuntimeError("AuditKIT did not record exactly our numbers: " + "; ".join(problems))
+
+
+def record_utility(variant: str, split: str, *, judge_dir: str = "frontier", text: str = "redacted",
+                   dtype: str | None = None) -> Path:
+    """Write the AuditKIT RunResult of ``variant``'s Hindi utility against stock on ``split`` from the
+    verdicts of ``judge_dir``'s judge ("frontier" or "fallback") and return its path
+    (``utility_record_path``).
+
+    The pair is read through ``lift.utility.pair_generations`` (``dtype`` defaults to ``generation.dtype``;
+    another needs Gate 0's licence) and the verdicts through ``lift.utility.current_verdicts``: every pair
+    must have a verdict on its answers as they now stand, so a record never outlives the answers it scores.
+    One Sample per pid: the instruction, the candidate's answer (``[redacted sha256:...]`` unless
+    ``text="full"``; stock's answer is named by key and sha256 only), and the verdict. The metrics are the
+    pair score (``win_rate``, threshold 0.75), whose metadata keeps the pair's verdict in the record
+    (``PAIR_FIELDS``: both orders, each failed order's cause kind, both generation keys and both answers'
+    sha256), and the failed-order share; the headline must equal ``lift.stats.win_rate`` and the verdicts'
+    failure count exactly, with every pair scored by every metric.
+    ``metadata.lift`` adds the judge id, the digests of the scores and keys, the verdict file's sha256, both
+    answer files' provenance, the win rate's interval and the failure counts. Raises instead of writing:
+    ValueError (UtilityRefused) when the pair or the verdicts cannot be reported, FileNotFoundError for a
+    missing verdict file, RuntimeError when AuditKIT's numbers differ from ours in any way."""
+    from lift import utility
+    from lift.io import sha256_file
+    from lift.stats.paired import win_rate
+
+    path = utility_record_path(judge_dir, variant, split, text=text, dtype=dtype)
+    pairing = utility.pair_generations(variant, split, dtype=dtype)
+    verdicts_file = utility.verdicts_path(judge_dir, variant, split, dtype=dtype)
+    verdicts = utility.current_verdicts(verdicts_file, pairing)
+    pids = [p.pid for p in pairing.pairs]
+    expected: dict[str, Any] = win_rate([v.score for v in verdicts], clusters=pids, n_boot=utility.N_BOOT)
+    failed = [(v.error_ab is not None) + (v.error_ba is not None) for v in verdicts]
+    failed_rate = sum(f / 2 for f in failed) / len(failed)
+    ak, um = _auditkit(), _utility_auditkit()
+    judge_id = verdicts[0].judge
+    lift_meta = {
+        "variant": variant, "reference": utility.REFERENCE, "set": utility.SET, "lang": utility.LANG,
+        "split": split, "judge_dir": judge_dir, "judge_id": judge_id, "dtype": pairing.dtype, "text": text,
+        "metric_version": METRIC_VERSION,
+        "scores_sha256": sha256_obj({v.pid: v.score for v in verdicts}),
+        "keys_sha256": sha256_obj({p.pid: p.candidate.key for p in pairing.pairs}),
+        "stock_keys_sha256": sha256_obj({p.pid: p.stock.key for p in pairing.pairs}),
+        "verdicts_path": utility.logical(verdicts_file), "verdicts_sha256": sha256_file(verdicts_file),
+        "provenance": {"candidate": utility.provenance([p.candidate for p in pairing.pairs]),
+                       "stock": utility.provenance([p.stock for p in pairing.pairs])},
+    }
+    samples = [ak.Sample(input=p.instruction, id=p.pid, task=f"{utility.SET}/{utility.LANG}/{split}",
+                         actual_output=p.candidate.output if text == "full" else redacted(p.candidate.output),
+                         metadata={"score": v.score, "order_ab": v.order_ab, "order_ba": v.order_ba,
+                                   "failure_ab": utility.failure_kind(v.error_ab),
+                                   "failure_ba": utility.failure_kind(v.error_ba), "key": p.candidate.key,
+                                   "stock_key": p.stock.key, "candidate_sha": v.candidate_sha,
+                                   "stock_sha": v.stock_sha})
+               for p, v in zip(pairing.pairs, verdicts, strict=True)]
+    metrics = um.utility_metrics()
+    with _no_disk_cache(ak.runner):
+        result = ak.evaluate(
+            samples, model=ak.Recorded(variant), scorers=metrics,
+            config=ak.RunConfig(track_performance=False, judge_model=judge_id, extra={"lift": lift_meta}),
+            tags=["lift", "utility", f"variant:{variant}", f"reference:{utility.REFERENCE}", f"split:{split}",
+                  f"judge:{judge_dir}", f"text:{text}"],
+        )
+    _check_utility(result, pids, {"win_rate": expected["win_rate"], "failed_order_rate": failed_rate},
+                   [m.name for m in metrics])
+    result.metadata["lift"] = {**lift_meta, **expected, "n_boot": utility.N_BOOT,
+                               "failed_order_rate": failed_rate, "failed_orders": sum(failed),
+                               "pairs_with_failure": sum(f > 0 for f in failed)}
+    _write_json_lf(path, result.to_dict())
+    log.info("%s: AuditKIT utility record of %d pairs written (%s)", path.name, len(pids), text)
+    return path

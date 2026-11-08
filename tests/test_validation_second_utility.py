@@ -23,6 +23,7 @@ from validation_fakes import (
     UTILITY_ID,
     build_world,
     fill_sheet,
+    judged_pair,
     make_generation,
     read_csv,
     use_world,
@@ -414,9 +415,11 @@ def answer(world, prefs: dict[str, str], *, notes: dict[str, str] | None = None)
 
 
 def verdict_file(world, orders: dict[str, tuple[str, str]], *, judge: str = UTILITY_ID) -> Path:
-    """UtilityVerdicts with the given (order_ab, order_ba) winners; the score averages both orders."""
+    """UtilityVerdicts with the given (order_ab, order_ba) winners; the score averages both orders. Each
+    names the pair it judged as the world holds it now (validation_fakes.judged_pair)."""
     rows = [UtilityVerdict(pid=pid, variant=CANDIDATE, judge=judge, order_ab=ab, order_ba=ba,
-                           score=(SCORE_AB[ab] + SCORE_BA[ba]) / 2).model_dump()
+                           score=(SCORE_AB[ab] + SCORE_BA[ba]) / 2,
+                           **judged_pair(world, CANDIDATE, pid)).model_dump()
             for pid, (ab, ba) in sorted(orders.items())]
     path = world.outputs / "utility" / CANDIDATE / "utility_hi_dev.jsonl"
     write_jsonl(path, rows)
@@ -739,6 +742,39 @@ def test_score_utility_counts_pairs_without_a_verdict(tmp_path, monkeypatch):
     write_verdicts(world, CANDIDATE, {it["pid"]: 1.0 for it in items})
     out = score_utility()
     assert (out["n_judged"], out["n_missing"], out["complete"]) == (19, 0, True)
+
+
+def test_score_utility_joins_a_verdict_only_on_the_answers_the_reader_saw(tmp_path, monkeypatch, capsys):
+    # R1-43: a verdict is found by pid but joined only when it is about the pair the reader saw: the item's
+    # two generation keys and, for an answer still in its file under that key, that answer's sha256. One
+    # about other answers (judged before they were made again, or the same key with other text) or naming
+    # no keys (written before lift utility recorded them) is left out and counted, never scored.
+    world = utility_world(tmp_path, monkeypatch)
+    items = draw(20)
+    answer(world, {it["item_id"]: "tie" for it in items})
+    path = write_verdicts(world, CANDIDATE, {it["pid"]: 1.0 for it in items})
+    rows = list(read_jsonl(path))
+    rows[0]["candidate_key"] = "0" * 64                      # a verdict on answers made before these
+    rows[1]["stock_sha"] = "1" * 64                          # stock's answer under its key, other text
+    rows[2].update(dict.fromkeys(("candidate_key", "stock_key", "candidate_sha", "stock_sha")))  # no keys
+    write_jsonl(path, rows)
+    assert main(["validate", "utility-score"]) == 0
+    out = json.loads((world.outputs / "metrics" / "validation" / "utility.json").read_text(encoding="utf-8"))
+    assert (out["n_labelled"], out["n_judged"], out["n_other_pair"], out["n_missing"]) == (20, 17, 3, 0)
+    assert out["complete"] is False and out["human_win_rate"]["n"] == 17 and out["n_superseded"] == 0
+    md = (world.outputs / "metrics" / "validation" / "utility.md").read_text(encoding="utf-8")
+    assert "verdict is about other answers than the reader saw (other generation keys or text, or none " \
+           "recorded): 3." in md
+    printed = capsys.readouterr().out
+    assert "incomplete: 0 without a verdict, 3 with one about other answers" in printed
+    assert (f"left out 3 pairs whose verdict is about other answers than the reader saw: judge them again "
+            f"(lift utility --variant {CANDIDATE} --split dev --judge-only)") in printed
+    # With the answer files gone, the text cannot be checked (a missing file proves nothing): the verdict
+    # under the item's keys is joined again; the other keys and the keyless verdict never are.
+    for gens in sorted((world.outputs / "generations").rglob("utility_hi_*.jsonl")):
+        gens.unlink()
+    out = score_utility(write=False)
+    assert (out["n_judged"], out["n_other_pair"], out["n_missing"]) == (18, 2, 0)
 
 
 def test_score_utility_reports_the_warnings_its_import_gave(tmp_path, monkeypatch, capsys):

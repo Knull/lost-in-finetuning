@@ -64,7 +64,10 @@ src/lift/       config io paths schemas cachekey splits selection manifest cli  
   data/         polyrefuse translate sources sft build                            <- P01
   models/       load variants generate (P02), loglik (P03)
   judge/        labels qwen3guard frontier (safety) pipeline                      <- P02
+                frontier (pairwise, Message Batches), local_pairwise              <- P03
   train/        lora (P03), merge (P02)
+  utility.py    utility pairs, verdicts, win rate, Hindi fidelity                 <- P03
+  gates.py      Gates 1 and 2                                                     <- P03
   repair/       wiseft resta cast                                                 <- P05
   diagnose/     activations signatures                                            <- P06
   stats/        paired agreement (implemented)
@@ -94,6 +97,13 @@ six languages, so pairing, splitting and clustering all go by pid.
 - Prompts: `data/prompts/{set}_{lang}.jsonl`
 - Generations: `outputs/generations/{variant}/{set}_{lang}_{split}.jsonl`
 - Judgements: `outputs/judgements/{judge}/{variant}/{set}_{lang}_{split}.jsonl`
+- Utility verdicts: `outputs/utility/{judge}/{variant}/utility_hi_{split}.jsonl`; per-item
+  log-likelihood scores: `outputs/scores/{belebele,heldout_loss}/{variant}/*[-{dtype}].jsonl`. Never put either
+  under outputs/judgements/ or outputs/metrics/auditkit/{judge}/{variant}/: lift.sync pairs those
+  with safety cells.
+- Metrics: `outputs/metrics/{utility,belebele,heldout_loss}/{variant}_{split}[-{dtype}].json`,
+  `outputs/metrics/gate{0,1,2}.json`
+- Adapters: `outputs/adapters/{name}/` (name `adapter-{candidate}-{std|stress}-s{seed}`)
 - Run manifests (cost section): `outputs/manifests/*.json`
 
 ## Environment
@@ -132,15 +142,19 @@ six languages, so pairing, splitting and clustering all go by pid.
   key. One file never holds two stacks (torch, transformers, GPU class): a finished cell is reused
   on any stack, but an unfinished one resumes only on the stack that started it, or is made again
   with the `lift restart` line its refusal prints (a job line right after `lift sync pull`).
-  `lift generate`, `judge` and `run-dev` exit 3 when they finished but skipped cells (each listed
-  with its remedy); the runners go on with the next line.
+  `lift generate`, `judge`, `run-dev`, `utility`, `belebele` and `heldout-loss` exit 3 when they
+  finished but skipped cells or left some for a rerun (each listed with its remedy); the runners go
+  on with the next line (`lift train` and `lift gate` never exit 3). On a T4 every model line takes
+  `--dtype fp16`: `generate`, `judge`, `run-dev`, `train`, `utility --generate-only`, `belebele`
+  and `heldout-loss` (`lift train`'s other T4 flags are in kaggle/README.md, Jobs on a T4 x2).
 - **Secrets.** `HF_TOKEN` (with accepted access to tiny-aya-global and tiny-aya-base),
   `GITHUB_TOKEN` (remote runtimes clone this private repo), the judge API key with its spend cap
   `LIFT_JUDGE_MAX_USD` (per lift process), `LIFT_RUNS_REPO`, and `GOOGLE_TRANSLATE_API_KEY` (the
   Cloud Translation API, only for `lift data build` runs that translate). Set them with a hidden
   prompt, never typed or pasted on a command line or into a chat.
-- **Pinned revisions.** `lift generate`, `lift judge` and `lift run-dev` refuse a revision that is
-  not a commit sha; Gate 0 (`lift smoke`) resolves and prints the shas to pin. Pin them in
+- **Pinned revisions.** `lift generate`, `judge`, `run-dev`, `train`, `utility` (not `--judge-only`),
+  `belebele` and `heldout-loss` refuse a revision that is not a commit sha; Gate 0 (`lift smoke`)
+  resolves and prints the shas to pin. Pin them in
   configs/project.yaml with a dated decisions.md entry, then commit and push to the ref the GPU
   job runs.
 
@@ -214,17 +228,41 @@ six languages, so pairing, splitting and clustering all go by pid.
   - Read prompts with `lift.data.build.load_prompts(set, lang, split)`.
   - Each module's docstring holds the verified facts about its source.
   - The splits are frozen in `data/splits/` (Nov 4). The 8 files that need Google Translate
-    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) wait for
-    `lift data build --only harmful easy_benign hard_benign` with `GOOGLE_TRANSLATE_API_KEY` set
-    (about 15 minutes on the laptop, no GPU). The SFT variants are aya/dedup (677 rows),
-    indicalign/dedup (3,000) and indicalign/raw (3,000, the stress recipe), in
-    `data/sft/{cand}/{variant}/sft_messages.jsonl`; the counts are `decision.rows_by_variant` in
-    `data/sft/report.json` (decisions items 47 and 57). The built files still hold the Nov 4
-    pools (aya/dedup 679) until `lift data build --only sft` rebuilds them with the R1 fixes.
+    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) were built on Nov 4
+    through the Cloud Translation API (decisions item 48) and pushed to the runs repo. The SFT
+    variants are aya/dedup (677 rows), indicalign/dedup (3,000) and indicalign/raw (3,000, the
+    stress recipe), in `data/sft/{cand}/{variant}/sft_messages.jsonl`; the counts are
+    `decision.rows_by_variant` in `data/sft/report.json` (decisions items 47 and 57). The built
+    files still hold the Nov 4 pools (aya/dedup 679) until `lift data build --only sft` rebuilds
+    them with the R1 fixes; `lift train` refuses them until then.
 - **P02 (harness).** models.load/generate/variants (stock, adapter), train.merge, prompts,
   judge.qwen3guard, judge.frontier (safety), judge.pipeline, audit.record_safety, sync, gate0, and
   `lift smoke|generate|judge|run-dev|restart|sync|remote`, with colab/job.py and kaggle/runner.ipynb.
   - Gate 0 passed on Nov 4 (bf16, Colab A100) and the three revisions are pinned in
-    configs/project.yaml (decisions item 49).
+    configs/project.yaml (decisions item 49). It runs again before the stock dev eval: the Nov 4
+    run predates the labelling-rules tag and the preamble rule (decisions item 60).
+- **P03 (training and gain).** Implemented and tested offline:
+  - `lift train` (train.lora: TRL SFTTrainer + PEFT LoRA on pre-tokenized rows, loss on
+    `models.load.encode_chat_turn`'s answer tokens only, rows with no supervised token refused
+    before the model loads, exports that `lift.data.sft.export_problems` flags refused (R2-01), one
+    process on one GPU (cuda:0; a T4 x2 leaves cuda:1 idle), fp32 merge parity (on a T4 an fp16
+    parity share is recorded, not required), push of outputs/adapters/{name};
+    `--check` lists the rows a line would train on, tokenizer only) and
+    `lift register-adapter` (the laptop writes the configs/variants.yaml entry from the pulled
+    adapter's registration.json; commit it before any job evaluates the adapter).
+  - judge.frontier: `pairwise()` (configs/rubrics/utility_v1.md) and the Message Batches cache
+    pre-fill (`prefill_safety`, `prefill_pairwise`; batch state in
+    outputs/judge_cache/frontier/*.batches.jsonl; a batch a person knows was deleted is abandoned with
+    `LIFT_ABANDON_BATCHES=<id,...>`). `lift judge --judge second` pre-fills the whole run in one batch;
+    a batch still running exits 3 (rerun the line to collect).
+  - `lift utility` (lift.utility: both orders, UtilityVerdicts in outputs/utility/, win rate,
+    Hindi fidelity, `audit.record_utility`; `--generate-only` on the GPU, which checks both sides'
+    answers against the registry and records it in outputs/utility/checked/, then `--judge-only` on the
+    laptop, the only path without a GPU stack; metrics version 2 name the files and adapter they
+    describe; judge.local_pairwise is the Qwen3-8B fallback, used only when asked for).
+  - `lift belebele` and `lift heldout-loss` (models.loglik; scores in outputs/scores/).
+  - `lift gate 1|2 [--dtype D]` (lift.gates; outputs/metrics/gate{1,2}[-{dtype}].json and .md; Gate 1
+    counts only utility metrics that still describe the current answers, verdicts and adapter).
+    Decisions 50-55.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

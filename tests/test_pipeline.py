@@ -2026,6 +2026,133 @@ def test_a_judge_object_takes_no_device_or_dtype(fake_prompt_files):
         pipeline.judge_file(path, judge=FakeJudge(), lid=FakeLID(), device="cuda:1")
 
 
+# --- planning (pending_items) and the bulk prefill --------------------------------------------------------
+
+
+class Recorder(FakeJudge):
+    """A FakeJudge that keeps every JudgeItem it is sent, in order."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.items: list[JudgeItem] = []
+
+    def judge(self, items):
+        self.items.extend(items)
+        return super().judge(items)
+
+
+def test_pending_items_are_what_judge_file_sends_and_write_nothing(fake_prompt_files):
+    """P03 W: lift judge plans every cell before a bulk prefill. Planning goes through judge_file's own code,
+    so its items are the ones judge_file then sends, in its order (by pid), and it writes nothing: no
+    judgements file, no manifest, no call to the judge."""
+    pids, gens, path = setup_cell(fake_prompt_files, n=6)
+    out = pipeline.judgements_path("fake", *CELL)
+    judge = Recorder()
+    planned = pipeline.pending_items(path, judge)
+    assert [i.key for i in planned] == [g.key for g in gens]
+    assert planned[0] == JudgeItem(gens[0].key, f"prompt {pids[0]} en", gens[0].output, "en")
+    assert not out.exists() and manifests() == [] and judge.calls == []
+
+    pipeline.judge_file(path, judge=judge, lid=FakeLID(), batch_size=4)
+    assert judge.items == planned
+    judge.items.clear()
+    for chosen in ([gens[4].key, gens[1].key], None):          # a key list, then every generation
+        assert pipeline.pending_items(path, judge, keys=chosen) == []      # all judged: nothing pending
+    other = Recorder("judge-b@2", short="other")              # a second judge's own file
+    some = pipeline.pending_items(path, other, keys=[gens[4].key, gens[1].key])
+    assert [i.key for i in some] == [gens[1].key, gens[4].key]
+    pipeline.judge_file(path, judge=other, lid=FakeLID(), keys=[gens[4].key, gens[1].key])
+    assert other.items == some
+    other.items.clear()
+    rest = pipeline.pending_items(path, other)
+    pipeline.judge_file(path, judge=other, lid=FakeLID())
+    assert other.items == rest and [i.key for i in rest] == [g.key for g in gens if g.key not in
+                                                            {gens[1].key, gens[4].key}]
+    assert pipeline.pending_items(path, other) == [] and len(manifests()) == 3
+
+
+def test_pending_items_draw_the_sample_judge_file_draws(fake_prompt_files):
+    pids, gens, path = setup_cell(fake_prompt_files, n=10)
+    judge = Recorder()
+    planned = pipeline.pending_items(path, judge, sample=0.3, seed=7)
+    drawn = p04_draw(pids, "harmful", "dev", 0.3, 7)
+    assert {i.key for i in planned} == {g.key for g in gens if g.pid in drawn}
+    pipeline.judge_file(path, judge=judge, lid=FakeLID(), sample=0.3, seed=7)
+    assert judge.items == planned and len(planned) == 3
+
+
+@pytest.mark.parametrize("cut", ["a cut line", "a whole line without its newline", "a cut record"])
+def test_pending_items_read_a_cut_last_line_as_the_repair_will_leave_it(fake_prompt_files, cut):
+    """A kill mid-append leaves a last line without its newline; judge_file repairs it before resuming
+    (completed when it is valid JSON, dropped otherwise). Planning reads the file as the repair will leave
+    it, without touching it, so the prefill covers what judge_file then sends."""
+    _, gens, path = setup_cell(fake_prompt_files, n=6)
+    judge = Recorder()
+    pipeline.judge_file(path, judge=judge, lid=FakeLID(), keys=[g.key for g in gens[:4]])
+    out = pipeline.judgements_path("fake", *CELL)
+    data = out.read_bytes()
+    damaged = {"a cut line": data + b'{"key": "trunc',
+               "a whole line without its newline": data[:-1],
+               "a cut record": data[:-10]}[cut]
+    out.write_bytes(damaged)
+    planned = pipeline.pending_items(path, judge)
+    assert out.read_bytes() == damaged                        # nothing repaired, nothing written
+    judged = 3 if cut == "a cut record" else 4                # a cut record is dropped and judged again
+    assert [i.key for i in planned] == [g.key for g in gens[judged:]]
+    judge.items.clear()
+    pipeline.judge_file(path, judge=judge, lid=FakeLID())
+    assert judge.items == planned
+    assert sorted(r["key"] for r in read_jsonl(out)) == sorted(g.key for g in gens)
+
+
+def test_pending_items_raise_what_judge_file_raises_and_never_build_a_judge(fake_prompt_files):
+    pids, gens, path = setup_cell(fake_prompt_files, n=4, outputs=safe_outputs(4))
+    with pytest.raises(OtherPrecisionError) as refused:                  # first, as in judge_file
+        pipeline.pending_items(path, guard(dtype="fp16"))
+    assert refused.value.dtype == "bf16"
+    pipeline.judge_file(path, judge=FakeJudge("judge-a@1"), lid=FakeLID(), keys=[gens[0].key])
+    with pytest.raises(pipeline.MixedJudgesError):
+        pipeline.pending_items(path, FakeJudge("judge-b@1"))
+    fake_prompt_files[("harmful", "en")][-1] = make_prompt(pids[-1], text="a corrected translation")
+    with pytest.raises(pipeline.StaleJudgementsError) as stale:
+        pipeline.pending_items(path, FakeJudge("judge-a@1"))
+    with pytest.raises(pipeline.StaleJudgementsError) as same:
+        pipeline.judge_file(path, judge=FakeJudge("judge-a@1"), lid=FakeLID())
+    assert str(stale.value) == str(same.value) and stale.value.command == same.value.command == RESTART
+    path.write_bytes(b"")
+    with pytest.raises(ValueError, match="holds no generations"):
+        pipeline.pending_items(path, FakeJudge())
+    with pytest.raises(TypeError, match="not a role"):
+        pipeline.pending_items(path, "second")
+    assert len(manifests()) == 1                               # only the judge_file run above
+
+
+class BulkFrontier(FakeFrontier):
+    """FakeFrontier with section B's bulk prefill: records what it is handed and returns its summary."""
+
+    def __init__(self):
+        super().__init__()
+        self.prefilled: list[tuple[list[str], list[str], list[str], bool]] = []
+
+    def prefill_safety(self, prompts, responses, prompt_langs, *, wait=True):
+        self.prefilled.append((list(prompts), list(responses), list(prompt_langs), wait))
+        return {"mode": "batch", "n_requests": len(prompts), "n_cached": 0, "n_submitted": len(prompts),
+                "n_collected": len(prompts), "n_errored": 0, "n_expired": 0, "n_canceled": 0,
+                "batch_ids": ["msgbatch_test"], "usd": 0.01}
+
+
+def test_frontier_adapter_prefill_hands_the_pairs_to_prefill_safety():
+    frontier = BulkFrontier()
+    adapter = pipeline.FrontierAdapter(frontier)
+    items = [JudgeItem("k" * 64, "p one", "r one", "en"), JudgeItem("j" * 64, "p two", "r two", "hi")]
+    summary = adapter.prefill(items)
+    assert summary["mode"] == "batch" and summary["n_requests"] == 2
+    assert adapter.prefill(items[1:], wait=False)["n_requests"] == 1
+    assert frontier.prefilled == [(["p one", "p two"], ["r one", "r two"], ["en", "hi"], True),
+                                  (["p two"], ["r two"], ["hi"], False)]
+    assert not callable(getattr(pipeline.Qwen3GuardAdapter, "prefill", None))     # a local judge has none
+
+
 def test_a_judged_cell_whose_prompt_left_its_split_is_refused(fake_prompt_files):
     """R2-06: a prompt leaves a judged cell's split (a reader's bad verdict drops it from the rebuilt prompt
     file, decisions items 25 and 46). Its generation and label are then stale for a complete and a partial
