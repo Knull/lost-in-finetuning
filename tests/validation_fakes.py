@@ -271,15 +271,29 @@ def use_world(monkeypatch, world: World) -> World:
     return world
 
 
+def judged_pair(world: World, candidate: str, pid: str, split: str = "dev") -> dict[str, str | None]:
+    """What lift utility records of the pair it judged (UtilityVerdict.candidate_key, stock_key,
+    candidate_sha, stock_sha): the candidate's and stock's utility answers to ``pid`` as the world holds
+    them now, None for a side it has no answer of."""
+    out: dict[str, str | None] = {}
+    for side, variant in (("candidate", candidate), ("stock", "stock")):
+        rec = next((g for g in world.generations.get((variant, "utility", "hi", split), []) if g.pid == pid),
+                   None)
+        out[f"{side}_key"] = None if rec is None else rec.key
+        out[f"{side}_sha"] = None if rec is None else sha256_text(rec.output)
+    return out
+
+
 def write_verdicts(world: World, candidate: str, scores: dict[str, float], *,
                    judge: str = UTILITY_ID, path: Path | None = None) -> Path:
-    """UtilityVerdict records for ``candidate`` (pid -> score); order fields chosen to match."""
+    """UtilityVerdict records for ``candidate`` (pid -> score), order fields chosen to match, each naming
+    the pair it judged as the world holds it now (``judged_pair``)."""
     def orders(score: float) -> tuple[str, str]:
         return {1.0: ("A", "B"), 0.75: ("A", "TIE"), 0.5: ("TIE", "TIE"), 0.25: ("B", "TIE"),
                 0.0: ("B", "A")}[score]
 
     rows = [UtilityVerdict(pid=pid, variant=candidate, judge=judge, order_ab=orders(s)[0],
-                           order_ba=orders(s)[1], score=s).model_dump()
+                           order_ba=orders(s)[1], score=s, **judged_pair(world, candidate, pid)).model_dump()
             for pid, s in sorted(scores.items())]
     path = path or world.outputs / "utility" / candidate / "utility_hi_dev.jsonl"
     write_jsonl(path, rows)

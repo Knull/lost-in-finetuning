@@ -327,9 +327,15 @@ def _utility_score(args: argparse.Namespace) -> int:
               f"win rate reader {out['human_win_rate']['win_rate']:.3f}, judge "
               f"{out['judge_win_rate']['win_rate']:.3f} (judge minus reader {d['difference']:+.3f}, "
               f"{d['lo']:+.3f} to {d['hi']:+.3f})"
-              + ("" if out["complete"] else f"; incomplete: {out['n_missing']} without a verdict"))
+              + ("" if out["complete"] else f"; incomplete: {out['n_missing']} without a verdict"
+                 + (f", {out['n_other_pair']} with one about other answers"
+                    if out.get("n_other_pair") else "")))
     if out["n_superseded"]:
         print(f"  left out {out['n_superseded']} pairs whose outputs were remade after the sheet was made")
+    if out.get("n_other_pair"):
+        print(f"  left out {out['n_other_pair']} pairs whose verdict is about other answers than the reader "
+              f"saw: judge them again (lift utility --variant {out['candidate']} --split {out['split']} "
+              "--judge-only)")
     if out.get("import_warnings"):
         print("  warning: the sheet was imported with warnings, not corrected in this score "
               f"(import_warnings): {len(out['import_warnings'])}")
