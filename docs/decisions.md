@@ -2,6 +2,22 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 8, 2026: IndicAlign rows that cannot fit, before any adapter was trained
+
+66. **The IndicAlign pilots train with `--drop-unfit`; max_seq_len stays 1024.**
+    - `lift train --check` on the Nov 8 SFT rebuild (tokenizer at the pinned Global revision): the
+      standard file has one row that leaves no supervised token within 1,024 tokens (ind-05992, a
+      1,230-token prompt with the preamble), and the raw file used by the stress recipe has three
+      (ind-05992, ind-10921 and ind-11562, the same 631-word user turn under three ids). Aya fits
+      whole: 677 rows, none dropped.
+    - Dropping them costs nothing the loss could use: those rows hold zero supervised tokens either
+      way. Standard trains on 2,999 rows and 334,998 supervised tokens; stress on 2,997 rows and
+      340,620. Both counts are exactly what the check reported with every row kept.
+    - Raising max_seq_len instead would change the locked recipe for every row (memory, batch shape,
+      truncation of 45 and 42 other rows) for the sake of rows whose prompt alone exceeds the window.
+    - `--drop-unfit` is used on every IndicAlign `lift train` line (standard seeds 1 to 3, stress
+      seed 1) and records the dropped ids in each run's manifest.
+
 ## Nov 5, 2026: R1 review fixes, before the stock dev eval
 
 R1 (prompts/R1_review.md) reviewed the data pipeline and the harness after P01, P02 and P04 had
