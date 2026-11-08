@@ -10,7 +10,8 @@ finished from an earlier run); 1 an error, or fp32 merge parity failed (the adap
 but not registered, an fp16 parity's registration is withdrawn, and nothing may evaluate it until the
 cause is understood: CLAUDE.md rule 9), or the registry already holds another entry under the name; 2 a
 refused request, before any GPU time (a candidate or seed the recipe does not allow, a per-device batch
-that does not divide the effective batch, a precision the GPU must not use, a stale or malformed
+that does not divide the effective batch, a precision the GPU must not use, SFT exports
+lift.data.sft.export_problems flags (built under other rules, say: rebuild them), a stale or malformed
 training file, rows the template leaves no answer token in, a push that cannot work) or before the first
 training step (a Trainer that would not take the recipe's batch: a torchrun launch, say). Unpinned
 revisions stop it like lift generate (exit 1).

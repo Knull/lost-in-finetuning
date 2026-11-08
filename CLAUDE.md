@@ -243,8 +243,9 @@ six languages, so pairing, splitting and clustering all go by pid.
 - **P03 (training and gain).** Implemented and tested offline:
   - `lift train` (train.lora: TRL SFTTrainer + PEFT LoRA on pre-tokenized rows, loss on
     `models.load.encode_chat_turn`'s answer tokens only, rows with no supervised token refused
-    before the model loads, one process on one GPU (cuda:0; a T4 x2 leaves cuda:1 idle), fp32 merge
-    parity (on a T4 an fp16 parity share is recorded, not required), push of outputs/adapters/{name};
+    before the model loads, exports that `lift.data.sft.export_problems` flags refused (R2-01), one
+    process on one GPU (cuda:0; a T4 x2 leaves cuda:1 idle), fp32 merge parity (on a T4 an fp16
+    parity share is recorded, not required), push of outputs/adapters/{name};
     `--check` lists the rows a line would train on, tokenizer only) and
     `lift register-adapter` (the laptop writes the configs/variants.yaml entry from the pulled
     adapter's registration.json; commit it before any job evaluates the adapter).
