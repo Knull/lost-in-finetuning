@@ -2,6 +2,25 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 9, 2026 (evening): the utility floor for an adapter below parity, before any repair was fitted
+
+72. **For an adapter at or below parity, the selection rule's utility floor is its own win rate.**
+    - Gate 1 failed on Nov 9 (outputs/metrics/gate1.json): neither seed-1 standard adapter wins 55% of
+      the dev utility pairs (aya 0.417 [0.330, 0.507], indicalign 0.318 [0.235, 0.402]). The README's
+      rule applies as written: no useful candidate means reject on usefulness, and the stress recipe is
+      used, labelled. The stress adapter, adapter-indicalign-stress-s1, wins 0.280 [0.200, 0.362].
+    - The README's condition ("keeps at least half of the adapter's gain": 70% -> 60%) was written for an
+      adapter that beats stock. Read literally, 0.5 + 0.5 x (0.28 - 0.5) = 0.39 would require a repair to
+      win back half of the adapter's loss. Only a move toward stock can do that (WiSE-FT by
+      construction), so the rule would favour the baseline for a reason unrelated to restoring safety and
+      could rule out ReSta and CAST before they are compared.
+    - For an adapter at or below parity the minimum is its own dev win rate (the point estimate, as for
+      the 55% bar): a repair may not make the answers worse than the adapter already is. Above parity
+      nothing changes; at parity both readings give 0.5. `lift.selection.min_win_rate` holds the rule
+      and `lift select` prints it per setting; configs/repairs.yaml is unchanged.
+    - Decided by the team on Nov 9 after the dev utility and drift numbers, before CAST was fitted and
+      before any repair setting was built or evaluated: no sweep number existed.
+
 ## Nov 9, 2026: GlotLID re-pinned after its pinned commit vanished, before any dev cell was judged
 
 67. **GlotLID is re-pinned to revision `85cd671` (`model.bin`, GlotLID v3), the same file as `baa20d1`.**

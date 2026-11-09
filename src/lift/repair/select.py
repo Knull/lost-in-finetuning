@@ -69,7 +69,7 @@ from typing import Any
 from lift import config, paths
 from lift.paths import metrics_dir
 from lift.repair import settings as rs
-from lift.selection import DevScores, Selection, select_repair
+from lift.selection import DevScores, Selection, min_win_rate, select_repair
 
 REPORT = "selection"
 CELLS = {"harmful_hi": ("harmful", "hi", "dev"), "overrefusal_hard_hi": ("hard_benign", "hi", "dev")}
@@ -307,7 +307,7 @@ def decide(c: Collected, rules: Mapping[str, Any], families: Sequence[str]) -> d
             # evaluated on all three seeds; the family's own pick is kept for the record.
             per_family[fam].update(winner=overall.winner, verdict=overall.verdict,
                                    family_rule_winner=own.winner)
-    min_win = 0.5 + rules["min_gain_retained"] * (c.adapter.win_rate - 0.5)
+    min_win = min_win_rate(c.adapter.win_rate, rules)      # decisions item 72 below parity
     rows = []
     for row in overall.table:
         cand = next(x for x in c.candidates if x.name == row["name"])

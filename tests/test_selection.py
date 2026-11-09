@@ -3,7 +3,7 @@ from dataclasses import replace
 import pytest
 
 from lift import config
-from lift.selection import DevScores, select_repair
+from lift.selection import DevScores, min_win_rate, select_repair
 
 RULES = config.get("selection", name="repairs")
 STOCK = DevScores("stock", "stock", harmful_hi=0.10, overrefusal_hard_hi=0.30, win_rate=0.5,
@@ -88,6 +88,23 @@ def test_rejects_non_repair_methods():
 
 def verdict(stock, adapter, setting):
     return select_repair(stock, adapter, [setting], RULES).verdict
+
+
+def test_an_adapter_below_parity_makes_its_own_win_rate_the_floor():
+    """Decisions item 72: the gain condition keeps half of a gain over parity; an adapter at or below parity
+    has none, so a repair may not make the answers worse than the adapter's own, and need not win back what
+    the adapter lost (the literal 0.5 + 0.5 x (0.28 - 0.5) = 0.39 would)."""
+    assert min_win_rate(0.70, RULES) == pytest.approx(0.60)
+    assert min_win_rate(0.50, RULES) == pytest.approx(0.50)
+    assert min_win_rate(0.28, RULES) == pytest.approx(0.28)
+    weak = replace(ADAPTER, win_rate=0.28)
+    sel = select_repair(STOCK, weak, [
+        cand("wiseft-l0.50", "wiseft", 0.20, win=0.45),
+        cand("cast-m1.0", "cast", 0.12, win=0.30),        # below 0.39, at or above the adapter's 0.28
+        cand("resta-a0.25", "resta", 0.10, win=0.27),     # worse than the adapter: excluded
+    ], RULES)
+    assert sel.winner == "cast-m1.0" and sel.eligible == ["wiseft-l0.50", "cast-m1.0"]
+    assert [r["gain_ok"] for r in sel.table] == [True, True, False]
 
 
 def test_the_selection_block_is_the_locked_one():
