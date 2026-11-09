@@ -470,7 +470,7 @@ def test_a_wrapper_meta_that_reuses_a_record_field_is_refused(stock):
 
 @pytest.mark.torch
 def test_a_cell_resumes_and_skips_done_keys(stock):
-    from lift.cachekey import generation_key
+    from lift.cachekey import generation_key, intervention_digest
 
     rows = bel_rows(5)
     path = loglik.belebele_cell(stock, rows[:3], lang="en", split="dev", batch_size=2)
@@ -492,6 +492,7 @@ def test_a_cell_resumes_and_skips_done_keys(stock):
     meta = records["bel-000"]["meta"]
     assert (meta["dtype"], meta["scoring"], meta["task_version"]) == ("fp32", "sequence", 1)
     assert meta["run_config"] == loglik.belebele_run_config(stock) and meta["model_rev"] == stock.model_rev
+    assert meta["intervention"] == intervention_digest(stock.spec)         # lift select checks the entry
     assert all(meta[k] for k in ("stack", "template", "task", "torch", "transformers", "gpu_capability"))
     docs = manifests("belebele")
     assert sorted((d["n_resumed"], d["n_written"]) for d in docs) == [(0, 3), (3, 2), (5, 0)]

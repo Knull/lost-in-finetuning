@@ -2,6 +2,150 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 9, 2026: GlotLID re-pinned after its pinned commit vanished, before any dev cell was judged
+
+67. **GlotLID is re-pinned to revision `85cd671` (`model.bin`, GlotLID v3), the same file as `baa20d1`.**
+    - On Nov 9 the Hub stopped serving `baa20d1` (404 for `model.bin` at that revision; it served
+      it at 23:29 UTC on Nov 8, in Gate 0). On Nov 5 the maintainers made GlotLID v4 the default
+      `model.bin` and kept v3 as `model_v3.bin`; `baa20d1` is no longer in the repo's history.
+      The first dev job stopped at its first judge call; nothing was judged.
+    - `model.bin` at `85cd671` (Apr 18, 2024, still in main's history) is GlotLID v3: sha256
+      `a818b6bd42a628ab47d3dfc1578c7ea615c45381f3494c42535e31e8c4cafc9e`, 1,687,094,687 bytes, the
+      same as `model_v3.bin` at main. The copy every earlier run used (the laptop's Hub cache of
+      `baa20d1`) has the same sha256, so every language label is unchanged: item 17's 2,102
+      labels, the prompt files' LID columns, the SFT cleaning and the frozen utility split.
+    - Main's `model.bin` is now v4 (2,060 labels, another model). Using it would change the
+      labelling rules mid-project, so it is not used.
+    - The pin string is part of the labelling rules tag (`lift.judge.labels.rules_tag`) and of the
+      SFT rules stamp, so both change. Nothing had been judged under the old tag except Gate 0's
+      dry run, which used these same bytes, so Gate 0 is not run again. The SFT exports are
+      rebuilt once (`lift data build --only sft`), which gives the same rows and the same sha256
+      as the files the pilots trained on.
+
+## Nov 8, 2026: IndicAlign rows that cannot fit, before any adapter was trained
+
+66. **The IndicAlign pilots train with `--drop-unfit`; max_seq_len stays 1024.**
+    - `lift train --check` on the Nov 8 SFT rebuild (tokenizer at the pinned Global revision): the
+      standard file has one row that leaves no supervised token within 1,024 tokens (ind-05992, a
+      1,230-token prompt with the preamble), and the raw file used by the stress recipe has three
+      (ind-05992, ind-10921 and ind-11562, the same 631-word user turn under three ids). Aya fits
+      whole: 677 rows, none dropped.
+    - Dropping them costs nothing the loss could use: those rows hold zero supervised tokens either
+      way. Standard trains on 2,999 rows and 334,998 supervised tokens; stress on 2,997 rows and
+      340,620. Both counts are exactly what the check reported with every row kept.
+    - Raising max_seq_len instead would change the locked recipe for every row (memory, batch shape,
+      truncation of 45 and 42 other rows) for the sake of rows whose prompt alone exceeds the window.
+    - `--drop-unfit` is used on every IndicAlign `lift train` line (standard seeds 1 to 3, stress
+      seed 1) and records the dropped ids in each run's manifest.
+
+## Nov 6, 2026 (evening): the frozen set always holds the selection's winner, before any repair was run
+
+Found by the cross-branch review (XB-01, XB-02) on synthetic dev numbers; no sweep number existed yet.
+Item 71 is the orchestrator's call, **pending team confirmation**.
+
+71. **The overall winner is frozen as its family's setting** (`lift select`; amends item 70). Item 70
+    froze each family's own pick and named the overall winner the adapter's verdict, but the two can
+    differ, so the winner the README says is "frozen, tagged in git, and applied to all three seeds"
+    could be frozen nowhere. The tie window moves with the pool: drops within 2 points of the best tie.
+    Example (adapter harmful 0.30, minimum win rate 0.60, every setting eligible): ReSta drops 0.20,
+    WiSE-FT A drops 0.18 (win 0.62), WiSE-FT B drops 0.165 (win 0.68). Over all settings the window is
+    0.18-0.20, A ties ReSta and wins as the cheaper repair. Within WiSE-FT alone the best drop is A's,
+    the window is 0.16-0.18, A and B tie at the same cost and B wins on its higher win rate. Freezing B
+    meant the winner A was never evaluated on the final split (the final guard refuses it) and P08 would
+    publish an unevaluated model.
+    - Now the overall winner replaces its own family's pick; the other families keep the rule within
+      the family. The frozen set is still one setting per family (3 x 3 seeds = 9 repaired variants)
+      and always holds `overall.winner`. selection.json keeps the family's own pick as
+      `families.<family>.family_rule_winner` when it differs.
+    - In the no-winner case (verdict reject) the overall pick (fewest violations, then the largest drop)
+      is also its family's pick, so nothing changes there.
+    - The freeze is recorded in a committed file, configs/frozen_recipe.json, written by a decided
+      `lift select`: `{"version": 1, "adapter", "selection_sha256"` (of the outputs/metrics/selection.json
+      bytes it wrote), `"overall_winner", "frozen": {family: setting}}`, sorted keys. Gate 3 commits it
+      before the tag (`git add configs/frozen_recipe.json && git commit -m "Freeze the recipe" && git tag
+      recipe-frozen-YYYYMMDD && git push && git push --tags`), so the tag names a concrete recipe the final
+      guard can compare with selection.json. A recipe is frozen once: while the file exists, `lift select`
+      refuses a run that would change it or the selection.json it pins (an undecided run included) and
+      writes nothing; the same inputs again keep both files (the run date and which seeds are
+      registered don't count as a change). Re-freezing means deleting the file and a dated entry here
+      (`--refreeze` does it in one step, but only while no `recipe-frozen-*` tag exists: after the tag
+      it refuses, and the tag must be removed by hand with its own dated entry). A pinned selection.json
+      is copied to `selection.<first 12 hex of its sha256>.json` before it is replaced.
+
+## Nov 6, 2026: P05 repairs, sweep and selection details, before any repair was run
+
+Pinned while writing P05 (branch p05-repairs), offline on CPU with a tiny model: no repaired variant had
+been built on Tiny Aya and no sweep number existed. Written as items 67-69 and 75; renumbered 68-71
+when P05 merged into main on Nov 9, after R1 (56-65) and items 66-67.
+
+68. **How CAST is fitted and applied** (`lift.repair.cast`, `lift fit-cast`). The plan fixed the fit data,
+    the pooling, the strengths and the always-on setting; it left these open.
+    - Steering vectors: `extract_caa_vectors(model, tok, harmful, benign, CAAConfig(target_layers=L))`, so
+      each is mean(harmful) - mean(benign) at the last prompt token (CAA's own pooling), not normalised:
+      the direction that adds refusal, and "strength 1" is exactly that vector.
+    - Steering layers L: SafeTune CASTTrainer's own default band, layers 14-18 of a 32-layer model scaled
+      to the model's depth (its `_default_layers`): 16-20 of Tiny Aya's 36. Written into
+      configs/repairs.yaml as `cast.behavior_band_of_32: [14, 18]`. CLAUDE.md's "refusal-steering layer
+      near 24 of 36" is the refusal-direction layer of the diagnosis (P06, toolkit-notes); changing the
+      band to it is a person's call, made before the first fit, with an entry here.
+    - Condition: `fit_cast_condition` with its defaults (candidate layers n/4 to 3n/4, thresholds -1 to 1
+      in steps of 0.01, F1 on its held-out half), pool `last` (configs/repairs.yaml), chat template on.
+      One fit per adapter serves all three strengths and the always-on setting; seeds 2-3 are fitted the
+      same way on their own adapter (the fit does not depend on the strength).
+    - The artifact is one safetensors file (no pickle; the same tensors and metadata give the same bytes),
+      whose sha256 every CAST entry pins (`artifacts.cast`), with the fitted layer, threshold and
+      comparator copied into its params. A refit changes the hash, so registered entries must be replaced
+      (`lift register-repairs --replace`) and their outputs go stale; `lift fit-cast` keeps an artifact
+      fitted on the same adapter hash, Global revision, prompts and precision, and refuses another without
+      `--refit`.
+    - The gate's prefill pass runs with position ids counted from each row's first real token and
+      `logits_to_keep=1`: the condition layer's hidden states are what the fit read (each prompt alone),
+      and full logits for a padded batch would cost gigabytes on a 262k vocabulary. The fit also computes
+      only the last position's logits (the hidden states, and the artifact, are unchanged; a test checks
+      the model is left as it was). Each row's decision, similarity and the pass's seconds are recorded in
+      GenerationRecord.meta (`gate_fired`, `gate_sim`, `gate_seconds`), so the gate's overhead is measured
+      apart. Belebele gates each item on its context (lift.models.loglik's contract, item 10).
+    - The diagnostic firing rates are read on exactly the held-out half `fit_cast_condition` scored
+      (its interleaved split, reproduced; for an odd count SafeTune's split is not interleaved, a quirk
+      kept as is).
+    - An artifact fitted in another precision than the run's (bf16 on Colab, used by an fp16 T4 run, or
+      the reverse) builds with a warning, not a refusal: the run's outputs are keyed by its dtype and by the
+      artifact's hash (whose metadata names the fit's dtype), and paired_labels pairs only one dtype, so no
+      number pairs across precisions; refusing would stop a Gate-0-licensed fp16 run of a registered entry.
+      Fitting in the run's precision instead is `lift fit-cast --dtype D --refit` plus `--replace`.
+69. **How the sweep runs** (`lift register-repairs`, `lift sweep`).
+    - Each setting is a configs/variants.yaml entry named by the scheme there, pinning the adapter hash
+      (from the adapter's own entry, which must pin one); WiSE-FT params {lambda}; ReSta {alpha, dare:
+      false, base, base_revision} (a re-pinned Base is a new cache key); CAST as in item 68. The GPU job
+      writes the entries into its own checkout before the first stage; the laptop writes the identical
+      entries with `lift register-repairs` after `lift sync pull` and commits them (lift utility
+      --judge-only compares the registry with the answers' check records).
+    - Each setting runs `lift run-dev`, `lift utility --generate-only` and `lift belebele --langs hi` on dev,
+      in one process, each building the variant afresh (a weight-space repair always starts from a freshly
+      merged adapter; stock and Base are loaded on the CPU and freed once applied). WiSE-FT and ReSta refuse
+      references whose parameter names or shapes do not match the adapter model's, since SafeTune skips
+      unmatched names with only a log line.
+    - Resume: a stage that exited 0 is recorded (outputs/metrics/sweep/{adapter}.json) with the setting's
+      intervention digest and precision and is not run again. Exit codes 0 / 3 (some stage left cells
+      listed by its command) / 1 (some stage failed). The runners treat lift sweep's 3 as a failure (it is
+      not one of the commands whose 3 they go past), so a sweep line goes last in its job; the final push
+      still runs.
+    - Costs per setting come from its records (GPU seconds per generated token; the gate apart), with a run
+      manifest per setting holding each stage's wall time this run.
+70. **How the selection is applied** (`lift select`).
+    - Nothing is selected while any input of stock, the adapter or any setting is missing or no longer
+      current (the paired_labels checks, Gate 1's utility checks, complete Belebele-hi score files on one
+      Global revision): a subset would be a selection the pre-registration did not make. The adapter's
+      own Belebele is not part of the rule and is not required.
+    - Current means made under the variant's registry entry as it is now: every generation and score
+      record names its entry's intervention digest (`meta.intervention`), and select refuses a safety cell
+      or Belebele file of another entry (a CAST artifact fitted again, registered with --replace), naming
+      its `lift restart` / `lift belebele --restart` line. A repair's records must name it; stock's and the
+      adapter's from before records named it are read as before.
+    - The same rule within each family (wiseft; resta; cast with cast_always) freezes that family's best
+      setting for the final eval, its verdict included (no eligible setting: the no-winner rule, per
+      family). The overall winner is the adapter's verdict.
+
 ## Nov 5, 2026: R1 review fixes, before the stock dev eval
 
 R1 (prompts/R1_review.md) reviewed the data pipeline and the harness after P01, P02 and P04 had

@@ -12,7 +12,8 @@ Weight-space repairs mutate in place: always start from freshly loaded adapter w
 a model a previous repair touched. Keep Base and Global copies on CPU and stream.
 
 P05 adds a repair by writing a builder ``(spec, ctx) -> LoadedVariant`` and registering it in
-``BUILDERS`` under its method (``@builder("wiseft")``); stock and adapter code stays untouched.
+``BUILDERS`` under its method (``@builder("wiseft")``); stock and adapter code stays untouched. The repair
+builders live in lift.repair.build, imported at the end of this module so the table is always complete.
 
 configs/variants.yaml holds one entry per variant: the VariantSpec fields (name, method, adapter,
 seed, params, artifacts) plus the documentation-only keys in ``REGISTRY_ONLY_KEYS``. An adapter's
@@ -37,7 +38,7 @@ score in any piece marks every row, and generate refuses that batch whole.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,10 @@ class LoadedVariant:
     # row's decision afterwards. None for a plain model, which loglik calls directly; loglik refuses a
     # wrapper (``base`` set) without it, so a gated variant is never scored ungated.
     score_logits: Callable[..., Any] | None = None
+    # What the builder loaded, by the key spec.artifacts names it under: the sha256 of each file (the
+    # adapter's hash, a CAST artifact's) and, for ReSta, the Base revision. build_variant refuses a variant
+    # whose declared ``spec.artifacts`` this does not match (R1-05).
+    loaded: dict[str, str] = field(default_factory=dict)
 
     @property
     def hf_model(self) -> Any:
@@ -115,7 +120,24 @@ def build_variant(spec: VariantSpec, *, device: str = "cuda:0", dtype: str = "bf
         raise NotImplementedError(f"no builder for method {spec.method!r} yet (repairs arrive in P05)")
     model_id = model_id or config.get("models.global.id")
     rev = resolved_revision(model_id, revision or config.get("models.global.revision"))
-    return make(spec, BuildContext(model_id=model_id, model_rev=rev, device=device, dtype=dtype))
+    variant = make(spec, BuildContext(model_id=model_id, model_rev=rev, device=device, dtype=dtype))
+    check_loaded(spec, variant.loaded)
+    return variant
+
+
+def check_loaded(spec: VariantSpec, loaded: dict[str, str]) -> None:
+    """Refuse a variant whose builder loaded other files than its registry entry declares (R1-05): each
+    ``spec.artifacts`` hash must be the one the builder loaded under that key. A declared file the builder
+    never loaded is refused too, as a typo in the entry would otherwise key cells on a hash nothing
+    checked."""
+    wrong = {key: (want, loaded.get(key)) for key, want in spec.artifacts.items() if loaded.get(key) != want}
+    if wrong:
+        shown = "; ".join(f"artifacts.{k}: declared {str(w)[:12]}, loaded "
+                          f"{str(g)[:12] if g else 'nothing under that key'}"
+                          for k, (w, g) in sorted(wrong.items()))
+        raise ValueError(f"{spec.name}: the builder loaded other files than configs/variants.yaml declares "
+                         f"({shown}). Register the variant again from the files it should load, then make "
+                         "its cells again.")
 
 
 @builder("stock")
@@ -141,7 +163,8 @@ def _build_adapter(spec: VariantSpec, ctx: BuildContext) -> LoadedVariant:
     model = merged_model(directory, device=ctx.device, dtype=ctx.dtype, base_id=ctx.model_id,
                          base_revision=ctx.model_rev)
     return LoadedVariant(model=model, tokenizer=tok, spec=spec, model_rev=ctx.model_rev, adapter_hash=digest,
-                         template_hash=template_hash(tok), dtype=ctx.dtype, device=ctx.device)
+                         template_hash=template_hash(tok), dtype=ctx.dtype, device=ctx.device,
+                         loaded={"adapter": digest})
 
 
 def checked_adapter(spec: VariantSpec) -> tuple[Path, str]:
@@ -193,3 +216,7 @@ def get_spec(name: str) -> VariantSpec:
     if name not in registry:
         raise KeyError(f"variant {name!r} is not in configs/variants.yaml (known: {sorted(registry)})")
     return registry[name]
+
+
+# The repair builders (wiseft, resta, cast, cast_always) register themselves in BUILDERS (P05).
+from lift.repair import build as _repair_builders  # noqa: E402, F401

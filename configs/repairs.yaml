@@ -19,6 +19,9 @@ cast:
     benign: [{set: easy_benign, split: train}, {set: hard_benign, split: fit}]
     langs: [en, hi, zh, es, ar, th]
     pool: last
+  # Steering layers (Nov 6, decisions.md item 68): SafeTune CASTTrainer's default band, layers 14-18 of
+  # a 32-layer model scaled to the model's depth (16-20 of Tiny Aya's 36).
+  behavior_band_of_32: [14, 18]
   language_aware: false        # cut Nov 3 per the cut order (schedule)
 
 selection:                     # run on seed-1 dev only; the winner is frozen and applied to all seeds

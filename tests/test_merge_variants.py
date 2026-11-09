@@ -255,7 +255,9 @@ def test_missing_adapter_and_unknown_method():
     with pytest.raises(FileNotFoundError, match="sync pull"):
         variants.build_variant(adapter_spec(), device="cpu", dtype="fp32", model_id="unused",
                                revision="a" * 40)
-    with pytest.raises(NotImplementedError, match="P05"):
+    # Every method has a builder since P05; a repair on a missing adapter fails like the adapter does.
+    assert set(variants.BUILDERS) == {"stock", "adapter", "wiseft", "resta", "cast", "cast_always"}
+    with pytest.raises(FileNotFoundError, match="sync pull"):
         variants.build_variant(VariantSpec(name="w", method="wiseft", adapter="x", params={"lambda": 0.5}),
                                device="cpu", model_id="unused", revision="a" * 40)
 

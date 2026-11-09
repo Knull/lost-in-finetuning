@@ -70,6 +70,25 @@ Lives in `safetune.interventions.steer.refusal_direction`.
 - `orthogonalize_weights(...)` and `restore_weights(model, snapshots)` do the weight-space
   ablation. `RefusalDirectionModel` does the hook version.
 
+### What P05 relies on (checked against the 0.1.12 source, Nov 6)
+
+- `CASTModel._gate_fires(input_ids, **kwargs)` passes its kwargs to the model's forward and pools each row
+  over its attention mask (left padding dropped); `generate` passes only `attention_mask`. lift's
+  `GatedCAST` subclass adds position ids and `logits_to_keep=1` there and records each row's decision;
+  `_steered(fires, fn, ...)` applies the vectors to the rows whose gate fired (a row mask when the batch
+  has more than one row). Both are private: SafeTune is pinned, and tests/test_repairs.py exercises them.
+- `fit_cast_condition` reads each prompt alone (no padding), while `extract_caa_vectors` runs left-padded
+  batches of 16 with no position ids; with rotary positions (and none on Cohere2's global layers) a
+  constant shift leaves attention between real tokens unchanged.
+- `extract_caa_vectors` maps positive -> the extractor's safe side, so it returns mean(positive) -
+  mean(negative); CAAConfig defaults: pool `last_token`, `normalize=False`, all layers unless
+  `target_layers`. CASTTrainer's default steering band is layers 14-18 of 32 scaled to depth
+  (`runner/steer/_activation._default_layers`).
+- `fit_cast_condition`'s held-out split per class: `n_val = max(1, round(n * val_frac))`, indices
+  `range(0, n, n // n_val)[:n_val]`; interleaved for even n, a leading block for some odd n.
+- `apply_wise_ft` and `apply_resta` skip parameter names missing from the reference with only a log
+  line, and `assert_mutates` only logs a warning when nothing changed.
+
 ### Runtime config and gotchas
 
 - Runtime config is `safetune.configure(...)`. Leave every `legacy_*` flag False.

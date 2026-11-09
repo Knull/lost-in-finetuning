@@ -389,9 +389,19 @@ def _smoke(args: argparse.Namespace) -> int:
 # --- lift generate ------------------------------------------------------------------------------------
 
 
+def _base_pin(variant: str) -> list[str]:
+    """``["models.base"]`` for a ReSta variant, whose weights depend on Base's (R1-04): its generate and
+    run-dev lines need Base pinned before torch loads, as Global is. An unknown name is refused later, with
+    the registry's names."""
+    from lift.models.variants import load_registry
+
+    spec = load_registry().get(variant)
+    return ["models.base"] if spec is not None and spec.method == "resta" else []
+
+
 def _generate(args: argparse.Namespace) -> int:
     _logging()
-    require_pinned("models.global")
+    require_pinned("models.global", *_base_pin(args.variant))
     sets = _names(args.sets, ALL_SETS, SAFETY_SETS)
     langs = _names(args.langs, LANGS, LANGS)
     dtype = _dtype(args.dtype)
@@ -823,7 +833,7 @@ def _run_dev(args: argparse.Namespace) -> int:
     # As in _judge, only a local judge has a revision to pin: once the judge decision makes the frontier
     # judge primary, the judges.safety_primary block names a provider and model instead.
     local = judge_dir("primary") == "qwen3guard"
-    require_pinned("models.global", *([_judge_entry("primary")] if local else []))
+    require_pinned("models.global", *_base_pin(args.variant), *([_judge_entry("primary")] if local else []))
     langs = _names(args.langs, LANGS, LANGS)
     sets = _names(args.sets, SAFETY_SETS, SAFETY_SETS)
     dtype = _dtype(args.dtype)
