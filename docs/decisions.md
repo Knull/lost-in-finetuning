@@ -2,6 +2,26 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 9, 2026: GlotLID re-pinned after its pinned commit vanished, before any dev cell was judged
+
+67. **GlotLID is re-pinned to revision `85cd671` (`model.bin`, GlotLID v3), the same file as `baa20d1`.**
+    - On Nov 9 the Hub stopped serving `baa20d1` (404 for `model.bin` at that revision; it served
+      it at 23:29 UTC on Nov 8, in Gate 0). On Nov 5 the maintainers made GlotLID v4 the default
+      `model.bin` and kept v3 as `model_v3.bin`; `baa20d1` is no longer in the repo's history.
+      The first dev job stopped at its first judge call; nothing was judged.
+    - `model.bin` at `85cd671` (Apr 18, 2024, still in main's history) is GlotLID v3: sha256
+      `a818b6bd42a628ab47d3dfc1578c7ea615c45381f3494c42535e31e8c4cafc9e`, 1,687,094,687 bytes, the
+      same as `model_v3.bin` at main. The copy every earlier run used (the laptop's Hub cache of
+      `baa20d1`) has the same sha256, so every language label is unchanged: item 17's 2,102
+      labels, the prompt files' LID columns, the SFT cleaning and the frozen utility split.
+    - Main's `model.bin` is now v4 (2,060 labels, another model). Using it would change the
+      labelling rules mid-project, so it is not used.
+    - The pin string is part of the labelling rules tag (`lift.judge.labels.rules_tag`) and of the
+      SFT rules stamp, so both change. Nothing had been judged under the old tag except Gate 0's
+      dry run, which used these same bytes, so Gate 0 is not run again. The SFT exports are
+      rebuilt once (`lift data build --only sft`), which gives the same rows and the same sha256
+      as the files the pilots trained on.
+
 ## Nov 8, 2026: IndicAlign rows that cannot fit, before any adapter was trained
 
 66. **The IndicAlign pilots train with `--drop-unfit`; max_seq_len stays 1024.**
