@@ -1,6 +1,8 @@
 from lift import config
 from lift.cli import build_parser, main
 
+REAL_LOAD = config.load          # at import, before conftest's autouse fixture serves its views
+
 
 def test_configs_load_and_respect_the_dev_budget():
     for name in ("project", "train", "repairs", "variants"):
@@ -11,6 +13,20 @@ def test_configs_load_and_respect_the_dev_budget():
     assert len(config.get("cast.strengths", name="repairs")) + 1 <= budget   # + always-on
     assert config.get("resta.dare", name="repairs") is False
     assert config.get("seeds") == [1, 2, 3]
+
+
+def test_the_committed_registry_parses(monkeypatch):
+    """conftest serves configs/variants.yaml with its stock entries only; the file itself, with every
+    adapter and repair a run registered, must still load: one entry per name, each a valid spec."""
+    from lift.models import variants
+
+    monkeypatch.setattr(config, "load", REAL_LOAD)
+    registry = variants.load_registry()
+    assert "stock" in registry
+    for name, spec in registry.items():
+        assert spec.name == name
+        if spec.method == "adapter":
+            assert spec.adapter == name and len(spec.artifacts["adapter"]) == 64
 
 
 def test_locked_generation_settings():

@@ -40,13 +40,21 @@ def pytest_configure(config):
 
 @pytest.fixture(autouse=True)
 def unpinned_revisions(monkeypatch):
-    """Serve configs/project.yaml with every pinnable revision set to "main". A test that needs a
-    pin sets it itself: it mutates this view (one copy per test, like the real cached load) or
-    monkeypatches lift.config.load or lift.config.get."""
+    """Serve configs/project.yaml with every pinnable revision set to "main", and configs/variants.yaml
+    with its stock entries only: the adapters and repairs a run registers are the project's state,
+    not a fixture, and tests register their own under the same names. A test that needs a pin sets it
+    itself: it mutates this view (one copy per test, like the real cached load) or monkeypatches
+    lift.config.load or lift.config.get. test_configs_and_cli checks the committed registry itself."""
     real = lift_config.load
     views: dict[str, dict] = {}
 
     def load(name: str = "project") -> dict:
+        if name == "variants":
+            if name not in views:
+                data = copy.deepcopy(real(name))
+                data["variants"] = [e for e in data.get("variants") or [] if e.get("method") == "stock"]
+                views[name] = data
+            return views[name]
         if name != "project":
             return real(name)
         if name not in views:
