@@ -27,8 +27,8 @@ ReSta reference.
 
 **Adapter.** Hindi instruction SFT on about 3,000 deduplicated rows. LoRA r 16, alpha 32,
 LR 2e-4, 2 epochs, chat template on, loss on assistant tokens only. Three seeds. Aya has only
-679 usable Hindi rows, so it trains on 679 and IndicAlign on 3,000 (`docs/decisions.md` items 23
-and 47, Nov 4).
+677 usable Hindi rows, so it trains on 677 and IndicAlign on 3,000 (`docs/decisions.md` items 23,
+47 and 57).
 
 - There are two data candidates: Aya Dataset Hindi rows and one non-Aya Hindi set (IndicAlign).
   We pick between them by dev utility win rate only, never by drift.

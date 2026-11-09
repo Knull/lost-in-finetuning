@@ -27,8 +27,11 @@ means reject on usefulness, and the stress recipe is used, labelled".
   "pending" as P04 wrote it for the judge configs/project.yaml made primary when it was scored. A
   missing file is pending (round 1 not scored yet), and so is one scored for another primary judge
   than the config names now (its ``judge_view`` against ``primary_view()``): it is scored again. A
-  file that cannot be read, or one that is not round 1 in Hindi or holds another status, leaves the
-  check incomplete, with the error.
+  file that no longer holds for the files here is "stale", with the reasons
+  ``lift.validation.score.gate1_stale`` gives (a round 1 file drawn or imported again, an item judged or
+  generated again, a changed bar; or a file written before it recorded its inputs), and Gate 1 is
+  pending until it is scored again (R2-12). A file that cannot be read, or one that is not round 1 in
+  Hindi or holds another status, leaves the check incomplete, with the error.
 - Gain check: for every candidate in configs/train.yaml, adapter-{candidate}-std-s1's dev utility
   metrics (``utility_metrics_path``, written by ``lift utility``). An adapter passes when its win rate,
   the point estimate with failed judge orders scored as ties, is at least 0.55: the README states the
@@ -433,6 +436,16 @@ def judge_check() -> dict[str, Any]:
         return {**out, "status": "pending",
                 "reason": f"{out['source']} was scored for {doc.get('judge_view')}, but configs/project.yaml "
                           f"now makes {view} primary: run {rescore} again"}
+    try:
+        stale = [_scrub(" ".join(str(problem).split())) for problem in validation.gate1_stale(doc)]
+    except (OSError, ValueError, RuntimeError) as exc:          # ValidateError is a RuntimeError
+        return {**out, "status": "incomplete", "error": _error(exc),
+                "reason": f"whether {out['source']} still holds for the files here cannot be checked: run "
+                          f"{rescore} again"}
+    if stale:
+        return {**out, "status": "stale", "stale": stale,
+                "reason": f"{out['source']} no longer holds for the files here ({'; '.join(stale)}): run "
+                          f"{rescore} again"}
     status = str(doc["status"])
     if status == "pending":
         out["reason"] = (f"P04's check is pending (block status {doc.get('block_status')}, "

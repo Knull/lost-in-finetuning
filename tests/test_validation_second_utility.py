@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import copy
 import csv
+import inspect
 import json
 import math
 import random
 import re
+import shlex
 from collections import defaultdict
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from validation_fakes import (
     UTILITY_ID,
     build_world,
     fill_sheet,
+    judged_pair,
     make_generation,
     read_csv,
     use_world,
@@ -29,14 +32,18 @@ from validation_fakes import (
     write_verdicts,
 )
 
-from lift import config
+from lift import config, sync
 from lift.cli import main
+from lift.commands import run as run_cmd
 from lift.io import read_jsonl, sha256_file, write_jsonl
+from lift.judge import pipeline
+from lift.judge.pipeline import JudgeOutcome
+from lift.models.generate import ASIDE_DIR, generations_path
 from lift.schemas import UtilityVerdict
 from lift.stats.agreement import cohens_kappa, percent_agreement
 from lift.validation.outputs import Prompts
-from lift.validation.sample import load_round, make_sheets
-from lift.validation.second_judge import second_judge_dir, second_judge_sample
+from lift.validation.sample import DEFAULT_SEED, load_round, make_sheets
+from lift.validation.second_judge import chosen_pids, second_judge_dir, second_judge_sample
 from lift.validation.store import ValidateError
 from lift.validation.utility import (
     UTILITY_COLUMNS,
@@ -47,6 +54,7 @@ from lift.validation.utility import (
     score_utility,
     utility_keys_path,
     utility_labels_path,
+    utility_meta_path,
     utility_sheet_path,
 )
 
@@ -311,6 +319,69 @@ def test_cli_second_judge_sample(tmp_path, monkeypatch, capsys):
                          rf"--keys {re.escape(keys)}", printed)
 
 
+# R2-08: decisions item 31's random part is drawn twice. P04's lists (lift.validation.second_judge, ranked
+# with lift.validation.sample.DEFAULT_SEED, a share of second_judge_fraction) are the canonical path; the
+# harness's `lift judge --judge second --sample F` (lift.judge.pipeline.second_judge_pids through judge_file,
+# ranked with split_seed: lift judge has no --seed) must reproduce them exactly, and it is what a restart's
+# refill line runs while P04 has drawn no list (lift.commands.run._judge_line). So that neither draw can move
+# alone: the seeds and the shares are one, and the two samplers draw the same pids.
+
+class FakeLID:
+    def top(self, text, k=5):
+        return [("hin_Deva", 0.99)][:k]
+
+
+class FakeSecondJudge:
+    """Stands in for the second judge: every output a refusal, written to outputs/judgements/fake/."""
+
+    judge_id = "fake-second-judge@0001"
+    short = "fake"
+
+    def judge(self, items):
+        return [JudgeOutcome("refusal", {"call": "refuse"}, "raw") for _ in items]
+
+
+def refill_fraction(cell=("stock", "harmful", "hi", "dev")) -> float:
+    """The --sample share of the line that refills the second judge's file of ``cell`` while P04 has drawn
+    no key list for it, read from the line the code builds."""
+    words = shlex.split(run_cmd._judge_line(*cell, role="second", dtype="bf16"))
+    assert "--sample" in words and "--keys" not in words, words
+    return float(words[words.index("--sample") + 1])
+
+
+def test_p04s_default_seed_is_the_split_seed_the_harness_samples_with():
+    assert DEFAULT_SEED == int(config.get("split_seed"))
+    assert inspect.signature(second_judge_sample).parameters["seed"].default == DEFAULT_SEED
+
+
+def test_the_refill_lines_sample_is_the_configured_second_judge_share():
+    assert refill_fraction() == float(config.get("second_judge_fraction"))
+
+
+def test_the_harness_sample_judges_exactly_p04s_random_part(tmp_path, monkeypatch):
+    monkeypatch.setattr("lift.manifest.git_sha", lambda: "test")          # judge_file's run manifests
+    world = second_judge_world(tmp_path, monkeypatch, dev=("stock",), final=("stock",), langs=("hi", "en"))
+    cells = sorted(cell for cell in world.generations if cell[1] != "utility")
+    # Each cell's refill line, run as lift judge runs it (judge_file's sample= and its default seed) before
+    # P04 has drawn any list, then P04's draw as `lift validate second-judge-sample --no-validated` makes it.
+    judged = {}
+    for cell in cells:
+        out = pipeline.judge_file(generations_path(*cell), judge=FakeSecondJudge(), lid=FakeLID(),
+                                  sample=refill_fraction(cell))
+        judged[cell] = {r["pid"] for r in read_jsonl(out)}
+    second_judge_sample(require_validated=False)
+    listed = set(key_lists()["random.txt"])
+    p04 = {cell: {g.pid for g in world.generations[cell] if g.key in listed} for cell in cells}
+    assert all(p04.values()) and ("stock", "redteam", "hi", "final") in p04
+    assert {c: sorted(pids) for c, pids in judged.items()} == {c: sorted(pids) for c, pids in p04.items()}
+    # And the two samplers are one draw at any share and seed, set and split.
+    for fraction, seed in ((0.1, DEFAULT_SEED), (0.25, DEFAULT_SEED), (0.5, 7)):
+        p04_draw = chosen_pids(Prompts(), fraction, seed)
+        assert len(p04_draw) == 7                         # three sets in dev and final, and redteam final
+        harness = {k: pipeline.second_judge_pids(*k, fraction, seed) for k in p04_draw}
+        assert harness == p04_draw, (fraction, seed)
+
+
 # ---------------------------------------------------------------------------------------------
 # The utility check: blind stock-vs-adapter Hindi pairs for the Hindi reader (Build 7)
 # ---------------------------------------------------------------------------------------------
@@ -344,9 +415,11 @@ def answer(world, prefs: dict[str, str], *, notes: dict[str, str] | None = None)
 
 
 def verdict_file(world, orders: dict[str, tuple[str, str]], *, judge: str = UTILITY_ID) -> Path:
-    """UtilityVerdicts with the given (order_ab, order_ba) winners; the score averages both orders."""
+    """UtilityVerdicts with the given (order_ab, order_ba) winners; the score averages both orders. Each
+    names the pair it judged as the world holds it now (validation_fakes.judged_pair)."""
     rows = [UtilityVerdict(pid=pid, variant=CANDIDATE, judge=judge, order_ab=ab, order_ba=ba,
-                           score=(SCORE_AB[ab] + SCORE_BA[ba]) / 2).model_dump()
+                           score=(SCORE_AB[ab] + SCORE_BA[ba]) / 2,
+                           **judged_pair(world, CANDIDATE, pid)).model_dump()
             for pid, (ab, ba) in sorted(orders.items())]
     path = world.outputs / "utility" / CANDIDATE / "utility_hi_dev.jsonl"
     write_jsonl(path, rows)
@@ -612,6 +685,28 @@ def test_score_utility_finds_verdicts_anywhere_under_outputs(tmp_path, monkeypat
     assert given["n_judged"] == 20 and list(given["verdict_files"]) == [str(path)]
 
 
+def test_score_utility_never_reads_verdicts_from_what_lift_sync_never_syncs(tmp_path, monkeypatch):
+    # R1-42: outputs/.sync-backup (local copies a forced pull replaced), outputs/.aside (what lift restart
+    # set aside) and Gate 0's staging hold superseded or local-only copies. A UtilityVerdict names no
+    # generation key, so read as current verdicts they would fill in the pairs the current file lacks.
+    world = utility_world(tmp_path, monkeypatch)
+    items = draw(20)
+    answer(world, {it["item_id"]: "tie" for it in items})
+    scores = {it["pid"]: 1.0 for it in items}
+    current = write_verdicts(world, CANDIDATE, dict(list(scores.items())[:12]))   # 8 pairs not judged yet
+    stamp = "20261105T000000Z"
+    stores = (f"{ASIDE_DIR}/{stamp}/utility", f"{sync.BACKUP_DIR}/{stamp}/outputs/utility",
+              "gate0/bf16/precision.new")
+    aside, *_ = [write_verdicts(world, CANDIDATE, scores,
+                                path=world.outputs / store / CANDIDATE / "utility_hi_dev.jsonl")
+                 for store in stores]
+    out = score_utility()
+    assert (out["n_labelled"], out["n_judged"], out["n_missing"], out["complete"]) == (20, 12, 8, False)
+    assert [Path(f).resolve() for f in out["verdict_files"]] == [current.resolve()]
+    # Named on purpose (--verdicts), a set-aside copy is read like any other file.
+    assert score_utility(verdict_files=[aside], write=False)["n_judged"] == 20
+
+
 def test_score_utility_with_two_judges_needs_a_judge_id(tmp_path, monkeypatch):
     world = utility_world(tmp_path, monkeypatch)
     items = draw(20)
@@ -647,6 +742,58 @@ def test_score_utility_counts_pairs_without_a_verdict(tmp_path, monkeypatch):
     write_verdicts(world, CANDIDATE, {it["pid"]: 1.0 for it in items})
     out = score_utility()
     assert (out["n_judged"], out["n_missing"], out["complete"]) == (19, 0, True)
+
+
+def test_score_utility_joins_a_verdict_only_on_the_answers_the_reader_saw(tmp_path, monkeypatch, capsys):
+    # R1-43: a verdict is found by pid but joined only when it is about the pair the reader saw: the item's
+    # two generation keys and, for an answer still in its file under that key, that answer's sha256. One
+    # about other answers (judged before they were made again, or the same key with other text) or naming
+    # no keys (written before lift utility recorded them) is left out and counted, never scored.
+    world = utility_world(tmp_path, monkeypatch)
+    items = draw(20)
+    answer(world, {it["item_id"]: "tie" for it in items})
+    path = write_verdicts(world, CANDIDATE, {it["pid"]: 1.0 for it in items})
+    rows = list(read_jsonl(path))
+    rows[0]["candidate_key"] = "0" * 64                      # a verdict on answers made before these
+    rows[1]["stock_sha"] = "1" * 64                          # stock's answer under its key, other text
+    rows[2].update(dict.fromkeys(("candidate_key", "stock_key", "candidate_sha", "stock_sha")))  # no keys
+    write_jsonl(path, rows)
+    assert main(["validate", "utility-score"]) == 0
+    out = json.loads((world.outputs / "metrics" / "validation" / "utility.json").read_text(encoding="utf-8"))
+    assert (out["n_labelled"], out["n_judged"], out["n_other_pair"], out["n_missing"]) == (20, 17, 3, 0)
+    assert out["complete"] is False and out["human_win_rate"]["n"] == 17 and out["n_superseded"] == 0
+    md = (world.outputs / "metrics" / "validation" / "utility.md").read_text(encoding="utf-8")
+    assert "verdict is about other answers than the reader saw (other generation keys or text, or none " \
+           "recorded): 3." in md
+    printed = capsys.readouterr().out
+    assert "incomplete: 0 without a verdict, 3 with one about other answers" in printed
+    assert (f"left out 3 pairs whose verdict is about other answers than the reader saw: judge them again "
+            f"(lift utility --variant {CANDIDATE} --split dev --judge-only)") in printed
+    # With the answer files gone, the text cannot be checked (a missing file proves nothing): the verdict
+    # under the item's keys is joined again; the other keys and the keyless verdict never are.
+    for gens in sorted((world.outputs / "generations").rglob("utility_hi_*.jsonl")):
+        gens.unlink()
+    out = score_utility(write=False)
+    assert (out["n_judged"], out["n_other_pair"], out["n_missing"]) == (18, 2, 0)
+
+
+def test_score_utility_reports_the_warnings_its_import_gave(tmp_path, monkeypatch, capsys):
+    # W3-07: the utility import records its warnings with the preferences (labels/utility_hi.meta.json),
+    # and the score reports them (utility.json import_warnings, a line in utility.md, the command's output)
+    world = utility_world(tmp_path, monkeypatch)
+    items = draw(20)
+    warned = answer(world, {it["item_id"]: "A" for it in items[1:]})["warnings"]     # one row left empty
+    assert [w for w in warned if items[0]["item_id"] in w]
+    assert json.loads(utility_meta_path().read_text(encoding="utf-8")).get("warnings") == warned
+    write_verdicts(world, CANDIDATE, {it["pid"]: 1.0 for it in items})
+    assert main(["validate", "utility-score"]) == 0
+    printed = capsys.readouterr().out
+    out = json.loads((world.outputs / "metrics" / "validation" / "utility.json").read_text(encoding="utf-8"))
+    assert out.get("import_warnings") == warned
+    md = (world.outputs / "metrics" / "validation" / "utility.md").read_text(encoding="utf-8")
+    assert [ln for ln in md.splitlines() if ln.startswith("Imported with warnings") and warned[0] in ln]
+    warning = "the sheet was imported with warnings, not corrected in this score (import_warnings): 1"
+    assert f"warning: {warning}" in [line.strip() for line in printed.splitlines()]
 
 
 def test_cli_utility_round_trip_prints_no_sheet_text(tmp_path, monkeypatch, capsys):

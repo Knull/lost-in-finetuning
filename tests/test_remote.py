@@ -492,8 +492,9 @@ def test_job_stops_the_running_line_on_the_stop_file_then_pushes(job, tmp_path):
     hang = HangingProc(b"loading\n")
 
     def ask_to_stop(key):
-        if key == "lift run-dev --variant stock":
-            (root / "lift_job.stop").write_text("ctrl-c\n", encoding="ascii")
+        if key == "lift run-dev --variant stock":  # whole: the monitor polls, and must never read it empty
+            (root / "lift_job.stop.tmp").write_text("ctrl-c\n", encoding="ascii")
+            os.replace(root / "lift_job.stop.tmp", root / "lift_job.stop")
 
     vm = FakeVM(root, hook=ask_to_stop, procs={"lift run-dev --variant stock": [hang]})
     status, vm, _ = run_job(job, root, ["lift sync pull", "lift run-dev --variant stock", "lift info"], vm=vm,
@@ -548,6 +549,112 @@ def test_job_kills_a_hung_push_and_tries_again(job, tmp_path, monkeypatch):
     assert hang.signals == [signal.SIGINT]
     assert vm.keys("lift ") == ["lift info", "lift sync push", "lift sync push"]
     assert status["push_rc"] == 0 and status["rc"] == 0
+
+
+class LeaderGoneProc:
+    """A line whose lift process (the group leader) printed ``output`` and exited with ``rc``, while a
+    child it started (same process group, same stdout) stays alive and silent with the pipe open. poll()
+    and wait() give the leader's rc; read() gives the output, then blocks until the group is signalled
+    (which ends the child and closes the pipe). After 10 s it gives up (``timed_out``), so a missing fix
+    fails the test instead of hanging the suite."""
+
+    def __init__(self, output: bytes = b"generating\n", rc: int = 0):
+        self.chunks = [output]
+        self.rc = rc
+        self.signals: list = []
+        self.released = threading.Event()
+        self.timed_out = False
+        self.stdout = self
+
+    def read(self, size=-1):
+        if self.chunks:
+            return self.chunks.pop(0)
+        if not self.released.wait(10):
+            self.timed_out = True
+        return b""
+
+    def close(self):
+        pass
+
+    def poll(self):
+        return self.rc  # the leader is gone
+
+    def wait(self, timeout=None):
+        return self.rc
+
+    def send_signal(self, sig):  # job.py signals the group (os.killpg) on a VM, the fake here
+        self.signals.append(sig)
+        self.released.set()
+
+    def kill(self):
+        self.signals.append("kill")
+        self.released.set()
+
+
+class SigintSurvivorProc(LeaderGoneProc):
+    """A line still running and silent. SIGINT ends its leader (poll() then gives -SIGINT) but not its
+    child, which ignores SIGINT and holds the pipe open until SIGKILL (kill())."""
+
+    def __init__(self):
+        super().__init__()
+        self.leader_rc = None
+
+    def poll(self):
+        return self.leader_rc
+
+    def wait(self, timeout=None):
+        return 0 if self.leader_rc is None else self.leader_rc
+
+    def send_signal(self, sig):
+        self.signals.append(sig)
+        if sig == signal.SIGINT:
+            self.leader_rc = -int(signal.SIGINT)  # the leader dies of it; the child goes on, pipe open
+
+
+# R1-30: the monitor stopped policing a command once its leader exited (poll() not None), while _stream
+# went on reading the pipe a child still held: no silence limit, stop request or SIGKILL reached the group,
+# so the line, the next lines and the final push waited on the child (on a VM, until --max-hours).
+def test_job_kills_a_silent_child_holding_the_pipe_after_its_leader_exited(job, tmp_path):
+    root = tmp_path / "content"
+    root.mkdir()
+    proc = LeaderGoneProc()
+    vm = FakeVM(root, procs={"lift run-dev --variant stock": [proc]})
+    status, vm, _ = run_job(job, root, ["lift run-dev --variant stock", "lift info"], vm=vm, heartbeat=0.01,
+                            spec_extra={"max_silent_minutes": 0.005})  # silent 0.3 s: hung
+    assert proc.signals == [signal.SIGINT] and not proc.timed_out
+    assert status["failed_line"] == 0 and status["rc"] == 1 and status["killed"].startswith("no output for")
+    assert vm.keys("lift ") == ["lift run-dev --variant stock", "lift sync push"] and status["push_rc"] == 0
+
+
+def test_job_stops_a_line_whose_leader_exited_but_whose_child_holds_the_pipe(job, tmp_path):
+    root = tmp_path / "content"
+    root.mkdir()
+    proc = LeaderGoneProc()
+
+    def ask_to_stop(key):  # lift remote uploads the stop file while the line runs
+        if key == "lift run-dev --variant stock":  # whole: the monitor polls, and must never read it empty
+            (root / "lift_job.stop.tmp").write_text("ctrl-c\n", encoding="ascii")
+            os.replace(root / "lift_job.stop.tmp", root / "lift_job.stop")
+
+    vm = FakeVM(root, hook=ask_to_stop, procs={"lift run-dev --variant stock": [proc]})
+    status, vm, _ = run_job(job, root, ["lift run-dev --variant stock", "lift info"], vm=vm, heartbeat=0.01)
+    assert proc.signals == [signal.SIGINT] and not proc.timed_out
+    assert status["stopped"] == "stop file: ctrl-c" and status["failed_line"] == 0
+    assert vm.keys("lift ") == ["lift run-dev --variant stock", "lift sync push"] and status["push_rc"] == 0
+
+
+def test_job_sigkills_a_child_that_outlives_the_sigint_of_its_leader(job, tmp_path, monkeypatch):
+    monkeypatch.setattr(job, "KILL_GRACE_SECONDS", 0.2, raising=False)
+    root = tmp_path / "content"
+    root.mkdir()
+    proc = SigintSurvivorProc()
+    vm = FakeVM(root, procs={"lift run-dev --variant stock": [proc]})
+    status, vm, _ = run_job(job, root, ["lift run-dev --variant stock", "lift info"], vm=vm, heartbeat=0.01,
+                            spec_extra={"max_silent_minutes": 0.005})
+    # SIGINT while the leader ran, then SIGKILL after the grace, though the leader had died of the SIGINT.
+    assert proc.signals[0] == signal.SIGINT and set(proc.signals[1:]) == {"kill"} and not proc.timed_out
+    assert status["failed_line"] == 0 and status["rc"] == 130 and status["killed"].startswith("no output for")
+    assert vm.keys("lift ") == ["lift run-dev --variant stock", "lift sync push"] and status["push_rc"] == 0
 
 
 def test_job_heartbeat_reaches_the_kernel_and_the_log_but_the_log_stays_off_the_kernel(job, tmp_path):
@@ -2950,3 +3057,123 @@ def test_readme_covers_skipped_cells_the_stop_request_and_watch():
     for words_in in (ctrl_c, cap, " ".join(remote_cmd.EXAMPLES.split())):
         assert "first Ctrl+C" in words_in and "goes on" in words_in, words_in
     assert "push retry" in ctrl_c and "push retry" in " ".join(remote_cmd.EXAMPLES.split())
+
+
+# R1-07: CLAUDE.md, Secrets: "Set them with a hidden prompt, never typed or pasted on a command line or
+# into a chat." Step 6 and .env.example typed each secret as a literal, lift remote's missing-secret text
+# said `$env:NAME = '...'` (`export NAME=...`), and the Claude Code advice had a session set what the
+# exit-6 banner names in its own command line, which only a value pasted into the chat could do.
+SECRET_NAME = r"(?:[A-Z][A-Z0-9_]*_(?:TOKEN|API_KEY)|NAME)\b"  # as CLAUDE.md lists them, or the placeholder
+# A quoted literal assigned in PowerShell, or a literal exported in a POSIX shell. A hidden prompt, a
+# variable or a subexpression is not a literal.
+TYPED_SECRET = re.compile(rf"\$env:(?P<ps>{SECRET_NAME})\s*=\s*[\"'](?!\$\()"
+                          rf"|\bexport\s+(?P<sh>{SECRET_NAME})=(?:[\"'](?!\$)|[^\s\"'$])")
+HIDDEN_PROMPT = re.compile(r"Read-Host\b[^\n]*-AsSecureString|\bread -r?s\b")
+
+
+def typed_secrets(text: str) -> list[str]:
+    """Where a secret is typed on a command line: the line number and the secret's name, never a value."""
+    return [f"line {text.count(chr(10), 0, m.start()) + 1}: {m.group('ps') or m.group('sh')}"
+            for m in TYPED_SECRET.finditer(text)]
+
+
+def hidden_prompt(name: str) -> str:
+    """Windows PowerShell 5.1's hidden prompt for one secret, as the runbooks give it."""
+    return f"[Net.NetworkCredential]::new('', (Read-Host -AsSecureString '{name}')).Password"
+
+
+# R2-19: for Claude Code sessions, step 6 and .env.example kept each secret at user scope, the runs repo's
+# WRITE token included, so every process started afterwards inherited it, the third-party build code of a
+# local pip install too (colab/job.py Job._env: secrets go to lift only, never to git or pip). The operator
+# now stores each one encrypted for their Windows account (Export-Clixml: DPAPI), and a session loads it
+# only in the command line that runs lift. LIFT_RUNS_REPO and LIFT_JUDGE_MAX_USD are settings.
+STORED = '"$env:USERPROFILE\\.lift\\{name}.xml"'
+USER_SCOPE = re.compile(r"\[Environment\]::SetEnvironmentVariable\(\s*'(?P<name>[A-Z][A-Z0-9_]*)'\s*,\s*"
+                        r"(?P<value>[^\n]+?)\s*,\s*'User'\s*\)")
+
+
+def stored(name: str) -> str:
+    """How the operator stores one secret for Claude Code sessions, in their own window."""
+    return f"Read-Host -AsSecureString '{name}' | Export-Clixml {STORED.format(name=name)}"
+
+
+def loaded(name: str) -> str:
+    """How a session loads one stored secret, in the command line that runs lift."""
+    return (f"$env:{name} = [Net.NetworkCredential]::new('', (Import-Clixml {STORED.format(name=name)}))"
+            ".Password")
+
+
+@pytest.mark.parametrize("path", ["colab/README.md", "kaggle/README.md", ".env.example"])
+def test_no_runbook_types_a_secret_on_a_command_line(path):
+    assert typed_secrets((REPO_ROOT / path).read_text(encoding="utf-8")) == [], path
+
+
+@pytest.mark.parametrize("path", ["colab/README.md", "kaggle/README.md", ".env.example"])
+def test_no_runbook_keeps_a_secret_at_user_scope(path):
+    text = (REPO_ROOT / path).read_text(encoding="utf-8")
+    kept = sorted({m["name"] for m in USER_SCOPE.finditer(text)       # `$null` removes one instead
+                   if re.fullmatch(SECRET_NAME, m["name"]) and m["value"].strip() != "$null"})
+    assert kept == [], (f"{path} keeps {', '.join(kept)} at user scope, so every process started afterwards "
+                        "inherits them, the build code of a local pip install included")
+
+
+def test_the_colab_setup_step_sets_each_secret_with_a_hidden_prompt():
+    step = readme().split("**Set the secrets**", 1)[1].split("\n7. **", 1)[0]
+    assert typed_secrets(step) == []
+    for name in ("GITHUB_TOKEN", "HF_TOKEN", "OPENAI_API_KEY"):
+        assert f"$env:{name} = {hidden_prompt(name)}" in step, name
+        # The one-time form for Claude Code sessions, typed in the user's own window (R2-19).
+        assert stored(name) in step, name
+    assert 'New-Item -ItemType Directory -Force "$env:USERPROFILE\\.lift"' in step
+    words = " ".join(step.split())
+    # Why not at user scope, and how to remove a secret an earlier step 6 put there, or a stored one.
+    assert "pip install" in words and "inherit" in words
+    assert "[Environment]::SetEnvironmentVariable('HF_TOKEN', $null, 'User')" in words
+    assert f"Remove-Item {STORED.format(name='HF_TOKEN')}" in words
+
+
+@pytest.mark.parametrize("os_name", ["nt", "posix"], ids=["powershell", "posix-shell"])
+def test_lift_remote_never_says_to_type_a_missing_secret(monkeypatch, os_name):
+    ctx = types.SimpleNamespace(out=io.StringIO())
+    with monkeypatch.context() as mp:  # missing_message picks its example by os.name
+        mp.setattr(remote.os, "name", os_name)
+        launch = remote.missing_message(["GITHUB_TOKEN", "LIFT_RUNS_REPO", "HF_TOKEN"])  # a launch's exit 2
+        blocked = remote.retry_blocker(ctx, None, ["HF_TOKEN"])  # watch's push retry, from a shell without it
+        remote.kept_on_vm(ctx, "lift-r107", None, None, blocked)  # the exit-6 banner names what to set
+    banner = ctx.out.getvalue()
+    assert "KEEPS RUNNING" in banner and "missing HF_TOKEN:" in banner and "missing GITHUB_TOKEN," in launch
+    for text in (launch, banner):
+        assert typed_secrets(text) == [] and HIDDEN_PROMPT.search(text), text
+        assert "`hf auth login` with a WRITE token" in text
+    example = f"$env:NAME = {hidden_prompt('NAME')}" if os_name == "nt" else "read -rs NAME; export NAME"
+    assert example in launch
+    # R2-19: in a Claude Code session, a secret step 6 stored is loaded in the command line that runs lift.
+    assert (f"{loaded('NAME')}; lift remote" in launch) == (os_name == "nt")
+
+
+def test_the_claude_code_advice_never_routes_a_secret_through_the_chat():
+    advice = " ".join(readme().split("**From Claude Code.**", 1)[1].split("\n\n", 1)[0].split())
+    assert "a 6 means" in advice and "lift remote watch" in advice
+    assert "never asks for or accepts a secret in the chat" in advice
+    # It loads each secret a lift command needs from its stored file, in the command line that runs that
+    # command, never from the user environment (R2-19).
+    assert f"{loaded('HF_TOKEN')}; lift remote" in advice and "GetEnvironmentVariable" not in advice
+    assert "own terminal" in advice and "set what its banner names in the same command line" not in advice
+
+
+# W3, on R1-08's restart paragraphs (decisions item 63). After a whole-cell restart, when another machine
+# pushed only some of the files it emptied (one judge's judgements, say), the push sends the others empty, the
+# generations among them, and keeps only the changed copies: not "the runs repo's copies". After a --judge
+# restart, when that machine also judged the generations it pushed, the pull the summary names reports the
+# emptied-file conflict, and only `lift sync push --force` settles it: a plain push reports it again.
+@pytest.mark.parametrize("path", ["colab/README.md", "kaggle/README.md"])
+def test_the_restart_paragraph_says_what_the_next_push_keeps_and_what_settles_it(path):
+    text = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
+    after = text[text.index("checkpoint push after it", text.index("`lift restart` moves the cell's")):]
+    note = after[:after.index("), and ") + 1]           # the parenthetical on what that push does
+    assert "keeps the runs repo's copies" not in note, note
+    assert "keeps the runs repo's copy of each file that changed there" in note, note
+    assert "`lift sync push --force` settles by completing the restart" in note, note
+    then = note.split("`lift sync pull`, then `lift sync push`", 1)[1]
+    assert ("if the emptied file also changed there, that pull reports the emptied-file conflict, which "
+            "`lift sync push --force` settles") in then, note

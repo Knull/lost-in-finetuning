@@ -15,3 +15,24 @@
 variants:
   - name: stock
     method: stock
+  - name: adapter-aya-std-s1
+    method: adapter
+    adapter: adapter-aya-std-s1
+    seed: 1
+    artifacts: {adapter: "673ce508cd4dbc22b87a4a304ac7df11d7396c2818549513612fa392e262b29f"}
+    location: "runs repo ($LIFT_RUNS_REPO): outputs/adapters/adapter-aya-std-s1@9bbb29064f7b4cb90272390455f903c96dba86ed"
+    note: "aya, standard recipe, seed 1: trained 2026-11-08 on NVIDIA A100-SXM4-40GB in bf16, 677 rows of aya/dedup; merge parity fp32 20/20 prompts token-identical"
+  - name: adapter-indicalign-std-s1
+    method: adapter
+    adapter: adapter-indicalign-std-s1
+    seed: 1
+    artifacts: {adapter: "048ef6e56f20b372648e2d1b450f24c02bc59e684f7c74c139d9e678f2c4efb9"}
+    location: "runs repo ($LIFT_RUNS_REPO): outputs/adapters/adapter-indicalign-std-s1@1db054b89601db3b1d70024a165ad5d294c7587a"
+    note: "indicalign, standard recipe, seed 1: trained 2026-11-09 on NVIDIA A100-SXM4-40GB in bf16, 2999 rows of indicalign/dedup; merge parity fp32 20/20 prompts token-identical"
+  - name: adapter-indicalign-stress-s1
+    method: adapter
+    adapter: adapter-indicalign-stress-s1
+    seed: 1
+    artifacts: {adapter: "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5"}
+    location: "runs repo ($LIFT_RUNS_REPO): outputs/adapters/adapter-indicalign-stress-s1@17a3585d20e7fc31534449f60a050140a173e944"
+    note: "indicalign, stress recipe, seed 1: trained 2026-11-09 on NVIDIA A100-SXM4-40GB in bf16, 2997 rows of indicalign/raw; merge parity fp32 20/20 prompts token-identical"

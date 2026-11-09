@@ -50,7 +50,9 @@ A markdown cell on top repeats the usage and the T4 rule. Then come two code cel
   `/kaggle/temp/lift/{data,outputs,validation}`, outside `/kaggle/working` (see below).
 - It shallow-clones the repo into `/kaggle/temp/lift/repo`. The token goes only into an HTTP
   header, set through `GIT_CONFIG_*` variables of that one git process, with
-  `GIT_TERMINAL_PROMPT=0`. It never goes into the URL, the command line or `.git/config`. If the
+  `GIT_TERMINAL_PROMPT=0`; any `GIT_CONFIG_PARAMETERS` or `GIT_CONFIG_COUNT/KEY_n/VALUE_n` the
+  runtime set are left out of that process (not out of `os.environ` or `bootstrap.sh`), so git reads
+  that one header. It never goes into the URL, the command line or `.git/config`. If the
   clone fails, the error shows git's message with the token redacted. Rerunning the cell deletes
   and re-clones only the clone.
 - It runs `kaggle/bootstrap.sh`:
@@ -92,10 +94,10 @@ lift info
 - The first failing line stops the job, with three exceptions. One is a push: see below. Another is
   a `lift generate`, `lift judge`, `lift run-dev`, `lift utility`, `lift belebele` or
   `lift heldout-loss` line that exits 3: it is done, but skipped some cells (stale, made in another
-  precision, or judged by another judge), had their AuditKIT record refused, or left some for a
-  rerun (`lift utility --no-wait` while its Message Batch runs), and it lists each with its remedy
-  (Troubleshooting). Its checkpoint push and the next lines still run, and the cell raises at the
-  end. The third is a `lift sync` line that exits 3 (below): the next lines still run too. Any other
+  precision, judged by another judge, short of their frozen split, or with decoding that went
+  non-finite), had their AuditKIT record refused, or left some for a rerun (`lift utility --no-wait`
+  while its Message Batch runs), and it lists each with its remedy (Troubleshooting). Its checkpoint
+  push and the next lines still run, and the cell raises at the end. The third is a `lift sync` line that exits 3 (below): the next lines still run too. Any other
   line's exit 3 stops the job (`lift train` and `lift gate` never exit 3).
 - After every line that succeeds (or exits 3, as above), `lift sync ...` lines excepted, the runner
   runs `lift sync push` as a checkpoint. It pushes once more in `finally`, even after a failure or
@@ -303,7 +305,14 @@ secrets getter, and the `lift_env` path in cell 2.
   `lift restart` moves the cell's generations, judgements and AuditKIT records (with `--judge`,
   only that judge's judgements and records) under `outputs/.aside/`, which is never synced, and
   leaves empty files in their place; an empty record is retired, and readers skip it. The
-  checkpoint push after it then replaces the runs repo's copies, and the job regenerates that cell
+  checkpoint push after it then replaces the runs repo's copies (if another machine pushed only
+  files the restart emptied since this machine's last sync, the push keeps the runs repo's copy of
+  each file that changed there and reports a conflict instead, which `lift sync push --force`
+  settles by completing the restart; if it pushed any other file of the cell, such as more
+  generations after a `--judge` restart, the summary names its own remedy: for those,
+  `lift sync pull`, then `lift sync push`, and if the emptied file also changed there, that pull
+  reports the emptied-file conflict, which `lift sync push --force` settles),
+  and the job regenerates that cell
   and reuses the others. A restart without `--judge` also empties the other judges' judgements,
   which `lift run-dev` does not refill: its log names the line that does, such as
   `lift judge ... --judge second` with P04's `--keys` list (`--sample 0.10` when P04 has drawn
@@ -365,9 +374,20 @@ secrets getter, and the `lift_env` path in cell 2.
     (Habits).
   - A cell made in another precision (bf16, by Colab): leave it out with `--sets` and `--langs`,
     and never restart it from here (Jobs on a T4 x2).
-  - A cell judged by another judge: run the line with the judge the message names (its id shows
-    the dtype and mode), or start that judge's judgements over with the `lift restart ... --judge`
-    line it prints, as for a stale cell.
+  - A cell judged by another judge: run the line with the judge the message names (its id names the
+    labelling rules, `#rules-<tag>`, and for Qwen3Guard the dtype and mode), or start that judge's
+    judgements over with the `lift restart ... --judge` line it prints, as for a stale cell. A file
+    that differs only in its rules tag (the labelling rules changed since it was judged) can only be
+    judged again: its message names only the restart line, and the old judge never finishes it.
+  - A cell short of its frozen split (most often translation failures that await a reader's
+    verdict): nothing was generated for it. Do what its listing says on the laptop first (the
+    language's failures sheet filled in, `lift data apply-spotchecks`, then `lift sync push`); a
+    later job's `lift sync pull` brings the completed prompt file, and the same line makes the cell.
+  - A cell whose decoding went non-finite (a NaN or +inf score, as an fp16 overflow gives; nothing
+    of that batch was written): a non-finite fp16 run is not reported (decisions item 27), so the
+    cell is made in bf16 on Colab, by a job with its `lift restart ... --dtype fp16` line right
+    after `lift sync pull` when its file holds fp16 records, then the line that failed without
+    `--dtype`. In bf16 it is a fault to report (CLAUDE.md rule 9).
   - A refused AuditKIT record: its error, above the list, says why; on a T4 it is most often the
     fp16 licence, which does not cover the cell (step 3 of the first jobs above). The judgements
     are written, so once that is fixed, the next run of the line writes the record.
