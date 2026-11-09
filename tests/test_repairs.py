@@ -150,9 +150,53 @@ def test_wiseft_builder_is_the_same_repair(tiny_lora_adapter, tiny_model_dir):
 # --- ReSta ----------------------------------------------------------------------------------------------
 
 
+def configure_base(base_dir):
+    """configs/project.yaml's Base pointed at the local stand-in (this test's view): the resta builder
+    refuses an entry that names another Base than the configured pin (R1-04)."""
+    config.load("project")["models"]["base"]["id"] = str(base_dir)
+
+
 def resta_spec(base_dir, alpha=0.25):
+    configure_base(base_dir)
     return spec("resta", alpha=alpha, dare=False, base=str(base_dir),
                 base_revision=resolved_revision(str(base_dir), "x"))
+
+
+def test_a_resta_variant_is_built_only_on_the_configured_base_pin(tiny_lora_adapter, tiny_model_dir,
+                                                                 base_dir):
+    """R1-04: ReSta's weights depend on Base's, so its Base revision is part of its key and must be the pin.
+    The builder refuses while models.base.revision is not a commit sha, and an entry naming another Base
+    revision than the configured one (Base re-pinned since registration) until it is registered again.
+    Another Base sha gives another key."""
+    install(tiny_lora_adapter)
+    named = spec("resta", alpha=0.25, dare=False, base="CohereLabs/tiny-aya-base", base_revision="a" * 40)
+    with pytest.raises(ValueError, match="not a commit sha"):          # the view leaves Base at "main"
+        build(named, tiny_model_dir)
+    good = resta_spec(base_dir)
+    stale = spec("resta", alpha=0.25, dare=False, base=str(base_dir), base_revision="f" * 40)
+    with pytest.raises(ValueError, match=r"register the ReSta settings again \(`lift register-repairs"):
+        build(stale, tiny_model_dir)
+    assert build(good, tiny_model_dir).loaded["base"] == good.params["base_revision"]
+    keys = {generation_key(model_rev="b" * 40, adapter_hash="c" * 64, spec=s, template_hash="d" * 64,
+                           gen_cfg={"max_new_tokens": 4}, pid="p", lang="hi", prompt_text="t")
+            for s in (good, stale)}
+    assert len(keys) == 2 and intervention_digest(good) != intervention_digest(stale)
+
+
+def test_a_cast_artifact_is_wrapped_from_the_bytes_its_hash_was_checked_on(tiny_model_dir, tmp_path):
+    """R1-05: ``cast.load`` reads the artifact once and parses those bytes, so with the declared sha256 the
+    steering vectors wrapped are the ones checked; another sha raises ArtifactChanged before anything is
+    parsed."""
+    import torch
+
+    path = cast.save(tmp_path / "cast.safetensors", torch.ones(8), {2: torch.ones(8)},
+                     {"format": cast.FORMAT, "behavior_layers": [2], "condition_layer": 1, "threshold": 0.5,
+                      "comparator": "greater", "f1_heldout": 1.0, "pool": "mean"})
+    digest = cast.artifact_hash(path)
+    cond, vecs, info = cast.load(path, sha256=digest)
+    assert sorted(vecs) == [2] and info["threshold"] == 0.5 and float(cond.threshold) == 0.5
+    with pytest.raises(cast.ArtifactChanged, match="fitted again since registration"):
+        cast.load(path, sha256="0" * 64)
 
 
 def test_resta_adds_alpha_times_global_minus_base_and_a_reload_undoes_it(tiny_lora_adapter, tiny_model_dir,

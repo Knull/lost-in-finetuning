@@ -52,12 +52,15 @@ def _merged(spec: VariantSpec, ctx: BuildContext) -> tuple[Any, Any, str]:
     return model, tok, digest
 
 
-def _loaded(spec: VariantSpec, ctx: BuildContext, model: Any, tok: Any, digest: str,
-            **extra: Any) -> LoadedVariant:
+def _loaded(spec: VariantSpec, ctx: BuildContext, model: Any, tok: Any, digest: str, *,
+            loaded: dict[str, str] | None = None, **extra: Any) -> LoadedVariant:
+    """The LoadedVariant, recording what was loaded (the adapter's hash, plus ``loaded``) for
+    build_variant's check against ``spec.artifacts`` (R1-05)."""
     from lift.models.load import template_hash
 
     return LoadedVariant(model=model, tokenizer=tok, spec=spec, model_rev=ctx.model_rev, adapter_hash=digest,
-                         template_hash=template_hash(tok), dtype=ctx.dtype, device=ctx.device, **extra)
+                         template_hash=template_hash(tok), dtype=ctx.dtype, device=ctx.device,
+                         loaded={"adapter": digest, **(loaded or {})}, **extra)
 
 
 def _free(*objs: Any) -> None:
@@ -84,6 +87,7 @@ def _build_wiseft(spec: VariantSpec, ctx: BuildContext) -> LoadedVariant:
 def _build_resta(spec: VariantSpec, ctx: BuildContext) -> LoadedVariant:
     from lift.models.load import load_model, resolved_revision
     from lift.repair import resta
+    from lift.repair.settings import base_reference
 
     alpha = _param(spec, "alpha")
     if spec.params.get("dare") is not False:
@@ -92,6 +96,12 @@ def _build_resta(spec: VariantSpec, ctx: BuildContext) -> LoadedVariant:
     if not base_id or not base_rev:
         raise ValueError(f"{spec.name}: a resta variant names its Base model (params.base, "
                          "params.base_revision)")
+    pinned = base_reference()                 # refuses an unpinned models.base.revision (R1-04)
+    if (base_id, base_rev) != pinned:
+        raise ValueError(f"{spec.name}: its entry names Base {base_id}@{str(base_rev)[:12]}, and "
+                         f"configs/project.yaml pins {pinned[0]}@{pinned[1][:12]} (R1-04): register the "
+                         "ReSta settings again (`lift register-repairs --adapter "
+                         f"{spec.adapter} --replace`), then make their cells again")
     resolved = resolved_revision(base_id, base_rev)
     if resolved != base_rev:
         raise ValueError(f"{spec.name}: Base {base_id} resolves to {resolved}, not the {base_rev} its entry "
@@ -102,11 +112,10 @@ def _build_resta(spec: VariantSpec, ctx: BuildContext) -> LoadedVariant:
     resta.make(model, base_cpu, stock_cpu, alpha)
     del base_cpu, stock_cpu
     _free()
-    return _loaded(spec, ctx, model, tok, digest)
+    return _loaded(spec, ctx, model, tok, digest, loaded={"base": str(base_rev)})
 
 
 def _build_cast(spec: VariantSpec, ctx: BuildContext, *, gate: bool) -> LoadedVariant:
-    from lift.io import sha256_file
     from lift.repair import cast
 
     strength = _param(spec, "strength")
@@ -118,12 +127,8 @@ def _build_cast(spec: VariantSpec, ctx: BuildContext, *, gate: bool) -> LoadedVa
         raise FileNotFoundError(f"{path} not found: run `lift fit-cast --adapter {spec.adapter}`, or `lift "
                                 "sync "
                                 "pull` to fetch it")
-    if sha256_file(path) != pinned:
-        raise ValueError(f"{spec.name}: {path} does not match the artifact hash pinned in "
-                         "configs/variants.yaml "
-                         "(fitted again since registration?)")
+    cond, vecs, info = cast.load(path, sha256=pinned)   # the bytes wrapped are the bytes checked (R1-05)
     model, tok, digest = _merged(spec, ctx)
-    _cond, _vecs, info = cast.load(path)
     wrong = {k: (info.get(k), v) for k, v in (("adapter_hash", digest), ("model_rev", ctx.model_rev))
              if info.get(k) != v}
     if wrong:
@@ -142,9 +147,9 @@ def _build_cast(spec: VariantSpec, ctx: BuildContext, *, gate: bool) -> LoadedVa
         if key in spec.params and spec.params[key] != held[key]:
             raise ValueError(f"{spec.name}: params.{key} {spec.params[key]!r} differs from the artifact's "
                              f"{held[key]!r}")
-    wrapper = cast.make(model, path, strength, gate=gate, pad_id=tok.pad_token_id)
-    return _loaded(spec, ctx, wrapper, tok, digest, base=model, batch_meta=wrapper.batch_meta,
-                   score_logits=wrapper.score_logits)
+    wrapper = cast.make_from(model, cond, vecs, strength, gate=gate, pad_id=tok.pad_token_id)
+    return _loaded(spec, ctx, wrapper, tok, digest, loaded={"cast": pinned}, base=model,
+                   batch_meta=wrapper.batch_meta, score_logits=wrapper.score_logits)
 
 
 @builder("cast")
