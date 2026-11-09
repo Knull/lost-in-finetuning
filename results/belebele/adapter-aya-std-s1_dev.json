@@ -1,0 +1,49 @@
+{
+ "kind": "belebele",
+ "version": 1,
+ "variant": "adapter-aya-std-s1",
+ "split": "dev",
+ "format_version": 1,
+ "scoring": "next_token",
+ "dtype": "bf16",
+ "model_rev": "af89d219b53ed9b13b8a4645f9c8028973510324",
+ "adapter_hash": "673ce508cd4dbc22b87a4a304ac7df11d7396c2818549513612fa392e262b29f",
+ "template": "bd24baa5ff7ccdfe",
+ "run_config": "0dedf5a7b96d22ee",
+ "langs": {
+  "en": {
+   "n": 200,
+   "n_correct": 158,
+   "accuracy": 0.79,
+   "n_ties": 2,
+   "pred_counts": {
+    "A": 68,
+    "B": 55,
+    "C": 41,
+    "D": 36
+   },
+   "gate_fired_rate": null,
+   "n_outside_split": 0,
+   "scores_path": "outputs/scores/belebele/adapter-aya-std-s1/belebele_en_dev.jsonl",
+   "scores_sha256": "34ee86c41f3d0f716a674d71ba7c03f75c7cd15ddae6d3b1096fdab3f8396ac8"
+  },
+  "hi": {
+   "n": 200,
+   "n_correct": 127,
+   "accuracy": 0.635,
+   "n_ties": 4,
+   "pred_counts": {
+    "A": 89,
+    "B": 42,
+    "C": 45,
+    "D": 24
+   },
+   "gate_fired_rate": null,
+   "n_outside_split": 0,
+   "scores_path": "outputs/scores/belebele/adapter-aya-std-s1/belebele_hi_dev.jsonl",
+   "scores_sha256": "d70f6937ce0f8e3d6b3014097efbc6cbe5ae30243b18e5a118bdeca75120aea4"
+  }
+ },
+ "left_out": {},
+ "created": "2026-11-09T14:40:41+00:00"
+}

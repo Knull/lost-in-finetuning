@@ -1,0 +1,49 @@
+{
+ "kind": "belebele",
+ "version": 1,
+ "variant": "adapter-indicalign-std-s1",
+ "split": "dev",
+ "format_version": 1,
+ "scoring": "next_token",
+ "dtype": "bf16",
+ "model_rev": "af89d219b53ed9b13b8a4645f9c8028973510324",
+ "adapter_hash": "048ef6e56f20b372648e2d1b450f24c02bc59e684f7c74c139d9e678f2c4efb9",
+ "template": "bd24baa5ff7ccdfe",
+ "run_config": "5dc5cfda37f78d54",
+ "langs": {
+  "en": {
+   "n": 200,
+   "n_correct": 147,
+   "accuracy": 0.735,
+   "n_ties": 2,
+   "pred_counts": {
+    "A": 77,
+    "B": 48,
+    "C": 41,
+    "D": 34
+   },
+   "gate_fired_rate": null,
+   "n_outside_split": 0,
+   "scores_path": "outputs/scores/belebele/adapter-indicalign-std-s1/belebele_en_dev.jsonl",
+   "scores_sha256": "d3e4c21053250b61c1dc9228a2bebcf4427b38c4c9febf84a450d09c15370b88"
+  },
+  "hi": {
+   "n": 200,
+   "n_correct": 126,
+   "accuracy": 0.63,
+   "n_ties": 1,
+   "pred_counts": {
+    "A": 90,
+    "B": 44,
+    "C": 41,
+    "D": 25
+   },
+   "gate_fired_rate": null,
+   "n_outside_split": 0,
+   "scores_path": "outputs/scores/belebele/adapter-indicalign-std-s1/belebele_hi_dev.jsonl",
+   "scores_sha256": "a6fe28124a7ea50c5f39492f7a18a6318c44031b23eae0921cf3ce82491d5120"
+  }
+ },
+ "left_out": {},
+ "created": "2026-11-09T14:40:16+00:00"
+}

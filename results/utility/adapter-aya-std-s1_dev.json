@@ -1,0 +1,275 @@
+{
+ "kind": "utility",
+ "version": 2,
+ "variant": "adapter-aya-std-s1",
+ "reference": "stock",
+ "split": "dev",
+ "lang": "hi",
+ "judge": "anthropic/claude-sonnet-5-5@utility_v1:821bed4ebfe8+provider-default+effort-low+max1024+api2026-10-21",
+ "judge_dir": "frontier",
+ "dtype": "bf16",
+ "candidate_adapter_hash": "673ce508cd4dbc22b87a4a304ac7df11d7396c2818549513612fa392e262b29f",
+ "candidate_intervention": "c1ec3afbd72e9569e95d700bd79a9f587f6c31bdd5ed5791f46ccc55b793ead2",
+ "n": 100,
+ "win_rate": 0.4175,
+ "lo": 0.32999999999999996,
+ "hi": 0.5075,
+ "p_vs_parity": 0.074992500749925,
+ "n_boot": 10000,
+ "failed_orders": 0,
+ "pairs_with_failure": 0,
+ "win_rate_failures_as_losses": 0.4175,
+ "win_rate_failures_as_wins": 0.4175,
+ "failure_reasons": {},
+ "outcomes": {
+  "win": 35,
+  "tie": 14,
+  "loss": 51
+ },
+ "scores": {
+  "1.0": 33,
+  "0.75": 2,
+  "0.5": 14,
+  "0.25": 1,
+  "0.0": 50
+ },
+ "position": {
+  "n_orders": 200,
+  "n_judged_orders": 200,
+  "winner_A": 86,
+  "winner_B": 95,
+  "winner_TIE": 19,
+  "a_share_of_decisive": 0.47513812154696133,
+  "n_pairs_both_judged": 100,
+  "n_consistent": 91,
+  "n_split": 9,
+  "consistency": 0.91
+ },
+ "fidelity": {
+  "candidate": {
+   "top_hi": 0.99,
+   "is_lang_hi": 0.99,
+   "n": 100,
+   "n_top_hi": 99,
+   "n_is_lang_hi": 99,
+   "top_labels": {
+    "hin_Deva": 75,
+    "anp_Deva": 22,
+    "awa_Deva": 1,
+    "bho_Deva": 1,
+    "bcl_Latn": 1
+   }
+  },
+  "stock": {
+   "top_hi": 1.0,
+   "is_lang_hi": 0.99,
+   "n": 100,
+   "n_top_hi": 100,
+   "n_is_lang_hi": 99,
+   "top_labels": {
+    "anp_Deva": 67,
+    "hin_Deva": 31,
+    "mag_Deva": 2
+   }
+  }
+ },
+ "generation": {
+  "candidate": {
+   "variant": "adapter-aya-std-s1",
+   "dtype": [
+    "bf16"
+   ],
+   "run_config": [
+    "ecfdf813ff457a68"
+   ],
+   "model_rev": [
+    "af89d219b53ed9b13b8a4645f9c8028973510324"
+   ],
+   "harness": [
+    "1"
+   ],
+   "template": [
+    "bd24baa5ff7ccdfe"
+   ],
+   "decoding": [
+    "53225615edca63f5"
+   ],
+   "max_new_tokens": [
+    "256"
+   ],
+   "torch": [
+    "2.14.1+cu130"
+   ],
+   "transformers": [
+    "5.22.1"
+   ],
+   "gpu": [
+    "NVIDIA A100-SXM4-40GB"
+   ],
+   "intervention": [
+    "c1ec3afbd72e9569e95d700bd79a9f587f6c31bdd5ed5791f46ccc55b793ead2"
+   ],
+   "adapter_hash": [
+    "673ce508cd4dbc22b87a4a304ac7df11d7396c2818549513612fa392e262b29f"
+   ],
+   "stack": [
+    "843a154bf005e33a"
+   ],
+   "n": 100,
+   "n_cap_hits": 16,
+   "cap_hit_rate": 0.16,
+   "mean_new_tokens": 91.0,
+   "path": "outputs/generations/adapter-aya-std-s1/utility_hi_dev.jsonl",
+   "file_sha256": "758dabfa7e91c5ad20959940e3ca078bf6c67045c15b1400bba209c38ea324c7",
+   "checked": {
+    "path": "outputs/utility/checked/adapter-aya-std-s1/utility_hi_dev.json",
+    "sha256": "8990996e27a5914d5640c320a3fabb1a9987a8efb462337420f20f413c14e1d9",
+    "run_config": "ecfdf813ff457a68",
+    "adapter_hash": "673ce508cd4dbc22b87a4a304ac7df11d7396c2818549513612fa392e262b29f",
+    "intervention": "c1ec3afbd72e9569e95d700bd79a9f587f6c31bdd5ed5791f46ccc55b793ead2",
+    "model_rev": "af89d219b53ed9b13b8a4645f9c8028973510324",
+    "harness": 1,
+    "created": "2026-11-09T14:04:31+00:00"
+   }
+  },
+  "stock": {
+   "variant": "stock",
+   "dtype": [
+    "bf16"
+   ],
+   "run_config": [
+    "778c569c401a2f5a"
+   ],
+   "model_rev": [
+    "af89d219b53ed9b13b8a4645f9c8028973510324"
+   ],
+   "harness": [
+    "1"
+   ],
+   "template": [
+    "bd24baa5ff7ccdfe"
+   ],
+   "decoding": [
+    "53225615edca63f5"
+   ],
+   "max_new_tokens": [
+    "256"
+   ],
+   "torch": [
+    "2.14.1+cu130"
+   ],
+   "transformers": [
+    "5.22.1"
+   ],
+   "gpu": [
+    "NVIDIA A100-SXM4-40GB"
+   ],
+   "intervention": [
+    "1e15d7c99bb69b4d3bbe5cf3d1127f1c9ebbb9b04b8d5c3ed8e1a1597bf614d7"
+   ],
+   "adapter_hash": [],
+   "stack": [
+    "843a154bf005e33a"
+   ],
+   "n": 100,
+   "n_cap_hits": 68,
+   "cap_hit_rate": 0.68,
+   "mean_new_tokens": 214.2,
+   "path": "outputs/generations/stock/utility_hi_dev.jsonl",
+   "file_sha256": "bf900b4cedf7a85d00833a1e303c566301f972269a15ad4fd055a3e452125b73",
+   "checked": {
+    "path": "outputs/utility/checked/stock/utility_hi_dev.json",
+    "sha256": "3e420e3543debbc3210faa6868688409b16483bd519b0117996f9242b8c4485f",
+    "run_config": "778c569c401a2f5a",
+    "adapter_hash": null,
+    "intervention": "1e15d7c99bb69b4d3bbe5cf3d1127f1c9ebbb9b04b8d5c3ed8e1a1597bf614d7",
+    "model_rev": "af89d219b53ed9b13b8a4645f9c8028973510324",
+    "harness": 1,
+    "created": "2026-11-09T14:02:45+00:00"
+   }
+  }
+ },
+ "by_source": {
+  "aya": {
+   "name": "Aya Dataset (human-written Hindi)",
+   "n": 51,
+   "win_rate": 0.3872549019607843,
+   "lo": 0.27450980392156865,
+   "hi": 0.5,
+   "p_vs_parity": 0.06009399060093991,
+   "n_boot": 10000,
+   "failed_orders": 0,
+   "pairs_with_failure": 0,
+   "win_rate_failures_as_losses": 0.3872549019607843,
+   "win_rate_failures_as_wins": 0.3872549019607843,
+   "fidelity": {
+    "candidate": {
+     "top_hi": 1.0,
+     "is_lang_hi": 1.0,
+     "n": 51,
+     "n_top_hi": 51,
+     "n_is_lang_hi": 51,
+     "top_labels": {
+      "hin_Deva": 38,
+      "anp_Deva": 11,
+      "awa_Deva": 1,
+      "bho_Deva": 1
+     }
+    },
+    "stock": {
+     "top_hi": 1.0,
+     "is_lang_hi": 1.0,
+     "n": 51,
+     "n_top_hi": 51,
+     "n_is_lang_hi": 51,
+     "top_labels": {
+      "anp_Deva": 31,
+      "hin_Deva": 20
+     }
+    }
+   }
+  },
+  "ind": {
+   "name": "IndicAlign Dolly_T (machine-translated Hindi)",
+   "n": 49,
+   "win_rate": 0.4489795918367347,
+   "lo": 0.3163265306122449,
+   "hi": 0.5816326530612245,
+   "p_vs_parity": 0.5058494150584941,
+   "n_boot": 10000,
+   "failed_orders": 0,
+   "pairs_with_failure": 0,
+   "win_rate_failures_as_losses": 0.4489795918367347,
+   "win_rate_failures_as_wins": 0.4489795918367347,
+   "fidelity": {
+    "candidate": {
+     "top_hi": 0.9795918367346939,
+     "is_lang_hi": 0.9795918367346939,
+     "n": 49,
+     "n_top_hi": 48,
+     "n_is_lang_hi": 48,
+     "top_labels": {
+      "hin_Deva": 37,
+      "anp_Deva": 11,
+      "bcl_Latn": 1
+     }
+    },
+    "stock": {
+     "top_hi": 1.0,
+     "is_lang_hi": 0.9795918367346939,
+     "n": 49,
+     "n_top_hi": 49,
+     "n_is_lang_hi": 48,
+     "top_labels": {
+      "anp_Deva": 36,
+      "hin_Deva": 11,
+      "mag_Deva": 2
+     }
+    }
+   }
+  }
+ },
+ "verdicts_path": "outputs/utility/frontier/adapter-aya-std-s1/utility_hi_dev.jsonl",
+ "verdicts_sha256": "0c15b302928a940ffb138349fc6d4b7a98629a3579f2e79b8c3eb8ac2583746c",
+ "created": "2026-11-09T19:50:04+00:00"
+}

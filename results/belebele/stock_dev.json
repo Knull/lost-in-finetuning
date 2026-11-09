@@ -1,0 +1,49 @@
+{
+ "kind": "belebele",
+ "version": 1,
+ "variant": "stock",
+ "split": "dev",
+ "format_version": 1,
+ "scoring": "next_token",
+ "dtype": "bf16",
+ "model_rev": "af89d219b53ed9b13b8a4645f9c8028973510324",
+ "adapter_hash": null,
+ "template": "bd24baa5ff7ccdfe",
+ "run_config": "95a4b981afe33102",
+ "langs": {
+  "en": {
+   "n": 200,
+   "n_correct": 153,
+   "accuracy": 0.765,
+   "n_ties": 0,
+   "pred_counts": {
+    "A": 71,
+    "B": 52,
+    "C": 41,
+    "D": 36
+   },
+   "gate_fired_rate": null,
+   "n_outside_split": 0,
+   "scores_path": "outputs/scores/belebele/stock/belebele_en_dev.jsonl",
+   "scores_sha256": "7690f177969d07c7b39538e977b4b1b28c2877a465efaee55868f143ef3e7e87"
+  },
+  "hi": {
+   "n": 200,
+   "n_correct": 125,
+   "accuracy": 0.625,
+   "n_ties": 1,
+   "pred_counts": {
+    "A": 85,
+    "B": 42,
+    "C": 50,
+    "D": 23
+   },
+   "gate_fired_rate": null,
+   "n_outside_split": 0,
+   "scores_path": "outputs/scores/belebele/stock/belebele_hi_dev.jsonl",
+   "scores_sha256": "41606bc8db5ee3384ed14fc6cd9c0ffe3ab3c3a4e58063c6e17470543e2cfdd6"
+  }
+ },
+ "left_out": {},
+ "created": "2026-11-09T14:39:51+00:00"
+}
