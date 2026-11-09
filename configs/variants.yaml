@@ -36,3 +36,73 @@ variants:
     artifacts: {adapter: "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5"}
     location: "runs repo ($LIFT_RUNS_REPO): outputs/adapters/adapter-indicalign-stress-s1@17a3585d20e7fc31534449f60a050140a173e944"
     note: "indicalign, stress recipe, seed 1: trained 2026-11-09 on NVIDIA A100-SXM4-40GB in bf16, 2997 rows of indicalign/raw; merge parity fp32 20/20 prompts token-identical"
+  - name: wiseft-l0.25-adapter-indicalign-stress-s1
+    method: wiseft
+    adapter: adapter-indicalign-stress-s1
+    seed: 1
+    params: {"lambda": 0.25}
+    artifacts: {"adapter": "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5"}
+    note: "P05 repair setting (lift register-repairs)"
+  - name: wiseft-l0.50-adapter-indicalign-stress-s1
+    method: wiseft
+    adapter: adapter-indicalign-stress-s1
+    seed: 1
+    params: {"lambda": 0.5}
+    artifacts: {"adapter": "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5"}
+    note: "P05 repair setting (lift register-repairs)"
+  - name: wiseft-l0.75-adapter-indicalign-stress-s1
+    method: wiseft
+    adapter: adapter-indicalign-stress-s1
+    seed: 1
+    params: {"lambda": 0.75}
+    artifacts: {"adapter": "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5"}
+    note: "P05 repair setting (lift register-repairs)"
+  - name: resta-a0.10-adapter-indicalign-stress-s1
+    method: resta
+    adapter: adapter-indicalign-stress-s1
+    seed: 1
+    params: {"alpha": 0.1, "base": "CohereLabs/tiny-aya-base", "base_revision": "d62ac17e241c871fc52e9a95d7b0e2615189d7d5", "dare": false}
+    artifacts: {"adapter": "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5"}
+    note: "P05 repair setting (lift register-repairs)"
+  - name: resta-a0.25-adapter-indicalign-stress-s1
+    method: resta
+    adapter: adapter-indicalign-stress-s1
+    seed: 1
+    params: {"alpha": 0.25, "base": "CohereLabs/tiny-aya-base", "base_revision": "d62ac17e241c871fc52e9a95d7b0e2615189d7d5", "dare": false}
+    artifacts: {"adapter": "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5"}
+    note: "P05 repair setting (lift register-repairs)"
+  - name: resta-a0.40-adapter-indicalign-stress-s1
+    method: resta
+    adapter: adapter-indicalign-stress-s1
+    seed: 1
+    params: {"alpha": 0.4, "base": "CohereLabs/tiny-aya-base", "base_revision": "d62ac17e241c871fc52e9a95d7b0e2615189d7d5", "dare": false}
+    artifacts: {"adapter": "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5"}
+    note: "P05 repair setting (lift register-repairs)"
+  - name: cast-m0.5-adapter-indicalign-stress-s1
+    method: cast
+    adapter: adapter-indicalign-stress-s1
+    seed: 1
+    params: {"behavior_layers": [16, 17, 18, 19, 20], "comparator": "smaller", "layer": 14, "pool": "last", "strength": 0.5, "threshold": 0.20000000000000107}
+    artifacts: {"adapter": "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5", "cast": "b6b72bbfba710693e4df6c4088e47a1cb9d3b39b5e0f86afbbc44b17bd6a6393"}
+    note: "P05 repair setting (lift register-repairs)"
+  - name: cast-m1.0-adapter-indicalign-stress-s1
+    method: cast
+    adapter: adapter-indicalign-stress-s1
+    seed: 1
+    params: {"behavior_layers": [16, 17, 18, 19, 20], "comparator": "smaller", "layer": 14, "pool": "last", "strength": 1.0, "threshold": 0.20000000000000107}
+    artifacts: {"adapter": "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5", "cast": "b6b72bbfba710693e4df6c4088e47a1cb9d3b39b5e0f86afbbc44b17bd6a6393"}
+    note: "P05 repair setting (lift register-repairs)"
+  - name: cast-m2.0-adapter-indicalign-stress-s1
+    method: cast
+    adapter: adapter-indicalign-stress-s1
+    seed: 1
+    params: {"behavior_layers": [16, 17, 18, 19, 20], "comparator": "smaller", "layer": 14, "pool": "last", "strength": 2.0, "threshold": 0.20000000000000107}
+    artifacts: {"adapter": "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5", "cast": "b6b72bbfba710693e4df6c4088e47a1cb9d3b39b5e0f86afbbc44b17bd6a6393"}
+    note: "P05 repair setting (lift register-repairs)"
+  - name: castalways-m1.0-adapter-indicalign-stress-s1
+    method: cast_always
+    adapter: adapter-indicalign-stress-s1
+    seed: 1
+    params: {"behavior_layers": [16, 17, 18, 19, 20], "comparator": "smaller", "layer": 14, "pool": "last", "strength": 1.0, "threshold": 0.20000000000000107}
+    artifacts: {"adapter": "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5", "cast": "b6b72bbfba710693e4df6c4088e47a1cb9d3b39b5e0f86afbbc44b17bd6a6393"}
+    note: "P05 repair setting (lift register-repairs)"
