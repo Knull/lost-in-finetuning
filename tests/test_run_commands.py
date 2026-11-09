@@ -121,13 +121,14 @@ def offline_runs_repo(monkeypatch):
 
 
 def short_runs(monkeypatch, *, chunk=2, new_tokens=6):
-    """Generation capped at a few tokens, and judging in small chunks so a kill can land mid-file."""
+    """Generation capped at a few tokens, by this test's configs/project.yaml generation.max_new_tokens (lift
+    generate takes the cap from it, and a read refuses a cell made under another: R2-10), and judging in
+    small chunks so a kill can land mid-file."""
+    from lift import config
     from lift.judge import pipeline
-    from lift.models import generate as gen
 
-    real_generate, real_judge_file = gen.generate, pipeline.judge_file
-    monkeypatch.setattr(gen, "generate",
-                        lambda *a, **kw: real_generate(*a, **{**kw, "max_new_tokens": new_tokens}))
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", new_tokens)
+    real_judge_file = pipeline.judge_file
     monkeypatch.setattr(pipeline, "judge_file",
                         lambda *a, **kw: real_judge_file(*a, **{**kw, "batch_size": chunk}))
 
@@ -143,8 +144,56 @@ def test_help_works_without_a_gpu_stack(command, capsys):
 def test_names_accept_commas_and_spaces_and_reject_unknowns():
     assert run_cmd._names(["hi,en", "zh"], ["en", "hi", "zh"], ["en"]) == ["hi", "en", "zh"]
     assert run_cmd._names(None, ["en", "hi"], ["en", "hi"]) == ["en", "hi"]
+    assert run_cmd._names(["hi,"], ["en", "hi"], ["en"]) == ["hi"]
     with pytest.raises(SystemExit):
         run_cmd._names(["xx"], ["en"], ["en"])
+    for nothing in ([""], [","], ["", ","]):          # R2-15: a flag given that names nothing ran no cell
+        with pytest.raises(SystemExit, match="names nothing"):
+            run_cmd._names(nothing, ["en", "hi"], ["en", "hi"])
+
+
+LISTS = {"generate": ["generate", "--variant", "stock", "--split", "dev", "--device", "cpu"],
+         "judge": ["judge", "--variant", "stock", "--split", "dev", "--device", "cpu"],
+         "run-dev": ["run-dev", "--variant", "stock", "--device", "cpu", "--judge-device", "cpu"],
+         "restart": ["restart", "--variant", "stock", "--split", "dev"]}
+
+
+@pytest.mark.parametrize("command", list(LISTS))
+def test_a_repeated_sets_or_langs_flag_adds_its_values(command):
+    # R2-15: --sets and --langs kept only the last of repeated flags (argparse's store action), so
+    # `--sets harmful --sets easy_benign` ran easy_benign alone and exited 0, listing nothing as left out
+    args = build_parser().parse_args([*LISTS[command], "--sets", "harmful", "--sets", "easy_benign",
+                                      "--langs", "hi", "en", "--langs", "zh"])
+    assert args.sets == ["harmful", "easy_benign"] and args.langs == ["hi", "en", "zh"]
+
+
+@pytest.mark.parametrize("command", list(LISTS))
+@pytest.mark.parametrize("names", [["--sets", "", "--langs", "hi"], ["--sets", "harmful", "--langs", ""],
+                                   ["--sets", ",", "--langs", "hi"]],
+                         ids=["sets-empty", "langs-empty", "comma"])
+def test_a_sets_or_langs_value_that_names_nothing_is_refused(command, names, monkeypatch):
+    # R2-15: `--sets ''` (or `--sets ,`) resolved to no cell, so the line ran nothing and exited 0 ("done")
+    pin(judge=True)
+    write_generation("harmful", "hi", "dev")                 # what lift judge checks before its judge loads
+    for target in ("lift.models.variants.build_variant", "lift.judge.pipeline.make_judge",
+                   "lift.models.generate.restart_cell"):
+        monkeypatch.setattr(target, lambda *a, **kw: pytest.fail("the line went on"))
+    with pytest.raises(SystemExit, match="names nothing"):
+        main([*LISTS[command], *names])
+    assert not (output_dir() / ".aside").exists()
+
+
+@pytest.mark.parametrize("keys", ["", "  "])
+def test_an_empty_keys_value_is_refused_at_parse(keys, monkeypatch, capsys):
+    # R2-15: `lift judge --judge second --keys ''` read the empty path as no key list, so the second
+    # (frontier) judge judged every generation of the cells instead of P04's sample, and the line exited 0
+    write_generation("harmful", "hi", "dev")
+    monkeypatch.setattr("lift.judge.pipeline.make_judge", lambda *a, **kw: pytest.fail("a judge loaded"))
+    with pytest.raises(SystemExit) as exc:
+        main(["judge", "--variant", "stock", "--split", "dev", "--judge", "second", "--sets", "harmful",
+              "--langs", "hi", "--keys", keys])
+    assert exc.value.code == 2
+    assert "argument --keys: needs the path of P04's key list" in capsys.readouterr().err
 
 
 def test_primary_judge_refuses_subsets():
@@ -156,6 +205,25 @@ def test_primary_judge_refuses_subsets():
                               "--sample", "0.1", "--keys", "k.txt"])
     with pytest.raises(SystemExit, match="not both"):
         args.func(args)
+
+
+@pytest.mark.parametrize("command", ["generate", "run-dev"])
+@pytest.mark.parametrize("flag, value", [("--batch-size", "-1"), ("--batch-size", "0"), ("--limit", "-3"),
+                                         ("--limit", "0")])
+def test_a_batch_size_or_limit_below_one_is_refused_before_a_model_loads(command, flag, value, monkeypatch,
+                                                                         capsys):
+    # R2-14: both flags took any int. A negative --batch-size made generate() decode empty batches for ever
+    # (the job held the GPU until its deadline), --limit 0 meant no limit and --limit -N cut each cell's last
+    # N prompts, all with exit 0. A value below 1 is refused at parse now (exit 2), before a model loads.
+    pin(judge=True)
+    monkeypatch.setattr("lift.models.variants.build_variant", lambda *a, **kw: pytest.fail("a model loaded"))
+    argv = {"generate": ["generate", "--variant", "stock", "--split", "dev"],
+            "run-dev": ["run-dev", "--variant", "stock"]}[command]
+    with pytest.raises(SystemExit) as exc:
+        main([*argv, "--device", "cpu", flag, value])
+    assert exc.value.code == 2
+    assert f"argument {flag}: must be at least 1, got {value}" in capsys.readouterr().err
+    assert getattr(build_parser().parse_args([*argv, flag, "1"]), flag[2:].replace("-", "_")) == 1
 
 
 def test_study_commands_refuse_unpinned_revisions():
@@ -494,6 +562,32 @@ def test_restart_sets_exactly_the_cells_files_aside_and_leaves_them_empty(judge,
             assert path.read_bytes() == data
     assert caplog.text.count("set aside in") == len(targets)       # one line per file, with its count
     assert "har-0001" not in caplog.text and "har-0000" not in caplog.text
+
+
+def test_restart_says_the_next_push_replaces_the_runs_repo_copies_unless_they_changed_there(caplog):
+    # W2-04 (R1-08): the help and the log said the next lift sync push always replaces the runs repo's copies.
+    # It does unless the cell's files there changed since this machine's last sync. W3 (docs, VERIFY-5): they
+    # then said such a copy is an emptied-file conflict, which lift sync push --force settles, which holds
+    # only when nothing but the emptied files changed there (decisions item 63); otherwise the push holds the
+    # emptied file back with the others, and lift sync pull, then lift sync push settles it.
+    caplog.set_level(logging.INFO, logger="lift.run")
+    restart_tree()
+    assert main([*RESTART, "--sets", "harmful", "--langs", "hi"]) == 0
+    [done] = [r.getMessage() for r in caplog.records if "the next lift sync push" in r.getMessage()]
+    settles = ("lift sync names what settles it (R1-08, decisions item 63: lift sync push --force when only "
+               "the files the restart emptied changed there, else lift sync pull, then lift sync push)")
+    for text in (done, " ".join(run_cmd.RESTART_HELP.split())):
+        assert "unless the cell's files there changed since this machine's last sync" in text, text
+        assert settles in text and "emptied-file conflict" not in text, text
+
+
+def test_skipped_judges_cells_name_the_restart_line_when_only_the_labelling_rules_differ():
+    # W2-04 (R1-12 follow-up): a judge id names its labelling rules too, and judgements made under other rules
+    # can never be finished with the file's judge, as no current judge applies them: only the role's lift
+    # restart --judge line remedies such a cell
+    head = " ".join(run_cmd.SKIPPED["judges"].split())
+    assert "labelling rules" in head and "--judge" in head and "the file's judge" in head
+    assert "its id names its precision and Controversial mode" not in head
 
 
 def test_restart_skips_files_that_are_not_here_and_a_second_run_finds_them_empty(caplog):
@@ -908,6 +1002,299 @@ def test_generate_skips_a_stale_cell_and_exits_3(fake_prompt_files, tiny_model_d
     assert f"harmful_en_dev: {line}\n" in caplog.text
 
 
+SHORT_PID = "prb-test-0003"         # the frozen final pid frozen_cell leaves out of easy_benign zh
+
+
+def frozen_cell(tmp_path, monkeypatch):
+    """data/splits/easy_benign.json (in tmp) freezing prb-test-0000..0003 as final, and easy_benign prompt
+    files the real lift.data.build.load_prompts reads: en holds every frozen pid, zh all but SHORT_PID, which
+    zh's report lists as an open wrong_lang translation failure (it awaits a reader's verdict, as
+    prb-test-0240 does on the real data). Placeholder texts."""
+    from fakes import make_prompt
+
+    from lift import splits
+    from lift.io import sha256_file
+    from lift.paths import prompts_dir
+
+    pids = [f"prb-test-{i:04d}" for i in range(4)]
+    monkeypatch.setattr(splits, "SPLITS_DIR", tmp_path / "splits")
+    splits.save_split("easy_benign", dict.fromkeys(pids, "final"), seed=0, sizes={"final": 4})
+    for lang in ("en", "zh"):
+        path = prompts_dir() / f"easy_benign_{lang}.jsonl"
+        write_jsonl(path, [make_prompt(p, lang, "easy_benign", "final", text=f"q {p}").model_dump(mode="json")
+                           for p in pids if lang == "en" or p != SHORT_PID])
+        failures = [{"pid": SHORT_PID, "rule": "wrong_lang", "detail": "top=jpn_Jpan 0.99",
+                     "engine": "google", "resolved": None}] if lang == "zh" else []
+        report = {"set": "easy_benign", "lang": lang, "file": path.name, "sha256": sha256_file(path),
+                  "translation_failures": failures, "exclusions": []}
+        reports = prompts_dir() / "reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        (reports / f"easy_benign_{lang}.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def short_remedy():
+    """frozen_cell's zh final remedy, as lift.data.build.load_prompts names it."""
+    from lift.data import build
+
+    return (f"1 translation failures await a reader's verdict on the failures sheet, e.g. ['{SHORT_PID}']: "
+            + build.reader_remedy(["zh"]))
+
+
+def test_a_short_cell_is_listed_with_its_remedy_whatever_precision_its_file_was_made_in():
+    # W2-01: a short cell's remedy is its prompt file's, on the laptop; it discards nothing, so it is listed
+    # as short with that remedy even when its generations file was made in another precision than the run's
+    from lift.data.build import ShortCellError
+
+    write_generation("easy_benign", "zh", "final", dtype="fp16")
+    exc = ShortCellError("easy_benign_zh: short", set_name="easy_benign", lang="zh", missing={"final": ["p"]},
+                         remedy="the remedy")
+    skipped: dict[str, dict[str, str]] = {}
+    run_cmd._skip(skipped, "stock", "easy_benign", "zh", "final", exc, judged=None, dtype="bf16")
+    assert skipped == {"short": {"easy_benign_zh_final": "the remedy"}}
+    assert run_cmd._listing(skipped) == [
+        f"1 cells {run_cmd.SKIPPED['short']}:\n  easy_benign_zh_final: the remedy\n"]
+    head = " ".join(run_cmd.SKIPPED["short"].split())
+    assert "reader's verdict" in head and "nothing was generated" in head
+
+
+@pytest.mark.torch
+def test_generate_skips_a_short_cell_lists_its_remedy_and_exits_3(tiny_model_dir, tmp_path, monkeypatch,
+                                                                  caplog):
+    # W2-01: a cell short of its frozen split (easy_benign zh final on the real data, until the zh reader's
+    # verdicts are applied) stopped `lift generate` with a traceback, so no later cell of the line ran. It is
+    # skipped and listed with its remedy now, and the line exits 3, as for a stale cell.
+    pytest.importorskip("torch")
+    from lift.models import generate as gen
+    from lift.models import variants
+
+    pin()
+    frozen_cell(tmp_path, monkeypatch)
+    real_build = variants.build_variant
+    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: real_build(
+        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)))
+    short_runs(monkeypatch)
+    argv = ["generate", "--variant", "stock", "--split", "final", "--sets", "easy_benign", "--langs", "zh",
+            "en", "--device", "cpu", "--dtype", "bf16"]
+    # The final split is closed until Gate 3's tag (lift.final's guard, tests/test_final.py): the line is
+    # refused before anything is read.
+    with pytest.raises(SystemExit, match="the final split is closed to stock: no recipe-frozen-"):
+        main(argv)
+    monkeypatch.setattr("lift.final.check_final", lambda variant, **kw: "recipe-frozen-20261107")
+    assert main(argv) == 3
+    assert not gen.generations_path("stock", "easy_benign", "zh", "final").exists()
+    assert len(gen.read_generations(gen.generations_path("stock", "easy_benign", "en", "final"))) == 4
+    assert listing(caplog, "are short of their frozen split") == (
+        f"1 cells {run_cmd.SKIPPED['short']}:\n  easy_benign_zh_final: {short_remedy()}\n")
+    assert "easy_benign_zh_final: short of its frozen split, skipped" in caplog.text
+
+
+def frozen_generations(lang, pids, *, variant="stock", dtype="bf16"):
+    """easy_benign ``lang`` final generations of ``pids``, from frozen_cell's prompt texts, as lift generate
+    made them (in ``dtype``) before a read of the split refused a cell short of its frozen split (R1-01).
+    Placeholder outputs."""
+    from lift.models.generate import generations_path
+
+    write_jsonl(generations_path(variant, "easy_benign", lang, "final"), [{
+        "key": sha256_text(f"{variant}:{lang}:{pid}"), "variant": variant, "pid": pid, "lang": lang,
+        "set": "easy_benign", "split": "final", "prompt_sha": sha256_text(f"q {pid}"), "output": "o",
+        "n_prompt_tokens": 1, "n_new_tokens": 1, "hit_cap": False, "seconds": 0.1, "meta": {"dtype": dtype}}
+        for pid in pids])
+
+
+@pytest.mark.parametrize("made", ["bf16", "fp16"])
+def test_judge_refuses_a_short_cells_record_with_its_remedy_and_exits_3(made, tmp_path, monkeypatch, caplog):
+    # W3-02: lift judge reads a cell's prompt texts by pid, so it judges a short cell's generations made
+    # before R1-01 (easy_benign zh final on the real data). Its AuditKIT record then loaded the split outside
+    # the record's refusal handling: ShortCellError was a traceback after the judgements were written, and no
+    # later cell of the line ran. The record is refused with the error's remedy now (and the lines that then
+    # make it), the other cells are judged and recorded, and the line exits 3. W3 (run-read, VERIFY-5): the
+    # remedy's lift generate line was in the judge run's precision (bf16 here, an API judge without --dtype),
+    # which lift generate refuses over the T4's fp16 cell; it is in the cell's own precision now.
+    from lift.judge import pipeline
+    from lift.judge.pipeline import JudgeOutcome
+
+    class Judge:                                    # an API primary judge: no pin, no GPU, no precision
+        judge_id = "openai/placeholder-model@x"
+        short = "frontier"
+
+        def judge(self, items):
+            return [JudgeOutcome("benign", {"label": "BENIGN"}, "") for _ in items]
+
+    recorded = []
+
+    def record_safety(variant, set_name, lang, split, **kw):
+        recorded.append(lang)
+        return "a record"
+
+    frozen_cell(tmp_path, monkeypatch)
+    pids = [f"prb-test-{i:04d}" for i in range(4)]
+    for lang in ("zh", "en"):
+        frozen_generations(lang, [p for p in pids if lang == "en" or p != SHORT_PID], dtype=made)
+    monkeypatch.setattr(pipeline, "judge_dir", lambda role: "frontier")
+    monkeypatch.setattr(pipeline, "make_judge", lambda *a, **kw: Judge())
+    monkeypatch.setattr("lift.lang.LangID", FakeLID)
+    monkeypatch.setattr("lift.audit.record_safety", record_safety)
+    argv = ["judge", "--variant", "stock", "--split", "final", "--sets", "easy_benign", "--langs", "zh", "en"]
+    assert main(argv) == 3
+    judged_n = [len(pipeline.load_judgements("stock", "easy_benign", lang, "final")) for lang in ("zh", "en")]
+    assert judged_n == [3, 4] and recorded == ["en"]
+    generate = "lift generate --variant stock --split final --sets easy_benign --langs zh"
+    generate += " --dtype fp16" if made == "fp16" else ""          # generation.dtype (bf16) is not named
+    assert (f"  easy_benign_zh_final: short of its frozen split: {short_remedy()}; then, after a later job's "
+            f"`lift sync pull`, `{generate}` makes the prompts the completed file adds, and the line that "
+            "failed judges them and writes the record\n") in caplog.text
+    assert "stock easy_benign_zh_final: no AuditKIT record: easy_benign_zh: " in caplog.text
+
+
+def test_judge_over_generations_short_of_their_split_refuses_the_record_and_exits_3(fake_prompt_files,
+                                                                                    monkeypatch, caplog,
+                                                                                    tmp_path):
+    # R2-13: a primary judge line over a generations file that stops short of its split (its lift generate
+    # line was stopped at --max-hours or killed as hung, or ran with --limit) logged one INFO line, wrote no
+    # AuditKIT record and exited 0, so job.py, the Kaggle runner and lift remote reported it done although
+    # every reported read refuses the cell. Its record is refused now, listed with the lift generate line
+    # that makes the rest, and the line exits 3; a whole cell the same line judged gets its record. The real
+    # Qwen3Guard adapter over StubGuard, the real record_safety and AuditKIT; placeholder texts.
+    pytest.importorskip("auditkit")
+    from fakes import make_prompt
+
+    from lift import audit
+    from lift import config as lift_config
+    from lift.cachekey import intervention_digest
+    from lift.judge import pipeline
+    from lift.models.generate import HARNESS_VERSION, generations_path
+    from lift.models.variants import get_spec
+
+    for name in ("XDG_CACHE_HOME", "XDG_DATA_HOME"):           # AuditKIT writes nothing outside outputs/
+        monkeypatch.setenv(name, str(tmp_path / name))
+    pin(judge=True)
+    pids = ("prh-test-0001", "prh-test-0002")
+    meta = {"dtype": "bf16", "run_config": "rc0", "model_rev": "b" * 40, "harness": HARNESS_VERSION,
+            "template": "9" * 16, "decoding": "d" * 16, "torch": "2.15.0", "transformers": "5.22.1",
+            "gpu": "NVIDIA A100-SXM4-40GB", "gpu_capability": "8.0",
+            "intervention": intervention_digest(get_spec("stock")),
+            "max_new_tokens": lift_config.load("project")["generation"]["max_new_tokens"]}
+    for lang, made in (("en", pids), ("hi", pids[:1])):       # hi: its generate line stopped after one prompt
+        fake_prompt_files[("harmful", lang)] = [make_prompt(p, lang, "harmful", "final", text=f"q {p}")
+                                                for p in pids]
+        write_jsonl(generations_path("stock", "harmful", lang, "final"), [{
+            "key": sha256_text(f"stock:{lang}:{pid}"), "variant": "stock", "pid": pid, "lang": lang,
+            "set": "harmful", "split": "final", "prompt_sha": sha256_text(f"q {pid}"), "output": "o",
+            "n_prompt_tokens": 1, "n_new_tokens": 9, "hit_cap": False, "seconds": 0.1, "meta": meta}
+            for pid in made])
+    monkeypatch.setattr(pipeline, "make_judge", lambda *a, **kw: guard())
+    monkeypatch.setattr("lift.lang.LangID", FakeLID)
+    argv = ["judge", "--variant", "stock", "--split", "final", "--sets", "harmful", "--langs", "en", "hi",
+            "--device", "cpu"]
+    assert main(argv) == 3
+    assert [judged("stock", "harmful", lang, "final") for lang in ("en", "hi")] == [2, 1]
+    records = {lang: audit.auditkit_path("qwen3guard", "stock", "harmful", lang, "final")
+               for lang in ("en", "hi")}
+    assert records["en"].is_file() and not records["hi"].exists()
+    generate = "lift generate --variant stock --split final --sets harmful --langs hi"
+    assert ("  harmful_hi_final: its generations do not cover every prompt of its split (a lift generate "
+            f"line stopped early, or run with --limit): `{generate}` makes the rest, then the line that "
+            "failed judges them and writes the record\n") in caplog.text
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors[0] == ("stock harmful_hi_final: no AuditKIT record: its generations do not cover every "
+                         "prompt of its split")
+    assert not any("harmful_en_final" in m for m in errors)
+
+
+def test_the_module_docstring_lists_every_kind_of_skipped_cell_with_its_remedy():
+    # W3-02: the module docstring still listed three kinds after W2-01 and W2-02 added short and nonfinite,
+    # and its judges remedy left out the cell only the role's restart line remedies
+    head = " ".join((run_cmd.__doc__ or "").split()).split(" Exit codes:")[0]
+    for name in ("MixedJudgesError", "ShortCellError", "NonFiniteOutputError"):
+        assert name in head, f"the module docstring does not name {name}"
+    for kind in run_cmd.SKIPPED:                    # each under its name, as the end-of-run listing heads it
+        assert re.search(rf"\. {kind} \(", head), f"the module docstring does not list the {kind} kind"
+    assert "labelling rules" in head and "reader's verdict on the failures sheet" in head
+    assert "no AuditKIT record" in head
+    assert "made in bf16 on an A100 or L4" in head and "fault to report (CLAUDE.md rule 9)" in head
+
+
+FAULT = "a fault in {}, no fp16 overflow: report it (CLAUDE.md rule 9), never tune around it"
+
+
+def overflow_on(monkeypatch, call):
+    """greedy_batch marking every row of its ``call``-th batch non-finite (an fp16 overflow, as its check
+    marks it); the other batches decode as they do."""
+    from dataclasses import replace
+
+    from lift.models import generate as gen
+
+    real, calls = gen.greedy_batch, []
+
+    def greedy_batch(model, rows, **kw):
+        calls.append(len(rows))
+        outs = real(model, rows, **kw)
+        return [replace(o, nonfinite=True) for o in outs] if len(calls) == call else outs
+
+    monkeypatch.setattr(gen, "greedy_batch", greedy_batch)
+
+
+def test_a_non_finite_cell_is_listed_apart_with_its_remedy():
+    # W2-02: an fp16 cell that went non-finite is made in bf16 on an A100 or L4: its restart line first when
+    # its file holds fp16 records (with the refill lines of the judgements it sets aside, made in bf16), else
+    # nothing to set aside; in bf16 or fp32 it is a fault to report, no line
+    from lift.models.generate import NonFiniteOutputError
+
+    write_generation("harmful", "en", "dev", dtype="fp16")                 # an earlier batch's records
+    write_judgements("frontier", "harmful", "en", "dev")                    # the second judge's sample
+    line = "lift restart --variant stock --split dev --sets harmful --langs en --dtype fp16"
+    errors = {"held": ("en", NonFiniteOutputError(f"... `{line}` ...", pids=["har-0002"], dtype="fp16",
+                                                  command=line)),
+              "fresh": ("hi", NonFiniteOutputError("...", pids=["har-0001"], dtype="fp16")),
+              "bf16": ("zh", NonFiniteOutputError("...", pids=["har-0001"], dtype="bf16"))}
+    remedies = {}
+    for name, (lang, exc) in errors.items():
+        skipped: dict[str, dict[str, str]] = {}
+        run_cmd._skip(skipped, "stock", "harmful", lang, "dev", exc, judged=None, dtype=exc.dtype)
+        [(kind, cells)] = skipped.items()
+        assert (kind, list(cells)) == ("nonfinite", [f"harmful_{lang}_dev"]), name
+        remedies[name] = cells[f"harmful_{lang}_dev"]
+    cell = "--variant stock --split dev --sets harmful --langs en"
+    assert remedies["held"] == (f"{line}\n    and once it is generated again: lift judge {cell} --judge "
+                                "second --sample 0.10")
+    assert remedies["fresh"] == ("nothing to set aside: run the line that failed in bf16 on an A100 or L4 "
+                                 "(without --dtype)")
+    assert remedies["bf16"] == FAULT.format("bf16")
+    head = " ".join(run_cmd.SKIPPED["nonfinite"].split())
+    assert "nothing of that batch was written" in head and "made in bf16" in head and "rule 9" in head
+
+
+@pytest.mark.torch
+def test_generate_skips_a_non_finite_cell_lists_it_and_exits_3(fake_prompt_files, tiny_model_dir, monkeypatch,
+                                                               caplog):
+    # W2-02: a batch that went non-finite stopped `lift generate` (and the job: its exit was 1), so no later
+    # cell ran. NonFiniteOutputError is a StaleOutputError now: the cell is listed apart, the others go on,
+    # and the line exits 3.
+    pytest.importorskip("torch")
+    from fakes import make_prompt
+
+    from lift.models import generate as gen
+    from lift.models import variants
+
+    pin()
+    for lang in ("en", "hi"):
+        fake_prompt_files[("harmful", lang)] = [make_prompt(f"har-{i}", lang, "harmful", "dev", text=f"q {i}")
+                                                for i in range(3)]
+    real_build = variants.build_variant
+    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: real_build(
+        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)))
+    short_runs(monkeypatch)
+    overflow_on(monkeypatch, 1)                                         # harmful_en's one batch
+    argv = ["generate", "--variant", "stock", "--split", "dev", "--sets", "harmful", "--langs", "en", "hi",
+            "--device", "cpu", "--dtype", "bf16"]
+    assert main(argv) == 3
+    assert not gen.generations_path("stock", "harmful", "en", "dev").exists()
+    assert len(gen.read_generations(gen.generations_path("stock", "harmful", "hi", "dev"))) == 3
+    assert listing(caplog, "went non-finite") == (
+        f"1 cells {run_cmd.SKIPPED['nonfinite']}:\n  harmful_en_dev: {FAULT.format('bf16')}\n")
+    assert "harmful_en_dev: decoding went non-finite, skipped" in caplog.text
+
+
 @pytest.mark.parametrize("role", ["primary", "second"])
 def test_judge_skips_a_stale_cell_and_exits_3(role, monkeypatch, caplog):
     # judge_file's refusal (a StaleOutputError) names the cell's restart line; lift judge lists it and
@@ -1216,7 +1603,11 @@ def test_run_dev_skips_a_stale_cell_exits_3_and_its_restart_line_lets_it_finish(
 
 def tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, sets, *, n=3):
     """run-dev on the tiny model (CPU), short outputs, the real Qwen3Guard adapter in the run's precision
-    over a StubGuard, a fake LID; the en prompts of ``sets`` are "question {i}" placeholders."""
+    over a StubGuard, a fake LID; the en prompts of ``sets`` are "question {i}" placeholders. The tiny model
+    stands in for Global at the revision ``pin`` pins, which its generations record as a real run's do (a
+    read compares them with the pin)."""
+    from dataclasses import replace
+
     from fakes import make_prompt
 
     from lift.judge import pipeline
@@ -1227,8 +1618,8 @@ def tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, sets, *, n=3):
         fake_prompt_files[(s, "en")] = [make_prompt(f"{s[:3]}-{i}", "en", s, "dev", text=f"question {i}")
                                         for i in range(n)]
     real_build = variants.build_variant
-    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: real_build(
-        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)))
+    monkeypatch.setattr(variants, "build_variant", lambda spec, *, device, dtype: replace(real_build(
+        spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)), model_rev="b" * 40))
     short_runs(monkeypatch)
     monkeypatch.setattr(pipeline, "make_judge", lambda role, **kw: guard(dtype=kw.get("dtype") or "bf16"))
     monkeypatch.setattr("lift.lang.LangID", FakeLID)
@@ -1236,10 +1627,20 @@ def tiny_run_dev(fake_prompt_files, tiny_model_dir, monkeypatch, sets, *, n=3):
 
 
 class Frontier:
-    """Stands in for the frontier second judge (an API judge: no stack, no precision)."""
+    """Stands in for the frontier second judge (an API judge: no stack, no precision), under the id the
+    pipeline gives the configured one: its rubric's version, OpenAI's default sampling, a stand-in API
+    version and the tag of the labelling rules (``second_judged`` reads its judgements back)."""
 
-    judge_id = "openai/placeholder-model@t0"
     short = "frontier"
+
+    @property
+    def judge_id(self):
+        from lift import config
+        from lift.judge.frontier import load_rubric
+        from lift.judge.labels import rules_tag
+
+        rubric = load_rubric(config.get("judges.safety_second.rubric")).version
+        return f"openai/placeholder-model@{rubric}+t0+max1024+apitest#{rules_tag()}"
 
     def judge(self, items):
         from lift.judge.pipeline import JudgeOutcome
@@ -1675,6 +2076,35 @@ class TestRunCells:
         assert skipped == {"precision": {"harmful_hi_dev": (
             "made in fp16: run it with --dtype fp16 where fp16 runs, or leave it out with --sets/--langs")}}
         assert part.read_bytes() == before
+        assert [judged("stock", *c) for c in cells] == [3, 0, 3, 3]
+
+    @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
+    def test_a_short_cell_is_listed_with_its_remedy_and_the_others_go_on(self, tiny_model_dir, tmp_path,
+                                                                         monkeypatch, mode):
+        # W2-01: run-dev met a cell short of its frozen split with a traceback, so no later cell ran
+        from lift.models.variants import build_variant
+        from lift.schemas import VariantSpec
+
+        frozen_cell(tmp_path, monkeypatch)
+        short_runs(monkeypatch)
+        holder = {"variant": build_variant(VariantSpec(name="stock", method="stock"), device="cpu",
+                                           dtype="fp32", model_id=str(tiny_model_dir))}
+        skipped: dict[str, dict[str, str]] = {}
+        run_cmd.run_cells(holder, lambda: self.Judge(), [("easy_benign", "zh"), ("easy_benign", "en")],
+                          split="final", concurrent=mode == "concurrent", interleave=mode == "interleave",
+                          lid=self.LID(), skipped=skipped)
+        assert skipped == {"short": {"easy_benign_zh_final": short_remedy()}}
+        assert [judged("stock", "easy_benign", lang, "final") for lang in ("zh", "en")] == [0, 4]
+
+    @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])
+    def test_a_cell_that_goes_non_finite_is_listed_and_the_others_go_on(self, setup, monkeypatch, mode):
+        # W2-02: a non-finite batch stopped run-dev (and the job), so no later cell ran
+        make_holder, cells = setup
+        short_runs(monkeypatch)
+        overflow_on(monkeypatch, 2)                                      # harmful_hi's one batch
+        skipped: dict[str, dict[str, str]] = {}
+        self.session(mode, make_holder, self.Judge(), cells, skipped=skipped)
+        assert skipped == {"nonfinite": {"harmful_hi_dev": FAULT.format("fp32")}}
         assert [judged("stock", *c) for c in cells] == [3, 0, 3, 3]
 
     @pytest.mark.parametrize("mode", ["concurrent", "interleave", "sequential"])

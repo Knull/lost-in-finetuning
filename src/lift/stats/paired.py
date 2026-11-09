@@ -4,11 +4,14 @@ which resamples uncentred differences and returns no intervals (verified Oct 28)
 Conventions: inputs are per-row outcomes for two variants on the same rows (row i of ``x`` and
 row i of ``y`` are the same prompt in the same language and seed). ``clusters`` groups rows that
 must be resampled together; pass the pid so one prompt seen in several languages or seeds counts
-once. Rates are fractions in [0, 1]; differences are x minus y.
+once. Rates are fractions in [0, 1]; differences are x minus y. The multiplicity corrections (``holm``,
+``benjamini_hochberg``) take a family of p-values in [0, 1] and refuse anything else: a test with no
+p-value is listed as not run and left out of its family before the correction.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -103,9 +106,25 @@ def paired_bootstrap(
                            n_rows=int(d.size), n_clusters=k, n_boot=n_boot)
 
 
-def holm(p_values: Sequence[float]) -> list[float]:
-    """Holm step-down adjusted p-values, in the input order."""
+def _p_values(p_values: Sequence[float]) -> np.ndarray:
+    """A family of p-values as a 1-D float array. A value that is not a number in [0, 1] is a ValueError:
+    NaN (or None) is a test that gave no p-value, which a correction must neither make one up for nor let
+    erase the others'."""
     p = np.asarray(p_values, dtype=float)
+    if p.ndim != 1:
+        raise ValueError("p-values must be a 1-D sequence, one per test of the family")
+    for i, v in enumerate(p.tolist()):
+        if not (math.isfinite(v) and 0.0 <= v <= 1.0):
+            raise ValueError(f"p-value {i} of the family is {v!r}, not a number in [0, 1]: a test with no "
+                             "p-value (an arm not run, a degenerate test) is listed as not run and left out "
+                             "of its family before the correction, never adjusted")
+    return p
+
+
+def holm(p_values: Sequence[float]) -> list[float]:
+    """Holm step-down adjusted p-values, in the input order. Every p-value must be a number in [0, 1]
+    (``_p_values``): a family holding a test with none is a ValueError."""
+    p = _p_values(p_values)
     m = p.size
     order = np.argsort(p)
     adjusted = np.empty(m)
@@ -117,8 +136,9 @@ def holm(p_values: Sequence[float]) -> list[float]:
 
 
 def benjamini_hochberg(p_values: Sequence[float]) -> list[float]:
-    """BH-FDR adjusted p-values (q-values), in the input order."""
-    p = np.asarray(p_values, dtype=float)
+    """BH-FDR adjusted p-values (q-values), in the input order. Every p-value must be a number in [0, 1]
+    (``_p_values``): a family holding a test with none is a ValueError."""
+    p = _p_values(p_values)
     m = p.size
     order = np.argsort(p)
     ranked = p[order] * m / np.arange(1, m + 1)

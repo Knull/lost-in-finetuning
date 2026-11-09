@@ -150,9 +150,53 @@ def test_wiseft_builder_is_the_same_repair(tiny_lora_adapter, tiny_model_dir):
 # --- ReSta ----------------------------------------------------------------------------------------------
 
 
+def configure_base(base_dir):
+    """configs/project.yaml's Base pointed at the local stand-in (this test's view): the resta builder
+    refuses an entry that names another Base than the configured pin (R1-04)."""
+    config.load("project")["models"]["base"]["id"] = str(base_dir)
+
+
 def resta_spec(base_dir, alpha=0.25):
+    configure_base(base_dir)
     return spec("resta", alpha=alpha, dare=False, base=str(base_dir),
                 base_revision=resolved_revision(str(base_dir), "x"))
+
+
+def test_a_resta_variant_is_built_only_on_the_configured_base_pin(tiny_lora_adapter, tiny_model_dir,
+                                                                 base_dir):
+    """R1-04: ReSta's weights depend on Base's, so its Base revision is part of its key and must be the pin.
+    The builder refuses while models.base.revision is not a commit sha, and an entry naming another Base
+    revision than the configured one (Base re-pinned since registration) until it is registered again.
+    Another Base sha gives another key."""
+    install(tiny_lora_adapter)
+    named = spec("resta", alpha=0.25, dare=False, base="CohereLabs/tiny-aya-base", base_revision="a" * 40)
+    with pytest.raises(ValueError, match="not a commit sha"):          # the view leaves Base at "main"
+        build(named, tiny_model_dir)
+    good = resta_spec(base_dir)
+    stale = spec("resta", alpha=0.25, dare=False, base=str(base_dir), base_revision="f" * 40)
+    with pytest.raises(ValueError, match=r"register the ReSta settings again \(`lift register-repairs"):
+        build(stale, tiny_model_dir)
+    assert build(good, tiny_model_dir).loaded["base"] == good.params["base_revision"]
+    keys = {generation_key(model_rev="b" * 40, adapter_hash="c" * 64, spec=s, template_hash="d" * 64,
+                           gen_cfg={"max_new_tokens": 4}, pid="p", lang="hi", prompt_text="t")
+            for s in (good, stale)}
+    assert len(keys) == 2 and intervention_digest(good) != intervention_digest(stale)
+
+
+def test_a_cast_artifact_is_wrapped_from_the_bytes_its_hash_was_checked_on(tiny_model_dir, tmp_path):
+    """R1-05: ``cast.load`` reads the artifact once and parses those bytes, so with the declared sha256 the
+    steering vectors wrapped are the ones checked; another sha raises ArtifactChanged before anything is
+    parsed."""
+    import torch
+
+    path = cast.save(tmp_path / "cast.safetensors", torch.ones(8), {2: torch.ones(8)},
+                     {"format": cast.FORMAT, "behavior_layers": [2], "condition_layer": 1, "threshold": 0.5,
+                      "comparator": "greater", "f1_heldout": 1.0, "pool": "mean"})
+    digest = cast.artifact_hash(path)
+    cond, vecs, info = cast.load(path, sha256=digest)
+    assert sorted(vecs) == [2] and info["threshold"] == 0.5 and float(cond.threshold) == 0.5
+    with pytest.raises(cast.ArtifactChanged, match="fitted again since registration"):
+        cast.load(path, sha256="0" * 64)
 
 
 def test_resta_adds_alpha_times_global_minus_base_and_a_reload_undoes_it(tiny_lora_adapter, tiny_model_dir,
@@ -231,6 +275,43 @@ def test_cast_fit_returns_a_condition_and_round_trips(fitted, tmp_path):
     other = cast.save(tmp_path / "c" / cast.ARTIFACT, cond.condition_vector, vecs,
                       {**info, "threshold": 0.123})
     assert cast.artifact_hash(other) != digest
+
+
+def test_the_fit_keeps_pooled_vectors_only_and_gets_safetunes_numbers(fitted, tmp_path):
+    """SafeTune 0.1.12 pins each prompt's whole hidden-state sequence until its fit ends (``_pool_hidden``'s
+    "last" returns a view; the CAA extractor pools after the last batch): the Nov 9 fit on Tiny Aya was
+    killed for memory. cast.fit pools as it goes, and its artifact equals the unpatched functions' output."""
+    import torch
+    from safetune.core.runtime.inference import vector_extraction as ve
+    from safetune.interventions.steer import cast as st_cast
+    from safetune.interventions.steer.caa import CAAConfig, extract_caa_vectors
+    from safetune.interventions.steer.cast import fit_cast_condition
+
+    model, tok, path = fitted
+    seq, batch = torch.randn(400, 8), torch.randn(2, 30, 8)
+    with cast._pooled_without_whole_sequences():
+        kept = st_cast._pool_hidden(seq, "last")
+        assert torch.equal(kept, seq[-1]) and kept.untyped_storage().nbytes() == 8 * 4
+        for method in ("last_token", "mean", "max"):
+            ext = ve.SteeringVectorExtractor(model, tok, ve.VectorExtractionConfig(pool_method=method))
+            ext._make_hook(0)(None, None, (batch,))
+            stored = ext._activations[0][0]
+            assert stored.shape == (2, 1, 8) and stored.untyped_storage().nbytes() == 2 * 8 * 4
+            assert torch.equal(ext._pool(stored), ext._pool(batch))
+    assert st_cast._pool_hidden(seq, "last").untyped_storage().nbytes() == 400 * 8 * 4   # restored
+    plain = ve.SteeringVectorExtractor(model, tok)
+    plain._make_hook(0)(None, None, (batch,))
+    assert plain._activations[0][0].shape == (2, 30, 8)                                  # restored
+    cond_ref = fit_cast_condition(model, list(HARMFUL), list(BENIGN), tok, pool="last", device="cpu")
+    vec_ref = extract_caa_vectors(model, tok, list(HARMFUL), list(BENIGN),
+                                  CAAConfig(target_layers=cast.behavior_layers(cast._num_layers(model))))
+    cond, vecs, info = cast.load(path)
+    assert (info["condition_layer"], info["comparator"]) == (cond_ref.condition_layer, cond_ref.comparator)
+    assert info["threshold"] == pytest.approx(cond_ref.threshold)
+    assert torch.allclose(cond.condition_vector.float(), cond_ref.condition_vector.float(), atol=1e-6)
+    assert sorted(vecs) == sorted(vec_ref)
+    for layer, v in vec_ref.items():
+        assert torch.allclose(vecs[layer].float(), v.float(), atol=1e-6)
 
 
 def test_the_fit_reads_the_tokens_generation_sees(tiny_tokenizer):

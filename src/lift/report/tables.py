@@ -365,7 +365,7 @@ def repair_comparison(stats: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def repair_vs_wiseft(stats: Mapping[str, Any]) -> dict[str, Any]:
-    """Each other frozen family minus WiSE-FT attenuation (analysis.vs_wiseft; docs/decisions.md 76)."""
+    """Each other frozen family minus WiSE-FT attenuation (analysis.vs_wiseft; docs/decisions.md 78)."""
     block = stats.get("vs_wiseft") or {"rows": []}
     rows = [
         {
@@ -391,7 +391,7 @@ def repair_vs_wiseft(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("seeds", "Seeds", "text"),
         ],
         rows,
-        "Not pre-registered, descriptive (docs/decisions.md 76): the README frames each repair against "
+        "Not pre-registered, descriptive (docs/decisions.md 78): the README frames each repair against "
         "simply scaling the adapter down but pre-registers no test of it. Paired by prompt within each seed "
         "and pooled over the seeds named (95% clustered bootstrap intervals, clusters = prompt id); gain "
         "kept: (repair - WiSE-FT) / (adapter - 0.5) over the same prompts. Estimates and intervals only: no "
@@ -536,6 +536,8 @@ def judge_sensitivity(stats: Mapping[str, Any]) -> dict[str, Any]:
         ("back-translated (NLLB) vs native", s.get("backtranslation", [])),
     ):
         for r in items:
+            # The back-translation sample counts its own gaps (n_skipped: no second label, or no native one).
+            skipped = r.get("n_skipped", 0)
             rows.append(
                 {
                     "check": check,
@@ -544,11 +546,17 @@ def judge_sensitivity(stats: Mapping[str, Any]) -> dict[str, Any]:
                     "agreement": r["agreement"],
                     "kappa": r["kappa"],
                     "agreement_binary": r["agreement_binary"],
+                    "n_expected": r.get("n_expected", r["n"] + skipped),
+                    "n_missing": r.get("n_missing", skipped),
                 }
             )
     if not rows:
         rows = []
-    note = "Four-class agreement and Cohen's kappa; binary = harmful vs not."
+    note = (
+        "Four-class agreement and Cohen's kappa; binary = harmful vs not. Sampled: the outputs the check's "
+        "sample holds in the final cells that were run; not judged: those of them without the check's "
+        "judgement (for the second judge each such cell is listed under not run)."
+    )
     loose = s.get("loose", {})
     for kind in ("drift", "repair"):
         pooled = (loose.get(kind) or {}).get("pooled")
@@ -566,6 +574,8 @@ def judge_sensitivity(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("agreement", "Agreement", "pct"),
             ("kappa", "Kappa", "f2"),
             ("agreement_binary", "Binary agreement", "pct"),
+            ("n_expected", "Sampled", "int"),
+            ("n_missing", "Not judged", "int"),
         ],
         rows,
         note,
@@ -762,7 +772,7 @@ def validate(doc: Mapping[str, Any]) -> list[str]:
 
 
 def _json_safe(obj: Any) -> Any:
-    """JSON-ready: a non-finite number becomes "undefined", never None (None means not run, decisions 73)."""
+    """JSON-ready: a non-finite number becomes "undefined", never None (None means not run, decisions 77)."""
     if isinstance(obj, float) and not math.isfinite(obj):
         return "undefined"
     if isinstance(obj, Mapping):

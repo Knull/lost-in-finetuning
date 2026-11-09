@@ -41,8 +41,8 @@ def near(a_ins: str, a_res: str, b_ins: str, b_res: str, nd: Mapping[str, Any] |
     nd = nd if nd is not None else config.load("project")["sources"]["sft"]["heldout"]["near_dup"]
     ins = (bool(dup_key(a_ins)) and bool(dup_key(b_ins))
            and jaccard(char_ngrams(a_ins, nd["ngram"]), char_ngrams(b_ins, nd["ngram"])) >= nd["instruction"])
-    long = len(dup_key(a_res)) >= nd["response_min_chars"] and len(dup_key(b_res)) >= nd["response_min_chars"]
-    res = long and jaccard(char_ngrams(a_res, nd["ngram"]), char_ngrams(b_res, nd["ngram"])) >= nd["response"]
+    res = (bool(dup_key(a_res)) and bool(dup_key(b_res))
+           and jaccard(char_ngrams(a_res, nd["ngram"]), char_ngrams(b_res, nd["ngram"])) >= nd["response"])
     return ins or res
 
 # (instruction, response) pairs, Hindi, invented.

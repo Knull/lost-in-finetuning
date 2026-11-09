@@ -416,8 +416,21 @@ def test_run_all_goes_in_order_and_lists_what_it_could_not_run():
     assert summary["results"] == {} and len(summary["not_run"]) == 13
 
 
+def made(name, *, but=()):
+    """Empty generations files for every final safety cell of ``name`` except ``but``."""
+    from lift.models.generate import generations_path
+
+    for set_name, lang in final.safety_cells():
+        if (set_name, lang) not in but:
+            path = generations_path(name, set_name, lang, "final")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+
+
 def test_the_laptop_half_runs_the_second_judge_sample_and_utility(monkeypatch):
     calls = []
+    made("stock")
+    made(A.format(1))
     assert final.judge_only(["stock", A.format(1)], call=lambda argv: calls.append(list(argv)) or 0) == 0
     assert calls[0] == [
         "judge",
@@ -429,6 +442,8 @@ def test_the_laptop_half_runs_the_second_judge_sample_and_utility(monkeypatch):
         "harmful",
         "easy_benign",
         "hard_benign",
+        "--langs",
+        *LANGS,
     ]
     assert calls[1][-4:] == ["--sets", "redteam", "--langs", "hi"]
     assert ["utility", f"--variant={A.format(1)}", "--split=final", "--judge-only"] in calls
@@ -439,6 +454,34 @@ def test_the_laptop_half_runs_the_second_judge_sample_and_utility(monkeypatch):
     assert final.second_judge_argv(A.format(1)) == [
         ["judge", f"--variant={A.format(1)}", "--split=final", "--judge=second", f"--keys={listed}"]
     ]
+
+
+def test_the_second_judge_lines_leave_out_a_cell_with_no_generations_and_say_so(capsys):
+    """R1: `lift judge` over named cells stops on a missing generations file, and a final cell short of its
+    frozen split (easy_benign zh until its reader's verdict) never gets one. The sample lines name only
+    the cells that exist, the others are listed, and the laptop half exits 3 instead of 0."""
+    name = A.format(1)
+    made(name, but={("easy_benign", "zh"), ("redteam", "hi")})
+    lines, absent = final.second_judge_plan(name)
+    assert absent == ["easy_benign_zh_final", "redteam_hi_final"]
+    tails = [line[line.index("--sets") :] for line in lines]
+    assert tails == [
+        ["--sets", "harmful", "hard_benign", "--langs", *LANGS],
+        ["--sets", "easy_benign", "--langs", *(x for x in LANGS if x != "zh")],
+    ]
+    assert all(
+        line[:5] == ["judge", f"--variant={name}", "--split=final", "--judge=second", "--sample=0.10"]
+        for line in lines
+    )
+    calls = []
+    assert final.judge_only([name], call=lambda argv: calls.append(list(argv)) or 0) == 3
+    assert [c for c in calls if c[0] == "judge"] == lines
+    out = capsys.readouterr().out
+    assert f"{name}: no generations file for easy_benign_zh_final, redteam_hi_final" in out
+    assert f"`lift final --variant {name}` (GPU)" in out and "reader's verdict" in out
+    # Nothing made at all: no judge line, only the utility one, and every cell is listed.
+    lines, absent = final.second_judge_plan("stock")
+    assert lines == [] and len(absent) == len(final.safety_cells())
 
 
 # ------------------------------------------------------------------------------------- back-translation

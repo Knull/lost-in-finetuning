@@ -22,6 +22,10 @@ Recipe and batch
   visible GPUs, the Trainer's batch and the rows each optimizer step took.
 
 Data
+- Nothing trains while ``lift.data.sft.export_problems`` lists a reason the exports must not be trained
+  on (R2-01): a report.json built under other rules than the current code and configs give (or none, as
+  the Nov 4 build), a planned variant it does not list, a folder it does not list, a missing file, or an
+  export that does not match its selection.json. Each reason names its remedy.
 - data/sft/{candidate}/{dedup|raw}/sft_messages.jsonl (recipe dedup true: dedup), found through
   data/sft/report.json, never by listing folders: a folder left by an earlier rule can sit beside the
   planned ones. Its row count must equal report.json's ``decision.rows_by_variant`` entry and its sha256
@@ -412,14 +416,23 @@ def sft_key(candidate: str, cfg: Mapping[str, Any]) -> str:
 
 
 def load_training_data(candidate: str, cfg: Mapping[str, Any]) -> TrainingData:
-    """The recipe's training file for ``candidate``, refused unless it is the one report.json planned
+    """The recipe's training file for ``candidate``, refused unless the exports may be trained on at all
+    (``lift.data.sft.export_problems`` lists nothing: built under the current rules and configs, every
+    planned variant present and matching its selection.json, R2-01), it is the one report.json planned
     (its row count and sha256) and every row is one non-empty user turn then one assistant turn."""
+    from lift.data import sft
+
     key = sft_key(candidate, cfg)
     report_path = sft_dir() / "report.json"
     rebuild = "rebuild the SFT files with `lift data build --only sft`"
     if not report_path.is_file():
         raise FileNotFoundError(f"{report_path} not found: the training files are built by `lift data build "
                                 "--only sft` and reach a GPU job through `lift sync pull`")
+    problems = sft.export_problems()
+    if problems:
+        raise TrainRefused(f"the SFT exports must not be trained on ({len(problems)} problem"
+                           f"{'s' if len(problems) > 1 else ''}, lift.data.sft.export_problems): "
+                           + "; ".join(problems))
     report = json.loads(report_path.read_text(encoding="utf-8"))
     planned = (report.get("decision") or {}).get("rows_by_variant") or {}
     if key not in planned:

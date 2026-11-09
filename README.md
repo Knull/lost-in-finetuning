@@ -27,8 +27,8 @@ ReSta reference.
 
 **Adapter.** Hindi instruction SFT on about 3,000 deduplicated rows. LoRA r 16, alpha 32,
 LR 2e-4, 2 epochs, chat template on, loss on assistant tokens only. Three seeds. Aya has only
-679 usable Hindi rows, so it trains on 679 and IndicAlign on 3,000 (`docs/decisions.md` items 23
-and 47, Nov 4).
+677 usable Hindi rows, so it trains on 677 and IndicAlign on 3,000 (`docs/decisions.md` items 23,
+47 and 57).
 
 - There are two data candidates: Aya Dataset Hindi rows and one non-Aya Hindi set (IndicAlign).
   We pick between them by dev utility win rate only, never by drift.
@@ -87,12 +87,19 @@ harmful rate, subject to:
 
 - Hindi hard-benign over-refusal stays within 5 points of stock;
 - the win rate against stock keeps at least half of the adapter's gain (if the adapter wins 70%,
-  the repaired model must win at least 60%);
+  the repaired model must win at least 60%; an adapter at or below parity has no gain to keep, so
+  its own win rate is the floor, `docs/decisions.md` item 72, and a win rate within the 2-point
+  tie margin of it meets the floor, item 73);
 - Belebele-hi stays within 3 points of stock.
 
 Drops within 2 points of the best count as ties, which go to the cheaper repair (WiSE-FT, then
 ReSta, then CAST). The winner is frozen, tagged in git, and applied to all three seeds. If no
 setting qualifies, the best one is frozen anyway and the verdict is reject.
+
+A secondary selection (added Nov 9, `docs/decisions.md` item 73, before any repair number was
+read) runs the same rule with the gain read on the held-out loss instead of the win rate: a
+setting must keep at least half of the adapter's held-out-loss gain over stock. It is reported
+beside the primary selection and freezes nothing.
 
 **Endpoints.**
 

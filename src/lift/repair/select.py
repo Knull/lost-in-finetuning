@@ -24,7 +24,7 @@ Nothing is selected while an input is missing or stale: the report says "incompl
 its remedy (rule 9: a subset would be a selection the pre-registration did not make). Otherwise
 ``lift.selection.select_repair`` decides the overall winner over all settings, and the same rule within
 each other family (wiseft, resta, cast with cast_always) gives that family's frozen setting; the overall
-winner is its own family's frozen setting (decisions item 75: the tie window moves with the pool, so the
+winner is its own family's frozen setting (decisions item 71: the tie window moves with the pool, so the
 rule over one family alone can pick a sibling). 3 families x 3 seeds = the 9 repaired variants of the
 final eval, the overall winner always among them. outputs/metrics/selection.json and .md hold the full
 table (every setting's numbers, checks and violations) and the drop's paired interval against the
@@ -49,6 +49,16 @@ paths (``_unrooted``): it is published with the logs.
 The command then prints the freeze steps: the commit-and-tag command, the configs/variants.yaml entries
 of the frozen settings on seeds 1-3 (seed 2 and 3 adapters must be registered; CAST needs its artifact,
 fitted first), and the fit-cast lines of seeds 2-3.
+
+The secondary selection (decisions item 73, ``run_secondary``) is the same rule over the same dev numbers
+with condition 2 read on the adapter's held-out-loss gain instead of its win rate: a setting must keep at
+least half of the gain in mean per-token NLL the adapter has over stock on the dev utility references
+(``lift heldout-loss``, paired with stock's scores by ``loglik.heldout_metrics``; the score files are
+checked against the registry as the Belebele ones are). It needs the adapter to have such a gain (its
+paired interval against stock below zero): otherwise it is "undefined", and "incomplete" while an input is
+missing, each with its remedy. It is written to outputs/metrics/selection_secondary.json and .md, apart
+from selection.json, so it freezes nothing, no recipe pins it, and it can be made again when the held-out
+scores arrive after the freeze. The frozen settings are always the primary rule's.
 """
 
 from __future__ import annotations
@@ -69,9 +79,10 @@ from typing import Any
 from lift import config, paths
 from lift.paths import metrics_dir
 from lift.repair import settings as rs
-from lift.selection import DevScores, Selection, select_repair
+from lift.selection import DevScores, Selection, min_win_rate, select_repair
 
 REPORT = "selection"
+SECONDARY = "selection_secondary"
 CELLS = {"harmful_hi": ("harmful", "hi", "dev"), "overrefusal_hard_hi": ("hard_benign", "hi", "dev")}
 
 
@@ -101,6 +112,10 @@ class Collected:
 
 def report_paths() -> tuple[Path, Path]:
     return metrics_dir() / f"{REPORT}.json", metrics_dir() / f"{REPORT}.md"
+
+
+def secondary_paths() -> tuple[Path, Path]:
+    return metrics_dir() / f"{SECONDARY}.json", metrics_dir() / f"{SECONDARY}.md"
 
 
 def _dtype_flag(dtype: str) -> str:
@@ -205,6 +220,42 @@ def _belebele(variant: str, dtype: str, *, pinned: str | None) -> tuple[float, d
     return float(hi["accuracy"]), {"n": hi.get("n"), "model_rev": doc.get("model_rev")}
 
 
+def _heldout(variant: str, dtype: str) -> tuple[float, dict[str, Any]]:
+    """(the variant's mean per-token NLL on the dev utility references minus stock's, details): negative
+    is a better fit than stock's. Raises Missing with the line that makes the scores."""
+    from lift.models import loglik
+    from lift.models.variants import get_spec
+
+    flag = _dtype_flag(dtype)
+    rerun = f"`lift heldout-loss --variant {variant}{flag}` (a GPU job line), then lift sync pull"
+    try:
+        pinned = get_spec(variant).artifacts.get("adapter")
+    except KeyError:
+        raise Missing(f"configs/variants.yaml does not list {variant}") from None
+    path = loglik.heldout_scores_path(variant, "dev", dtype=dtype)
+    stale = _stale(variant, path)
+    if stale:
+        raise Missing(f"held-out loss dev: {stale}; start it over: run `lift heldout-loss --variant "
+                      f"{variant} --restart{flag}` (GPU), then lift sync pull")
+    try:
+        doc = loglik.heldout_metrics(variant, "dev", dtype=dtype)
+    except (OSError, ValueError) as exc:
+        raise Missing(f"held-out loss dev scores cannot be read ({_short(exc)}); run {rerun}") from None
+    if doc is None:
+        raise Missing(f"no complete held-out loss dev scores ({path.name}); run {rerun}")
+    if pinned and doc.get("adapter_hash") != pinned:
+        raise Missing(f"held-out loss dev scores were made from adapter {str(doc.get('adapter_hash'))[:12]}, "
+                      f"not the pinned {pinned[:12]}; run `lift heldout-loss --variant {variant} --restart"
+                      f"{flag}` (GPU), then lift sync pull")
+    vs = doc.get("vs_stock")
+    if vs is None:
+        raise Missing(f"held-out loss dev cannot be paired with stock's ({_short(doc.get('vs_stock_note'))})")
+    return float(vs["diff_mean_nll"]), {
+        "mean_nll": doc["mean_nll"], "n_rows": doc["n_rows"], "n_tokens": doc["n_tokens"],
+        "diff_row_mean_nll": vs["diff_row_mean_nll"], "lo": vs["lo"], "hi": vs["hi"],
+        "model_rev": doc.get("model_rev")}
+
+
 def read_scores(name: str, method: str, dtype: str) -> Read:
     """(DevScores or None, what is missing, details) of one variant on seed-1 dev in ``dtype``."""
     from lift.models.variants import get_spec
@@ -303,11 +354,11 @@ def decide(c: Collected, rules: Mapping[str, Any], families: Sequence[str]) -> d
         own = select_repair(c.stock, c.adapter, pool, rules)
         per_family[fam] = _selection_doc(own)
         if fam == winner_family and own.winner != overall.winner:
-            # Decisions item 75: the overall winner is frozen as its family's setting, so it is the one
+            # Decisions item 71: the overall winner is frozen as its family's setting, so it is the one
             # evaluated on all three seeds; the family's own pick is kept for the record.
             per_family[fam].update(winner=overall.winner, verdict=overall.verdict,
                                    family_rule_winner=own.winner)
-    min_win = 0.5 + rules["min_gain_retained"] * (c.adapter.win_rate - 0.5)
+    min_win = min_win_rate(c.adapter.win_rate, rules)      # decisions items 72-73 below parity
     rows = []
     for row in overall.table:
         cand = next(x for x in c.candidates if x.name == row["name"])
@@ -318,6 +369,97 @@ def decide(c: Collected, rules: Mapping[str, Any], families: Sequence[str]) -> d
                      "belebele_drop": c.stock.belebele_hi - cand.belebele_hi,
                      "eligible": row["violations"] == 0})
     return {"overall": _selection_doc(overall), "families": per_family, "table": rows}
+
+
+def decide_secondary(c: Collected, rules: Mapping[str, Any], families: Sequence[str],
+                     nll: Mapping[str, float]) -> dict[str, Any]:
+    """The secondary selection over complete inputs (decisions item 73): the rule with condition 2 read on
+    the share of the adapter's held-out-loss gain each setting keeps. ``nll`` is {variant: mean NLL minus
+    stock's} for the adapter and every candidate; the adapter's must be negative."""
+    from lift.selection import heldout_gain_retained
+
+    assert c.stock is not None and c.adapter is not None
+    gain = nll[c.adapter.name]
+    kept = {x.name: heldout_gain_retained(gain, nll[x.name]) for x in c.candidates}
+    overall = select_repair(c.stock, c.adapter, c.candidates, rules, heldout_retained=kept)
+    per_family: dict[str, Any] = {}
+    for fam in families:
+        pool = [x for x in c.candidates if rs.FAMILY[x.method] == fam]
+        if pool:
+            per_family[fam] = _selection_doc(select_repair(
+                c.stock, c.adapter, pool, rules, heldout_retained={x.name: kept[x.name] for x in pool}))
+    rows = []
+    for row in overall.table:
+        cand = next(x for x in c.candidates if x.name == row["name"])
+        rows.append({**row, "family": rs.FAMILY[row["method"]], "harmful_hi": cand.harmful_hi,
+                     "overrefusal_hard_hi": cand.overrefusal_hard_hi,
+                     "overrefusal_increase": cand.overrefusal_hard_hi - c.stock.overrefusal_hard_hi,
+                     "heldout_nll_minus_stock": nll[row["name"]],
+                     "min_heldout_retained": rules["min_gain_retained"], "belebele_hi": cand.belebele_hi,
+                     "belebele_drop": c.stock.belebele_hi - cand.belebele_hi,
+                     "eligible": row["violations"] == 0})
+    primary = select_repair(c.stock, c.adapter, c.candidates, rules)
+    return {"overall": _selection_doc(overall), "families": per_family, "table": rows,
+            "primary": _selection_doc(primary)}
+
+
+def run_secondary(adapter: str, *, families: Sequence[str] = rs.FAMILIES, dtype: str | None = None,
+                  reader: Callable[..., Any] | None = None,
+                  heldout_reader: Callable[[str, str], tuple[float, dict[str, Any]]] | None = None,
+                  ) -> dict[str, Any]:
+    """Collect, decide the secondary selection when it can be decided, and write
+    outputs/metrics/selection_secondary.json and .md (the module docstring). Status: "decided";
+    "incomplete" (an input is missing: the primary rule's, or a held-out loss score file); "undefined" (the
+    adapter has no held-out-loss gain over stock, so there is no share to keep). Nothing here touches
+    selection.json or the frozen recipe."""
+    dtype = dtype or config.get("generation.dtype")
+    rules = config.get("selection", name="repairs")
+    c = collect(adapter, families, dtype, reader=reader)
+    problems = _check_revisions(c) if reader is None else []
+    read = heldout_reader or _heldout
+    missing = {name: list(why) for name, why in c.missing.items()}
+    nll: dict[str, float] = {}
+    heldout: dict[str, dict[str, Any]] = {}
+    for name in [adapter, *(s.name(adapter) for s in rs.settings(families))]:
+        try:
+            nll[name], heldout[name] = read(name, dtype)
+        except Missing as exc:
+            missing.setdefault(name, []).append(f"heldout_loss: {exc}")
+    doc: dict[str, Any] = {
+        "kind": "selection_secondary", "version": 1, "adapter": adapter, "split": "dev", "lang": "hi",
+        "dtype": dtype, "judge": "primary", "families": list(families), "rules": dict(rules),
+        "gain_measure": "held-out loss: mean per-token NLL of the dev utility references, minus stock's",
+        "decision": "docs/decisions.md item 73", "created": datetime.now(UTC).isoformat(),
+        "stock": asdict(c.stock) if c.stock else None,
+        "adapter_scores": _nan_safe(asdict(c.adapter)) if c.adapter else None,
+        "missing": missing, "problems": problems, "heldout": heldout,
+    }
+    if missing or problems or c.stock is None or c.adapter is None:
+        doc["status"] = "incomplete"
+    else:
+        gain, upper = nll[adapter], heldout[adapter].get("hi")
+        doc["adapter_gain"] = {"nll_minus_stock": gain, "lo": heldout[adapter].get("lo"), "hi": upper}
+        if not gain < 0 or (upper is not None and not upper < 0):
+            doc["status"] = "undefined"
+            doc["undefined"] = (
+                f"{adapter} has no held-out-loss gain over stock to keep: its mean per-token NLL on the dev "
+                f"utility references is {gain:+.4f} against stock's"
+                + ("" if upper is None else f", and the paired 95% interval of the per-reference difference "
+                                            f"reaches {upper:+.4f}")
+                + ". The secondary selection is not defined for it")
+        else:
+            doc.update(decide_secondary(c, rules, families, nll))
+            doc["status"] = "decided"
+    doc = _unrooted(_nan_safe(doc))
+    json_path, md_path = secondary_paths()
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    for path, text in ((json_path, json.dumps(doc, indent=1, ensure_ascii=False) + "\n"),
+                       (md_path, render_secondary(doc))):
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    return doc
 
 
 def _today() -> str:
@@ -582,7 +724,7 @@ def render(doc: Mapping[str, Any]) -> str:
               f"Overall winner: **{doc['overall']['winner']}** (verdict {doc['overall']['verdict']}).", ""]
     for fam, sel in doc["families"].items():
         note = (f"; the overall winner, frozen in place of {sel['family_rule_winner']} by the family's rule "
-                "alone (decisions item 75)") if sel.get("family_rule_winner") else ""
+                "alone (decisions item 71)") if sel.get("family_rule_winner") else ""
         lines.append(f"- {fam}: {sel['winner']} (verdict {sel['verdict']}{note})")
     lines += ["", "| setting | harmful hi % | drop pts | drop 95% CI | over-refusal +pts | win % (min) | "
               "Belebele-hi % (drop pts) | violations | eligible |", "|---|---|---|---|---|---|---|---|---|"]
@@ -594,6 +736,44 @@ def render(doc: Mapping[str, Any]) -> str:
                      "| "
                      f"{_pct(r['belebele_hi'])} ({_pct(r['belebele_drop'])}) | {r['violations']} | "
                      f"{'yes' if r['eligible'] else 'no'} |")
+    return "\n".join(lines) + "\n"
+
+
+def render_secondary(doc: Mapping[str, Any]) -> str:
+    lines = [f"# Secondary repair selection: {doc['adapter']} (seed-1 dev, Hindi, {doc['dtype']})", "",
+             "The selection rule with its gain condition read on the held-out loss instead of the win rate "
+             "(docs/decisions.md item 73): a setting must keep at least "
+             f"{_pct(doc['rules']['min_gain_retained'])}% of the adapter's gain over stock in mean per-token "
+             "NLL on the dev utility references. It freezes nothing: the frozen settings are the primary "
+             "rule's (selection.md).", "", f"Status: **{doc['status']}**", ""]
+    if doc["status"] == "undefined":
+        return "\n".join([*lines, doc["undefined"] + "."]) + "\n"
+    if doc["status"] != "decided":
+        lines += ["Nothing is selected while an input is missing:", ""]
+        for name, why in {**doc["missing"], **{"problems": doc["problems"]}}.items():
+            for w in why:
+                lines.append(f"- {name}: {w}")
+        return "\n".join(lines) + "\n"
+    s, a, g = doc["stock"], doc["adapter_scores"], doc["adapter_gain"]
+    lines += [f"Stock: harmful {_pct(s['harmful_hi'])}%, hard-benign refusal "
+              f"{_pct(s['overrefusal_hard_hi'])}%, Belebele-hi {_pct(s['belebele_hi'])}%. Adapter: harmful "
+              f"{_pct(a['harmful_hi'])}%, held-out NLL {g['nll_minus_stock']:+.4f} nats/token against stock"
+              + ("" if g.get("lo") is None else f" (per-reference 95% CI [{g['lo']:+.4f}, {g['hi']:+.4f}])")
+              + ".", "",
+              f"Secondary winner: **{doc['overall']['winner']}** (verdict {doc['overall']['verdict']}). "
+              f"The primary rule on the same numbers picks {doc['primary']['winner']} "
+              f"(verdict {doc['primary']['verdict']}).", ""]
+    for fam, sel in doc["families"].items():
+        lines.append(f"- {fam}: {sel['winner']} (verdict {sel['verdict']})")
+    lines += ["", "| setting | harmful hi % | drop pts | over-refusal +pts | NLL - stock | gain kept % (min) "
+              "| win % | Belebele-hi % (drop pts) | violations | eligible |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
+    for r in doc["table"]:
+        lines.append(f"| {r['name']} | {_pct(r['harmful_hi'])} | {_pct(r['drop'])} | "
+                     f"{_pct(r['overrefusal_increase'])} | {r['heldout_nll_minus_stock']:+.4f} | "
+                     f"{_pct(r['heldout_retained'])} ({_pct(r['min_heldout_retained'])}) | "
+                     f"{_pct(r['win_rate'])} | {_pct(r['belebele_hi'])} ({_pct(r['belebele_drop'])}) | "
+                     f"{r['violations']} | {'yes' if r['eligible'] else 'no'} |")
     return "\n".join(lines) + "\n"
 
 

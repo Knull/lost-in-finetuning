@@ -7,7 +7,7 @@
   adapter in the reported precision only (not a stress sweep, not another dtype), and the CAST fit of that
   adapter (``fit_cast`` manifests, same filter), which the check-up needs before its CAST settings run.
   Final manifests count in the reported precision only.
-- A check-up is the whole acceptance test of one adapter (decisions.md 73): the seed-1 dev sweep (with its
+- A check-up is the whole acceptance test of one adapter (decisions.md 77): the seed-1 dev sweep (with its
   CAST fit) plus the final battery of stock, the seed-1 adapter and the seed-1 frozen winner (``checkup``).
   ``gpu_hours_per_checkup`` is their sum, None (not run) while any of them has no manifest.
 - Latency: GPU seconds per generated token of each variant's final generations (safety cells and

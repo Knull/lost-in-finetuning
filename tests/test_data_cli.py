@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from datafakes import FakeTranslator
 from fake_build import BlockingTranslator, fixture_ctx, isolate, read_sheet, repo_state, write_sheet
 
 from lift.cli import build_parser, main
@@ -157,6 +158,52 @@ def test_build_exits_3_when_cache_only_misses_items(dirs, monkeypatch, capsys):
     assert "a rerun can translate are missing from: hard_benign_hi" in capsys.readouterr().out
 
 
+def test_build_exits_0_and_lists_a_cell_short_of_its_frozen_split(dirs, monkeypatch, capsys):
+    # R1-01: a frozen pid an open failure (an empty output) leaves out: listed with its cell, not complete;
+    # a rerun cannot add it, so the exit stays 0
+    use_fixtures(monkeypatch)
+    assert main(["data", "build", "--only", "hard_benign", "--langs", "en"]) == 0
+    first = build.load_prompts("hard_benign", "en")[0]
+    use_fixtures(monkeypatch, translator=FakeTranslator(empty_for=[first.text]))
+    capsys.readouterr()
+    assert main(["data", "build", "--only", "hard_benign", "--langs", "en", "hi"]) == 0
+    out = capsys.readouterr().out
+    # W2-01: each line names the remedy with the cell's --langs (the default sheets are hi zh es only)
+    remedy = build.reader_remedy(["hi"])
+    assert "`lift data spotcheck-sheets --langs hi`" in remedy and "spotcheck_hi_failures.csv" in remedy
+    assert (f"hard_benign_hi is short of its frozen split ({first.split} 1), awaiting a reader's verdict on "
+            f"the failures sheet: {first.pid}; {remedy}") in out.splitlines()
+    assert out.splitlines()[-1].startswith("built; 1 fit/dev/final items await a reader's verdict on the "
+                                           f"failures sheet ({remedy}); summary in ")
+    assert main(["data", "stats"]) == 0
+    assert f"  short of their frozen split: hard_benign_hi ({first.split} 1)" in capsys.readouterr().out
+
+
+def test_sheets_and_apply_exit_1_when_a_prompt_file_is_refused(dirs, monkeypatch, capsys, caplog):
+    # W2-01 (R1-01 follow-up): load_prompts refuses a prompt file whose committed split file is missing (or
+    # that carries a split stamp the committed split does not give) with a ValueError; spotcheck-sheets and
+    # apply-spotchecks log it and exit 1, as for a missing file, instead of a traceback
+    use_fixtures(monkeypatch)
+    assert main(["data", "build", "--only", "hard_benign", "--langs", "en"]) == 0
+    first = build.load_prompts("hard_benign", "en")[0]
+    use_fixtures(monkeypatch, translator=FakeTranslator(empty_for=[first.text]))
+    assert main(["data", "build"]) == 0                                 # hard_benign hi: one open failure
+    sheet = dirs.sheets / "sheet.csv"
+    sheet.parent.mkdir(parents=True)
+    write_sheet(sheet, [{"item_id": f"hi-{first.pid}", "set": "hard_benign", "english": first.text,
+                         "translation": "", "verdict": "bad", "corrected": "", "note": ""}])
+    (dirs.splits / "hard_benign.json").unlink()                          # a checkout without it
+    capsys.readouterr()
+    caplog.set_level(logging.ERROR)
+    missing = "hard_benign_en: the committed split file"
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 1
+    assert missing in caplog.text and "is missing" in caplog.text and "Traceback" not in caplog.text
+    caplog.clear()
+    assert main(["data", "spotcheck-sheets", "--langs", "hi"]) == 1
+    assert "hard_benign_hi: the committed split file" in caplog.text and "Traceback" not in caplog.text
+    assert capsys.readouterr().out == "" and not (dirs.sheets / "spotcheck_hi.csv").exists()
+
+
 def test_stats_sheets_and_apply_on_a_built_fixture(dirs, monkeypatch, capsys, caplog):
     use_fixtures(monkeypatch)
     assert main(["data", "build"]) == 0
@@ -197,6 +244,64 @@ def test_stats_sheets_and_apply_on_a_built_fixture(dirs, monkeypatch, capsys, ca
     caplog.clear()
     assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 1
     assert "verdict must be ok, fixed or bad" in caplog.text and rows[1]["translation"] not in caplog.text
+
+
+def test_stats_marks_the_sft_exports_a_trainer_refuses_as_stale(dirs, monkeypatch, capsys):
+    # R2-01: lift data stats checks the exports under the context's configs (a fresh build is not stale),
+    # and prints each reason a trainer refuses them, here a report.json with no rules stamp (the Nov 4 build)
+    use_fixtures(monkeypatch)
+    assert main(["data", "build", "--only", "utility", "sft", "--langs", "hi"]) == 0
+    capsys.readouterr()
+    assert main(["data", "stats"]) == 0
+    assert "stale" not in capsys.readouterr().out
+    root = dirs.data / "sft"
+    for path in [root / "report.json", *root.rglob("selection.json")]:         # as the Nov 4 build wrote them
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        del doc["rules"]
+        path.write_text(json.dumps(doc), encoding="utf-8")
+    assert main(["data", "stats"]) == 0
+    lines = [line for line in capsys.readouterr().out.splitlines() if "stale" in line]
+    assert len(lines) == 1 and lines[0].startswith("  stale: data/sft/report.json carries no rules stamp")
+    assert lines[0].endswith("rebuild with `lift data build --only sft`, then `lift sync push`")
+    assert main(["data", "stats", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["sft"]["status"] == "stale"
+    (root / "report.json").unlink()                                   # exports that no report lists
+    assert main(["data", "stats"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "sft: exports on disk, but no data/sft/report.json" in lines
+    assert ("  stale: data/sft/report.json is missing: rebuild with `lift data build --only sft`, then "
+            "`lift sync push`") in lines
+
+
+def test_spotcheck_sheets_are_written_and_read_under_the_validation_dir(dirs, monkeypatch, capsys, tmp_path):
+    # R1 post-merge item 2: a remote runtime moves validation/ with LIFT_VALIDATION_DIR, and P04's sheets
+    # and lift sync follow it. So do P01's: written there, and a filled sheet found there by the name a
+    # job line gives it (run from the clone, where validation/ is not that tree).
+    use_fixtures(monkeypatch)
+    moved = tmp_path / "moved" / "validation"
+    monkeypatch.setenv("LIFT_VALIDATION_DIR", str(moved))
+    assert main(["data", "build"]) == 0
+    capsys.readouterr()
+    assert main(["data", "spotcheck-sheets", "--langs", "hi", "--n", "1"]) == 0
+    written = [Path(line) for line in capsys.readouterr().out.splitlines()]
+    assert [p.name for p in written] == ["spotcheck_hi.csv", "spotcheck_hi_failures.csv"]
+    assert all(p.parent == moved / "sheets" and p.is_file() for p in written)
+    sheet = moved / "sheets" / "spotcheck_hi.csv"
+    rows = read_sheet(sheet)
+    rows[0]["verdict"] = "ok"
+    write_sheet(sheet, rows)
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    monkeypatch.chdir(clone)
+    names = ("spotcheck_hi.csv", "validation/sheets/spotcheck_hi.csv", r"validation\sheets\spotcheck_hi.csv")
+    for name in names:
+        assert main(["data", "apply-spotchecks", "--file", name, "--dry-run"]) == 0, name
+        assert "dry run: 1 verdicts checked (1 new" in capsys.readouterr().out
+    # A file that exists where it is named is read from there, as before.
+    (clone / "spotcheck_hi.csv").write_bytes(sheet.read_bytes())
+    sheet.unlink()
+    assert main(["data", "apply-spotchecks", "--file", "spotcheck_hi.csv", "--dry-run"]) == 0
+    assert main(["data", "apply-spotchecks", "--file", "nowhere.csv", "--dry-run"]) == 1
 
 
 def test_spotcheck_sheets_exits_1_before_a_build(dirs, monkeypatch, capsys, caplog):
@@ -247,6 +352,75 @@ def test_apply_exits_3_when_the_rebuild_loses_records_and_1_without_the_cache(di
     assert main(["data", "apply-spotchecks", "--file", str(sheet), "--dry-run"]) == 1
     assert "lacks the engine output of items in the files this sheet has verdicts on" in caplog.text
     assert "harmful_hi: 9 items (e.g." in caplog.text and capsys.readouterr().out == ""
+
+
+def test_apply_exits_1_and_names_the_rebuild_when_it_stops_after_the_verdicts_are_stored(dirs, monkeypatch,
+                                                                                         capsys, caplog):
+    # W3-04: a ValueError from the rebuild comes after the verdicts are stored, so the line says they are
+    # stored and the rebuild stopped. R2-02: applying the sheet again, once the cause is fixed, finishes that
+    # rebuild (the file's report does not hold the stored verdicts yet), and so does the named line that
+    # rebuilds their files from them (from the cache, as apply-spotchecks does).
+    use_fixtures(monkeypatch)
+    assert main(["data", "build", "--only", "harmful", "--langs", "en", "hi"]) == 0
+    sheet = dirs.sheets / "sheet.csv"
+    sheet.parent.mkdir(parents=True)
+    records = build.load_prompts("harmful", "hi")
+    assert not any(r.translation.checked for r in records)
+    write_sheet(sheet, sheet_rows(records[:2], "ok"))
+    real = build._build_file
+
+    def stops(run, src, set_name, lang):
+        raise ValueError("fake: the rebuild stops")
+
+    monkeypatch.setattr(build, "_build_file", stops)
+    capsys.readouterr()
+    caplog.set_level(logging.ERROR)
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 1
+    logged = " ".join(caplog.text.split())
+    rebuild = "`lift data build --only harmful --langs hi --cache-only`"
+    assert "2 new verdicts are stored" in logged and "fake: the rebuild stops" in logged
+    assert "Once the cause is fixed, apply the sheet again" in logged
+    # W3 (VERIFY-4): the named line can exit 3, unlike the apply's own rebuild
+    assert ("(a --cache-only build exits 3 when a file holds an error or empty translation failure, which "
+            'the cache never holds: it reports the item as "error: not cached"') in logged
+    assert rebuild in logged and "Traceback" not in logged and capsys.readouterr().out == ""
+    stored = dirs.data / "interim" / "translations" / "spotchecks.jsonl"
+    assert len(stored.read_text(encoding="utf-8").splitlines()) == 2
+    caplog.clear()
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 1      # the cause is still there
+    assert "the resumed rebuild of the files that must hold the verdicts stored in" in caplog.text
+    assert capsys.readouterr().out == "" and len(stored.read_text(encoding="utf-8").splitlines()) == 2
+    assert main(["data", "apply-spotchecks", "--file", str(sheet), "--dry-run"]) == 0
+    assert capsys.readouterr().out.splitlines()[-2:] == [
+        "would also rebuild harmful_hi (resumed): its report did not hold the verdicts stored on it yet (a "
+        "rebuild cut short)", "dry run: 2 verdicts checked (0 new, 2 unchanged), nothing written"]
+    monkeypatch.setattr(build, "_build_file", real)
+    assert main(["data", "apply-spotchecks", "--file", str(sheet)]) == 0      # fixed: the retry finishes it
+    out = capsys.readouterr().out.splitlines()
+    assert out[-2] == ("resumed the rebuild of harmful_hi: its report did not hold the verdicts stored on it "
+                       "yet (a rebuild cut short)")
+    assert out[-1] == "0 verdicts applied, 2 unchanged; rebuilt harmful_hi"
+    assert {r.pid for r in build.load_prompts("harmful", "hi") if r.translation.checked} == {
+        r.pid for r in records[:2]}
+
+    def interrupted(run, src, set_name, lang):
+        raise RuntimeError("fake: not a ValueError")
+
+    monkeypatch.setattr(build, "_build_file", interrupted)       # any other error: its traceback, after
+    write_sheet(sheet, sheet_rows(records[2:3], "ok"))            # a line that says what is stored
+    caplog.clear()
+    with pytest.raises(RuntimeError, match="not a ValueError"):
+        build.apply_spotchecks(sheet, ctx=build.BuildContext.default())
+    logged = " ".join(caplog.text.split())
+    assert "1 new verdicts are stored" in logged and rebuild in logged
+    monkeypatch.setattr(build, "_build_file", real)               # the named line rebuilds the file too
+    assert main(["data", "build", "--only", "harmful", "--langs", "hi", "--cache-only"]) == 0
+    assert {r.pid for r in build.load_prompts("harmful", "hi") if r.translation.checked} == {
+        r.pid for r in records[:3]}
+    with pytest.raises(SystemExit):
+        main(["data", "apply-spotchecks", "--help"])
+    shown = " ".join(capsys.readouterr().out.split())
+    assert "or the rebuild stops (the verdicts are stored: once the cause is fixed, applying the" in shown
 
 
 def test_apply_exits_1_when_glotlid_cannot_load_and_stores_nothing(dirs, monkeypatch, capsys, caplog):

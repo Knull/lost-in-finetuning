@@ -294,18 +294,32 @@ def _select(args: argparse.Namespace) -> int:
     from lift.repair import select
 
     _adapter(args.adapter)
+    families = _families(args.repairs)
     try:
-        doc = select.run(args.adapter, families=_families(args.repairs), dtype=args.dtype,
-                         refreeze=args.refreeze)
+        doc = select.run(args.adapter, families=families, dtype=args.dtype, refreeze=args.refreeze)
     except select.RecipeFrozen as exc:
         print(f"lift select: {exc}", file=sys.stderr)
+        _select_secondary(args.adapter, families, args.dtype)
         return 2
     json_path, md_path = select.report_paths()
     print_selection(doc)
     print(f"wrote {json_path} and {md_path.name}")
     if doc.get("recipe"):
         print(f"wrote {select.RECIPE}")
+    _select_secondary(args.adapter, families, args.dtype)
     return 0 if doc["status"] == "decided" else 3
+
+
+def _select_secondary(adapter: str, families: list[str], dtype: str | None) -> None:
+    """The secondary selection (decisions item 73), beside the primary one. It never changes lift select's
+    exit code or the frozen recipe: it is a report."""
+    from lift.repair import select
+
+    doc = select.run_secondary(adapter, families=families, dtype=dtype)
+    json_path, md_path = select.secondary_paths()
+    print()
+    print(select.render_secondary(doc), end="")
+    print(f"wrote {json_path} and {md_path.name} (secondary: freezes nothing)")
 
 
 def print_selection(doc: dict[str, Any]) -> None:

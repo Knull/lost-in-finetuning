@@ -6,7 +6,7 @@ The final split is touched only here (CLAUDE.md rule 1), so every final line pas
   VM whose shallow fetch of the job's ref carries no tags, by ``git ls-remote --tags origin`` with the
   GITHUB_TOKEN the job hands to lift lines (sent as an http header through that git process's GIT_CONFIG_*
   variables, as kaggle/runner.ipynb fetches: never in a URL, on a command line or in a log);
-- the tag froze a concrete recipe (``verified_recipe``, docs/decisions.md 77): configs/frozen_recipe.json,
+- the tag froze a concrete recipe (``verified_recipe``, docs/decisions.md 79): configs/frozen_recipe.json,
   written by P05's ``lift select`` and committed before the tag, exists, is the same at HEAD (and in the
   working tree) as in the commit the newest tag points to (``git show <tag>:configs/frozen_recipe.json``; a
   shallow VM clone fetches that one tag first, the token again only in GIT_CONFIG_* variables), and its
@@ -21,7 +21,7 @@ The final split is touched only here (CLAUDE.md rule 1), so every final line pas
 
 The same guard runs in every command that makes final outputs (``lift generate``, ``lift utility`` but
 --judge-only, ``lift belebele``, ``lift heldout-loss`` with ``--split final``), so no side line can reach the
-final split either (docs/decisions.md 70).
+final split either (docs/decisions.md 74).
 
 GPU half (``lift final --variant V``). Four stages, each through the harness (rule 2), in this process:
 
@@ -87,7 +87,7 @@ SAFETY = ("harmful", "easy_benign", "hard_benign")
 REDTEAM = ("redteam", "hi")
 STAGES = ("safety", "utility", "belebele", "backtranslation")
 SEEDS = (1, 2, 3)
-BT_SEED = 70  # the back-translation sample's draw (pipeline._rank), decisions.md 70
+BT_SEED = 70  # the back-translation sample's draw (pipeline._rank), decisions.md 74
 
 
 class Refused(ValueError):
@@ -316,7 +316,7 @@ def _winner_problem(winner: Any, frozen: Mapping[str, Any]) -> str | None:
 
 def _selection_problems(selection: Mapping[str, Any] | None, recipe: Mapping[str, Any] | None) -> list[str]:
     """What keeps a decided selection from being the frozen recipe's: an overall winner its family did not
-    freeze (XB-01), or another frozen map or winner than the recipe's (decisions.md 77)."""
+    freeze (XB-01), or another frozen map or winner than the recipe's (decisions.md 79)."""
     settings = frozen_settings(selection)
     if not settings:
         return []
@@ -343,7 +343,7 @@ def reported_recipe(
     git: Callable[..., str | None] | None = None,
 ) -> dict[str, Any] | None:
     """The check ``lift stats`` and ``lift report`` make before they read or show final results of repaired
-    variants (XB2-02; decisions.md 77: only the recipe the tag froze is evaluated, and so reported): the
+    variants (XB2-02; decisions.md 79: only the recipe the tag froze is evaluated, and so reported): the
     recipe as the newest tag froze it (``verified_recipe``: working tree, HEAD and tag agree, and its
     selection_sha256 is outputs/metrics/selection.json's), ``selection`` its frozen map and winner, and every
     repaired variant reported (``repaired``; default every frozen variant of ``selection``) one the recipe
@@ -457,7 +457,7 @@ class Planned:
 
 def standard_adapter(selection: Mapping[str, Any] | None) -> str | None:
     """The seed-1 standard adapter whose recipe gets "retain with its interval" when the stress adapter
-    carries the repair comparison (README Gate 2; docs/decisions.md 78); None when the selection's adapter
+    carries the repair comparison (README Gate 2; docs/decisions.md 80); None when the selection's adapter
     is a standard one. Read from selection.json's ``standard_adapter`` when it names one, else from Gate 2's
     report (outputs/metrics/gate2.json, ``candidate``: the Gate 1 pick, ``lift gate 2 --candidate NAME``);
     None when neither says (the verdict is then listed as not run with that remedy)."""
@@ -755,7 +755,8 @@ def safety(name: str, opts: Options) -> int:
     from lift.models.variants import build_variant, get_spec
 
     local = judge_dir("primary") == "qwen3guard"
-    run.require_pinned("models.global", *(["judges.safety_primary"] if local else []))
+    judge_pin = [run._judge_entry("primary")] if local else []
+    run.require_pinned("models.global", *run._base_pin(name), *judge_pin)
     dtype = run._dtype(opts.dtype)
     gen_device, judge_device = opts.device, run._judge_device(opts.judge_device)
     run._refuse_other_dtype(dtype, gen_device, judge_device if local else None)
@@ -925,15 +926,33 @@ def _primary_judge(opts: Options, dtype: str) -> Any:
 # -------------------------------------------------------------------------------------------- laptop
 
 
-def second_judge_argv(name: str) -> list[list[str]]:
-    """The second judge's lines of one variant's final split (module docstring)."""
+def second_judge_plan(name: str) -> tuple[list[list[str]], list[str]]:
+    """(the second judge's lines of one variant's final split, the final cells they leave out).
+
+    With P04's key list of the variant the line is ``--keys`` on it, which reads only the files holding
+    its keys. Without one the lines are ``--sample``, and ``lift judge`` over named cells stops on the
+    first generations file that is missing (R1). A final cell can lack its file for good: one short of its
+    frozen split is skipped by ``lift final`` until a reader's verdict (easy_benign zh on the real data).
+    So the lines name only the cells whose generations file exists, grouped by the languages a set has,
+    and the others are returned as "{set}_{lang}_final" to be listed, never judged around silently."""
+    from lift.models.generate import generations_path
     from lift.paths import validation_dir
 
     listed = validation_dir() / "keys" / "second_judge" / f"{name}_{SPLIT}.txt"
     if listed.is_file():
-        return [["judge", f"--variant={name}", f"--split={SPLIT}", "--judge=second", f"--keys={listed}"]]
+        return [["judge", f"--variant={name}", f"--split={SPLIT}", "--judge=second", f"--keys={listed}"]], []
     fraction = f"{float(config.get('second_judge_fraction')):.2f}"
-    return [
+    present: dict[str, list[str]] = {}
+    absent: list[str] = []
+    for set_name, lang in safety_cells():
+        if generations_path(name, set_name, lang, SPLIT).is_file():
+            present.setdefault(set_name, []).append(lang)
+        else:
+            absent.append(f"{set_name}_{lang}_{SPLIT}")
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for set_name, langs in present.items():
+        groups.setdefault(tuple(langs), []).append(set_name)
+    lines = [
         [
             "judge",
             f"--variant={name}",
@@ -941,20 +960,18 @@ def second_judge_argv(name: str) -> list[list[str]]:
             "--judge=second",
             f"--sample={fraction}",
             "--sets",
-            *SAFETY,
-        ],
-        [
-            "judge",
-            f"--variant={name}",
-            f"--split={SPLIT}",
-            "--judge=second",
-            f"--sample={fraction}",
-            "--sets",
-            REDTEAM[0],
+            *sets,
             "--langs",
-            REDTEAM[1],
-        ],
+            *langs,
+        ]
+        for langs, sets in groups.items()
     ]
+    return lines, absent
+
+
+def second_judge_argv(name: str) -> list[list[str]]:
+    """The second judge's lines of one variant's final split (``second_judge_plan``)."""
+    return second_judge_plan(name)[0]
 
 
 def judge_only(
@@ -969,8 +986,11 @@ def judge_only(
 
     call = call or _call
     codes: dict[str, int] = {}
+    left_out: dict[str, list[str]] = {}
     for name in names:
-        lines = second_judge_argv(name)
+        lines, absent = second_judge_plan(name)
+        if absent:
+            left_out[name] = absent
         if name != "stock":
             lines.append(
                 [
@@ -986,7 +1006,14 @@ def judge_only(
             codes[" ".join(argv)] = call(argv)
     for line, rc in codes.items():
         print(f"lift {line}: exit {rc}")
+    for name, cells in left_out.items():
+        print(
+            f"{name}: no generations file for {', '.join(cells)}, so the second judge's sample leaves "
+            f"{'it' if len(cells) == 1 else 'them'} out. `lift final --variant {name}` (GPU) makes a cell "
+            "or lists why it is skipped (a cell short of its frozen split waits for a reader's verdict); "
+            "then this line again"
+        )
     values = set(codes.values())
     if values - {0, 3}:
         return 1
-    return 3 if 3 in values else 0
+    return 3 if 3 in values or left_out else 0

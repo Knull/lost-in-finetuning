@@ -10,9 +10,12 @@ import json
 import pytest
 from fakes import make_prompt
 
-from lift import cli
+from lift import cli, config
+from lift.cachekey import intervention_digest
 from lift.io import sha256_text, write_jsonl
+from lift.judge import labels as judge_labels
 from lift.judge import pipeline
+from lift.models import variants
 from lift.models.generate import generations_path
 from lift.paths import figures_dir, metrics_dir
 from lift.report import analysis, cost, tables
@@ -24,7 +27,9 @@ A = "adapter-aya-std-s{}"
 WINNER = "wiseft-l0.50-adapter-aya-std-s{}"
 RESTA = "resta-a0.25-adapter-aya-std-s{}"
 CAST = "cast-m1.0-adapter-aya-std-s{}"
-JUDGE = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40 + "#bf16#strict"
+# A primary judge's id as R1 writes it: the labelling rules' tag is part of it (decisions.md 58).
+JUDGE = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40 + f"#{judge_labels.rules_tag()}#bf16#strict"
+ADAPTER_HASH = "1" * 64  # what the real-cell tests' registry pins for every adapter seed
 SELECTION = {
     "status": "decided",
     "adapter": A.format(1),
@@ -87,6 +92,8 @@ class FakeSource(analysis.Source):
         self.count = count
         self.scores = utility
         self.judge = judge
+        self.unjudged: set[str] = set()  # variants with no second-judge file at all
+        self.dropped: set[tuple] = set()  # (variant, set, lang, pid) sampled but left unjudged
 
     def labels(self, variant, set_name, lang):
         if variant not in self.present:
@@ -123,8 +130,17 @@ class FakeSource(analysis.Source):
             for p, lab in labels.items()
         ]
         if judge == "second":
-            return out[::3]
+            if variant in self.unjudged:
+                raise analysis.Missing("no second-judge judgements file")
+            return [x for x in out[::3] if (variant, set_name, lang, x.pid) not in self.dropped]
         return out
+
+    def second_expected(self, set_name):
+        """The draw is every third prompt of a set: exactly what the fake second judge judged."""
+        return set(PIDS[set_name][::3])
+
+    def second_listed(self, variant):
+        return set()
 
     def cap_hits(self, variant, set_name, lang):
         return {}
@@ -260,6 +276,71 @@ def test_verdict_per_adapter_from_synthetic_records(count, selection_verdict, ex
     (v,) = doc["verdicts"]
     assert (v["adapter"], v["recipe"], v["verdict"]) == (A.format(1), "standard", expected)
     assert v["reason"]
+
+
+def test_the_second_judges_sample_is_checked_for_coverage():
+    """R1-10: the second judge's cells are read with complete=False, which says nothing about whether the
+    sample is whole. Every output of the draw in a final cell that was run must have a second-judge
+    judgement: the ones without are counted beside the agreement and listed as not run."""
+    source = FakeSource()
+    stats = analysis.compute(source, SELECTION, use_file=False)
+    rows = {r["lang"]: r for r in stats["sensitivity"]["second_judge"]}
+    # 13 variants x (3 sets in every language, and Hindi's red-team set), a third of each cell's prompts
+    per_cell = len(PIDS["harmful"][::3]) + 2 * len(PIDS["easy_benign"][::3])
+    assert rows["en"]["n_expected"] == rows["en"]["n"] == 13 * per_cell and rows["en"]["n_missing"] == 0
+    assert rows["hi"]["n_expected"] == 13 * (per_cell + len(PIDS["redteam"][::3]))
+    assert stats["sensitivity"]["second_judge_gaps"] == []
+    assert not any("second judge" in x for x in stats["not_run"])
+
+    source = FakeSource()
+    source.dropped = {
+        ("stock", "harmful", "hi", PIDS["harmful"][0]),
+        ("stock", "harmful", "hi", PIDS["harmful"][3]),
+    }
+    source.unjudged = {CAST.format(2)}
+    stats = analysis.compute(source, SELECTION, use_file=False)
+    rows = {r["lang"]: r for r in stats["sensitivity"]["second_judge"]}
+    cast_hi = per_cell + len(PIDS["redteam"][::3])
+    assert rows["hi"]["n_missing"] == 2 + cast_hi and rows["en"]["n_missing"] == per_cell
+    assert rows["hi"]["n"] == rows["hi"]["n_expected"] - rows["hi"]["n_missing"]
+    gaps = {(g["variant"], g["set"], g["lang"]): g for g in stats["sensitivity"]["second_judge_gaps"]}
+    assert (
+        gaps[("stock", "harmful", "hi")]["n_missing"] == 2 and gaps[("stock", "harmful", "hi")]["why"] is None
+    )
+    whole = gaps[(CAST.format(2), "harmful", "th")]
+    assert whole["n_missing"] == whole["n_expected"] == len(PIDS["harmful"][::3])
+    assert whole["why"] == "no second-judge judgements file"
+    assert (
+        "second judge stock harmful_hi: 2 of its 7 sampled outputs not judged (`lift final --variant stock "
+        "--judge-only`)"
+    ) in stats["not_run"]
+    listed = [x for x in stats["not_run"] if x.startswith(f"second judge {CAST.format(2)} ")]
+    assert len(listed) == 19 and all("no second-judge judgements file" in x for x in listed)
+    doc = tables.build(stats, cost.section([("stock", "stock")], docs=[]))
+    table_rows = {
+        r["lang"]: r
+        for r in doc["tables"]["judge_sensitivity"]["rows"]
+        if r["check"] == "second judge vs primary"
+    }
+    assert (
+        table_rows["Hindi"]["n_missing"] == 2 + cast_hi and table_rows["Hindi"]["n_expected"] == 13 * cast_hi
+    )
+    assert [c["key"] for c in doc["tables"]["judge_sensitivity"]["columns"]][-2:] == [
+        "n_expected",
+        "n_missing",
+    ]
+    bt = next(
+        r for r in doc["tables"]["judge_sensitivity"]["rows"] if r["check"].startswith("back-translated")
+    )
+    assert bt["n_expected"] == bt["n"] + bt["n_missing"]
+    assert tables.validate(json.loads(json.dumps(tables._json_safe(doc)))) == []
+    # A language whose whole sample is unjudged still gets its row: nothing is dropped unseen.
+    source = FakeSource()
+    source.unjudged = set(all_variants())
+    stats = analysis.compute(source, SELECTION, use_file=False)
+    rows = {r["lang"]: r for r in stats["sensitivity"]["second_judge"]}
+    assert set(rows) == set(LANGS) and rows["zh"]["n"] == 0 and rows["zh"]["agreement"] is None
+    assert rows["zh"]["n_missing"] == rows["zh"]["n_expected"] == 13 * per_cell
 
 
 def test_a_missing_arm_is_shown_as_not_run_never_estimated():
@@ -429,8 +510,42 @@ META = {
 }
 
 
+@pytest.fixture
+def registry(monkeypatch):
+    """configs/variants.yaml as the real-cell tests register it: stock and the adapter's three seeds, each
+    pinning its adapter hash. R1's read checks take a cell only when it was made under its variant's entry
+    (``meta.intervention``) and, for an adapter, from the adapter the entry pins (``meta.adapter_hash``)."""
+    doc = {
+        "variants": [
+            {"name": "stock", "method": "stock"},
+            *(
+                {
+                    "name": A.format(s),
+                    "method": "adapter",
+                    "adapter": A.format(s),
+                    "seed": s,
+                    "artifacts": {"adapter": ADAPTER_HASH},
+                }
+                for s in (1, 2, 3)
+            ),
+        ]
+    }
+    served = config.load
+    monkeypatch.setattr(config, "load", lambda name="project": doc if name == "variants" else served(name))
+    return doc
+
+
 def write_cell(variant: str, pids: list[str], harmful: int, meta: dict | None = None) -> None:
-    meta = {**META, **(meta or {})}
+    """A reportable harmful_hi_final cell as the harness writes it since R1: each generation names the cap
+    it was made under, its registry entry's intervention digest and, for an adapter, the adapter's hash."""
+    spec = variants.get_spec(variant)
+    made = {
+        "max_new_tokens": config.get("generation.max_new_tokens"),
+        "intervention": intervention_digest(spec),
+    }
+    if spec.method == "adapter":
+        made["adapter_hash"] = ADAPTER_HASH
+    meta = {**META, **made, **(meta or {})}
     gens, judgements = [], []
     for i, p in enumerate(pids):
         key, output = sha256_text(f"{variant}|{p}"), f"placeholder {variant} {p}"
@@ -481,7 +596,7 @@ def write_cell(variant: str, pids: list[str], harmful: int, meta: dict | None = 
     )
 
 
-def test_lift_stats_reads_real_cells_through_paired_labels(fake_prompt_files):
+def test_lift_stats_reads_real_cells_through_paired_labels(fake_prompt_files, registry):
     pids = PIDS["harmful"]
     fake_prompt_files[("harmful", "hi")] = [
         make_prompt(p, "hi", "harmful", "final", text=f"prompt {p}") for p in pids
@@ -504,7 +619,7 @@ def test_lift_stats_reads_real_cells_through_paired_labels(fake_prompt_files):
 
 
 def test_a_pair_that_cannot_be_paired_is_refused_loudly_not_shown_as_not_run(
-    fake_prompt_files, capsys, monkeypatch
+    fake_prompt_files, capsys, monkeypatch, registry
 ):
     """Both cells were run, but the adapter's outputs come from another Global revision: paired_labels refuses
     the pair, and lift stats must stop with that refusal, not report the primary endpoint as "not run"."""
@@ -539,7 +654,7 @@ def test_utility_verdicts_of_two_judges_are_never_mixed():
     assert stats["utility"]["retained"]["wiseft"]["est"] == pytest.approx(2 / 3)
 
 
-def test_a_cell_made_under_a_replaced_registry_entry_is_not_read(fake_prompt_files):
+def test_a_cell_made_under_a_replaced_registry_entry_is_not_read(fake_prompt_files, registry):
     """P05's stale-input rule (meta.intervention) holds on the final split too: a cell whose records name
     another registry entry than the variant's now is not run (with its restart line), never reported."""
     pids = PIDS["harmful"]
@@ -663,7 +778,7 @@ def test_partial_belebele_and_utility_arms_are_listed_and_their_seeds_named():
 
 
 def test_an_undefined_value_is_never_shown_as_not_run():
-    """XB-11 (decisions.md 73): None means not run and nothing else. The share of the gain kept is undefined
+    """XB-11 (decisions.md 77): None means not run and nothing else. The share of the gain kept is undefined
     when the adapter shows no gain over parity: a text value with the reason, never None."""
 
     def no_gain(variant):
@@ -776,7 +891,7 @@ def test_the_standard_adapter_comes_from_gate_2():
 
 
 def test_each_repair_against_wiseft_is_descriptive_and_outside_the_claim_families(stats):
-    """XB-07 (decisions.md 76): the README frames "each repair is compared with simply scaling the adapter
+    """XB-07 (decisions.md 78): the README frames "each repair is compared with simply scaling the adapter
     down" but pre-registers no test of it, so the contrast is descriptive: estimates and intervals, no
     p-values, in neither Holm's nor BH's family."""
     rows = {r["family"]: r for r in stats["vs_wiseft"]["rows"]}
@@ -823,7 +938,7 @@ def freeze(monkeypatch, selection=SELECTION):
 
 
 def test_stats_and_report_read_repaired_results_only_under_the_recipe_the_tag_froze(monkeypatch, capsys):
-    """XB2-02 (decisions.md 77): lift stats and lift report apply lift final's recipe check whenever they read
+    """XB2-02 (decisions.md 79): lift stats and lift report apply lift final's recipe check whenever they read
     final results of repaired variants. A lift select --refreeze after the final (ReSta now the winner) makes
     both refuse with the remedy; results of stock and the adapter alone stay readable."""
     from lift import final, paths
@@ -873,7 +988,7 @@ def test_stats_and_report_read_repaired_results_only_under_the_recipe_the_tag_fr
 
 
 def test_the_repair_comparison_names_the_seeds_each_row_pools():
-    """XB2-05 (decisions.md 78): a pooled value names its seeds. CAST's seed 3 was not run, so its row pools
+    """XB2-05 (decisions.md 80): a pooled value names its seeds. CAST's seed 3 was not run, so its row pools
     seeds 1 and 2; a cell that pools fewer seeds than the row's harmful rate names its own."""
     present = [v for v in all_variants() if v != CAST.format(3)]
     stats = analysis.compute(FakeSource(present), SELECTION, use_file=False)

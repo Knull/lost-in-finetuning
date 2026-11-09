@@ -15,7 +15,7 @@ Decisions (docs/decisions.md): the condition and the vectors are fitted per seed
 being repaired, from train/fit data only (PolyRefuse harmful train vs harmless train + the 100
 OR-Bench fit prompts, all 6 languages pooled). Strengths {0.5, 1.0, 2.0} plus always-on at 1.0.
 
-How it is used here (decisions.md item 67):
+How it is used here (decisions.md item 68):
 - Condition: ``fit_cast_condition`` with its default candidate layers (n/4 to 3n/4), ``pool`` from
   configs/repairs.yaml (``last``), its default threshold grid and held-out half, chat template on.
 - Steering vectors: ``extract_caa_vectors(model, tok, harmful, benign, CAAConfig(target_layers=...))``,
@@ -129,7 +129,7 @@ def fit(model: Any, tokenizer: Any, harmful: list[str], benign: list[str], *, ou
     _check_runtime()
     pool = config.get("cast.fit.pool", name="repairs")
     layers = behavior_layers(_num_layers(model))
-    with _hidden_states_only(model):
+    with _hidden_states_only(model), _pooled_without_whole_sequences():
         condition = fit_cast_condition(model, list(harmful), list(benign), tokenizer, pool=pool,
                                        device=str(device))
         vectors = extract_caa_vectors(model, tokenizer, list(harmful), list(benign),
@@ -165,6 +165,48 @@ def _hidden_states_only(model: Any) -> Iterator[None]:
             del model.forward
 
 
+@contextmanager
+def _pooled_without_whole_sequences() -> Iterator[None]:
+    """Keep only the pooled vectors SafeTune's fit uses, not the sequences they were pooled from.
+
+    SafeTune 0.1.12 holds every prompt's whole hidden-state sequence until its fit ends, at every layer it
+    reads, while it needs one vector per prompt and layer:
+    - ``fit_cast_condition``: ``_pool_hidden(h, "last")`` returns ``h[-1, :]``, a view, so each kept vector
+      pins its prompt's (seq, hidden) float32 tensor. With the ~366-token preamble that is about 70 MB a
+      prompt over the 19 candidate layers, so the 1,476 harmful fit prompts alone need about 100 GB: the
+      Nov 9 fit was killed (exit 137) on the A100 VM, which has about 83 GB of RAM.
+    - ``extract_caa_vectors``: the extractor's hooks store each batch's whole (batch, seq, hidden) output
+      and pool only after the last batch (15 to 20 GB for the 1,800 benign prompts at five layers).
+    Inside the block the "last" vector is copied out of its sequence, and the extractor's hook pools each
+    batch's CPU copy as it comes (SafeTune's own ``_pool``, on the tensor SafeTune pools) and keeps a copy
+    with a sequence dimension of one, which its pooling after the last batch returns unchanged. The numbers
+    are the same; only the memory differs (test_repairs checks the artifact against the unpatched
+    functions)."""
+    from safetune.core.runtime.inference import vector_extraction as ve
+    from safetune.interventions.steer import cast as st_cast
+
+    pool_hidden = st_cast._pool_hidden
+    make_hook = ve.SteeringVectorExtractor._make_hook
+
+    def pooled_copy(h_seq: Any, pool: str) -> Any:
+        return pool_hidden(h_seq, pool).clone()
+
+    def pooled_hook(self: Any, layer_idx: int) -> Any:
+        def hook_fn(module: Any, inp: Any, out: Any) -> None:
+            h = out[0] if isinstance(out, tuple) else out
+            self._activations.setdefault(layer_idx, []).append(
+                self._pool(h.detach().cpu()).unsqueeze(1).clone())
+        return hook_fn
+
+    st_cast._pool_hidden = pooled_copy
+    ve.SteeringVectorExtractor._make_hook = pooled_hook
+    try:
+        yield
+    finally:
+        st_cast._pool_hidden = pool_hidden
+        ve.SteeringVectorExtractor._make_hook = make_hook
+
+
 def save(path: Path, condition_vector: Any, vectors: Mapping[int, Any], info: Mapping[str, Any]) -> Path:
     """Write the artifact (float32 tensors, ``info`` as JSON in the metadata) atomically."""
     import os
@@ -194,23 +236,50 @@ def artifact_hash(path: Path) -> str:
     return sha256_file(Path(path))
 
 
-def load(path: Path) -> tuple[Any, dict[int, Any], dict[str, Any]]:
-    """(CASTCondition, {layer: steering vector}, info) of an artifact."""
-    from safetensors import safe_open
+class ArtifactChanged(ValueError):
+    """A CAST artifact that no longer has the sha256 its registry entry declares (R1-05)."""
+
+
+def load(path: Path, *, sha256: str | None = None) -> tuple[Any, dict[int, Any], dict[str, Any]]:
+    """(CASTCondition, {layer: steering vector}, info) of an artifact. The file is read once and parsed from
+    those bytes, so with ``sha256`` (the hash its registry entry declares) the bytes loaded are the bytes
+    checked: an artifact fitted again since registration raises ArtifactChanged (R1-05), whenever the fit
+    happened."""
+    import hashlib
+
+    from safetensors.torch import load as load_tensors
     from safetune.interventions.steer.cast import CASTCondition
 
-    with safe_open(str(path), framework="pt") as f:
-        info = json.loads((f.metadata() or {})["lift"])
-        if info.get("format") != FORMAT:
-            raise ValueError(f"{path} is not a {FORMAT} artifact")
-        cv = f.get_tensor("condition_vector")
-        vectors = {int(k.split(".", 1)[1]): f.get_tensor(k) for k in f.keys() if k.startswith("steering.")}
+    data = Path(path).read_bytes()
+    if sha256 is not None and hashlib.sha256(data).hexdigest() != sha256:
+        raise ArtifactChanged(f"{path} does not match the artifact hash {sha256[:12]} pinned in "
+                              "configs/variants.yaml: it was fitted again since registration. Register the "
+                              "CAST settings again (`lift register-repairs --adapter ... --replace`) and "
+                              "make their cells again")
+    info = json.loads(_header_metadata(data, path).get("lift") or "{}")
+    if info.get("format") != FORMAT:
+        raise ValueError(f"{path} is not a {FORMAT} artifact")
+    tensors = load_tensors(data)
+    cv = tensors["condition_vector"]
+    vectors = {int(k.split(".", 1)[1]): v for k, v in tensors.items() if k.startswith("steering.")}
     if sorted(vectors) != list(info["behavior_layers"]):
         raise ValueError(f"{path}: steering layers {sorted(vectors)} differ from its metadata")
     cond = CASTCondition(condition_vector=cv, condition_layer=int(info["condition_layer"]),
                          threshold=float(info["threshold"]), comparator=info["comparator"],
                          f1=float(info["f1_heldout"]), pool=info["pool"])
     return cond, vectors, info
+
+
+def _header_metadata(data: bytes, path: Path) -> dict[str, Any]:
+    """The ``__metadata__`` of a safetensors file held in ``data``."""
+    import struct
+
+    if len(data) < 8:
+        raise ValueError(f"{path} is not a safetensors file")
+    (n,) = struct.unpack("<Q", data[:8])
+    if n > min(len(data) - 8, 100_000_000):
+        raise ValueError(f"{path} is not a safetensors file")
+    return json.loads(data[8:8 + n].decode("utf-8")).get("__metadata__") or {}
 
 
 def _sync(device: Any) -> None:
@@ -327,9 +396,17 @@ class AlwaysOnCAST:
         return [{"gate_fired": True, "gate_always_on": True} for _ in range(self._n)]
 
 
-def make(model: Any, artifact_path: Path, strength: float, *, gate: bool = True, pad_id: int = 0) -> Any:
-    """A CASTModel (gate on) or an always-on wrapper with the same ``generate`` interface."""
-    condition, vectors, _info = load(artifact_path)
+def make(model: Any, artifact_path: Path, strength: float, *, gate: bool = True, pad_id: int = 0,
+         sha256: str | None = None) -> Any:
+    """A CASTModel (gate on) or an always-on wrapper with the same ``generate`` interface, from the artifact
+    at ``artifact_path`` (checked against ``sha256`` when given, as ``load`` does)."""
+    condition, vectors, _info = load(artifact_path, sha256=sha256)
+    return make_from(model, condition, vectors, strength, gate=gate, pad_id=pad_id)
+
+
+def make_from(model: Any, condition: Any, vectors: Mapping[int, Any], strength: float, *, gate: bool = True,
+              pad_id: int = 0) -> Any:
+    """``make`` from an artifact already loaded (``load``), so a builder wraps exactly what it checked."""
     _check_runtime()
     strength = float(strength)
     if strength <= 0:
