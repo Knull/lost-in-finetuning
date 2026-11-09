@@ -194,23 +194,50 @@ def artifact_hash(path: Path) -> str:
     return sha256_file(Path(path))
 
 
-def load(path: Path) -> tuple[Any, dict[int, Any], dict[str, Any]]:
-    """(CASTCondition, {layer: steering vector}, info) of an artifact."""
-    from safetensors import safe_open
+class ArtifactChanged(ValueError):
+    """A CAST artifact that no longer has the sha256 its registry entry declares (R1-05)."""
+
+
+def load(path: Path, *, sha256: str | None = None) -> tuple[Any, dict[int, Any], dict[str, Any]]:
+    """(CASTCondition, {layer: steering vector}, info) of an artifact. The file is read once and parsed from
+    those bytes, so with ``sha256`` (the hash its registry entry declares) the bytes loaded are the bytes
+    checked: an artifact fitted again since registration raises ArtifactChanged (R1-05), whenever the fit
+    happened."""
+    import hashlib
+
+    from safetensors.torch import load as load_tensors
     from safetune.interventions.steer.cast import CASTCondition
 
-    with safe_open(str(path), framework="pt") as f:
-        info = json.loads((f.metadata() or {})["lift"])
-        if info.get("format") != FORMAT:
-            raise ValueError(f"{path} is not a {FORMAT} artifact")
-        cv = f.get_tensor("condition_vector")
-        vectors = {int(k.split(".", 1)[1]): f.get_tensor(k) for k in f.keys() if k.startswith("steering.")}
+    data = Path(path).read_bytes()
+    if sha256 is not None and hashlib.sha256(data).hexdigest() != sha256:
+        raise ArtifactChanged(f"{path} does not match the artifact hash {sha256[:12]} pinned in "
+                              "configs/variants.yaml: it was fitted again since registration. Register the "
+                              "CAST settings again (`lift register-repairs --adapter ... --replace`) and "
+                              "make their cells again")
+    info = json.loads(_header_metadata(data, path).get("lift") or "{}")
+    if info.get("format") != FORMAT:
+        raise ValueError(f"{path} is not a {FORMAT} artifact")
+    tensors = load_tensors(data)
+    cv = tensors["condition_vector"]
+    vectors = {int(k.split(".", 1)[1]): v for k, v in tensors.items() if k.startswith("steering.")}
     if sorted(vectors) != list(info["behavior_layers"]):
         raise ValueError(f"{path}: steering layers {sorted(vectors)} differ from its metadata")
     cond = CASTCondition(condition_vector=cv, condition_layer=int(info["condition_layer"]),
                          threshold=float(info["threshold"]), comparator=info["comparator"],
                          f1=float(info["f1_heldout"]), pool=info["pool"])
     return cond, vectors, info
+
+
+def _header_metadata(data: bytes, path: Path) -> dict[str, Any]:
+    """The ``__metadata__`` of a safetensors file held in ``data``."""
+    import struct
+
+    if len(data) < 8:
+        raise ValueError(f"{path} is not a safetensors file")
+    (n,) = struct.unpack("<Q", data[:8])
+    if n > min(len(data) - 8, 100_000_000):
+        raise ValueError(f"{path} is not a safetensors file")
+    return json.loads(data[8:8 + n].decode("utf-8")).get("__metadata__") or {}
 
 
 def _sync(device: Any) -> None:
@@ -327,9 +354,17 @@ class AlwaysOnCAST:
         return [{"gate_fired": True, "gate_always_on": True} for _ in range(self._n)]
 
 
-def make(model: Any, artifact_path: Path, strength: float, *, gate: bool = True, pad_id: int = 0) -> Any:
-    """A CASTModel (gate on) or an always-on wrapper with the same ``generate`` interface."""
-    condition, vectors, _info = load(artifact_path)
+def make(model: Any, artifact_path: Path, strength: float, *, gate: bool = True, pad_id: int = 0,
+         sha256: str | None = None) -> Any:
+    """A CASTModel (gate on) or an always-on wrapper with the same ``generate`` interface, from the artifact
+    at ``artifact_path`` (checked against ``sha256`` when given, as ``load`` does)."""
+    condition, vectors, _info = load(artifact_path, sha256=sha256)
+    return make_from(model, condition, vectors, strength, gate=gate, pad_id=pad_id)
+
+
+def make_from(model: Any, condition: Any, vectors: Mapping[int, Any], strength: float, *, gate: bool = True,
+              pad_id: int = 0) -> Any:
+    """``make`` from an artifact already loaded (``load``), so a builder wraps exactly what it checked."""
     _check_runtime()
     strength = float(strength)
     if strength <= 0:
