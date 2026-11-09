@@ -33,7 +33,8 @@ judges:
 langid:
   id: cis-lmu/glotlid
   file: model.bin
-  revision: baa20d139151a26a71a20eddabf30d4de7329fc7   # pinned Nov 3 (P01)
+  revision: 85cd6716494360367b75f642b5bc78667605d0b4   # re-pinned Nov 9 (item 67): GlotLID v3, the
+                                                       # same bytes as the vanished baa20d1 (item 17)
   min_prob: 0.5
 
 languages:
