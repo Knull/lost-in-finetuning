@@ -228,22 +228,25 @@ six languages, so pairing, splitting and clustering all go by pid.
   - Read prompts with `lift.data.build.load_prompts(set, lang, split)`.
   - Each module's docstring holds the verified facts about its source.
   - The splits are frozen in `data/splits/` (Nov 4). The 8 files that need Google Translate
-    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) wait for
-    `lift data build --only harmful easy_benign hard_benign` with `GOOGLE_TRANSLATE_API_KEY` set
-    (about 15 minutes on the laptop, no GPU). The SFT variants are aya/dedup (679 rows),
-    indicalign/dedup (3,000) and indicalign/raw (3,000, the stress recipe), in
-    `data/sft/{cand}/{variant}/sft_messages.jsonl`; the counts are `decision.rows_by_variant` in
-    `data/sft/report.json` (decisions item 47).
+    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) were built on Nov 4
+    through the Cloud Translation API (decisions item 48) and pushed to the runs repo. The SFT
+    variants are aya/dedup (677 rows), indicalign/dedup (3,000) and indicalign/raw (3,000, the
+    stress recipe), in `data/sft/{cand}/{variant}/sft_messages.jsonl`; the counts are
+    `decision.rows_by_variant` in `data/sft/report.json` (decisions items 47 and 57). The built
+    files still hold the Nov 4 pools (aya/dedup 679) until `lift data build --only sft` rebuilds
+    them with the R1 fixes; `lift train` refuses them until then.
 - **P02 (harness).** models.load/generate/variants (stock, adapter), train.merge, prompts,
   judge.qwen3guard, judge.frontier (safety), judge.pipeline, audit.record_safety, sync, gate0, and
   `lift smoke|generate|judge|run-dev|restart|sync|remote`, with colab/job.py and kaggle/runner.ipynb.
   - Gate 0 passed on Nov 4 (bf16, Colab A100) and the three revisions are pinned in
-    configs/project.yaml (decisions item 49).
+    configs/project.yaml (decisions item 49). It runs again before the stock dev eval: the Nov 4
+    run predates the labelling-rules tag and the preamble rule (decisions item 60).
 - **P03 (training and gain).** Implemented and tested offline:
   - `lift train` (train.lora: TRL SFTTrainer + PEFT LoRA on pre-tokenized rows, loss on
     `models.load.encode_chat_turn`'s answer tokens only, rows with no supervised token refused
-    before the model loads, one process on one GPU (cuda:0; a T4 x2 leaves cuda:1 idle), fp32 merge
-    parity (on a T4 an fp16 parity share is recorded, not required), push of outputs/adapters/{name};
+    before the model loads, exports that `lift.data.sft.export_problems` flags refused (R2-01), one
+    process on one GPU (cuda:0; a T4 x2 leaves cuda:1 idle), fp32 merge parity (on a T4 an fp16
+    parity share is recorded, not required), push of outputs/adapters/{name};
     `--check` lists the rows a line would train on, tokenizer only) and
     `lift register-adapter` (the laptop writes the configs/variants.yaml entry from the pulled
     adapter's registration.json; commit it before any job evaluates the adapter).
@@ -269,6 +272,6 @@ six languages, so pairing, splitting and clustering all go by pid.
   `lift register-repairs` (laptop), `lift sweep` (run-dev, utility --generate-only and belebele hi per
   setting, resumable; `--judge-only` on the laptop) and `lift select` (outputs/metrics/selection.json and
   .md, overall and per family, then the freeze steps). A sweep line goes last in its job: the runners do
-  not go past its partial exit. Decisions 67-69.
+  not go past its partial exit. Decisions 68-71.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

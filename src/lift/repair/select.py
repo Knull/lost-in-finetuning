@@ -24,7 +24,7 @@ Nothing is selected while an input is missing or stale: the report says "incompl
 its remedy (rule 9: a subset would be a selection the pre-registration did not make). Otherwise
 ``lift.selection.select_repair`` decides the overall winner over all settings, and the same rule within
 each other family (wiseft, resta, cast with cast_always) gives that family's frozen setting; the overall
-winner is its own family's frozen setting (decisions item 75: the tie window moves with the pool, so the
+winner is its own family's frozen setting (decisions item 71: the tie window moves with the pool, so the
 rule over one family alone can pick a sibling). 3 families x 3 seeds = the 9 repaired variants of the
 final eval, the overall winner always among them. outputs/metrics/selection.json and .md hold the full
 table (every setting's numbers, checks and violations) and the drop's paired interval against the
@@ -303,7 +303,7 @@ def decide(c: Collected, rules: Mapping[str, Any], families: Sequence[str]) -> d
         own = select_repair(c.stock, c.adapter, pool, rules)
         per_family[fam] = _selection_doc(own)
         if fam == winner_family and own.winner != overall.winner:
-            # Decisions item 75: the overall winner is frozen as its family's setting, so it is the one
+            # Decisions item 71: the overall winner is frozen as its family's setting, so it is the one
             # evaluated on all three seeds; the family's own pick is kept for the record.
             per_family[fam].update(winner=overall.winner, verdict=overall.verdict,
                                    family_rule_winner=own.winner)
@@ -582,7 +582,7 @@ def render(doc: Mapping[str, Any]) -> str:
               f"Overall winner: **{doc['overall']['winner']}** (verdict {doc['overall']['verdict']}).", ""]
     for fam, sel in doc["families"].items():
         note = (f"; the overall winner, frozen in place of {sel['family_rule_winner']} by the family's rule "
-                "alone (decisions item 75)") if sel.get("family_rule_winner") else ""
+                "alone (decisions item 71)") if sel.get("family_rule_winner") else ""
         lines.append(f"- {fam}: {sel['winner']} (verdict {sel['verdict']}{note})")
     lines += ["", "| setting | harmful hi % | drop pts | drop 95% CI | over-refusal +pts | win % (min) | "
               "Belebele-hi % (drop pts) | violations | eligible |", "|---|---|---|---|---|---|---|---|---|"]

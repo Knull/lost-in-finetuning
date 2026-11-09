@@ -10,12 +10,13 @@ auditkit = pytest.importorskip("auditkit")
 
 from fakes import make_prompt  # noqa: E402
 
-from lift import audit  # noqa: E402
+from lift import audit, config  # noqa: E402
+from lift.cachekey import intervention_digest  # noqa: E402
 from lift.io import read_jsonl, sha256_text, stable_json, write_jsonl  # noqa: E402
-from lift.judge import pipeline  # noqa: E402
+from lift.judge import labels, pipeline  # noqa: E402
 from lift.models.generate import generations_path  # noqa: E402
 from lift.paths import metrics_dir  # noqa: E402
-from lift.schemas import GenerationRecord, JudgementRecord, UnclearFlags  # noqa: E402
+from lift.schemas import GenerationRecord, JudgementRecord, UnclearFlags, VariantSpec  # noqa: E402
 from lift.stats.paired import rates  # noqa: E402
 
 CELL = ("adapter", "harmful", "hi", "dev")
@@ -29,8 +30,16 @@ OUTPUTS = [f"placeholder output number {i}" for i in range(6)]
 WRONG_LANG = [False, False, False, False, True, False]
 HIT_CAP = [True, False, False, True, False, False]
 GUARD_ID = "Qwen/Qwen3Guard-Gen-4B@" + "a" * 40
+RULES = labels.rules_tag()                        # the labelling rules of configs/project.yaml
+# The cell's variant as P03 registers it in configs/variants.yaml: a cell is read only under its entry, which
+# for an adapter variant pins the adapter's hash (lift register-adapter writes artifacts.adapter: META's).
+ADAPTER = {"name": "adapter", "method": "adapter", "adapter": "adapter-aya-std-s1", "seed": 1,
+           "artifacts": {"adapter": "b" * 64}}
+INTERVENTION = intervention_digest(VariantSpec.model_validate(ADAPTER))
 META = {"run_config": "rc0", "model_rev": "c" * 40, "harness": 1, "template": "9" * 16, "decoding": "d" * 16,
-        "torch": "2.15.0", "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB"}
+        "max_new_tokens": config.get("generation.max_new_tokens"), "torch": "2.15.0",
+        "transformers": "5.22.1", "gpu": "NVIDIA A100-SXM4-40GB", "intervention": INTERVENTION,
+        "adapter_hash": "b" * 64}
 GPU_CLASS = {"bf16": "8.0", "fp16": "7.5"}       # meta.gpu_capability: bf16 on the A100, fp16 on the T4
 STACK = {"torch": "2.15.0", "transformers": "5.22.1", "gpu_capability": "8.0"}     # the judge's
 DIGEST = "e" * 64                                 # the bf16 Gate 0 run the T4 comparison paired with
@@ -66,7 +75,7 @@ def write_cell(dtype: str = "bf16", judged_on: str | None = None) -> None:
                   **({"judge_failure": "unparseable"} if FAILED[i] else {})}
         judgements.append(JudgementRecord(
             key=key, variant=variant, pid=pid, lang=lang, set=set_name, split=split,
-            judge=f"{GUARD_ID}#{dtype}#strict", judge_label=LABELS[i], label=LABELS[i], flags=flags,
+            judge=f"{GUARD_ID}#{RULES}#{dtype}#strict", judge_label=LABELS[i], label=LABELS[i], flags=flags,
             native=native, output_sha=sha256_text(OUTPUTS[i])))
     write_jsonl(generations_path(*CELL), [g.model_dump() for g in reversed(gens)])
     write_jsonl(pipeline.judgements_path(pipeline.judge_dir("primary"), *CELL),
@@ -74,7 +83,10 @@ def write_cell(dtype: str = "bf16", judged_on: str | None = None) -> None:
 
 
 @pytest.fixture
-def cell(fake_prompt_files, xdg):
+def cell(fake_prompt_files, xdg, monkeypatch):
+    load = config.load
+    registry = {"variants": [{"name": "stock", "method": "stock"}, ADAPTER]}
+    monkeypatch.setattr(config, "load", lambda name="project": registry if name == "variants" else load(name))
     fake_prompt_files[CELL[1:3]] = [make_prompt(p, CELL[2], text=TEXTS[p]) for p in PIDS]
     write_cell()
     return xdg
@@ -96,7 +108,7 @@ def test_headline_equals_lift_rates(cell):
     lift = result.metadata["lift"]
     assert (lift["n"], lift["n_harmful"], lift["n_unclear"]) == (6, 2, 2)
     assert (lift["variant"], lift["judge"], lift["judge_id"], lift["text"]) == (
-        "adapter", "primary", f"{GUARD_ID}#bf16#strict", "redacted")
+        "adapter", "primary", f"{GUARD_ID}#{RULES}#bf16#strict", "redacted")
     assert result.config.extra["lift"]["labels_sha256"] == lift["labels_sha256"]
 
 
@@ -106,8 +118,25 @@ def test_lift_metadata_records_the_loose_rate_failures_and_provenance(cell):
     assert lift["n_judge_failures"] == 1
     assert lift["provenance"] == {"dtype": ["bf16"], "run_config": ["rc0"], "model_rev": ["c" * 40],
                                   "harness": ["1"], "template": ["9" * 16], "decoding": ["d" * 16],
-                                  "torch": ["2.15.0"], "transformers": ["5.22.1"],
-                                  "gpu": ["NVIDIA A100-SXM4-40GB"], "judge_stack": [stable_json(STACK)]}
+                                  "max_new_tokens": ["256"], "torch": ["2.15.0"], "transformers": ["5.22.1"],
+                                  "gpu": ["NVIDIA A100-SXM4-40GB"], "intervention": [INTERVENTION],
+                                  "adapter_hash": ["b" * 64], "judge_stack": [stable_json(STACK)]}
+
+
+def test_no_record_for_a_cell_made_under_another_cap_than_the_configured_one(cell, monkeypatch):
+    """R2-10: after a dated edit of generation.max_new_tokens, a cell nobody made again under the new cap is
+    refused, through record_safety or a command's record step, as stale with its restart line: no AuditKIT
+    record carries the old cap's rates."""
+    from lift.commands import run as run_cmd
+
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", 512)
+    with pytest.raises(ValueError, match="6 generations were made under another cap than the 512 new tokens"):
+        audit.record_safety(*CELL)
+    refused: dict[str, str] = {}
+    run_cmd._record(*CELL, dtype="bf16", refused=refused)
+    assert list(refused) == ["harmful_hi_dev"]
+    assert "lift restart --variant adapter --split dev --sets harmful --langs hi" in refused["harmful_hi_dev"]
+    assert not (metrics_dir() / "auditkit").exists()
 
 
 def test_a_judge_without_a_loose_reading_records_none(cell):
@@ -123,16 +152,17 @@ def test_a_judge_without_a_loose_reading_records_none(cell):
 
 def write_licence(n: int = 200, digest: str = DIGEST, **fields):
     """outputs/metrics/gate0-fp16.json as Gate 0's T4 comparison run writes it (its fp16 check compared
-    ``n`` prompts with the bf16 run ``DIGEST``, under META's harness and decoding, on a T4), and the passing
-    bf16 Gate 0 it compared against (gate0.json, whose run is ``digest``); only the fields the licence
-    reads."""
+    ``n`` prompts with the bf16 run ``DIGEST``, under META's harness and decoding, on a T4, judged by the
+    configured primary judge in fp16), and the passing bf16 Gate 0 it compared against (gate0.json, whose
+    run is ``digest``); only the fields the licence reads."""
     metrics_dir().mkdir(parents=True, exist_ok=True)
     reference = {"dtype": "bf16", "pass": True, "checks": {"precision": {"pass": True, "digest": digest}},
-                 "revisions": {"global": "c" * 40}}
+                 "judge": {"id": f"{GUARD_ID}#{RULES}#bf16#strict"}, "revisions": {"global": "c" * 40}}
     (metrics_dir() / "gate0.json").write_text(json.dumps(reference), encoding="utf-8")
     fp16 = {"pass": True, "comparable": True, "n": n, "reference_digest": DIGEST, "harness": META["harness"],
             "decoding": META["decoding"]}
     doc = {"dtype": "fp16", "reference_dtype": "bf16", "pass": True, "gpu_capability": GPU_CLASS["fp16"],
+           "judge": {"id": f"{GUARD_ID}#{RULES}#fp16#strict"},
            "checks": {"precision": {"pass": True}, "fp16": fp16}, "revisions": {"global": "c" * 40}, **fields}
     (metrics_dir() / "gate0-fp16.json").write_text(json.dumps(doc), encoding="utf-8")
 
@@ -160,7 +190,7 @@ def test_a_cell_in_another_precision_needs_gate0s_licence_and_gets_its_own_file(
     assert sorted(p.name for p in path.parent.iterdir()) == ["harmful_hi_dev-fp16.full.json",
                                                              "harmful_hi_dev-fp16.json"]
     lift = auditkit.RunResult.load(str(path)).metadata["lift"]
-    assert lift["provenance"]["dtype"] == ["fp16"] and lift["judge_id"] == f"{GUARD_ID}#fp16#strict"
+    assert lift["provenance"]["dtype"] == ["fp16"] and lift["judge_id"] == f"{GUARD_ID}#{RULES}#fp16#strict"
     write_cell()
     assert audit.record_safety(*CELL, dtype="bf16") == path.with_name("harmful_hi_dev.json")
 
@@ -218,6 +248,25 @@ def test_no_fp16_record_from_a_judge_off_the_t4(cell, judged_on):
     assert "judge the cell again on the T4" in refused["harmful_hi_dev"]
     assert not (metrics_dir() / "auditkit").exists()
     write_cell("fp16")                                                # judged again on the T4
+    assert audit.record_safety(*CELL, dtype="fp16").name == "harmful_hi_dev-fp16.json"
+
+
+def test_no_fp16_record_from_a_judge_the_comparison_did_not_run(cell):
+    """R2-07: the T4 comparison measured the agreement of one judge (gate0-fp16.json judge.id: its model,
+    revision, labelling rules and Controversial mode). A cell judged by another, here the strict judge when
+    the comparison ran the loose mapping, gets no -fp16 record, through record_safety or a command's record
+    step."""
+    from lift.commands import run as run_cmd
+
+    write_cell("fp16")
+    write_licence(judge={"id": f"{GUARD_ID}#{RULES}#fp16#loose"})
+    with pytest.raises(ValueError, match=r"6 judgements were made by .*not by the judge gate0-fp16\.json"):
+        audit.record_safety(*CELL, dtype="fp16")
+    refused: dict[str, str] = {}
+    run_cmd._record(*CELL, dtype="fp16", refused=refused)
+    assert list(refused) == ["harmful_hi_dev"] and "re-run the full bf16 Gate 0" in refused["harmful_hi_dev"]
+    assert not (metrics_dir() / "auditkit").exists()
+    write_licence()                                                   # the comparison ran the strict judge
     assert audit.record_safety(*CELL, dtype="fp16").name == "harmful_hi_dev-fp16.json"
 
 
