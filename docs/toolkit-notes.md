@@ -88,6 +88,14 @@ Lives in `safetune.interventions.steer.refusal_direction`.
   `range(0, n, n // n_val)[:n_val]`; interleaved for even n, a leading block for some odd n.
 - `apply_wise_ft` and `apply_resta` skip parameter names missing from the reference with only a log
   line, and `assert_mutates` only logs a warning when nothing changed.
+- **Fit memory (Nov 9).** Both fits keep every prompt's whole hidden-state sequence until they end.
+  `fit_cast_condition`'s `_pool_hidden(h, "last")` returns `h[-1, :]`, a view that pins its prompt's
+  float32 (seq, hidden) copy, at all 19 candidate layers: about 70 MB a prompt with the preamble. The
+  first Tiny Aya fit (3,276 prompts) was killed for memory (exit 137) on the 83 GB A100 VM.
+  `SteeringVectorExtractor._make_hook` (behind `extract_caa_vectors`) stores each batch's whole output
+  and pools after the last batch. `lift.repair.cast.fit` patches both for the fit only: the last-token
+  vector is copied out, and the hook pools each batch's CPU copy with SafeTune's own `_pool` as it comes.
+  The artifact is the same as the unpatched functions give (tests/test_repairs.py).
 
 ### Runtime config and gotchas
 

@@ -129,7 +129,7 @@ def fit(model: Any, tokenizer: Any, harmful: list[str], benign: list[str], *, ou
     _check_runtime()
     pool = config.get("cast.fit.pool", name="repairs")
     layers = behavior_layers(_num_layers(model))
-    with _hidden_states_only(model):
+    with _hidden_states_only(model), _pooled_without_whole_sequences():
         condition = fit_cast_condition(model, list(harmful), list(benign), tokenizer, pool=pool,
                                        device=str(device))
         vectors = extract_caa_vectors(model, tokenizer, list(harmful), list(benign),
@@ -163,6 +163,48 @@ def _hidden_states_only(model: Any) -> Iterator[None]:
             model.forward = previous
         else:
             del model.forward
+
+
+@contextmanager
+def _pooled_without_whole_sequences() -> Iterator[None]:
+    """Keep only the pooled vectors SafeTune's fit uses, not the sequences they were pooled from.
+
+    SafeTune 0.1.12 holds every prompt's whole hidden-state sequence until its fit ends, at every layer it
+    reads, while it needs one vector per prompt and layer:
+    - ``fit_cast_condition``: ``_pool_hidden(h, "last")`` returns ``h[-1, :]``, a view, so each kept vector
+      pins its prompt's (seq, hidden) float32 tensor. With the ~366-token preamble that is about 70 MB a
+      prompt over the 19 candidate layers, so the 1,476 harmful fit prompts alone need about 100 GB: the
+      Nov 9 fit was killed (exit 137) on the A100 VM, which has about 83 GB of RAM.
+    - ``extract_caa_vectors``: the extractor's hooks store each batch's whole (batch, seq, hidden) output
+      and pool only after the last batch (15 to 20 GB for the 1,800 benign prompts at five layers).
+    Inside the block the "last" vector is copied out of its sequence, and the extractor's hook pools each
+    batch's CPU copy as it comes (SafeTune's own ``_pool``, on the tensor SafeTune pools) and keeps a copy
+    with a sequence dimension of one, which its pooling after the last batch returns unchanged. The numbers
+    are the same; only the memory differs (test_repairs checks the artifact against the unpatched
+    functions)."""
+    from safetune.core.runtime.inference import vector_extraction as ve
+    from safetune.interventions.steer import cast as st_cast
+
+    pool_hidden = st_cast._pool_hidden
+    make_hook = ve.SteeringVectorExtractor._make_hook
+
+    def pooled_copy(h_seq: Any, pool: str) -> Any:
+        return pool_hidden(h_seq, pool).clone()
+
+    def pooled_hook(self: Any, layer_idx: int) -> Any:
+        def hook_fn(module: Any, inp: Any, out: Any) -> None:
+            h = out[0] if isinstance(out, tuple) else out
+            self._activations.setdefault(layer_idx, []).append(
+                self._pool(h.detach().cpu()).unsqueeze(1).clone())
+        return hook_fn
+
+    st_cast._pool_hidden = pooled_copy
+    ve.SteeringVectorExtractor._make_hook = pooled_hook
+    try:
+        yield
+    finally:
+        st_cast._pool_hidden = pool_hidden
+        ve.SteeringVectorExtractor._make_hook = make_hook
 
 
 def save(path: Path, condition_vector: Any, vectors: Mapping[int, Any], info: Mapping[str, Any]) -> Path:

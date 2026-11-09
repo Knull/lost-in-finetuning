@@ -277,6 +277,43 @@ def test_cast_fit_returns_a_condition_and_round_trips(fitted, tmp_path):
     assert cast.artifact_hash(other) != digest
 
 
+def test_the_fit_keeps_pooled_vectors_only_and_gets_safetunes_numbers(fitted, tmp_path):
+    """SafeTune 0.1.12 pins each prompt's whole hidden-state sequence until its fit ends (``_pool_hidden``'s
+    "last" returns a view; the CAA extractor pools after the last batch): the Nov 9 fit on Tiny Aya was
+    killed for memory. cast.fit pools as it goes, and its artifact equals the unpatched functions' output."""
+    import torch
+    from safetune.core.runtime.inference import vector_extraction as ve
+    from safetune.interventions.steer import cast as st_cast
+    from safetune.interventions.steer.caa import CAAConfig, extract_caa_vectors
+    from safetune.interventions.steer.cast import fit_cast_condition
+
+    model, tok, path = fitted
+    seq, batch = torch.randn(400, 8), torch.randn(2, 30, 8)
+    with cast._pooled_without_whole_sequences():
+        kept = st_cast._pool_hidden(seq, "last")
+        assert torch.equal(kept, seq[-1]) and kept.untyped_storage().nbytes() == 8 * 4
+        for method in ("last_token", "mean", "max"):
+            ext = ve.SteeringVectorExtractor(model, tok, ve.VectorExtractionConfig(pool_method=method))
+            ext._make_hook(0)(None, None, (batch,))
+            stored = ext._activations[0][0]
+            assert stored.shape == (2, 1, 8) and stored.untyped_storage().nbytes() == 2 * 8 * 4
+            assert torch.equal(ext._pool(stored), ext._pool(batch))
+    assert st_cast._pool_hidden(seq, "last").untyped_storage().nbytes() == 400 * 8 * 4   # restored
+    plain = ve.SteeringVectorExtractor(model, tok)
+    plain._make_hook(0)(None, None, (batch,))
+    assert plain._activations[0][0].shape == (2, 30, 8)                                  # restored
+    cond_ref = fit_cast_condition(model, list(HARMFUL), list(BENIGN), tok, pool="last", device="cpu")
+    vec_ref = extract_caa_vectors(model, tok, list(HARMFUL), list(BENIGN),
+                                  CAAConfig(target_layers=cast.behavior_layers(cast._num_layers(model))))
+    cond, vecs, info = cast.load(path)
+    assert (info["condition_layer"], info["comparator"]) == (cond_ref.condition_layer, cond_ref.comparator)
+    assert info["threshold"] == pytest.approx(cond_ref.threshold)
+    assert torch.allclose(cond.condition_vector.float(), cond_ref.condition_vector.float(), atol=1e-6)
+    assert sorted(vecs) == sorted(vec_ref)
+    for layer, v in vec_ref.items():
+        assert torch.allclose(vecs[layer].float(), v.float(), atol=1e-6)
+
+
 def test_the_fit_reads_the_tokens_generation_sees(tiny_tokenizer):
     from safetune._refusal_helpers import _encode_prompts
 
