@@ -271,7 +271,9 @@ six languages, so pairing, splitting and clustering all go by pid.
   their registry entries (repair.settings), `lift fit-cast` (outputs/artifacts/cast/{adapter}/),
   `lift register-repairs` (laptop), `lift sweep` (run-dev, utility --generate-only and belebele hi per
   setting, resumable; `--judge-only` on the laptop) and `lift select` (outputs/metrics/selection.json and
-  .md, overall and per family, then the freeze steps). A sweep line goes last in its job: the runners do
-  not go past its partial exit. Decisions 68-71.
+  .md, overall and per family, then the freeze steps; beside it the secondary selection of decisions
+  item 73, outputs/metrics/selection_secondary.json and .md, the same rule with the gain read on
+  `lift heldout-loss`, which freezes nothing). A sweep line goes last in its job: the runners do
+  not go past its partial exit. Decisions 68-73.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

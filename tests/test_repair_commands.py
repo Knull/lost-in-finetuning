@@ -237,6 +237,132 @@ def test_select_refuses_to_decide_with_a_missing_setting(registry, monkeypatch, 
     assert "git tag recipe-frozen-" in out and "lift fit-cast --adapter adapter-aya-std-s2" in out
 
 
+def fake_heldout(nll, *, width=0.05):
+    """A select._heldout stand-in: ``nll`` is {"adapter" or a setting's tag: mean NLL minus stock's}; a
+    name not listed has no held-out scores. The paired interval is the value +- ``width``."""
+
+    def read(name, dtype):
+        key = "adapter" if name == ADAPTER else name[: -len(ADAPTER) - 1]
+        if key not in nll:
+            raise select.Missing(f"no complete held-out loss dev scores; run `lift heldout-loss --variant "
+                                 f"{name}` (a GPU job line), then lift sync pull")
+        value = nll[key]
+        return value, {"mean_nll": 2.19 + value, "n_rows": 100, "n_tokens": 11500,
+                       "diff_row_mean_nll": value, "lo": value - width, "hi": value + width, "model_rev": "r"}
+
+    return read
+
+
+def heldout_case(**overrides):
+    """Every setting at stock's held-out loss (it keeps none of the gain), the adapter 0.30 nats better."""
+    nll = {"adapter": -0.30, **{s.tag: 0.0 for s in rs.settings()}}
+    nll.update(overrides)
+    return nll
+
+
+def test_the_secondary_selection_reads_the_gain_on_the_heldout_loss(registry):
+    """Decisions item 73. On the "ties" numbers the primary rule gives WiSE-FT 0.50 the win as the cheaper
+    of two tied drops. It keeps a third of what the adapter learned, CAST keeps all of it: read on the
+    held-out loss, WiSE-FT is out and CAST wins. The secondary report is its own file and freezes nothing."""
+    nll = heldout_case(**{"wiseft-l0.50": -0.10, "cast-m1.0": -0.30, "resta-a0.10": -0.33})
+    doc = select.run_secondary(ADAPTER, reader=fake_reader(CASES["ties"]), heldout_reader=fake_heldout(nll))
+    assert (doc["kind"], doc["status"], doc["decision"]) == ("selection_secondary", "decided",
+                                                             "docs/decisions.md item 73")
+    assert doc["overall"] == {"winner": f"cast-m1.0-{ADAPTER}", "verdict": "repair",
+                              "eligible": [f"cast-m1.0-{ADAPTER}"]}
+    assert doc["primary"]["winner"] == f"wiseft-l0.50-{ADAPTER}"
+    assert doc["adapter_gain"] == {"nll_minus_stock": -0.30, "lo": pytest.approx(-0.35),
+                                   "hi": pytest.approx(-0.25)}
+    rows = {r["name"][: -len(ADAPTER) - 1]: r for r in doc["table"]}
+    assert len(rows) == 10 and {r["family"] for r in rows.values()} == set(rs.FAMILIES)
+    assert rows["wiseft-l0.50"]["heldout_retained"] == pytest.approx(1 / 3)
+    assert rows["wiseft-l0.50"]["gain_ok"] is False and rows["wiseft-l0.50"]["eligible"] is False
+    assert rows["cast-m1.0"]["heldout_retained"] == pytest.approx(1.0) and rows["cast-m1.0"]["eligible"]
+    assert rows["resta-a0.10"]["heldout_retained"] == pytest.approx(1.1)        # fits better than the adapter
+    assert rows["resta-a0.10"]["gain_ok"] and not rows["resta-a0.10"]["drop_ok"]   # but lowers nothing
+    assert rows["cast-m2.0"]["heldout_retained"] == 0.0 and rows["cast-m2.0"]["min_heldout_retained"] == 0.5
+    assert rows["cast-m1.0"]["heldout_nll_minus_stock"] == -0.30
+    # Within WiSE-FT alone nothing keeps half the gain: the family's pick is its best drop, verdict reject.
+    assert doc["families"]["wiseft"] == {"winner": f"wiseft-l0.50-{ADAPTER}", "verdict": "reject",
+                                         "eligible": []}
+    assert doc["families"]["cast"]["winner"] == f"cast-m1.0-{ADAPTER}"
+    json_path, md_path = select.secondary_paths()
+    assert json.loads(json_path.read_text(encoding="utf-8")) == json.loads(json.dumps(doc))
+    md = md_path.read_text(encoding="utf-8")
+    assert f"Secondary winner: **cast-m1.0-{ADAPTER}**" in md and "freezes nothing" in md
+    assert f"The primary rule on the same numbers picks wiseft-l0.50-{ADAPTER}" in md
+    assert "| 33.3 (50.0) |" in md and "-0.1000" in md
+    # Nothing of the primary selection is written or frozen by it.
+    assert not select.report_paths()[0].exists() and not _recipe().exists()
+    assert "frozen" not in doc and "freeze" not in doc
+
+
+def test_the_secondary_selection_waits_for_every_heldout_score(registry):
+    nll = heldout_case(**{"cast-m1.0": -0.30})
+    del nll["wiseft-l0.25"]
+    numbers = dict(CASES["ties"])
+    del numbers["resta-a0.40"]                                   # an input of the primary rule is missing too
+    doc = select.run_secondary(ADAPTER, reader=fake_reader(numbers), heldout_reader=fake_heldout(nll))
+    assert doc["status"] == "incomplete" and "overall" not in doc and "table" not in doc
+    assert set(doc["missing"]) == {f"wiseft-l0.25-{ADAPTER}", f"resta-a0.40-{ADAPTER}"}
+    why = doc["missing"][f"wiseft-l0.25-{ADAPTER}"]
+    assert why == [f"heldout_loss: no complete held-out loss dev scores; run `lift heldout-loss --variant "
+                   f"wiseft-l0.25-{ADAPTER}` (a GPU job line), then lift sync pull"]
+    md = select.secondary_paths()[1].read_text(encoding="utf-8")
+    assert "Status: **incomplete**" in md and f"lift heldout-loss --variant wiseft-l0.25-{ADAPTER}" in md
+    # The adapter's own scores are an input as well.
+    del nll["adapter"]
+    doc = select.run_secondary(ADAPTER, reader=fake_reader(CASES["ties"]), heldout_reader=fake_heldout(nll))
+    assert doc["status"] == "incomplete" and ADAPTER in doc["missing"]
+
+
+@pytest.mark.parametrize(("gain", "width", "says"), [
+    (0.02, 0.01, "+0.0200 against stock's"),                       # the adapter fits worse than stock
+    (0.0, 0.01, "+0.0000 against stock's"),
+    (-0.02, 0.05, "interval of the per-reference difference reaches +0.0300"),   # a gain within the noise
+])
+def test_the_secondary_selection_is_undefined_without_a_heldout_gain(registry, gain, width, says):
+    nll = heldout_case(adapter=gain, **{"cast-m1.0": gain})
+    doc = select.run_secondary(ADAPTER, reader=fake_reader(CASES["ties"]),
+                               heldout_reader=fake_heldout(nll, width=width))
+    assert doc["status"] == "undefined" and "overall" not in doc
+    assert "no held-out-loss gain over stock to keep" in doc["undefined"] and says in doc["undefined"]
+    md = select.secondary_paths()[1].read_text(encoding="utf-8")
+    assert "Status: **undefined**" in md and "not defined for it." in md
+
+
+def test_lift_select_prints_the_secondary_selection_and_never_lets_it_touch_the_freeze(registry, monkeypatch,
+                                                                                      capsys):
+    """The secondary report rides on lift select but has no say in it: the exit code is the primary
+    rule's, and held-out scores that arrive (or change) after the freeze leave selection.json and the
+    recipe that pins it byte for byte."""
+    monkeypatch.setattr(select, "read_scores", fake_reader(CASES["ties"]))
+    nll = heldout_case()
+    del nll["cast-m1.0"]
+    monkeypatch.setattr(select, "_heldout", fake_heldout(nll))
+    assert cli.main(["select", "--adapter", ADAPTER]) == 0          # decided, though the secondary is not
+    out = capsys.readouterr().out
+    assert "# Secondary repair selection" in out and "Status: **incomplete**" in out
+    assert "selection_secondary.json" in out and "(secondary: freezes nothing)" in out
+    sel_bytes, recipe = select.report_paths()[0].read_bytes(), _recipe().read_text(encoding="utf-8")
+    assert json.loads(recipe)["overall_winner"] == f"wiseft-l0.50-{ADAPTER}"
+
+    nll.update({"cast-m1.0": -0.30, "wiseft-l0.50": -0.10})         # the held-out scores arrive
+    assert cli.main(["select", "--adapter", ADAPTER]) == 0
+    out = capsys.readouterr().out
+    assert f"Secondary winner: **cast-m1.0-{ADAPTER}**" in out
+    assert select.report_paths()[0].read_bytes() == sel_bytes
+    assert _recipe().read_text(encoding="utf-8") == recipe
+    assert json.loads(select.secondary_paths()[0].read_text(encoding="utf-8"))["status"] == "decided"
+
+    # A refused primary run (other numbers while a recipe stands) still reports the secondary.
+    monkeypatch.setattr(select, "read_scores", fake_reader(CASES["largest"]))
+    assert cli.main(["select", "--adapter", ADAPTER]) == 2
+    captured = capsys.readouterr()
+    assert "already frozen" in captured.err and "# Secondary repair selection" in captured.out
+    assert select.report_paths()[0].read_bytes() == sel_bytes
+
+
 REAL_FROZEN_TAGS = getattr(select, "frozen_tags", None)
 
 

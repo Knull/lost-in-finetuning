@@ -743,6 +743,48 @@ def test_heldout_metrics_pool_by_source_and_pair_with_stock(stock, fake_prompt_f
 
 
 @pytest.mark.torch
+def test_the_secondary_selection_reads_the_heldout_gain_from_the_score_files(stock, fake_prompt_files,
+                                                                             monkeypatch):
+    """Decisions item 73: lift select's secondary rule reads each variant's pooled NLL difference from stock
+    (heldout_metrics' vs_stock), and only while the scores are the registered adapter's and pair with
+    stock's; anything else is missing, with the line that makes it."""
+    from fakes import build_tiny_cohere2
+
+    from lift import config
+    from lift.repair import select
+
+    prompts = [utility(i, "aya" if i < 3 else "ind") for i in range(5)]
+    fake_prompt_files[("utility", "hi")] = prompts
+    registry = {"variants": [{"name": "stock", "method": "stock"},
+                             {"name": "adapter-x", "method": "adapter", "adapter": "adapter-x", "seed": 1,
+                              "artifacts": {"adapter": "a" * 64}}]}
+    real = config.load
+    monkeypatch.setattr(config, "load", lambda name="project": registry if name == "variants" else real(name))
+    with pytest.raises(select.Missing, match="run `lift heldout-loss --variant adapter-x --dtype fp32`"):
+        select._heldout("adapter-x", "fp32")
+    spec = VariantSpec(name="adapter-x", method="adapter", adapter="adapter-x", seed=1,
+                       artifacts={"adapter": "a" * 64})
+    adapter = dataclasses.replace(stock, model=build_tiny_cohere2(stock.tokenizer, seed=7),
+                                  adapter_hash="a" * 64, spec=spec)
+    loglik.heldout_cell(adapter, prompts, split="dev")
+    with pytest.raises(select.Missing, match="cannot be paired with stock's"):
+        select._heldout("adapter-x", "fp32")
+    loglik.heldout_cell(stock, prompts, split="dev")
+    value, details = select._heldout("adapter-x", "fp32")
+    doc = loglik.heldout_metrics("adapter-x", "dev", dtype="fp32")
+    stock_doc = loglik.heldout_metrics("stock", "dev", dtype="fp32")
+    assert value == doc["vs_stock"]["diff_mean_nll"] == pytest.approx(doc["mean_nll"] - stock_doc["mean_nll"])
+    assert value != 0 and details["n_rows"] == 5 and details["mean_nll"] == doc["mean_nll"]
+    assert (details["lo"], details["hi"]) == (doc["vs_stock"]["lo"], doc["vs_stock"]["hi"])
+    # Scores made under another registry entry (an adapter trained again) are not this entry's.
+    registry["variants"][1]["artifacts"]["adapter"] = "b" * 64
+    with pytest.raises(select.Missing, match="made under another registry entry.*--restart --dtype fp32"):
+        select._heldout("adapter-x", "fp32")
+    with pytest.raises(select.Missing, match="does not list adapter-y"):
+        select._heldout("adapter-y", "fp32")
+
+
+@pytest.mark.torch
 def test_each_precision_pairs_with_stocks_scores_of_its_own_precision(stock, fake_prompt_files):
     """V05: an adapter's held-out loss pairs with stock's file of its own precision, and neither precision's
     files or metrics change when the other's cells are scored. bf16 stands for Colab's runs and fp32 for a

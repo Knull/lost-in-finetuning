@@ -3,7 +3,7 @@ from dataclasses import replace
 import pytest
 
 from lift import config
-from lift.selection import DevScores, min_win_rate, select_repair
+from lift.selection import DevScores, heldout_gain_retained, min_win_rate, select_repair
 
 RULES = config.get("selection", name="repairs")
 STOCK = DevScores("stock", "stock", harmful_hi=0.10, overrefusal_hard_hi=0.30, win_rate=0.5,
@@ -93,18 +93,77 @@ def verdict(stock, adapter, setting):
 def test_an_adapter_below_parity_makes_its_own_win_rate_the_floor():
     """Decisions item 72: the gain condition keeps half of a gain over parity; an adapter at or below parity
     has none, so a repair may not make the answers worse than the adapter's own, and need not win back what
-    the adapter lost (the literal 0.5 + 0.5 x (0.28 - 0.5) = 0.39 would)."""
+    the adapter lost (the literal 0.5 + 0.5 x (0.28 - 0.5) = 0.39 would). Item 73: "no worse" is read with
+    the rule's tie margin, so a repair within 2 points of the adapter's win rate meets the floor."""
     assert min_win_rate(0.70, RULES) == pytest.approx(0.60)
-    assert min_win_rate(0.50, RULES) == pytest.approx(0.50)
-    assert min_win_rate(0.28, RULES) == pytest.approx(0.28)
+    assert min_win_rate(0.51, RULES) == pytest.approx(0.505)       # above parity: the rule as registered
+    assert min_win_rate(0.50, RULES) == pytest.approx(0.48)
+    assert min_win_rate(0.28, RULES) == pytest.approx(0.26)
     weak = replace(ADAPTER, win_rate=0.28)
     sel = select_repair(STOCK, weak, [
         cand("wiseft-l0.50", "wiseft", 0.20, win=0.45),
-        cand("cast-m1.0", "cast", 0.12, win=0.30),        # below 0.39, at or above the adapter's 0.28
-        cand("resta-a0.25", "resta", 0.10, win=0.27),     # worse than the adapter: excluded
+        cand("cast-m1.0", "cast", 0.12, win=0.27),        # one pair below the adapter's 0.28: a tie with it
+        cand("resta-a0.25", "resta", 0.10, win=0.25),     # 3 points worse than the adapter: excluded
     ], RULES)
     assert sel.winner == "cast-m1.0" and sel.eligible == ["wiseft-l0.50", "cast-m1.0"]
     assert [r["gain_ok"] for r in sel.table] == [True, True, False]
+    assert "heldout_retained" not in sel.table[0]
+
+
+@pytest.mark.parametrize("adapter_win", [0.28, 0.3175, 0.4175, 0.50])
+def test_the_floor_below_parity_is_inclusive_at_the_tie_margin(adapter_win):
+    """Win rates move in quarter points (two orders of 100 pairs): exactly 2 points under the adapter
+    passes whatever the float rounding, one step further does not."""
+    weak = replace(ADAPTER, win_rate=adapter_win)
+
+    def ok(win):
+        sel = select_repair(STOCK, weak, [cand("cast-m1.0", "cast", 0.12, win=win)], RULES)
+        return sel.table[0]["gain_ok"]
+
+    assert ok(adapter_win) and ok(adapter_win - 0.02) and not ok(adapter_win - 0.0225)
+
+
+def test_the_share_of_the_heldout_gain_kept():
+    """Decisions item 73: 1 is the adapter's own fit, 0 is stock's; no gain, no share."""
+    assert heldout_gain_retained(-0.33, -0.33) == pytest.approx(1.0)
+    assert heldout_gain_retained(-0.33, -0.165) == pytest.approx(0.5)
+    assert heldout_gain_retained(-0.33, 0.0) == 0.0
+    assert heldout_gain_retained(-0.33, 0.066) == pytest.approx(-0.2)      # worse than stock
+    assert heldout_gain_retained(-0.33, -0.40) > 1                         # better than the adapter
+    for no_gain in (0.0, 0.05):
+        with pytest.raises(ValueError, match="no held-out-loss gain"):
+            heldout_gain_retained(no_gain, -0.1)
+
+
+def test_the_secondary_rule_reads_the_gain_on_the_heldout_loss():
+    """Decisions item 73. The stress adapter loses to stock (0.28), so the win-rate floor lets a move to
+    stock through: WiSE-FT 0.25 has the largest drop, CAST ties it within 2 points, and the cheaper repair
+    wins. Read on the held-out loss, WiSE-FT 0.25 keeps under half of what the adapter learned and is out;
+    CAST keeps it all and wins. Everything else in the rule is the same."""
+    weak = replace(ADAPTER, win_rate=0.28, harmful_hi=0.49)
+    cands = [cand("wiseft-l0.25", "wiseft", 0.18, win=0.46), cand("wiseft-l0.50", "wiseft", 0.30, win=0.40),
+             cand("cast-m1.0", "cast", 0.20, win=0.28),
+             cand("cast-m2.0", "cast", 0.10, overref=0.40, win=0.28)]
+    kept = {"wiseft-l0.25": 0.42, "wiseft-l0.50": 0.74, "cast-m1.0": 0.99, "cast-m2.0": 0.99}
+    primary = select_repair(STOCK, weak, cands, RULES)
+    assert primary.winner == "wiseft-l0.25"
+    assert primary.eligible == ["wiseft-l0.25", "wiseft-l0.50", "cast-m1.0"]
+    secondary = select_repair(STOCK, weak, cands, RULES, heldout_retained=kept)
+    assert secondary.winner == "cast-m1.0" and secondary.verdict == "repair"
+    assert secondary.eligible == ["wiseft-l0.50", "cast-m1.0"]          # over-refusal still excludes m2.0
+    assert [r["gain_ok"] for r in secondary.table] == [False, True, True, True]
+    assert [r["heldout_retained"] for r in secondary.table] == [0.42, 0.74, 0.99, 0.99]
+    # exactly half is kept; the win rate plays no part
+    half = select_repair(STOCK, weak, [cand("resta-a0.10", "resta", 0.2, win=0.01)], RULES,
+                         heldout_retained={"resta-a0.10": 0.5})
+    assert half.verdict == "repair"
+    # ties after cost go to the larger share kept
+    pair = [cand("wiseft-l0.50", "wiseft", 0.2), cand("wiseft-l0.75", "wiseft", 0.21)]
+    tie = select_repair(STOCK, weak, pair, RULES, heldout_retained={"wiseft-l0.50": 0.6, "wiseft-l0.75": 0.9})
+    assert tie.winner == "wiseft-l0.75"
+    with pytest.raises(ValueError, match="no held-out-loss share.*cast-m1.0"):
+        select_repair(STOCK, weak, cands, RULES, heldout_retained={k: v for k, v in kept.items()
+                                                                   if k != "cast-m1.0"})
 
 
 def test_the_selection_block_is_the_locked_one():
