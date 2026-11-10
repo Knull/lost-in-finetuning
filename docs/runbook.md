@@ -266,5 +266,7 @@ git.
 - The zh spot-check sheet has four invalid verdict rows. Fix them, then
   `lift data apply-spotchecks --file <sheet>` and regenerate the short zh cell, or accept that
   the zh easy-benign cell is reported as not run.
-- Validation round 2, if the first round leaves time.
+- Validation round 2, if the first round leaves time. Draw it only if it will be finished: once a
+  round's keys exist, `lift publish datasets` refuses to stage the logs until every sheet of that
+  round is imported, and the second judge has covered its keys.
 - Team names, annotators' consent to be named, full citations, the two upstream issues.
