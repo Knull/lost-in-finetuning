@@ -4,7 +4,7 @@
   "GPU-hours of the final battery per variant (outputs/metrics/final_report.json)",
   "GPU-hours per check-up (outputs/metrics/final_report.json)",
   "cost: GPU-hours per check-up and per-token latency per repair (outputs/metrics/final_report.json)",
-  "drift and repair under other readings (refusal rate, loose reading, second judge) (outputs/metrics/final_report.json)",
+  "drift and repair under other readings (refusal rate, loose reading, outputs that trip no unclear flag, second judge) (outputs/metrics/final_report.json)",
   "each adapter's checks (outputs/metrics/final_report.json)",
   "easy and hard over-refusal per language (outputs/metrics/final_report.json)",
   "every adapter on its own axes against stock (drift, refusals, usefulness, held-out loss, Belebele) (outputs/metrics/final_report.json)",

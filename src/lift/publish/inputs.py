@@ -120,8 +120,8 @@ TABLES = {
     "belebele": "Belebele accuracy per language",
     "heldout": "held-out loss per variant and the share of the adapter's gain each repair keeps",
     "judge_sensitivity": "judge sensitivity (strict vs loose, second judge, back-translation)",
-    "sensitivity_effects": "drift and repair under other readings (refusal rate, loose reading, second "
-    "judge)",
+    "sensitivity_effects": "drift and repair under other readings (refusal rate, loose reading, outputs "
+    "that trip no unclear flag, second judge)",
     "cost": "cost: GPU-hours per check-up and per-token latency per repair",
     "signatures": "exploratory diagnostic signatures (P06)",
 }

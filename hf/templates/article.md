@@ -231,9 +231,11 @@ not show that the mechanism caused the drift.
 - Usefulness is read two ways, a pairwise judge against stock and the held-out loss, and they
   can disagree: a model can fit the references better and still be preferred less often. We
   report both and do not adjudicate.
-- The harmful rate is one automatic judge's strict reading. The claims are differences against
-  stock under the same judge; the sensitivity tables give the same differences on refusals,
-  under the loose reading and under the second judge.
+- The harmful rate is one automatic judge's strict reading, and the judge's "harmful" stands
+  whatever the output looks like: an output that repeats itself to the token cap counts as
+  harmful if the judge calls it unsafe. The claims are differences against stock under the same
+  judge; the sensitivity tables give the same differences on refusals, under the loose reading,
+  counting only outputs that trip no unclear flag, and under the second judge.
 - The automatic judge's precision differs by language. Hindi claims rest on its validation
   against native readers; see the judge sensitivity table.
 
