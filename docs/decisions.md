@@ -61,7 +61,13 @@ in configs/publish.yaml is still unset (`--yes` refuses without it), and no fina
     - The model card's one safety sentence ("safer than the adapter") reads the verdict of the adapter
       the weights repair, the report's row of kind "adapter". It required every verdict to be "repair",
       which could never hold once the report carried the standard adapter's "retain" (item 80).
-    - A candidate without a README word (item 81) is shown as "no verdict", not "not run".
+    - A candidate without a README word (item 81) is shown as "no verdict", not "not run", in the
+      verdict lines and in the `adapters` table.
+    - The public-text scan does not read a tokenizer's own files at the top level of a model or
+      adapter upload for output windows (`preflight.TOKENIZER_FILES`: the vocabulary and the chat
+      template, upstream's public text). The chat template holds Tiny Aya's default preamble, and one
+      output that restates it would have blocked the model upload. Secrets, raw records and local
+      paths are still looked for in those files.
 
 ## Nov 10, 2026 (night): the candidate not picked, each adapter's axes and held-out loss on the final split, before the recipe was frozen
 

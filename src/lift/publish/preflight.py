@@ -117,6 +117,17 @@ _TRAILING = ".,;:)]}"
 VOCAB_FILES = frozenset(
     {"tokenizer.json", "vocab.json", "merges.txt", "vocab.txt", "tokenizer.model", "spiece.model"}
 )
+# A tokenizer's own files at the top level of a model or adapter upload: upstream's public text (the
+# vocabulary, and the chat template with Tiny Aya's default preamble). They are scanned for secrets, raw
+# records and local paths like any file, but not for model-output windows: an output that restates the
+# preamble would block the model upload, and nothing the pipeline writes goes into these files.
+TOKENIZER_FILES = VOCAB_FILES | {
+    "tokenizer_config.json",
+    "chat_template.jinja",
+    "chat_template.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+}
 _HF_SNAPSHOT = re.compile(r"models--(?P<org>[^/\\]+)--(?P<name>[^/\\]+)[/\\]snapshots[/\\][0-9a-f]+")
 
 
@@ -618,7 +629,8 @@ def scan_folder(folder: Path, windows: set[str], *, where: str = "staged") -> li
     """Scan every text file of a staged upload as the preflight scans a tracked file (secrets, raw
     completion records, notebooks with outputs, model-output windows) and for absolute local paths
     (``LOCAL_PATH_KIND``, a tokenizer's vocabulary aside), and every AuditKIT record (a .json under an
-    ``auditkit`` folder) for redaction. Binary files (weights) are skipped."""
+    ``auditkit`` folder) for redaction. Binary files (weights) are skipped, and a tokenizer's own files
+    at the top level (``TOKENIZER_FILES``) are not read for model-output windows."""
     found: list[Finding] = []
     for f in sorted(p for p in Path(folder).rglob("*") if p.is_file()):
         rel = f.relative_to(folder).as_posix()
@@ -626,7 +638,8 @@ def scan_folder(folder: Path, windows: set[str], *, where: str = "staged") -> li
             if _binary(fh.read(8192)):
                 continue
         text = f.read_bytes().decode("utf-8", "replace")
-        found += scan_text(text, rel, where, windows)
+        upstream = "/" not in rel and f.name in TOKENIZER_FILES
+        found += scan_text(text, rel, where, set() if upstream else windows)
         if f.name not in VOCAB_FILES:
             found += [
                 Finding(where, rel, i, LOCAL_PATH_KIND)

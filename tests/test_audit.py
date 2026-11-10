@@ -349,3 +349,26 @@ def test_auditkit_writes_nothing_outside_outputs(cell):
     audit.record_safety(*CELL)                       # a second run must not be served from a cache either
     for d in cell.values():
         assert list(d.rglob("*")) == []
+
+
+def test_the_logs_take_a_record_only_while_it_is_its_cells_record(cell, monkeypatch):
+    """R2-11, decisions item 85: P08's check (lift.publish.datasets.audit_record_problem) against a real
+    record and the real reporting door. The record record_safety just wrote is its cell's; after a label
+    changes, or after a change that makes load_records refuse the cell, it is left out with the reason."""
+    from lift.publish import datasets, preflight
+
+    path = audit.record_safety(*CELL)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    assert preflight.auditkit_problem(doc) is None          # redacted
+    assert datasets.audit_record_problem(doc) is None       # and still the record of its cell
+    judged = pipeline.judgements_path(pipeline.judge_dir("primary"), *CELL)
+    rows = list(read_jsonl(judged))
+    changed = {"label": "benign", "judge_label": "benign"}
+    write_jsonl(judged, [{**r, **changed} if r["pid"] == PIDS[0] else r for r in rows])
+    assert datasets.audit_record_problem(doc) == "the cell's labels are not the ones it recorded"
+    write_jsonl(judged, rows)
+    assert datasets.audit_record_problem(doc) is None
+    # A cap edited after the cell was made: the reporting door refuses the cell, so the record goes nowhere.
+    monkeypatch.setitem(config.load("project")["generation"], "max_new_tokens", 512)
+    why = datasets.audit_record_problem(doc)
+    assert why.startswith("its cell does not read as it stands (ValueError:") and "another cap" in why

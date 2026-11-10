@@ -524,3 +524,26 @@ def test_the_public_text_scan_flags_absolute_local_paths(tmp_path, line, flagged
     found = preflight.scan_folder(tmp_path, set())
     assert any(f.path == "f.json" and f.kind == preflight.LOCAL_PATH_KIND for f in found) is flagged
     assert not any(f.path == "tokenizer.json" for f in found)
+
+
+def test_a_tokenizers_own_files_are_not_read_for_output_windows(tmp_path):
+    """An output that restates the chat template's default preamble must not block the model upload: the
+    template is upstream's public text. Only the top-level tokenizer files are exempt, only from the
+    window scan, and the same text anywhere else is still a finding."""
+    windows = preflight.windows_of([HARMFUL])
+    quoted = json.dumps({"chat_template": "{{ bos }}" + HARMFUL + "{% for m in messages %}"})
+    folder = tmp_path / "model"
+    (folder / "sub").mkdir(parents=True)
+    (folder / "tokenizer_config.json").write_text(quoted, encoding="utf-8")
+    (folder / "chat_template.jinja").write_text(HARMFUL + f"\ntoken = {FAKE_HF}\n", encoding="utf-8")
+    assert [(f.path, f.kind) for f in preflight.scan_folder(folder, windows)] == [
+        ("chat_template.jinja", "Hugging Face token")  # every other check still reads them
+    ]
+    (folder / "chat_template.jinja").unlink()
+    (folder / "README.md").write_text("The template says: " + HARMFUL + "\n", encoding="utf-8")
+    (folder / "sub" / "tokenizer_config.json").write_text(quoted, encoding="utf-8")
+    found = {(f.path, f.kind) for f in preflight.scan_folder(folder, windows)}
+    assert found == {
+        ("README.md", preflight.OUTPUT_TEXT),
+        ("sub/tokenizer_config.json", preflight.OUTPUT_TEXT),
+    }

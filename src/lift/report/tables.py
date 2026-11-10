@@ -417,6 +417,9 @@ KIND_LABELS = {
     "standard": "standard recipe (Gate 1 pick)",
     "candidate": "candidate not picked (exploratory)",
 }
+# A candidate that drifts has no README word (the selection rule was not run on it: decisions.md 81). Its
+# verdict cell says so: None would render as "not run", and it was run.
+NO_VERDICT = "no verdict"
 
 
 def _nll(value: Any) -> str | None:
@@ -443,7 +446,7 @@ def adapters(stats: Mapping[str, Any]) -> dict[str, Any]:
             {
                 "adapter": v["adapter"],
                 "role": KIND_LABELS.get(v.get("kind"), v.get("kind")),
-                "verdict": v["verdict"],
+                "verdict": v["verdict"] or (NO_VERDICT if v.get("kind") == "candidate" and drift else None),
                 "usefulness": None if use is None else (v.get("usefulness_verdict") or "meets Gate 1's bar"),
                 "drift": _ci(drift),
                 "drift_meaningful": _yes_no(drift.get("meaningful") if drift else None),

@@ -201,7 +201,8 @@ class FakeSource(analysis.Source):
     def dev_win_rate(self, variant):
         if variant not in self.present:
             raise analysis.Missing("no dev utility metrics")
-        return {"win_rate": self.dev_win.get(variant, 0.8), "lo": 0.72, "hi": 0.88, "n": 100}
+        win = self.dev_win.get(variant, 0.8)
+        return {"win_rate": win, "lo": win - 0.08, "hi": win + 0.08, "n": 100}
 
     def backtranslations(self, variant, set_name, lang):
         if variant != "stock" or set_name != "harmful":
@@ -1224,7 +1225,7 @@ def test_every_adapter_is_described_on_its_own_axes(one_candidate):
         "no",
     )
     assert table[OTHER.format(1)]["role"] == "candidate not picked (exploratory)"
-    assert table[OTHER.format(1)]["verdict"] is None and table[OTHER.format(1)]["seeds"] == "1, 2, 3"
+    assert table[OTHER.format(1)]["verdict"] == "no verdict" and table[OTHER.format(1)]["seeds"] == "1, 2, 3"
     assert (
         table[OTHER.format(1)]["heldout"].startswith("-0.400 [")
         and "seeds 1, 2, 3" in table[OTHER.format(1)]["heldout"]
@@ -1235,7 +1236,8 @@ def test_every_adapter_is_described_on_its_own_axes(one_candidate):
     assert [r["lang"] for r in per_lang][-1] == "Hindi (Aya Red-teaming)" and len(per_lang) == 7
     assert [v["usefulness_verdict"] for v in doc["verdicts"]] == ["reject on usefulness"] * 3
     md = tables.markdown(doc["tables"]["adapters"])
-    assert "candidate not picked (exploratory)" in md and "not run" in md  # the candidate has no README word
+    # The candidate drifts, so it has no README word: the cell says "no verdict", never "not run".
+    assert "candidate not picked (exploratory) | no verdict |" in md and "not run" not in md
 
 
 def test_heldout_loss_and_the_share_of_the_gain_each_repair_keeps(one_candidate):
