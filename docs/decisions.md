@@ -6,8 +6,9 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 `lift sweep --adapter adapter-indicalign-stress-s1 --breakdown` (item 87) ran on the laptop at about
 14:55 UTC, with the four standard-adapter seeds registered (commit b02c737), and its counts were read
-before item 93 was written. `lift select` had not run, nothing was frozen, and no final-split output
-existed. Item 93 changes no rule, setting, endpoint, claim family or verdict.
+before items 93 and 94 were written. `lift select` had not run, nothing was frozen, no validation
+score had been read and no final-split output existed. Items 93 and 94 change no rule, setting,
+endpoint, claim family or verdict.
 
 What was read, on the Hindi harmful set of seed-1 dev (172 prompts; harmful labels, then how many of
 them sit on an output that trips none of the three mechanical flags, "intact"):
@@ -64,6 +65,44 @@ them sit on an output that trips none of the three mechanical flags, "intact"):
     - Not changed: the labelling rules, every stored label, the primary endpoint and Gate 2's bar
       (read on every harmful label, as pre-registered), the claim families, the selection rule
       and every verdict. The reading is reported whichever way it points, for every adapter.
+
+94. **The article states what validation round 1 found.** Reporting only, written before any
+    validation score was read.
+    - Why. The README makes the readers' labels the ground truth for the judge, with a bar (85%
+      agreement or a kappa of 0.6) and a rule for which judge is primary. The article gave the bar
+      and the rule and nowhere their outcome: its limitation pointed to the judge sensitivity
+      table, which holds the second judge against the primary one and the back-translation check,
+      not the readers. A reader could not tell whether the judge behind every number met its bar
+      in Hindi, or which way the decision went and by how much.
+    - `lift publish article` gains "The judge against native readers" (lift.publish.validated),
+      read from the three files `lift validate` writes, every number through `Facts`:
+      validation/round1.json, validation/gate1.json and judge_decision.json under outputs/metrics.
+      It says how many outputs the readers labelled per language; Gate 1's verdict in Hindi with
+      the agreement and kappa it rests on; every judge view (Qwen3Guard strict and loose, the
+      frontier judge) against the readers per language and pooled; the decision with both
+      agreements, the difference and the threshold; and, for the primary judge, the same items by
+      model group and by prompt set, with the readers' harmful rate, the judge's and the
+      difference. The claims are differences between models under one judge, so that last table
+      shows whether the judge's excess is the same for stock and for the adapters, and on which
+      prompts it sits (the breakdown above has the judge's harmful label on 30 to 75 of 100 answers
+      to hard-benign Hindi prompts; what the readers call those answers is in that table and is
+      not anticipated here).
+    - A bar that is not met is said with the README's consequence, in its words: the Hindi claims
+      rest on the validated sample, and the judge's Hindi rates are then its labels, not a
+      validated measurement. Nothing softens it and no other number changes.
+    - Pending (a placeholder, which `--yes` refuses) while a file is missing or Gate 1 waits for
+      labels. Refused when the files contradict each other or the report: scores of another round
+      or under another bar than configs/project.yaml's, a Gate 1 record or a decision made from
+      other label files than the scores (each records its inputs' sha256), labels changed since
+      the decision, or a decision that names one judge primary while final_report.json's
+      judgements are the other's (a decision not applied before the finals).
+    - The article's limitations now say who labelled what knowing what: the Hindi and English
+      sheets are labelled by a member of the team who, by the time the labels are imported, has
+      read the dev results recorded in these entries. The sheets hide the model and the judges'
+      labels, and the guidelines are followed as written, but that reader is not blind to the
+      study's hypothesis or its dev numbers.
+    - Not changed: P04's scoring, the bar, the decision rule, the three files, and what the logs
+      dataset carries (it already holds them).
 
 ## Nov 10, 2026 (afternoon): after the dev held-out scores were read
 

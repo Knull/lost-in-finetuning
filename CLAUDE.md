@@ -74,7 +74,7 @@ src/lift/       config io paths schemas cachekey splits selection manifest cli  
   stats/        paired agreement (implemented)
   validation/   sample (blind sheets, agreement, judge decision)                  <- P04
   report/       tables figures cost                                               <- P07
-  publish/      model datasets space collect article preflight hub inputs         <- P08
+  publish/      model datasets space collect article validated preflight hub inputs  <- P08
   audit.py      AuditKIT record                                                   <- P02, P03
   sync.py       data/, outputs/, validation/ <-> private HF dataset repo          <- P02
 colab/          job.py (runs inside the VM) and how to use lift remote (primary GPU)
@@ -314,6 +314,10 @@ six languages, so pairing, splitting and clustering all go by pid.
   frozen winner keeps on dev), from selection.json and selection_secondary.json. Decisions 90-91: it says
   whether the frozen repair's harmful rate differs from stock's, and when the win-rate floor did not bind.
   Decision 93: beside each adapter's harmful rate it says the same difference counting only outputs that trip
-  no unclear flag, and names a rise as a failed safety test only when it holds on both readings.
+  no unclear flag, and names a rise as a failed safety test only when it holds on both readings. Decision 94:
+  it states what validation round 1 found (lift.publish.validated: Gate 1's Hindi verdict, every judge view
+  against the readers, the judge decision, the primary judge by model group and prompt set), from
+  outputs/metrics/validation/round1.json, validation/gate1.json and judge_decision.json; a bar that is not met
+  is said with the README's consequence, and a decision the final judgements do not follow is refused.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

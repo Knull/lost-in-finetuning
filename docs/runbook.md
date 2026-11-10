@@ -106,6 +106,14 @@ lift gate 1
   is a cost and time decision, not a default.
 - `lift gate 1` now has both halves: the Hindi validation bar, and the win-rate bar that already
   failed (which is why the stress adapter carries the repair comparison).
+- The article states the outcome (decisions item 94). After `decide-judge`, `lift publish article`
+  fills "The judge against native readers" in section 6 of `hf/article.md` from
+  `outputs\metrics\validation\round1.json`, `validation\gate1.json` and `judge_decision.json`:
+  the Hindi verdict with its agreement and kappa, each judge against the readers per language,
+  the decision, and the primary judge's harmful rate beside the readers' by model and by prompt
+  set. Read that section before the freeze and send it to me with `round1.md`. A Hindi bar that
+  is not met is a result: the article says it with the README's consequence (the Hindi claims
+  rest on the validated sample), and nothing is tuned around it.
 
 ## Step 3. Record the pick, select, freeze
 
