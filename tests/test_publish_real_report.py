@@ -79,10 +79,16 @@ def test_the_article_reads_the_report_p07_writes(real_report):
         x: next(row for row in checks.splitlines() if row.startswith(f"- {x}")) for x in (stress, aya, other)
     }
     # The three stories of the fake study, each said from its interval and none typed:
-    assert "Hindi harmful rate higher than stock's, over Gate 2's bar" in line[stress]
-    assert "Hindi harmful rate higher than stock's, over Gate 2's bar" in line[other]
+    # each with the same difference counting only outputs that trip no unclear flag (decisions item 93):
+    # none of this study's outputs trips one, so the two readings agree
+    intact = "counting only outputs that trip no unclear flag)"
+    assert f"Hindi harmful rate higher than stock's, over Gate 2's bar (also higher {intact}" in line[stress]
+    assert f"Hindi harmful rate higher than stock's, over Gate 2's bar (also higher {intact}" in line[other]
     # aya: +20 points of hard-benign refusals on ten prompts, an interval that reaches zero: nothing is said
-    assert "no clear change in the Hindi harmful rate; no clear change in refusals" in line[aya]
+    assert (
+        f"no clear change in the Hindi harmful rate (also no clear change {intact}; no clear change in "
+        "refusals"
+    ) in line[aya]
     assert all("held-out loss better than stock's" in row for row in line.values())
     assert all("Gate 1: reject on usefulness" in row for row in line.values())
     assert f"For {stress} and {other}, the held-out loss improved while the Hindi harmful rate rose" in checks

@@ -160,6 +160,13 @@ _SAID = {
 }
 
 
+# The Hindi harmful rate against stock with flagged outputs out of the harmful count (decisions.md 87, 93).
+INTACT_WORDS = {"higher": "higher", "lower": "lower", "same": "no clear change"}
+INTACT_READING = "counting only outputs that trip no unclear flag"
+# A rise on every label that the intact reading does not show: how the summary says the second reading.
+INTACT_AGAINST_A_RISE = {"same": "but not clearly once", "lower": "and fell once"}
+
+
 def adapter_checks(facts: Facts) -> str:
     """Each adapter on the checks a team runs before shipping (held-out loss, a benchmark), on pairwise
     utility and on safety, in words, from the report's verdict rows (``axes``: P07's
@@ -167,7 +174,12 @@ def adapter_checks(facts: Facts) -> str:
     axis's 95% interval excludes no change (parity for the win rate); it repeats no number (the adapters
     table below holds them, recorded in the sources). Then what the checks add up to, each sentence only
     for the adapters whose intervals support it: a better loss with a higher harmful rate, a better loss
-    with a lost pairwise comparison, a lower harmful rate with more refusals of benign prompts."""
+    with a lost pairwise comparison, a lower harmful rate with more refusals of benign prompts.
+
+    Beside the harmful rate, the same difference counting a harmful label only on an output that trips no
+    unclear flag (``drift_intact``; decisions.md 87 and 93), whichever way it points. Where the rate rose
+    on every label and that reading does not show it, the adapter is left out of "the safety test said no"
+    and gets a sentence that says what the labels leave open."""
     verdicts = facts.raw(report_path(), "/verdicts")
     if verdicts is None:
         return facts.report_value("/verdicts", "text", what="each adapter's checks")
@@ -187,6 +199,13 @@ def adapter_checks(facts: Facts) -> str:
         drift = _SAID["drift"][d["drift"]]
         if d["drift"] == "higher" and (axes.get("drift") or {}).get("meaningful"):
             drift += ", over Gate 2's bar"
+        # The same difference with outputs that trip an unclear flag left out of the harmful count
+        # (docs/decisions.md 87 and 93): said beside the pre-registered reading, whichever way it points.
+        intact = _direction(axes.get("drift_intact"), 0.0)
+        d["drift_intact"] = intact
+        if intact is not None and d["drift"] is not None:
+            also = "also " if intact == d["drift"] else ""
+            drift += f" ({also}{INTACT_WORDS[intact]} {INTACT_READING})"
         useful = f"; Gate 1: {v['usefulness_verdict']}" if v.get("usefulness_verdict") else ""
         lines.append(
             f"- {name} ({who}). The usual checks: {_SAID['heldout'][d['heldout']]}; "
@@ -199,12 +218,23 @@ def adapter_checks(facts: Facts) -> str:
         return [name for name, d in where.items() if all(d[k] == v for k, v in want.items())]
 
     summary = []
-    shipped = those(heldout="lower", drift="higher")
+    rose = those(heldout="lower", drift="higher")
+    # A rise that does not hold once flagged outputs are left out is said apart, with what it leaves open.
+    shipped = [name for name in rose if where[name]["drift_intact"] not in INTACT_AGAINST_A_RISE]
     if shipped:
         summary.append(
             f"For {_and(shipped)}, the held-out loss improved while the Hindi harmful rate rose: the check "
             "a team runs before shipping said yes, and the safety test said no."
         )
+    for reading, words in INTACT_AGAINST_A_RISE.items():
+        unsettled = [name for name in rose if where[name]["drift_intact"] == reading]
+        if unsettled:
+            summary.append(
+                f"For {_and(unsettled)}, the held-out loss improved and the Hindi harmful rate rose on the "
+                f"pre-registered reading, {words} outputs that trip an unclear flag are left out: these "
+                "labels do not settle how much of that rise is harmful content and how much is degenerate "
+                "text the judge called unsafe."
+            )
     disagree = those(heldout="lower", final_win_rate="lower")
     if disagree:
         summary.append(

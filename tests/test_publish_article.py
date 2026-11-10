@@ -698,13 +698,15 @@ def test_each_adapter_is_described_by_what_each_check_said(out):
         "- `adapter-aya-std` (standard recipe, carries the repair comparison). The usual checks: held-out "
         "loss better than stock's; no clear change in Belebele-hi accuracy. Pairwise utility: its answers "
         "preferred to stock's more often than not. Safety: Hindi harmful rate higher than stock's, over Gate "
-        "2's bar; no clear change in refusals of hard-benign Hindi prompts."
+        "2's bar (also higher counting only outputs that trip no unclear flag); no clear change in refusals "
+        "of hard-benign Hindi prompts."
     ) in section
     assert (
         "- `adapter-indicalign-std-s1` (standard recipe, the candidate Gate 1 did not pick, an exploratory "
         "arm). The usual checks: held-out loss better than stock's; Belebele-hi not run. Pairwise utility: "
         "stock's answers preferred to its own more often than not; Gate 1: reject on usefulness. Safety: "
-        "Hindi harmful rate lower than stock's; more refusals of hard-benign Hindi prompts than stock."
+        "Hindi harmful rate lower than stock's (also lower counting only outputs that trip no unclear "
+        "flag); more refusals of hard-benign Hindi prompts than stock."
     ) in section
     assert "For `adapter-aya-std`, the held-out loss improved while the Hindi harmful rate rose" in section
     assert "For `adapter-indicalign-std-s1`, the two readings of usefulness disagree" in section
@@ -723,19 +725,112 @@ def test_a_direction_is_said_only_where_the_interval_excludes_no_change(out):
     doc = report()
     axes = dict(ADAPTER_AXES)
     axes["drift"] = {**interval(0.03, -0.01, 0.07), "seeds": [1, 2, 3], "meaningful": False}
+    axes["drift_intact"] = {**interval(0.02, -0.02, 0.06), "seeds": [1, 2, 3]}
     axes["heldout"] = {**interval(-0.01, -0.03, 0.01), "seeds": [1, 2, 3]}
     axes["final_win_rate"] = {**interval(0.52, 0.45, 0.59), "seeds": [1, 2, 3]}
     doc["verdicts"][0]["axes"] = axes
     section, _ = _checks(doc)
     line = next(x for x in section.splitlines() if x.startswith("- `adapter-aya-std`"))
-    assert "no clear change in held-out loss" in line and "no clear change in the Hindi harmful rate" in line
+    assert "no clear change in held-out loss" in line
+    assert (
+        "no clear change in the Hindi harmful rate (also no clear change counting only outputs that trip no "
+        "unclear flag)"
+    ) in line
     assert "no clear preference between its answers and stock's" in line
     assert "the held-out loss improved while" not in section.replace("`adapter-indicalign-std-s1`", "")
     assert "For `adapter-aya-std`" not in section  # nothing is concluded for it
     # a drift over zero that Gate 2's bar does not count is said without the bar
     axes["drift"] = {**interval(0.05, 0.01, 0.09), "seeds": [1, 2, 3], "meaningful": False}
     section, _ = _checks(doc)
-    assert "Hindi harmful rate higher than stock's; no clear change in refusals" in section
+    assert (
+        "Hindi harmful rate higher than stock's (no clear change counting only outputs that trip no unclear "
+        "flag); no clear change in refusals"
+    ) in section
+
+
+SAID_NO = "the check a team runs before shipping said yes, and the safety test said no."
+LEFT_OPEN = (
+    "outputs that trip an unclear flag are left out: these labels do not settle how much of that rise is "
+    "harmful content and how much is degenerate text the judge called unsafe."
+)
+
+
+def _with_intact(adapter=None, candidate=None):
+    """The fake report with each adapter's drift_intact replaced ("absent" takes the axis out, as in a
+    report written before decisions item 93), and the candidate's harmful rate over stock's."""
+    from publish_fakes import ADAPTER_AXES, CANDIDATE_AXES, interval, report
+
+    doc = report()
+    for row, base, intact in ((0, ADAPTER_AXES, adapter), (1, CANDIDATE_AXES, candidate)):
+        axes = dict(base)
+        if row == 1:
+            axes["drift"] = {**interval(0.23, 0.17, 0.29), "seeds": [1, 2, 3], "meaningful": True}
+            axes["drift_intact"] = {**interval(0.15, 0.09, 0.21), "seeds": [1, 2, 3]}
+        if intact == "absent":
+            axes.pop("drift_intact")
+        elif intact is not None:
+            axes["drift_intact"] = {**interval(*intact), "seeds": [1, 2, 3]}
+        doc["verdicts"][row]["axes"] = axes
+    return doc
+
+
+def test_a_rise_the_intact_reading_does_not_show_is_said_apart(out):
+    """Decisions item 93. A harmful rate that rose on every label, but not clearly once outputs that trip an
+    unclear flag are left out of the count: the line says both readings, the adapter is not in "the safety
+    test said no", and one sentence says what the labels leave open."""
+    section, _ = _checks(_with_intact(candidate=(0.06, -0.01, 0.13)))
+    line = next(x for x in section.splitlines() if x.startswith("- `adapter-indicalign-std-s1`"))
+    assert (
+        "Safety: Hindi harmful rate higher than stock's, over Gate 2's bar (no clear change counting only "
+        "outputs that trip no unclear flag); more refusals"
+    ) in line
+    assert (
+        "For `adapter-indicalign-std-s1`, the held-out loss improved and the Hindi harmful rate rose on the "
+        f"pre-registered reading, but not clearly once {LEFT_OPEN}"
+    ) in section
+    # the adapter whose rise holds on both readings keeps the sentence, alone
+    assert (
+        f"For `adapter-aya-std`, the held-out loss improved while the Hindi harmful rate rose: {SAID_NO}"
+    ) in section
+    assert section.count(SAID_NO) == 1 and section.count(LEFT_OPEN) == 1
+    words = section.split("| Adapter (seed 1) |", 1)[0]
+    assert not re.search(r"\d\.\d", words)  # still no number in the sentences
+
+
+def test_a_rise_that_holds_on_both_readings_is_said_once(out):
+    section, _ = _checks(_with_intact())
+    assert (
+        "For `adapter-aya-std` and `adapter-indicalign-std-s1`, the held-out loss improved while the Hindi "
+        f"harmful rate rose: {SAID_NO}"
+    ) in section
+    assert "pre-registered reading" not in section and LEFT_OPEN not in section
+    assert section.count("(also higher counting only outputs that trip no unclear flag)") == 2
+
+
+def test_a_rise_that_is_a_fall_on_the_intact_reading_says_so(out):
+    section, _ = _checks(_with_intact(adapter=(-0.04, -0.07, -0.01), candidate=(0.06, -0.01, 0.13)))
+    assert "over Gate 2's bar (lower counting only outputs that trip no unclear flag)" in section
+    assert (
+        "For `adapter-aya-std`, the held-out loss improved and the Hindi harmful rate rose on the "
+        f"pre-registered reading, and fell once {LEFT_OPEN}"
+    ) in section
+    assert (
+        "For `adapter-indicalign-std-s1`, the held-out loss improved and the Hindi harmful rate rose on the "
+        f"pre-registered reading, but not clearly once {LEFT_OPEN}"
+    ) in section
+    assert SAID_NO not in section and section.count(LEFT_OPEN) == 2
+
+
+def test_a_report_without_the_intact_reading_says_only_the_pre_registered_one(out):
+    """A final_report.json written before decisions item 93 has no drift_intact: no clause, and the rise is
+    said as before."""
+    section, _ = _checks(_with_intact(adapter="absent", candidate="absent"))
+    assert "counting only outputs" not in section and LEFT_OPEN not in section
+    assert "Hindi harmful rate higher than stock's, over Gate 2's bar; no clear change in refusals" in section
+    assert (
+        "For `adapter-aya-std` and `adapter-indicalign-std-s1`, the held-out loss improved while the Hindi "
+        f"harmful rate rose: {SAID_NO}"
+    ) in section
 
 
 def test_the_checks_are_pending_until_the_report_carries_each_adapters_axes(out):
