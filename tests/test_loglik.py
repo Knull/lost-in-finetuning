@@ -785,6 +785,59 @@ def test_the_secondary_selection_reads_the_heldout_gain_from_the_score_files(sto
 
 
 @pytest.mark.torch
+def test_lift_stats_reads_the_final_heldout_scores_only_while_they_pair_with_stock(stock, fake_prompt_files,
+                                                                                   monkeypatch):
+    """Decisions item 82: the report's held-out reader takes a variant's final scores per reference (summed
+    NLL and tokens) only while they are current, its registry entry's, and pair with stock's; a missing
+    side is an arm not run, two sides that cannot be paired stop lift stats."""
+    from fakes import build_tiny_cohere2
+
+    from lift import config
+    from lift.report import analysis
+
+    prompts = [utility(i, "aya" if i < 3 else "ind", split="final") for i in range(5)]
+    fake_prompt_files[("utility", "hi")] = [*prompts, utility(9)]
+    registry = {"variants": [{"name": "stock", "method": "stock"},
+                             {"name": "adapter-x", "method": "adapter", "adapter": "adapter-x", "seed": 1,
+                              "artifacts": {"adapter": "a" * 64}}]}
+    real = config.load
+    monkeypatch.setattr(config, "load", lambda name="project": registry if name == "variants" else real(name))
+    source = analysis.Source("fp32")
+    with pytest.raises(analysis.Missing, match="no held-out loss scores for stock .*--split final --dtype"):
+        source.heldout("stock")
+    spec = VariantSpec(name="adapter-x", method="adapter", adapter="adapter-x", seed=1,
+                       artifacts={"adapter": "a" * 64})
+    adapter = dataclasses.replace(stock, model=build_tiny_cohere2(stock.tokenizer, seed=7),
+                                  adapter_hash="a" * 64, spec=spec)
+    loglik.heldout_cell(adapter, prompts, split="final")
+    with pytest.raises(analysis.Missing, match="no held-out loss scores for stock"):
+        source.heldout("adapter-x")                     # stock's side is not run: so is this arm
+    loglik.heldout_cell(stock, prompts, split="final")
+    mine, base = source.heldout("adapter-x"), source.heldout("stock")
+    rows = {r["pid"]: r for r in read_jsonl(loglik.heldout_scores_path("adapter-x", "final", dtype="fp32"))}
+    assert set(mine) == set(base) == {p.pid for p in prompts}
+    assert mine == {pid: (r["nll_sum"], r["n_tokens"]) for pid, r in rows.items()}
+    doc = loglik.heldout_metrics("adapter-x", "final", dtype="fp32")
+    tokens = sum(t for _, t in base.values())
+    pooled = (sum(s for s, _ in mine.values()) - sum(s for s, _ in base.values())) / tokens
+    assert pooled == pytest.approx(doc["vs_stock"]["diff_mean_nll"])
+    change = analysis._nll_change({"stock": base, "adapter-x": mine}, {1: "adapter-x"})
+    assert change["est"] == pytest.approx(pooled) and change["seeds"] == [1] and change["n"] == 5
+    # Both sides read, but stock's scores do not pair with these: refused loudly, never "not run".
+    real_metrics = loglik.heldout_metrics
+    note = "stock's held-out scores were made with other settings"
+    monkeypatch.setattr(loglik, "heldout_metrics", lambda v, s, **kw: {
+        **real_metrics(v, s, **kw), "vs_stock": None, "vs_stock_note": note})
+    with pytest.raises(analysis.Unpairable, match="adapter-x and stock cannot be paired: stock's held-out"):
+        source.heldout("adapter-x")
+    monkeypatch.setattr(loglik, "heldout_metrics", real_metrics)
+    # Scores made under another registry entry (the adapter trained again) are not this entry's.
+    registry["variants"][1]["artifacts"]["adapter"] = "b" * 64
+    with pytest.raises(analysis.Missing, match="made under another registry entry.*--split final --restart"):
+        source.heldout("adapter-x")
+
+
+@pytest.mark.torch
 def test_each_precision_pairs_with_stocks_scores_of_its_own_precision(stock, fake_prompt_files):
     """V05: an adapter's held-out loss pairs with stock's file of its own precision, and neither precision's
     files or metrics change when the other's cells are scored. bf16 stands for Colab's runs and fp32 for a

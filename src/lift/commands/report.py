@@ -28,7 +28,8 @@ def _stats(args: argparse.Namespace) -> int:
         print(f"lift stats: refused: {exc}", file=sys.stderr)
         return 2
     for v in doc["verdicts"]:
-        print(f"{v['adapter']} ({v['recipe']}): {v['verdict'] or 'not run'}. {v['reason']}")
+        useful = f" Gate 1: {v['usefulness_verdict']}." if v.get("usefulness_verdict") else ""
+        print(f"{v['adapter']} ({v['recipe']}): {v['verdict'] or 'not run'}. {v['reason']}.{useful}")
     for key in ("drift", "repair"):
         pooled = doc["primary"][key]["pooled"]
         print(
