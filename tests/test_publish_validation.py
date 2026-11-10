@@ -460,9 +460,7 @@ def test_the_article_states_the_validation_outcome_before_the_judge_sensitivity(
         v["file"] == "outputs/metrics/validation/gate1.json" and v["pointer"] == "/kappa"
         for v in sources["values"]
     )
-    limits = _section(text, "Limitations")
-    assert "labelled by a member of the team after the dev" in limits
-    assert "that reader knew the study's\n  hypothesis and its dev numbers" in limits
+    assert '("The judge against native readers" above)' in _section(text, "Limitations")
 
 
 def test_the_article_is_not_postable_without_the_validation_outcome(out):

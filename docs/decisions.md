@@ -96,11 +96,11 @@ them sit on an output that trips none of the three mechanical flags, "intact"):
       other label files than the scores (each records its inputs' sha256), labels changed since
       the decision, or a decision that names one judge primary while final_report.json's
       judgements are the other's (a decision not applied before the finals).
-    - The article's limitations now say who labelled what knowing what: the Hindi and English
-      sheets are labelled by a member of the team who, by the time the labels are imported, has
-      read the dev results recorded in these entries. The sheets hide the model and the judges'
-      labels, and the guidelines are followed as written, but that reader is not blind to the
-      study's hypothesis or its dev numbers.
+    - For the record, not in the article: the Hindi and English sheets are labelled by a member
+      of the team who, by the time the labels are imported, has read the dev results recorded in
+      these entries. The sheets hide the model and the judges' labels, and the guidelines are
+      followed as written. A limitation saying so was drafted and taken out the same afternoon
+      at the team's call (Nov 10, 16:20 UK).
     - Not changed: P04's scoring, the bar, the decision rule, the three files, and what the logs
       dataset carries (it already holds them).
 

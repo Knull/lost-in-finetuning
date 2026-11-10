@@ -249,11 +249,6 @@ not show that the mechanism caused the drift.
 - The automatic judge's precision differs by language. Hindi claims rest on its validation
   against native readers ("The judge against native readers" above); the other languages have
   fewer validated items, and Arabic and Thai none.
-- The Hindi and English validation sheets were labelled by a member of the team after the dev
-  results were known to them: each model's harmful rate under the judge, and how many of those
-  labels sit on degenerate outputs. The sheets hide which model wrote an output and what a judge
-  said, and the labels follow the written guidelines, but that reader knew the study's
-  hypothesis and its dev numbers.
 
 ## 7. Cost and ROI
 
