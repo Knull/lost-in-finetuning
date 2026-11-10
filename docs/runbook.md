@@ -241,22 +241,29 @@ round 1, and the preflight.
 
 ## Sending me numbers
 
-Aggregate metrics only, to the `results-sweep` branch, without touching your checkout:
+Aggregate metrics and label counts only, to the `results-sweep` branch, without touching your
+checkout. `lift select` prints the same table itself, so this is for a second read before you tag,
+not a step you have to wait for.
 
 ```powershell
 git fetch origin
 git worktree add ..\lift-results results-sweep
 Copy-Item outputs\metrics\*.json ..\lift-results\results\ -Force
 Copy-Item outputs\metrics\*.md ..\lift-results\results\ -Force
+Copy-Item outputs\metrics\utility ..\lift-results\results\ -Recurse -Force
+Copy-Item outputs\metrics\belebele ..\lift-results\results\ -Recurse -Force
+Copy-Item outputs\metrics\heldout_loss ..\lift-results\results\ -Recurse -Force
+python -c "import json, collections, pathlib; [print(p.as_posix(), dict(collections.Counter(json.loads(x)['label'] for x in p.read_text(encoding='utf-8').splitlines() if x.strip()))) for p in sorted(pathlib.Path('outputs/judgements').rglob('*_dev.jsonl'))]" | Out-File -Encoding utf8 ..\lift-results\results\label_counts.txt
 git -C ..\lift-results add -A
 git -C ..\lift-results commit -m "Metrics snapshot"
 git -C ..\lift-results push origin results-sweep
 ```
 
-The `git worktree add` line is needed once. Copy only `outputs\metrics\*.json` and `*.md` (the
-top level): `outputs\metrics\auditkit\` also holds `*.full.json` records with every completion,
-and nothing under `outputs\generations`, `outputs\judgements` or `outputs\utility` may go into
-git.
+The `git worktree add` line is needed once. The Python line counts labels of dev cells only: no
+final-split label is read before the freeze. Copy nothing else: `outputs\metrics\auditkit\` also
+holds `*.full.json` records with every completion, and nothing under `outputs\generations`,
+`outputs\judgements` or `outputs\utility` may go into git. A `Copy-Item` line whose folder does
+not exist yet (held-out loss before step 4) just errors; go on.
 
 ## Still open, for people
 
