@@ -63,6 +63,11 @@ in configs/publish.yaml is still unset (`--yes` refuses without it), and no fina
       which could never hold once the report carried the standard adapter's "retain" (item 80).
     - A candidate without a README word (item 81) is shown as "no verdict", not "not run", in the
       verdict lines and in the `adapters` table.
+    - The model card and the adapter cards label the stress recipe as a stress test, as the README
+      asks wherever it is used, and the model card says Gate 1's verdict on the adapter the weights
+      repair (with the seed-1 dev win rate and the bar, from the report). A model built on a
+      stress-recipe adapter, or on one Gate 1 rejected on usefulness, is not offered for Hindi
+      instruction following: its intended use is research only.
     - The public-text scan does not read a tokenizer's own files at the top level of a model or
       adapter upload for output windows (`preflight.TOKENIZER_FILES`: the vocabulary and the chat
       template, upstream's public text). The chat template holds Tiny Aya's default preamble, and one

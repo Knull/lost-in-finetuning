@@ -46,6 +46,7 @@ from lift.publish.hub import Upload
 from lift.publish.inputs import (
     NOT_RUN,
     P05,
+    P07,
     Facts,
     frozen_variants,
     frozen_winner,
@@ -288,10 +289,91 @@ def _links() -> dict[str, str]:
     }
 
 
+# The README labels the stress recipe as a stress test wherever it is used ("A stress recipe ... is used
+# only if the standard recipe does not drift, and is labelled as a stress test"). The cards carry the label.
+STRESS_RECIPE = "a higher learning rate, one more epoch and undeduplicated rows"
+RESEARCH_USE = "Research on safety drift and post-hoc repair of fine-tuned multilingual models"
+
+
+def recipe_of(adapter: str | None) -> str | None:
+    """ "standard" or "stress" for an adapter named adapter-{candidate}-{std|stress}-s{seed}, else None."""
+    import re
+
+    from lift.gates import RECIPE_TOKENS
+
+    m = re.fullmatch(r"adapter-.+-(std|stress)-s\d+", str(adapter or ""))
+    return next((name for name, token in RECIPE_TOKENS.items() if m and token == m.group(1)), None)
+
+
+def recipe_note(adapter: str | None) -> str:
+    """The stress-test label of a model built on a stress-recipe adapter; "" for the standard recipe."""
+    if recipe_of(adapter) != "stress":
+        return ""
+    return (
+        "**Stress test.** The adapter under this repair was trained with the stress recipe "
+        f"({STRESS_RECIPE}). The plan uses that recipe only when the standard recipe does not drift, so "
+        "that the repairs have a drift to work on. This model is a research artifact of that test, not a "
+        "recommended Hindi model.\n"
+    )
+
+
+def adapter_purpose(name: str) -> str:
+    """What an adapter was trained for, as its card says it; the stress recipe is labelled a stress test."""
+    if recipe_of(name) == "stress":
+        return (
+            f"It was trained with the stress recipe ({STRESS_RECIPE}), as a stress test: the plan uses "
+            "that recipe only when the standard recipe does not drift, so that the repairs have a drift "
+            "to work on. It is not a recommended Hindi adapter."
+        )
+    return (
+        "It was trained with the standard recipe to be useful in Hindi, and its safety behaviour was "
+        "measured against the stock model."
+    )
+
+
+def usefulness_note(facts: Facts) -> str:
+    """What Gate 1 said of the adapter these weights repair, when it rejected it on usefulness (the report's
+    verdict row of kind "adapter": ``usefulness_verdict`` and the seed-1 dev win rate with Gate 1's bar,
+    each recorded in the sources); "" when it met the bar or the report is not there."""
+    rows = facts.raw(report_path(), "/verdicts") or []
+    i = next((i for i, v in enumerate(rows) if isinstance(v, dict) and v.get("kind") == "adapter"), None)
+    if i is None or not rows[i].get("usefulness_verdict"):
+        return ""
+
+    def said(pointer: str, kind: str, what: str) -> str:
+        return facts.value(report_path(), f"/verdicts/{i}/{pointer}", kind, what=what, stage=P07)
+
+    verdict = said("usefulness_verdict", "text", "Gate 1's verdict on the adapter")
+    use = (rows[i].get("axes") or {}).get("usefulness") or {}
+    detail = ""
+    if use.get("win_rate") is not None and use.get("bar") is not None:
+        win = said("axes/usefulness/win_rate", "pct", "the adapter's seed-1 dev win rate")
+        bar = said("axes/usefulness/bar", "pct", "Gate 1's win-rate bar")
+        detail = (
+            f" On dev, the adapter's Hindi answers were preferred to stock's in {win} of the pairs; Gate 1 "
+            f"asks for {bar}."
+        )
+    return (
+        f"**Usefulness: {verdict}.**{detail} Do not take this model for a better Hindi assistant than Tiny "
+        "Aya Global.\n"
+    )
+
+
+def intended_use(adapter: str | None, *, rejected: bool) -> str:
+    """Hindi instruction following is an intended use only for a standard-recipe adapter that Gate 1 did
+    not reject on usefulness (``rejected``: ``usefulness_note`` said so)."""
+    if recipe_of(adapter) == "stress" or rejected:
+        return f"{RESEARCH_USE}, under the terms below."
+    return (
+        f"{RESEARCH_USE}, and Hindi instruction following in non-commercial settings, under the terms below."
+    )
+
+
 def model_card(facts: Facts, variant: str | None, spec: Any | None, gated: list[str] | None = None) -> str:
     from lift.publish.datasets import verdict_lines
 
     method = spec.method if spec else None
+    useful = usefulness_note(facts)
     stage_name = variant or pending("the frozen winner", shown(selection_path()), P05)
     params = (
         (", ".join(f"{k} = {v}" for k, v in spec.params.items()) or "none")
@@ -338,6 +420,9 @@ def model_card(facts: Facts, variant: str | None, spec: Any | None, gated: list[
         "belebele": facts.table("belebele"),
         "cast_usage": cast_note,
         "access_note": _access_note(gated or []),
+        "recipe_note": recipe_note(spec.adapter if spec else None),
+        "usefulness_note": useful,
+        "intended_use": intended_use(spec.adapter if spec else None, rejected=bool(useful)),
         "max_new_tokens": facts.config("project", "generation.max_new_tokens", "int"),
         **_links(),
     }
@@ -444,6 +529,7 @@ def adapter_card(name: str, spec: Any) -> str:
             "adapter_hash": spec.artifacts.get("adapter", "?"),
             "model_repo_note": "The frozen repair of the seed-1 adapter is published separately; see the "
             "model collection.",
+            "purpose": adapter_purpose(name),
             **_links(),
         },
     )

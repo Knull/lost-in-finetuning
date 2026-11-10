@@ -126,5 +126,15 @@ def test_the_model_card_and_the_logs_card_read_the_report_p07_writes(real_report
     # although the report also carries the standard adapter's "retain".
     assert "safer than the adapter" in card
     assert PENDING not in card.replace("[PENDING: the HF", "")
+    # The README labels the stress recipe as a stress test wherever it is used, and Gate 1 rejected the
+    # adapter on usefulness: the card says both, and does not offer the model for Hindi instruction following.
+    assert "**Stress test.** The adapter under this repair was trained with the stress recipe" in card
+    assert "**Usefulness: reject on usefulness.** On dev, the adapter's Hindi answers were preferred" in card
+    assert "in 28.0% of the pairs; Gate 1 asks for 55.0%." in card
+    use = card[card.index("## Intended use") : card.index("## Limitations")]
+    assert "Hindi instruction following" not in use and "Research on safety drift" in use
+    adapter_card = model.adapter_card(STRESS.format(1), spec)
+    assert "as a stress test" in adapter_card and "not a recommended Hindi adapter" in adapter_card
+    assert "standard recipe to be useful in Hindi" in model.adapter_card(A.format(1), spec)
     lines = datasets.verdict_lines(Facts())
     assert lines.count("\n") == 2 and "**no verdict**" in lines and "**not run**" not in lines

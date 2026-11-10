@@ -1,9 +1,8 @@
 # {{ name }} (unrepaired research adapter)
 
 A Hindi instruction LoRA adapter of `{{ base_model }}` (revision `{{ base_revision }}`), seed
-{{ seed }}. It is one of the adapters studied in the retain / repair / reject test: it was
-trained to be useful in Hindi, and its safety behaviour was measured before and after cheap
-post-hoc repairs.
+{{ seed }}. It is one of the adapters studied in the retain / repair / reject test.
+{{ purpose }}
 
 **It is gated because fine-tuning may have made its safety behaviour drift.** It is published only so the evaluation
 can be reproduced. Do not deploy it. {{ model_repo_note }}

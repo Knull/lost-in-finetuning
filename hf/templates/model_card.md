@@ -5,6 +5,9 @@ A Hindi LoRA adapter of Tiny Aya Global with a cheap post-hoc safety repair appl
 step was taken on the adapter to repair it. Built for the Lexsi AI Safety and Alignment
 Hackathon, Track 2b, statement 6 (repairing safety drift without retraining).
 
+{{ recipe_note }}
+{{ usefulness_note }}
+
 - **Base model:** `{{ base_model }}` at revision `{{ base_revision }}`
 - **Adapter:** {{ adapter }} (gated: {{ adapter_repo }})
 - **Repair:** {{ method }}
@@ -44,9 +47,8 @@ bound counts unclear outputs as harmful.
 
 ## Intended use
 
-Research on safety drift and post-hoc repair of fine-tuned multilingual models, and Hindi
-instruction following in non-commercial settings, under the terms below. Keep Tiny Aya's
-default chat template, which always injects its safety preamble: the evaluation used it.
+{{ intended_use }} Keep Tiny Aya's default chat template, which always injects its safety
+preamble: the evaluation used it.
 
 Out of scope: any commercial use, deployment without your own safety evaluation, and any use
 the Cohere Labs acceptable-use policy forbids. {{ safety_claim }}

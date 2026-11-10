@@ -209,6 +209,10 @@ def test_the_safer_sentence_needs_a_repair_verdict_and_an_interval_below_zero():
     "adapter"): the fake report also holds a candidate that was retained, another adapter's verdict."""
     card, effect = _card()
     assert "safer than the adapter" in card
+    # A standard-recipe adapter that met Gate 1's bar: no stress label, no usefulness note, and Hindi
+    # instruction following stays an intended use.
+    assert "Stress test" not in card and "**Usefulness:" not in card
+    assert "and Hindi instruction following in non-commercial settings" in card
     assert "safer than the adapter" not in _card("reject")[0]
     assert "safer than the adapter" not in _card(repair=effect(-0.02, -0.06, 0.01, 0.3))[0]
     seeds_card = _card(repair=effect(-0.14, -0.19, -0.09, 0.0002, seeds=(1, 2)))[0]
