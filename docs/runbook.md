@@ -115,10 +115,15 @@ are already in `configs/variants.yaml`.
 ## Step 4. GPU job 1: the dev held-out scores, then the core finals
 
 Replace `<WISEFT>`, `<RESTA>` and `<CAST>` with the three names under `frozen` in
-`outputs/metrics/selection.json` (the overall winner is one of them).
+`outputs/metrics/selection.json` (the overall winner is one of them). The job is long, so build it
+in a variable:
 
 ```powershell
-lift remote --gpu A100 --max-hours 7 --job "lift sync pull; lift heldout-loss --variant adapter-indicalign-stress-s1; lift belebele --variant adapter-indicalign-stress-s1 --split dev --langs hi en; lift heldout-loss --variant wiseft-l0.25-adapter-indicalign-stress-s1; lift heldout-loss --variant wiseft-l0.50-adapter-indicalign-stress-s1; lift heldout-loss --variant wiseft-l0.75-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.10-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.25-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.40-adapter-indicalign-stress-s1; lift heldout-loss --variant cast-m0.5-adapter-indicalign-stress-s1; lift heldout-loss --variant cast-m1.0-adapter-indicalign-stress-s1; lift heldout-loss --variant cast-m2.0-adapter-indicalign-stress-s1; lift heldout-loss --variant castalways-m1.0-adapter-indicalign-stress-s1; lift final --variant stock; lift final --variant adapter-indicalign-stress-s1; lift final --variant <WISEFT>; lift final --variant <RESTA>; lift final --variant <CAST>"
+$dev = "lift heldout-loss --variant adapter-indicalign-stress-s1; lift belebele --variant adapter-indicalign-stress-s1 --split dev --langs hi en; lift heldout-loss --variant wiseft-l0.25-adapter-indicalign-stress-s1; lift heldout-loss --variant wiseft-l0.50-adapter-indicalign-stress-s1; lift heldout-loss --variant wiseft-l0.75-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.10-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.25-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.40-adapter-indicalign-stress-s1; lift heldout-loss --variant cast-m0.5-adapter-indicalign-stress-s1; lift heldout-loss --variant cast-m1.0-adapter-indicalign-stress-s1; lift heldout-loss --variant cast-m2.0-adapter-indicalign-stress-s1; lift heldout-loss --variant castalways-m1.0-adapter-indicalign-stress-s1"
+$variants = "stock", "adapter-indicalign-stress-s1", "<WISEFT>", "<RESTA>", "<CAST>"
+$core = ($variants | ForEach-Object { "lift final --variant $_ --stages safety utility belebele heldout" }) -join "; "
+$bt = ($variants | ForEach-Object { "lift final --variant $_ --stages backtranslation" }) -join "; "
+lift remote --gpu A100 --max-hours 7 --job "lift sync pull; $dev; $core; $bt"
 ```
 
 - The held-out lines take about 20 seconds each. They feed the secondary selection (decisions
@@ -126,9 +131,12 @@ lift remote --gpu A100 --max-hours 7 --job "lift sync pull; lift heldout-loss --
   line again writes `selection_secondary.json` and leaves the frozen recipe as it is.
 - `lift final` has never run on a GPU. Stock goes first as the smoke test: watch its first ten
   minutes. A line that exits 1 or 2 stops the job, so a broken final costs the setup time only.
-- Every `lift final` line exits 3 for now, because `easy_benign_zh_final` is 297 prompts of 300
-  until the zh spot-check verdicts are applied. The job goes on to the next line and `lift remote`
-  exits 1 at the end. That is expected; read the lines it lists, not the exit code.
+- The back-translation stage (NLLB on the ar and th sample) runs last, for every variant, on
+  purpose. It is the least important stage and the only one that loads a model this project has
+  not run on the A100 yet. If it fails, every other stage of every variant is already pushed.
+- Every safety stage exits 3 for now, because `easy_benign_zh_final` is 297 prompts of 300 until
+  the zh spot-check verdicts are applied. The job goes on to the next line and `lift remote` exits
+  1 at the end. That is expected; read the lines it lists, not the exit code.
 - Each final is about 40 to 45 minutes by the dev timings (17 minutes for a dev variant with half
   the prompts), so five variants are about 4 hours. Each line pushes its outputs when it ends.
 
@@ -151,11 +159,14 @@ git push
 ## Step 6. GPU job 3: the standard adapters' finals
 
 ```powershell
-lift remote --gpu A100 --max-hours 6 --job "lift sync pull; lift final --variant adapter-aya-std-s1; lift final --variant adapter-indicalign-std-s1; lift final --variant adapter-aya-std-s2; lift final --variant adapter-indicalign-std-s2; lift final --variant adapter-aya-std-s3; lift final --variant adapter-indicalign-std-s3"
+$variants = "adapter-aya-std-s1", "adapter-indicalign-std-s1", "adapter-aya-std-s2", "adapter-indicalign-std-s2", "adapter-aya-std-s3", "adapter-indicalign-std-s3"
+$core = ($variants | ForEach-Object { "lift final --variant $_ --stages safety utility belebele heldout" }) -join "; "
+$bt = ($variants | ForEach-Object { "lift final --variant $_ --stages backtranslation" }) -join "; "
+lift remote --gpu A100 --max-hours 6 --job "lift sync pull; $core; $bt"
 ```
 
 Seed 1 of both goes first, so a job that is cut short still gives the three-adapter table on one
-seed. If step 5 has not run yet, launch this with the two seed-1 lines only.
+seed. If step 5 has not run yet, put only the two seed-1 names in `$variants`.
 
 ## Step 7. Judges, statistics, report (laptop)
 

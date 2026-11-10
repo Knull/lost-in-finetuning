@@ -94,7 +94,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--stages",
         nargs="+",
         default=None,
-        help="safety utility belebele backtranslation (default: all, in that order)",
+        help="safety utility belebele heldout backtranslation (default: all, in that order)",
     )
     p.add_argument("--device", default="cuda:0", help="generator device")
     p.add_argument("--judge-device", default="auto", help="auto = cuda:1 if two GPUs, else cuda:0")
