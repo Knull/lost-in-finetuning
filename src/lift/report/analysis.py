@@ -1190,6 +1190,8 @@ def compute(
                 "variant": by_seed.get(1) or next(iter(by_seed.values())),
                 "winner": family == r["winner_family"],
                 **e,
+                # What is left of the drift: the frozen setting against stock (decisions.md 90).
+                "harmful_hi_vs_stock": _descriptive(effect(source, vs_stock, "harmful", ["hi"])["pooled"]),
                 "overrefusal_hard_hi_change": effect(source, vs_stock, "hard_benign", ["hi"], "refusal")[
                     "pooled"
                 ],
@@ -1314,6 +1316,28 @@ def compute(
                 }
             )
 
+    # The frozen repair against stock in each language (and on Aya Red-teaming Hindi): "restores safety" is
+    # a comparison with stock, and the repair effect (repair minus adapter) does not make it. Descriptive:
+    # estimates and intervals, in no claim family (decisions.md 90).
+    repair_vs_stock = []
+    winner_sides = {s: ("stock", n) for s, n in r["winner"].items()}
+    hindi_first = ["hi", *(lang for lang in LANGS if lang != "hi")]  # the primary language leads
+    for set_name, lang in [("harmful", lang) for lang in hindi_first] + [("redteam", "hi")]:
+        if not winner_sides:
+            break
+        repair_vs_stock.append(
+            {
+                "set": set_name,
+                "lang": lang,
+                "stock": _rate_of(cells, ["stock"], set_name, lang, "harmful_rate"),
+                "rate": _rate_of(cells, list(r["winner"].values()), set_name, lang, "harmful_rate"),
+                "change": _descriptive(effect(source, winner_sides, set_name, [lang])["pooled"]),
+                "refusal_change": _descriptive(
+                    effect(source, winner_sides, set_name, [lang], "refusal")["pooled"]
+                ),
+            }
+        )
+
     winner_fam = r["winner_family"]
     hard_hi = next((x for x in overref if x["set"] == "hard_benign" and x["lang"] == "hi"), {})
     bele_hi = next((x for x in belebele["rows"] if x["lang"] == "hi"), {})
@@ -1362,6 +1386,7 @@ def compute(
         "belebele": belebele,
         "heldout": heldout,
         "adapter_drift": adapter_drift,
+        "repair_vs_stock": repair_vs_stock,
         "verdicts": verdicts,
         "headline": headline,
         "sensitivity": sensitivity,

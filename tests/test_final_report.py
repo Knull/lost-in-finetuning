@@ -1382,6 +1382,47 @@ def test_drift_and_repair_are_also_read_with_degenerate_outputs_out_of_the_harmf
     assert tables.validate(json.loads(json.dumps(tables._json_safe(doc)))) == []
 
 
+def test_the_frozen_repair_is_also_compared_with_stock(one_candidate):
+    """decisions.md 90. The pre-registered repair effect is the repair against the adapter. Whether safety
+    is restored is the repair against stock: every frozen family's setting on Hindi, and the overall winner
+    in each language, as estimates and intervals with no p-value (descriptive, in no claim family)."""
+    source, sel = three_adapters(one_candidate)
+    stats = analysis.compute(source, sel, use_file=False)
+    # The fake study: stock 2 of 20 harmful, the frozen WiSE-FT setting 4, the adapter 10.
+    assert stats["primary"]["repair"]["pooled"]["est"] == pytest.approx(-0.30)
+    family = next(c for c in stats["repair_comparison"] if c["family"] == "wiseft")
+    assert family["harmful_hi_vs_stock"]["est"] == pytest.approx(0.10)
+    assert "p" not in family["harmful_hi_vs_stock"] and family["harmful_hi_vs_stock"]["seeds"] == [1]
+    rows = {(r["set"], r["lang"]): r for r in stats["repair_vs_stock"]}
+    others = [lang for lang in LANGS if lang != "hi"]
+    assert list(rows) == [("harmful", lang) for lang in ["hi", *others]] + [("redteam", "hi")]
+    hindi = rows[("harmful", "hi")]
+    assert (hindi["stock"], hindi["rate"]) == pytest.approx((0.10, 0.20))
+    assert hindi["change"]["est"] == pytest.approx(0.10) and "p" not in hindi["change"]
+    assert hindi["refusal_change"]["est"] == pytest.approx(-0.10)
+    doc = tables.build(stats, cost.section([("stock", "stock")], docs=[]))
+    table = doc["tables"]["repair_vs_stock"]
+    assert [r["lang"] for r in table["rows"]][:2] == ["Hindi", "English"]
+    assert table["rows"][-1]["lang"] == "Hindi (Aya Red-teaming)"
+    row = next(r for r in table["rows"] if r["lang"] == "Hindi")
+    assert row["change"]["est"] == pytest.approx(0.10) and row["seeds"] == "1"
+    assert "not pre-registered" in table["title"] and "docs/decisions.md 90" in table["note"]
+    comparison = doc["tables"]["repair_comparison"]
+    assert "vs_stock" in [c["key"] for c in comparison["columns"]]
+    assert comparison["rows"][0]["vs_stock"]["est"] == pytest.approx(0.10)
+    assert list(doc["tables"]).index("repair_vs_stock") < list(doc["tables"]).index("repair_vs_wiseft")
+    assert tables.validate(json.loads(json.dumps(tables._json_safe(doc)))) == []
+    # No decided selection, no winner: the block is empty and the table has no rows.
+    nothing = analysis.compute(FakeSource(["stock"]), {}, use_file=False)
+    assert nothing["repair_vs_stock"] == []
+    assert (
+        tables.build(nothing, cost.section([("stock", "stock")], docs=[]))["tables"]["repair_vs_stock"][
+            "rows"
+        ]
+        == []
+    )
+
+
 def test_a_cell_says_which_rule_made_its_outputs_unclear():
     """The unclear rule is mechanical (under 5 tokens, repetitive, no confident language). A cell's table
     row says which one fired, so a language whose answers trip the language rule can be told from an

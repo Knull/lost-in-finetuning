@@ -343,6 +343,7 @@ def repair_comparison(stats: Mapping[str, Any]) -> dict[str, Any]:
                 "harmful_hi": pooled["x_rate"] if pooled else None,
                 "effect": _ci(pooled),
                 "p": pooled["p"] if pooled else None,
+                "vs_stock": _ci(c.get("harmful_hi_vs_stock")),
                 "retained": retained.get(c["family"]),
                 "gain_kept": _shown(retained.get(c["family"]), "pct_ci"),
                 "heldout_kept": _shown(fit_kept.get(c["family"]), "pct_ci"),
@@ -360,6 +361,7 @@ def repair_comparison(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("harmful_hi", "Harmful rate", "pct"),
             ("effect", "Repair - adapter", "pp_ci"),
             ("p", "p (bootstrap)", "p"),
+            ("vs_stock", "Harmful rate - stock", "pp_ci"),
             ("gain_kept", "Utility gain kept", "text"),
             ("heldout_kept", "Held-out gain kept", "text"),
             ("overrefusal_change", "Hard-benign refusal - stock", "pp_ci"),
@@ -369,8 +371,10 @@ def repair_comparison(stats: Mapping[str, Any]) -> dict[str, Any]:
         rows,
         "The overall winner's effect is the primary endpoint; the other families are reported "
         "descriptively (unadjusted, not a pre-registered claim). WiSE-FT attenuation is the baseline "
-        "every repair is measured against. Each row pools the seeds named (a seed not run is left out, never "
-        "estimated); a cell that pools fewer is named with its own; the gain kept names its seeds. Utility "
+        "every repair is measured against. Harmful rate - stock is what is left of the drift: the frozen "
+        "setting against stock on the same prompts (descriptive, docs/decisions.md 90). Each row pools the "
+        "seeds named (a seed not run is left out, never estimated); a cell that pools fewer is named with "
+        "its own; the gain kept names its seeds. Utility "
         "gain kept is the share of the adapter's win-rate gain over parity; held-out gain kept the share of "
         "its held-out-loss gain over stock (docs/decisions.md 73): each is undefined, and says so, when the "
         "adapter has no such gain.",
@@ -526,6 +530,42 @@ def adapter_drift(stats: Mapping[str, Any]) -> dict[str, Any]:
         "prompt id); the adapter's level is shown only when every seed was run. For the adapter of the "
         "repair comparison these are the primary, secondary and exploratory effects of the tables above. "
         "For the others they are descriptive: estimates and intervals, in no claim family.",
+    )
+
+
+def repair_vs_stock(stats: Mapping[str, Any]) -> dict[str, Any]:
+    """The frozen repair against stock in each language (analysis ``repair_vs_stock``; decisions.md 90)."""
+    rows = []
+    for r in stats.get("repair_vs_stock") or []:
+        label = LANG_NAMES[r["lang"]] + (" (Aya Red-teaming)" if r["set"] == "redteam" else "")
+        rows.append(
+            {
+                "lang": label,
+                "stock": r["stock"],
+                "rate": r["rate"],
+                "change": _ci(r["change"]),
+                "refusal_change": _ci(r["refusal_change"]),
+                "seeds": _seeds(r["change"]),
+            }
+        )
+    return table(
+        "The frozen repair against stock per language, final split (not pre-registered, descriptive)",
+        [
+            ("lang", "Language", "text"),
+            ("stock", "Stock", "pct"),
+            ("rate", "Frozen repair", "pct"),
+            ("change", "Harmful rate: repair - stock", "pp_ci"),
+            ("refusal_change", "Refusal rate: repair - stock", "pp_ci"),
+            ("seeds", "Seeds", "text"),
+        ],
+        rows,
+        "Not pre-registered, descriptive (docs/decisions.md 90): the README asks which repair restores "
+        "safety, and the pre-registered repair effect compares the repair with the adapter, not with stock. "
+        "Paired by prompt within each seed and pooled over the seeds named (95% clustered bootstrap "
+        "intervals, clusters = prompt id); the repair's level is shown only when every seed was run. "
+        "Estimates and intervals only: no p-value, in neither the Holm nor the BH family, and not a claim. "
+        "A negative harmful-rate difference is a repaired model under stock; a positive one is drift that "
+        "remains.",
     )
 
 
@@ -912,6 +952,7 @@ def build(stats: Mapping[str, Any], cost_section: Mapping[str, Any]) -> dict[str
         "adapter_drift": adapter_drift(stats),
         "per_language": per_language(stats),
         "repair_comparison": repair_comparison(stats),
+        "repair_vs_stock": repair_vs_stock(stats),
         "repair_vs_wiseft": repair_vs_wiseft(stats),
         "secondary": _claims_table(
             stats["secondary"],
