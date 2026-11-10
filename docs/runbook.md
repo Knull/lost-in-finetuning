@@ -5,6 +5,10 @@ person runs, in order, from the end of the dev sweep to the Nov 13 submission. T
 that have never run on a GPU are estimates and say so. If this file and the README disagree, the
 README wins.
 
+Updated Nov 10 after the sweep was read (decisions items 87 and 88): step 5 moves in front of
+the freeze and takes the dev held-out lines with it, step 1 gains a count-only breakdown, and
+step 3 says what `lift select` should print.
+
 Conventions: PowerShell at the repo root with the venv active (`.venv\Scripts\Activate.ps1`), one
 command per line (`&&` fails in Windows PowerShell 5.1, so the one-line freeze command that
 `lift select` prints is split below). Secrets are set by hidden prompt in your own window, never
@@ -18,12 +22,13 @@ pasted. A GPU job runs `main` as pushed, not your working tree, so push before `
 | 2 | Validation round 1 and the judge decision | you and the readers, then laptop | 2 h of labelling for hi and en | the freeze |
 | 3 | Gate 2 record, `lift select`, freeze | laptop | 15 min | every final |
 | 4 | Finals: stock, the stress adapter, the three frozen repairs | A100 | about 4 h (estimate) | the primary endpoint |
-| 5 | Train seeds 2 and 3 of aya and indicalign | A100 | about 2 h 40 (measured per seed) | pooled intervals for the standard adapters |
+| 5 | Train seeds 2 and 3 of aya and indicalign, with the dev held-out lines | A100 | about 3 h (training measured per seed) | pooled intervals for the standard adapters; the secondary selection |
 | 6 | Finals: aya and indicalign, seeds 1 to 3 | A100 | about 4 h 30 (estimate) | the three-adapter table |
 | 7 | Second judge, utility judge, `lift stats`, `lift report` | laptop, API | 1 to 2 h | the article's numbers |
 | 8 | Publish, article, preflight, repo public | laptop and one short A100 job | half a day | the submission |
 
-Steps 4 and 5 do not depend on each other. Step 6 needs step 5 only for seeds 2 and 3.
+Steps 4 and 5 do not depend on each other, and step 5 needs no freeze: start it as soon as the
+sweep is in, while steps 1 to 3 happen on the laptop. Step 6 needs step 5 only for seeds 2 and 3.
 
 ## Step 0. Update the laptop
 
@@ -46,6 +51,20 @@ lift sweep --adapter adapter-indicalign-stress-s1 --judge-only
 The second line needs `ANTHROPIC_API_KEY` and `LIFT_JUDGE_MAX_USD` in that window. It submits
 Message Batches and waits; if it exits 3, run it again to collect. If the sweep job itself ended
 with a setting left partial, `lift select` (step 3) names the cell and its remedy.
+
+Then, with no API key needed:
+
+```powershell
+lift sweep --adapter adapter-indicalign-stress-s1 --breakdown
+```
+
+It counts the dev records and writes `outputs\metrics\sweep_breakdown.md` and `.json`: every
+label against the unclear flags and the token cap, CAST's gate per set and language and against
+the label the unrepaired adapter got on the same prompt, and each setting paired with the
+adapter. Counts only, no output text, and no rule reads it (decisions item 87). It answers two
+questions the sweep's log left open: how many "harmful" labels sit on degenerate outputs (CAST at
+2.0 above all, and each adapter), and which prompts the gate fired on. Send it with the snapshot
+at the end of this file.
 
 ## Step 2. Validation round 1, then the judge decision
 
@@ -93,8 +112,19 @@ lift select --adapter adapter-indicalign-stress-s1
 Read `outputs/metrics/selection.md` before freezing. It has every setting's Hindi harmful rate,
 hard-benign refusal rate, win rate and Belebele-hi, which conditions it met, and the winner overall
 and per family. Stop and send it to me if the status is `incomplete`, or if the overall verdict is
-`reject`: both are results, but what gets frozen then deserves a second look. `lift select` also
-prints the freeze steps; they are these, one per line:
+`reject`: both are results, but what gets frozen then deserves a second look.
+
+What it should print, from the sweep's log (Nov 10): Hindi harmful 11, 22 and 51 of 172 for
+WiSE-FT 0.25, 0.50 and 0.75, 59, 59 and 88 for ReSta 0.10, 0.25 and 0.40, 54, 54 and 152 for CAST
+0.5, 1.0 and 2.0, and 4 with the gate always on, against the adapter's 84 and stock's 24. Only
+WiSE-FT 0.25 is within 3 points of stock on Belebele-hi (0.600 against 0.625), so it is the
+overall winner whatever the win rates are: "repair" if its own win rate is 0.26 or more, else
+"reject" with the same setting frozen. ReSta and CAST have no eligible setting, so each family's
+frozen setting comes with verdict "reject": ReSta 0.10 and CAST 0.5, unless a win rate splits
+their ties with ReSta 0.25 and CAST 1.0. If `selection.md` shows other counts or another overall
+winner, stop and send it to me before freezing: either I misread the log or a cell changed.
+
+`lift select` also prints the freeze steps; they are these, one per line:
 
 ```powershell
 git add configs/frozen_recipe.json
@@ -112,11 +142,13 @@ After the tag the recipe is fixed: `lift select --refreeze` is refused, by desig
 The stress recipe has one seed, so there is nothing more to register: the three frozen settings
 are already in `configs/variants.yaml`.
 
-## Step 4. GPU job 1: the dev held-out scores, then the core finals
+## Step 4. GPU job 1: the core finals
 
 Replace `<WISEFT>`, `<RESTA>` and `<CAST>` with the three names under `frozen` in
 `outputs/metrics/selection.json` (the overall winner is one of them). The job is long, so build it
-in a variable:
+in a variable. If step 5's job already ran the dev held-out lines, leave the `$dev` line out and
+drop `$dev;` from the last line: each of its lines would find its scores done, and still cost a
+model load.
 
 ```powershell
 $dev = "lift heldout-loss --variant adapter-indicalign-stress-s1; lift belebele --variant adapter-indicalign-stress-s1 --split dev --langs hi en; lift heldout-loss --variant wiseft-l0.25-adapter-indicalign-stress-s1; lift heldout-loss --variant wiseft-l0.50-adapter-indicalign-stress-s1; lift heldout-loss --variant wiseft-l0.75-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.10-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.25-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.40-adapter-indicalign-stress-s1; lift heldout-loss --variant cast-m0.5-adapter-indicalign-stress-s1; lift heldout-loss --variant cast-m1.0-adapter-indicalign-stress-s1; lift heldout-loss --variant cast-m2.0-adapter-indicalign-stress-s1; lift heldout-loss --variant castalways-m1.0-adapter-indicalign-stress-s1"
@@ -140,11 +172,24 @@ lift remote --gpu A100 --max-hours 7 --job "lift sync pull; $dev; $core; $bt"
 - Each final is about 40 to 45 minutes by the dev timings (17 minutes for a dev variant with half
   the prompts), so five variants are about 4 hours. Each line pushes its outputs when it ends.
 
-## Step 5. GPU job 2: seeds 2 and 3 of the standard adapters
+## Step 5. GPU job 2: the dev held-out scores, then seeds 2 and 3 of the standard adapters
+
+Nothing here needs the freeze, so it can run while steps 1 to 3 happen on the laptop.
 
 ```powershell
-lift remote --gpu A100 --max-hours 4 --job "lift sync pull; lift train --candidate aya --recipe standard --seed 2; lift train --candidate aya --recipe standard --seed 3; lift train --candidate indicalign --recipe standard --seed 2 --drop-unfit; lift train --candidate indicalign --recipe standard --seed 3 --drop-unfit"
+$dev = "lift heldout-loss --variant adapter-indicalign-stress-s1; lift belebele --variant adapter-indicalign-stress-s1 --split dev --langs hi en; lift heldout-loss --variant wiseft-l0.25-adapter-indicalign-stress-s1; lift heldout-loss --variant wiseft-l0.50-adapter-indicalign-stress-s1; lift heldout-loss --variant wiseft-l0.75-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.10-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.25-adapter-indicalign-stress-s1; lift heldout-loss --variant resta-a0.40-adapter-indicalign-stress-s1"
+$train = "lift train --candidate aya --recipe standard --seed 2; lift train --candidate aya --recipe standard --seed 3; lift train --candidate indicalign --recipe standard --seed 2 --drop-unfit; lift train --candidate indicalign --recipe standard --seed 3 --drop-unfit"
+$cast = "lift heldout-loss --variant cast-m0.5-adapter-indicalign-stress-s1; lift heldout-loss --variant cast-m1.0-adapter-indicalign-stress-s1; lift heldout-loss --variant cast-m2.0-adapter-indicalign-stress-s1; lift heldout-loss --variant castalways-m1.0-adapter-indicalign-stress-s1"
+lift remote --gpu A100 --max-hours 4.5 --job "lift sync pull; $dev; $train; $cast"
 ```
+
+- The first eight lines take a few minutes and give the stress adapter's own dev Belebele-hi and
+  the held-out loss of the adapter and of the WiSE-FT and ReSta settings.
+- CAST's held-out lines go last: held-out scoring through the gate has never run on a GPU, and a
+  line that exits 1 or 2 stops the job. Last, a failure there costs nothing that came before it.
+- The held-out scores feed the secondary selection (decisions item 73), which freezes nothing.
+  `lift select` prints it beside the primary one once every setting has its score; before that it
+  says which are missing and the primary selection is not affected.
 
 Measured on seed 1: aya 17 minutes, indicalign 61 minutes. Then on the laptop:
 
@@ -221,8 +266,8 @@ Resources panel for the real figure.
 
 | Job | Hours | Units |
 | --- | --- | --- |
-| Step 4: held-out lines and five finals | about 4.2 | about 33 |
-| Step 5: four training runs | about 2.8 | about 22 |
+| Step 4: five finals | about 4.0 | about 31 |
+| Step 5: dev held-out lines and four training runs | about 3.0 | about 24 |
 | Step 6: six finals | about 4.6 | about 36 |
 | Step 8: build the repaired model | about 0.4 | about 3 |
 | Total | about 12 | about 94 |
@@ -259,8 +304,9 @@ git -C ..\lift-results commit -m "Metrics snapshot"
 git -C ..\lift-results push origin results-sweep
 ```
 
-The `git worktree add` line is needed once. The Python line counts labels of dev cells only: no
-final-split label is read before the freeze. Copy nothing else: `outputs\metrics\auditkit\` also
+The `git worktree add` line is needed once. The first two `Copy-Item` lines take
+`sweep_breakdown.json` and `.md` with them (step 1). The Python line counts labels of dev cells
+only: no final-split label is read before the freeze. Copy nothing else: `outputs\metrics\auditkit\` also
 holds `*.full.json` records with every completion, and nothing under `outputs\generations`,
 `outputs\judgements` or `outputs\utility` may go into git. A `Copy-Item` line whose folder does
 not exist yet (held-out loss before step 4) just errors; go on.

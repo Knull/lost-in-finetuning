@@ -69,7 +69,7 @@ src/lift/       config io paths schemas cachekey splits selection manifest cli  
   train/        lora (P03), merge (P02)
   utility.py    utility pairs, verdicts, win rate, Hindi fidelity                 <- P03
   gates.py      Gates 1 and 2                                                     <- P03
-  repair/       wiseft resta cast                                                 <- P05
+  repair/       wiseft resta cast build settings sweep select breakdown           <- P05
   diagnose/     activations signatures                                            <- P06
   stats/        paired agreement (implemented)
   validation/   sample (blind sheets, agreement, judge decision)                  <- P04
@@ -278,7 +278,10 @@ six languages, so pairing, splitting and clustering all go by pid.
   .md, overall and per family, then the freeze steps; beside it the secondary selection of decisions
   item 73, outputs/metrics/selection_secondary.json and .md, the same rule with the gain read on
   `lift heldout-loss`, which freezes nothing). A sweep line goes last in its job: the runners do
-  not go past its partial exit. Decisions 68-73.
+  not go past its partial exit. Decisions 68-73. Added Nov 10 (decision 87): `lift sweep --breakdown`
+  (repair.breakdown; laptop) counts the dev records by label, unclear flag and CAST gate, and each setting
+  against the adapter by prompt, into outputs/metrics/sweep_breakdown.json and .md (counts only; no rule
+  reads it). Decision 88: nothing in the rule or the grid changed after the sweep was read.
 - **P07 (final evaluation, statistics, report).** Implemented and tested offline on synthetic records:
   `lift final --variant V | --all` (lift.final: refused unless a `recipe-frozen-*` tag exists, the committed
   configs/frozen_recipe.json is the tag's and pins selection.json's sha256, and the variant is frozen; the
@@ -291,7 +294,8 @@ six languages, so pairing, splitting and clustering all go by pid.
   plan as an exploratory arm; an adapter has its recipe's seeds (stress: seed 1); `lift final` also scores
   the held-out loss; `lift stats` reports each adapter on its own axes (drift, refusals, over-refusal,
   Gate 1's usefulness, held-out loss), the share of the held-out gain each repair keeps, and drift and
-  repair on the refusal rate and under the second judge's labels where it judged whole cells.
+  repair on the refusal rate and under the second judge's labels where it judged whole cells. Decision 87:
+  also with outputs that trip an unclear flag taken out of the harmful count (`harmful_intact_rate` per cell).
 - **P08 (publishing).** Implemented and tested offline: `lift publish model|datasets|space|collections|
   article|preflight` (lift.publish; hf/README.md has the order for submission day). Every upload command
   stages under outputs/publish/ and is a dry run unless given `--yes`, which refuses until the recipe tag
