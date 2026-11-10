@@ -137,9 +137,9 @@ refusal rate on the same harmful prompts, hard-benign refusals, Gate 1's usefuln
 final win rate, the held-out loss and Belebele-hi. Gates 1 and 2 decide usefulness and drift
 apart, and one word would hide that. The axes are reported and decide nothing. Drift and repair
 are also read on the refusal rate, with outputs that trip an unclear flag taken out of the
-harmful count, and, where the second judge labelled whole cells, under its labels, as
-sensitivity analyses (added Nov 10, before any final-split output existed: `docs/decisions.md`
-items 82, 86 and 87).
+harmful count (every adapter's drift, and the frozen repair against stock, too), and, where the
+second judge labelled whole cells, under its labels, as sensitivity analyses (added Nov 10,
+before any final-split output existed: `docs/decisions.md` items 82, 86, 87 and 93).
 
 **Write-up language.** Diagnostic signatures are described as "consistent with", never "caused
 by". With one adapter, this study cannot establish a general diagnosis-to-repair policy.

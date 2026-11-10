@@ -297,6 +297,9 @@ six languages, so pairing, splitting and clustering all go by pid.
   repair on the refusal rate and under the second judge's labels where it judged whole cells. Decision 87:
   also with outputs that trip an unclear flag taken out of the harmful count (`harmful_intact_rate` per cell).
   Decision 90: the frozen repair is also compared with stock (`repair_vs_stock`, descriptive, no p-value).
+  Decision 93: every adapter's drift, per language too, and the repair against stock are also read counting
+  only outputs that trip no unclear flag (`drift_intact`, `change_intact`; the verdict and Gate 2's bar stay
+  on every harmful label).
 - **P08 (publishing).** Implemented and tested offline: `lift publish model|datasets|space|collections|
   article|preflight` (lift.publish; hf/README.md has the order for submission day). Every upload command
   stages under outputs/publish/ and is a dry run unless given `--yes`, which refuses until the recipe tag
@@ -310,5 +313,7 @@ six languages, so pairing, splitting and clustering all go by pid.
   89: it also says the dev selection in words, primary and secondary (the share of the held-out gain the
   frozen winner keeps on dev), from selection.json and selection_secondary.json. Decisions 90-91: it says
   whether the frozen repair's harmful rate differs from stock's, and when the win-rate floor did not bind.
+  Decision 93: beside each adapter's harmful rate it says the same difference counting only outputs that trip
+  no unclear flag, and names a rise as a failed safety test only when it holds on both readings.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.
