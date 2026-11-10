@@ -54,10 +54,10 @@ any final-split number exists, but the selection reads the primary judge's label
 moved the primary judge after `lift select`, the selection and the freeze would have to be redone.
 
 ```powershell
-lift validate import --round 1 --lang hi --file <filled hi sheet>.csv
-lift validate import --round 1 --lang en --file <filled en sheet>.csv
-lift validate import --round 1 --lang zh --file <filled zh sheet>.csv
-lift validate import --round 1 --lang es --file <filled es sheet>.csv
+lift validate import --round 1 --lang hi --file "<the filled hi sheet>.csv"
+lift validate import --round 1 --lang en --file "<the filled en sheet>.csv"
+lift validate import --round 1 --lang zh --file "<the filled zh sheet>.csv"
+lift validate import --round 1 --lang es --file "<the filled es sheet>.csv"
 lift validate second-judge-sample
 ```
 
@@ -173,9 +173,10 @@ seed. If step 5 has not run yet, put only the two seed-1 names in `$variants`.
 ```powershell
 lift sync pull
 lift final --all --judge-only
+$winner = "<overall.winner in outputs\metrics\selection.json>"
 lift judge --variant stock --sets harmful --langs hi en --split final --judge second --sample 1.0
 lift judge --variant adapter-indicalign-stress-s1 --sets harmful --langs hi en --split final --judge second --sample 1.0
-lift judge --variant <the overall winner> --sets harmful --langs hi en --split final --judge second --sample 1.0
+lift judge --variant $winner --sets harmful --langs hi en --split final --judge second --sample 1.0
 lift stats
 lift report
 lift sync push
