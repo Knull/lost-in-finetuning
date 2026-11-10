@@ -642,3 +642,62 @@ def test_backtranslation_judges_the_same_sampled_pids_and_resumes(fake_prompt_fi
     assert final.backtranslation("stock", final.Options(), judge=judge, translator=translator) == 0
     assert len(judge.items) == n  # resumed: nothing judged twice
     assert final.backtranslation(A.format(1), final.Options(), judge=judge, translator=translator) == 3
+
+
+# ------------------------------------------------- the safety stage for real, on the tiny model (CPU)
+
+
+@pytest.mark.torch
+def test_lift_final_runs_the_safety_stage_on_the_final_split_of_a_real_model(
+    fake_prompt_files, tiny_model_dir, monkeypatch, capsys
+):
+    """Every other test here hands lift final a stand-in for its stages. This one runs the safety stage
+    through the harness on the tiny cohere2 model: the CLI, the guard, run-dev's path on the final split
+    (three sets in six languages and Aya Red-teaming Hindi), the AuditKIT record of each cell, the state
+    file and the manifest. A second run finds the stage done."""
+    pytest.importorskip("torch")
+    pytest.importorskip("auditkit")
+    from dataclasses import replace
+
+    from test_run_commands import FakeLID, guard, judged, pin, short_runs
+
+    from lift.judge import pipeline
+    from lift.models import variants
+
+    pin(judge=True)
+    cells = final.safety_cells()
+    assert len(cells) == 19 and cells[-1] == ("redteam", "hi")
+    for set_name, lang in cells:
+        fake_prompt_files[(set_name, lang)] = [
+            make_prompt(f"{set_name[:3]}-{i}", lang, set_name, "final", text=f"question {i}")
+            for i in range(2)
+        ]
+    real_build = variants.build_variant
+    monkeypatch.setattr(
+        variants,
+        "build_variant",
+        lambda spec, *, device, dtype: replace(
+            real_build(spec, device="cpu", dtype=dtype, model_id=str(tiny_model_dir)), model_rev="b" * 40
+        ),
+    )
+    short_runs(monkeypatch)
+    monkeypatch.setattr(pipeline, "make_judge", lambda role, **kw: guard(dtype=kw.get("dtype") or "bf16"))
+    monkeypatch.setattr("lift.lang.LangID", FakeLID)
+    monkeypatch.setattr(final, "check_final", lambda name, **kw: TAG[0])  # the guard has its own tests
+    argv = ["final", "--variant", "stock", "--stages", "safety", "--device", "cpu", "--judge-device", "cpu"]
+    argv += ["--dtype", "bf16"]
+
+    assert cli.main(argv) == 0
+    assert "stock: safety 0" in capsys.readouterr().out
+    assert [judged("stock", s, lang, "final") for s, lang in cells] == [2] * 19
+    records = sorted(p.name for p in (metrics_dir() / "auditkit" / "qwen3guard" / "stock").glob("*.json"))
+    assert len(records) == 19 and "redteam_hi_final.json" in records
+    state = final.read_state("stock")
+    assert state["stages"]["safety"]["rc"] == 0
+    [manifest] = [json.loads(p.read_text()) for p in manifests_dir().glob("final_variant-*.json")]
+    assert manifest["stages"] == {"safety": 0} and manifest["frozen_tag"] == TAG[0]
+    assert manifest["gpu_hours"] > 0 and manifest["split"] == "final"
+
+    monkeypatch.setattr(variants, "build_variant", lambda *a, **kw: pytest.fail("the stage ran again"))
+    assert cli.main(argv) == 0
+    assert "stock: safety 0" in capsys.readouterr().out

@@ -1178,3 +1178,43 @@ def test_a_wrapper_without_score_logits_exits_2(stock, fake_prompt_files, monkey
     fake_prompt_files[("utility", "hi")] = [utility(1)]
     assert main(["heldout-loss", "--variant", "stock", "--device", "cpu"]) == 2
     assert not scores_dir().exists()                                     # no score file, in any precision
+
+
+@pytest.mark.torch
+def test_lift_final_scores_belebele_in_six_languages(tiny_model_dir, monkeypatch, capsys):
+    """lift final's belebele stage for real, on the tiny model: lift belebele on the final split (the guard
+    has its own tests), all six languages in one line, the state file and the manifest. tests/test_final.py
+    runs the safety stage the same way."""
+    from lift import final
+    from lift.schemas import LANGS
+
+    pin()
+    tiny_build(monkeypatch, tiny_model_dir)
+    for lang in LANGS:
+        write_belebele(lang, [*bel_rows(3, lang=lang, split="final"), bel_row(9, lang=lang, split="dev")])
+    monkeypatch.setattr(final, "check_final", lambda name, **kw: "recipe-frozen-20261110")
+    argv = ["final", "--variant", "stock", "--stages", "belebele", "--device", "cpu"]
+    assert main(argv) == 0
+    assert "stock: belebele 0" in capsys.readouterr().out
+    doc = loglik.read_metrics(metrics_dir() / "belebele" / "stock_final.json")
+    assert sorted(doc["langs"]) == sorted(LANGS) and all(c["n"] == 3 for c in doc["langs"].values())
+    assert final.read_state("stock")["stages"]["belebele"]["rc"] == 0
+    [manifest] = manifests("final_variant")
+    assert manifest["stages"] == {"belebele": 0} and manifest["split"] == "final"
+
+
+@pytest.mark.torch
+def test_lift_final_scores_the_heldout_loss_of_the_final_references(tiny_model_dir, fake_prompt_files,
+                                                                    monkeypatch, capsys):
+    """lift final's heldout stage for real (decisions item 82): lift heldout-loss on the final split."""
+    from lift import final
+
+    pin()
+    tiny_build(monkeypatch, tiny_model_dir)
+    fake_prompt_files[("utility", "hi")] = [*(utility(i, split="final") for i in range(3)), utility(8)]
+    monkeypatch.setattr(final, "check_final", lambda name, **kw: "recipe-frozen-20261110")
+    assert main(["final", "--variant", "stock", "--stages", "heldout", "--device", "cpu"]) == 0
+    assert "stock: heldout 0" in capsys.readouterr().out
+    nll = loglik.read_metrics(metrics_dir() / "heldout_loss" / "stock_final.json")
+    assert nll["n_rows"] == 3 and nll["split"] == "final"
+    assert final.read_state("stock")["stages"]["heldout"]["rc"] == 0
