@@ -1,11 +1,13 @@
-"""Gradio Space: the verdicts, per-language heatmaps, utility retained and redacted examples of the
+"""Gradio Space: the verdicts, per-language heatmaps, utility retained and a few cut examples of the
 retain / repair / reject test, read only from the public aggregate logs dataset (no model loading).
 
-Data: ``aggregates/final_report.json`` and ``examples/refusals.jsonl`` of the logs dataset named in
-``space_config.json`` (``lift publish space`` writes it), or a local folder with the same layout in
-``LIFT_SPACE_DATA`` (for testing). Every number shown comes from final_report.json, formatted by each
-column's ``format`` exactly as the article does (``fmt`` is a copy of the project's formatter in
-src/lift/publish/inputs.py: the Space imports nothing from the project).
+Data: ``aggregates/final_report.json`` of the logs dataset named in ``space_config.json`` (``lift publish
+space`` writes it), and ``examples.json`` beside this file: a few outputs, each cut when the Space was built
+to at most MAX_WORDS words and MAX_CHARS characters plus ``[redacted]``, whatever its label. ``redact``
+cuts each one again before it is shown, so no longer text can appear here. A local folder with the same
+layout in ``LIFT_SPACE_DATA`` replaces both (for testing). Every number shown comes from
+final_report.json, formatted by each column's ``format`` exactly as the article does (``fmt`` is a copy of
+the project's formatter in src/lift/publish/inputs.py: the Space imports nothing from the project).
 """
 
 from __future__ import annotations
@@ -13,14 +15,22 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
 REPORT = "aggregates/final_report.json"
-EXAMPLES = "examples/refusals.jsonl"
+EXAMPLES = "examples.json"
 MAX_WORDS = 10
+MAX_CHARS = 59
+MARK = "[redacted]"
 NOT_RUN = "not run"
+# Scripts written without spaces between words: two characters count as one word there.
+_UNSPACED = re.compile(
+    "[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+    "\U00020000-\U0002fa1f]"
+)
 
 
 # A copy of the project's fmt (src/lift/publish/inputs.py); tests/test_publish_space_notebook.py checks it.
@@ -98,24 +108,35 @@ def _fetch(name: str) -> Path | None:
 
 
 def load_data() -> dict[str, Any]:
-    report_path, examples_path = _fetch(REPORT), _fetch(EXAMPLES)
+    report_path = _fetch(REPORT)
     report = json.loads(report_path.read_text(encoding="utf-8")) if report_path else None
-    examples = []
-    if examples_path:
-        examples = [
-            json.loads(line)
-            for line in examples_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-    return {"report": report, "examples": examples}
+    local = os.environ.get("LIFT_SPACE_DATA")
+    examples_path = (Path(local) if local else HERE) / EXAMPLES
+    examples = json.loads(examples_path.read_text(encoding="utf-8")) if examples_path.is_file() else []
+    return {"report": report, "examples": examples if isinstance(examples, list) else []}
 
 
-def redact(text: str, label: str | None) -> str:
-    """Refusals are shown as they are; anything else is cut to MAX_WORDS words and marked."""
-    if label == "refusal":
-        return text
-    words = str(text).split()
-    return " ".join(words[:MAX_WORDS]) + " [redacted]"
+# A copy of the project's cut (src/lift/publish/space.py); tests/test_publish_space_notebook.py checks it.
+def redact(text: Any) -> str:
+    """The start of ``text``, then ``[redacted]``, whatever its label: at most MAX_WORDS words (two
+    characters count as a word in a script written without spaces) and at most MAX_CHARS characters, ending
+    on a whole word unless the first word alone is longer."""
+    kept: list[str] = []
+    budget, room = MAX_WORDS, MAX_CHARS
+    for word in str(text).removesuffix(MARK).split():
+        if budget <= 0:
+            break
+        cost = max(1, -(-len(_UNSPACED.findall(word)) // 2))
+        if cost > budget:
+            word, cost = word[: 2 * budget], budget
+        if len(word) > room:  # no room left for the whole word: only a first word is cut inside
+            if not kept:
+                kept.append(word[:room])
+            break
+        kept.append(word)
+        budget -= cost
+        room -= len(word) + 1
+    return f"{' '.join(kept)} {MARK}".strip()
 
 
 def verdict_markdown(report: dict | None) -> str:
@@ -200,7 +221,8 @@ def example_rows(
                 e.get("lang", ""),
                 e.get("set", ""),
                 e.get("pid", ""),
-                redact(e.get("refusal_text") or "", e.get("label")),
+                e.get("label") or "not judged",
+                redact(e.get("text") or ""),
             ]
         )
     return rows
@@ -221,11 +243,17 @@ def build_ui(data: dict[str, Any] | None = None):
         with gr.Tab("Utility retained"):
             head, rows = table_rows(report, "utility")
             gr.Dataframe(value=rows, headers=head or None)
-        with gr.Tab("Example refusals"):
+        with gr.Tab("Examples (cut)"):
+            gr.Markdown(
+                f"The first words of a few outputs, each cut to at most {MAX_WORDS} words and marked "
+                f"`{MARK}`, whatever its label. The full outputs are in the gated dataset only."
+            )
             langs = sorted({e.get("lang") for e in examples if e.get("lang")})
             pick = gr.Dropdown(choices=["all", *langs], value="all", label="language")
             table = gr.Dataframe(
-                value=example_rows(examples), headers=["variant", "lang", "set", "pid", "text"], wrap=True
+                value=example_rows(examples),
+                headers=["variant", "lang", "set", "pid", "label", "text"],
+                wrap=True,
             )
             pick.change(lambda x: example_rows(examples, None if x == "all" else x), pick, table)
     return demo

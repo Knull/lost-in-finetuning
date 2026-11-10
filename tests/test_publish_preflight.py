@@ -1,7 +1,7 @@
 """lift publish preflight on throwaway git repos: secrets, raw completions, notebook outputs and forbidden
-paths, in the tracked files and in the history of every ref of origin, and any run of an output labelled
-harmful on this machine (which must have some). Fake secrets and harmful texts are assembled at run time,
-so no literal one is in this file (the preflight itself would flag it)."""
+paths, in the tracked files and in the history of every ref of origin, and any run of any model output on
+this machine, whatever its label (decisions item 62; the machine must have some). Fake secrets and
+outputs are assembled at run time, so no literal one is in this file (the preflight itself would flag it)."""
 
 from __future__ import annotations
 
@@ -22,8 +22,9 @@ FAKE_GITHUB = "ghp_" + "x1Y" * 13
 HARMFUL = " ".join(f"preflightfake{i:02d}" for i in range(22)) + " " + "unsafe marker " * 3
 
 
-def harmful_tree(text: str = HARMFUL, *, label: str = "harmful") -> None:
-    """One generation judged ``label`` by the primary judge, and validation round 1 (labels here)."""
+def harmful_tree(text: str = HARMFUL, *, label: str = "refusal") -> None:
+    """One generation judged ``label`` by the primary judge, and validation round 1 (labels here). The
+    default label is a refusal: the guard reads the text, not the label."""
     from lift.publish.datasets import role_dir
 
     key = sha256_text(text)
@@ -121,16 +122,14 @@ def test_text_of_a_harmful_output_is_found(repo):
     windows = {preflight._norm(harmful)[: preflight.WINDOW]}
     (repo / "pasted.md").write_text("an issue quoting\n" + harmful.replace(" ", "\n  ") + "\n")
     git(repo, "add", "-A")
-    assert kinds(preflight.run(repo, history=False, windows=windows)) == [
-        "text of an output labelled harmful"
-    ]
+    assert kinds(preflight.run(repo, history=False, windows=windows)) == ["text of a model output"]
 
 
 def test_this_repo_passes_and_cli_prints_the_steps(capsys):
     harmful_tree()
     assert cli.main(["publish", "preflight", "--no-history"]) == 0
     out = capsys.readouterr().out
-    assert "gh repo edit" in out and "1 outputs labelled harmful" in out
+    assert "gh repo edit" in out and "text of the 1 model outputs on this machine" in out
     assert "NOT ENOUGH TO MAKE THE REPO PUBLIC" in out and "gh issue list" in out
 
 
@@ -150,31 +149,58 @@ def test_a_fake_marked_later_is_allowed_in_the_history_too(repo):
 
 
 def test_a_machine_without_outputs_fails(capsys):
-    with pytest.raises(PublishError, match="no harmful outputs found on this machine.*lift sync pull"):
+    with pytest.raises(PublishError, match="no model outputs found on this machine.*lift sync pull"):
         preflight.load_windows()
     assert cli.main(["publish", "preflight", "--no-history"]) == 1
     assert "lift sync pull" in capsys.readouterr().err
 
 
-def test_judgements_without_a_harmful_text_here_fail():
-    harmful_tree(label="refusal")
-    with pytest.raises(PublishError, match="no output labelled harmful"):
+@pytest.mark.parametrize("label", ["harmful", "refusal", "benign", "unclear", "anything"])
+def test_an_output_is_checked_whatever_its_label(repo, label):
+    """Decisions item 62: for most outputs the label is one automatic judge's, so no label clears a text."""
+    harmful_tree(label=label)
+    windows, n, gone = preflight.load_windows()
+    assert n == 1 and windows and gone == 0
+    (repo / "notes.md").write_text("quoted: " + HARMFUL[40:200] + "\n")
+    git(repo, "add", "-A")
+    assert kinds(preflight.run(repo, history=False)) == [preflight.OUTPUT_TEXT]
+
+
+def test_outputs_too_short_for_a_window_fail():
+    harmful_tree("a short answer")
+    with pytest.raises(PublishError, match="none of 60 characters or more"):
         preflight.load_windows()
 
 
-def test_a_harmful_output_whose_generation_is_missing_fails():
+def test_a_judged_output_whose_generation_is_missing_fails():
+    from lift.publish.datasets import role_dir
+
     harmful_tree()
-    for f in paths.generations_dir().rglob("*.jsonl"):
-        f.unlink()
-    with pytest.raises(PublishError, match="1 of 1 outputs labelled harmful have no generation"):
+    other = paths.judgements_dir() / role_dir("second") / "adapter-aya-std-s1" / "redteam_hi_dev.jsonl"
+    write_jsonl(
+        other, [{"key": sha256_text("elsewhere"), "pid": "p", "label": "refusal", "output_sha": "0" * 64}]
+    )
+    with pytest.raises(
+        PublishError, match=r"1 judged outputs have no generation on this machine \(e\.g\. in"
+    ):
         preflight.load_windows()
+
+
+def test_a_window_of_few_distinct_characters_is_no_ones_text():
+    """A rule of dashes or a repeated syllable matches a tokenizer's vocabulary and every table rule: such
+    a window is left out, and a text of ordinary words keeps all of its windows."""
+    assert preflight.windows_of(["-" * 300, "ha " * 100, "=-" * 150]) == set()
+    mixed = HARMFUL + " " + "-" * 200
+    windows = preflight.windows_of([mixed])
+    assert windows and all(len(set(w)) >= preflight.MIN_DISTINCT for w in windows)
+    assert preflight.windows_of([HARMFUL]) <= windows | {preflight._norm(HARMFUL)[-preflight.WINDOW :]}
 
 
 def test_run_loads_the_windows_from_this_machine(repo):
     harmful_tree()
     (repo / "notes.md").write_text("quoted: " + HARMFUL[40:200] + "\n")
     git(repo, "add", "-A")
-    assert kinds(preflight.run(repo, history=False)) == [preflight.HARMFUL_TEXT]
+    assert kinds(preflight.run(repo, history=False)) == [preflight.OUTPUT_TEXT]
 
 
 # ------------------------------------------------------------------- P08-R1-14 the whole output, any size
@@ -187,7 +213,7 @@ def test_any_90_characters_of_a_harmful_output_are_found(repo, part):
     piece = {"start": norm[:90], "tail": norm[-90:], "middle": norm[47:137]}[part]
     (repo / "pasted.md").write_text("an issue quoting\n" + piece.replace(" ", "\n   ") + "\n")
     git(repo, "add", "-A")
-    assert kinds(preflight.run(repo, history=False)) == [preflight.HARMFUL_TEXT]
+    assert kinds(preflight.run(repo, history=False)) == [preflight.OUTPUT_TEXT]
 
 
 def test_a_short_quote_is_not_a_finding(repo):
@@ -206,7 +232,7 @@ def test_a_large_file_is_scanned_in_chunks(repo, monkeypatch):
         filler + "\n" + preflight._norm(HARMFUL)[100:200] + "\n" + filler + " " + FAKE_HF
     )
     git(repo, "add", "-A")
-    assert kinds(preflight.run(repo, history=False)) == ["Hugging Face token", preflight.HARMFUL_TEXT]
+    assert kinds(preflight.run(repo, history=False)) == ["Hugging Face token", preflight.OUTPUT_TEXT]
 
 
 def test_windows_in_matches_has_window_across_every_cut(monkeypatch):
@@ -225,7 +251,7 @@ def test_an_escaped_text_in_json_is_found(repo):
     multiline = HARMFUL.replace(" ", "\n")  # JSON writes these newlines as \n escapes
     (repo / "cells.json").write_text(json.dumps({"note": multiline[30:200]}, ensure_ascii=True))
     git(repo, "add", "-A")
-    assert kinds(preflight.run(repo, history=False)) == [preflight.HARMFUL_TEXT]
+    assert kinds(preflight.run(repo, history=False)) == [preflight.OUTPUT_TEXT]
 
 
 # ------------------------------------------------------------------- P08-R1-23 notebooks and more secrets
@@ -363,7 +389,7 @@ def test_a_normalised_copy_of_a_harmful_output_is_found(case):
     assert output != copy
     windows = preflight.windows_of([output])
     found = preflight.scan_text("pasted from an editor:\n" + copy + "\n", "notes.html", "tree", windows)
-    assert kinds(found) == [preflight.HARMFUL_TEXT]
+    assert kinds(found) == [preflight.OUTPUT_TEXT]
 
 
 @pytest.mark.parametrize("case", sorted(UNICODE_CASES))
@@ -415,15 +441,15 @@ def test_a_harmful_output_that_repeats_its_prompt_does_not_flag_the_prompt():
     for text in (PROMPT, PROMPT_EN, json.dumps({"text": PROMPT, "text_en": PROMPT_EN})):
         assert preflight.scan_text(text, "harmful/hi.jsonl", "staged", windows) == []
     # the completion's own text is still caught: its continuation, and a run across the echo
-    assert kinds(preflight.scan_text(HARMFUL[:95], "a.md", "staged", windows)) == [preflight.HARMFUL_TEXT]
+    assert kinds(preflight.scan_text(HARMFUL[:95], "a.md", "staged", windows)) == [preflight.OUTPUT_TEXT]
     across = PROMPT[-40:] + ": " + HARMFUL[:55]
-    assert kinds(preflight.scan_text(across, "b.md", "staged", windows)) == [preflight.HARMFUL_TEXT]
+    assert kinds(preflight.scan_text(across, "b.md", "staged", windows)) == [preflight.OUTPUT_TEXT]
 
 
 def test_without_the_prompt_files_every_window_stays():
     harmful_tree("Sure. " + PROMPT + ": " + HARMFUL)
     windows, _n, _gone = preflight.load_windows()
-    assert kinds(preflight.scan_text(PROMPT, "p.md", "staged", windows)) == [preflight.HARMFUL_TEXT]
+    assert kinds(preflight.scan_text(PROMPT, "p.md", "staged", windows)) == [preflight.OUTPUT_TEXT]
 
 
 # ---------------------------------------------------- P08-R2-13 judgement and utility records are raw

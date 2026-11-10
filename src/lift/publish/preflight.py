@@ -9,26 +9,29 @@ since making a repo public publishes its history too), holds:
 - a raw completion: a JSON line shaped like a GenerationRecord (key, variant, output) or an AuditKIT
   record that keeps outputs, a JudgementRecord line that keeps the judge's raw output, or a
   UtilityVerdict line; or any 60-character window (taken every 30 characters, so any run of 90 characters
-  or more is caught) of an output that a judge or human labelled harmful in this machine's outputs/.
+  or more is caught) of any model output in this machine's outputs/, whatever its label (decisions
+  item 62: for about 90% of outputs the label is Qwen3Guard's alone, so the guard reads content, never
+  labels). A window of fewer than MIN_DISTINCT distinct characters is no one's text (a rule of dashes, a
+  repeated syllable; a tokenizer's vocabulary holds such runs) and is left out.
   Both sides are normalised the same way (``_norm``: NFKC, format characters such as zero-width spaces,
   joiners and soft hyphens removed, case folded, whitespace collapsed), so an editor's Unicode form, a
   change of case or an inserted zero-width character does not hide a copy. JSON, JSONL, notebook and CSV
   files are also scanned as their decoded string values, and any text with HTML entities also unescaped,
   so an escaped text is found too. A window that is also a run of a prompt text (``data/prompts``, any
-  language, the English source too) is dropped: prompts are public by design, and a harmful output
-  that restates its prompt must not block the prompt set. Only the echoed run goes: a window that
-  reaches into the completion's own text stays;
+  language, the English source too) is dropped: prompts are public by design, and an output that
+  restates its prompt must not block the prompt set. Only the echoed run goes: a window that reaches
+  into the completion's own text stays;
 - a notebook committed with outputs or execution counts (a Colab run saved with its results);
 - a path that must never be committed: outputs/, data/ outside data/splits/, validation sheets, labels
   and keys, model weights, .env, *.token, kaggle.json.
 
 Every text blob is scanned, however large (a big one in chunks, the blobs streamed one at a time from
 ``git cat-file``); only binary blobs are path-checked.
-The text check needs this machine's outputs: ``load_windows`` refuses when there are no judgements here,
-or no output labelled harmful whose text is here (``lift sync pull`` first), so the check is never a
-silent no-op. GitHub publishes every branch, tag and pull-request ref of the remote, not only the local
-ones: the CLI fetches them all first (``fetch_public_refs``), and the steps list what a person must still
-read by hand (PR and issue text, Actions logs).
+The text check needs this machine's outputs: ``load_windows`` refuses when there are no generations
+here, or a judgement names a key with no generation here (``lift sync pull`` first), so the check is
+never a silent no-op. GitHub publishes every branch, tag and pull-request ref of the remote, not only
+the local ones: the CLI fetches them all first (``fetch_public_refs``), and the steps list what a person
+must still read by hand (PR and issue text, Actions logs).
 
 A finding names the file, line and kind, never the matched text. A line holding ``preflight: allow``
 is skipped (for a documented fake in a test). When it passes it prints the steps to make the repo public.
@@ -95,7 +98,8 @@ FORBIDDEN_PATHS = (
 WINDOW = 60
 STRIDE = 30  # windows start every STRIDE characters, so any run of WINDOW + STRIDE characters holds one
 CHUNK_CHARS = 8 << 20  # a longer text is scanned a chunk at a time (windows_in), never skipped
-HARMFUL_TEXT = "text of an output labelled harmful"
+MIN_DISTINCT = 8  # a window of fewer distinct characters (a rule of dashes, "ha ha ha") is no one's text
+OUTPUT_TEXT = "text of a model output"
 NOTEBOOK_OUTPUTS = "notebook with outputs or execution counts"
 JSON_SUFFIXES = (".json", ".jsonl", ".ipynb")
 
@@ -256,8 +260,11 @@ def relativised_note(done: dict[str, int]) -> list[str]:
         return []
     return [
         f"{sum(done.values())} absolute local path(s) staged repo-relative in {', '.join(sorted(done))}"
-        + (" (selection.json's bytes then differ from the sha256 the recipe pins)"
-           if any(f.endswith("selection.json") for f in done) else "")
+        + (
+            " (selection.json's bytes then differ from the sha256 the recipe pins)"
+            if any(f.endswith("selection.json") for f in done)
+            else ""
+        )
     ]
 
 
@@ -308,7 +315,8 @@ def _modes(text: str) -> tuple[str, ...]:
 
 def windows_of(texts: Iterable[str]) -> set[str]:
     """The WINDOW-character windows of each text (normalised, ``_norm``) starting every STRIDE characters,
-    plus its last window: a copy of any WINDOW + STRIDE characters of a text holds one of them whole."""
+    plus its last window: a copy of any WINDOW + STRIDE characters of a text holds one of them whole. A
+    window of fewer than MIN_DISTINCT distinct characters is left out (the module docstring says why)."""
     out: set[str] = set()
     for t in texts:
         for mode in _modes(t):
@@ -317,7 +325,7 @@ def windows_of(texts: Iterable[str]) -> set[str]:
                 continue
             out.update(n[s : s + WINDOW] for s in range(0, len(n) - WINDOW + 1, STRIDE))
             out.add(n[-WINDOW:])
-    return out
+    return {w for w in out if len(set(w)) >= MIN_DISTINCT}
 
 
 def has_window(text: str, windows: set[str] | frozenset) -> bool:
@@ -353,46 +361,45 @@ def _in_flat(flat: str, windows: set[str] | frozenset) -> bool:
     return bool(windows) and any(flat[s : s + WINDOW] in windows for s in range(0, len(flat) - WINDOW + 1))
 
 
-def harmful_windows() -> set[str]:
-    """The windows of every output labelled harmful in this machine's outputs/ (may be empty: the
-    publish paths use ``load_windows``, which refuses an empty set)."""
-    from lift.publish.datasets import harmful_record
+def output_windows() -> set[str]:
+    """The windows of every model output in this machine's outputs/, whatever its label (may be empty:
+    the publish paths use ``load_windows``, which refuses an empty set)."""
+    from lift.publish.datasets import output_record
 
-    _, texts = harmful_record()
-    return windows_of(texts)
+    return windows_of(output_record().texts)
 
 
 def load_windows() -> tuple[set[str], int, int]:
-    """(windows, number of harmful outputs they come from, number of outputs labelled harmful whose text
-    is no longer on this machine), or PublishError when this machine cannot say which texts are harmful:
-    no judgements here, outputs labelled harmful whose generations are not here, or no window at all. A
-    check against an empty set would pass anything."""
-    from lift.publish.datasets import harmful_outputs, judgement_files
+    """(windows, number of outputs they come from, number of judged outputs whose text is no longer on
+    this machine), or PublishError when this machine cannot say what the outputs are: no generations
+    here, judgements of keys whose generations are not here, or no window at all. A check against an
+    empty set would pass anything."""
+    from lift.publish.datasets import output_record
 
     pull = "run `lift sync pull` first (outputs/ and validation/ come only from the private runs repo)"
-    files = judgement_files()
-    if not files:
+    found = output_record()
+    if not found.texts:
         raise PublishError(
-            f"no harmful outputs found on this machine (no judgements in {paths.judgements_dir().name}/), so "
-            f"the text check would be empty: {pull}"
+            f"no model outputs found on this machine (no generations in {paths.generations_dir().name}/), "
+            f"so the text check would be empty: {pull}"
         )
-    keys, texts, missing, gone = harmful_outputs()
-    if missing:
+    if found.missing:
         raise PublishError(
-            f"{len(missing)} of {len(keys)} outputs labelled harmful have no generation on this machine, so "
-            f"their text cannot be checked: {pull}"
+            f"{len(found.missing)} judged outputs have no generation on this machine (e.g. in "
+            f"{', '.join(found.missing_files[:3])}), so their text cannot be checked: {pull}, or start the "
+            "cell over with its lift restart line"
         )
-    windows = windows_of(texts)
+    windows = windows_of(found.texts)
     # P08-R2-03: a run the output copied from a prompt is public anyway (the prompt sets); a window that
     # reaches into the completion's own text is never a run of a prompt, so it stays.
     windows -= windows_in_texts(prompt_texts(), windows)
     if not windows:
         raise PublishError(
-            f"no harmful outputs found on this machine ({len(files)} judgement files, but no output labelled "
-            f"harmful of {WINDOW} characters or more beyond what it repeats of a prompt), so the text check "
-            f"would be empty: {pull}"
+            f"no model outputs found on this machine ({len(found.texts)} outputs, but none of {WINDOW} "
+            f"characters or more beyond what it repeats of a prompt), so the text check would be empty: "
+            f"{pull}"
         )
-    return windows, len(texts), gone
+    return windows, len(found.texts), found.gone
 
 
 def forbidden_path(path: str) -> bool:
@@ -563,7 +570,7 @@ def scan_text(
         decoded = decoded_text(text, path)
         for body in _bodies(text, decoded):
             if windows_in(body, windows):
-                found.append(Finding(where, path, 0, HARMFUL_TEXT))
+                found.append(Finding(where, path, 0, OUTPUT_TEXT))
                 break
     return found
 
@@ -609,7 +616,7 @@ def _binary(head: bytes) -> bool:
 
 def scan_folder(folder: Path, windows: set[str], *, where: str = "staged") -> list[Finding]:
     """Scan every text file of a staged upload as the preflight scans a tracked file (secrets, raw
-    completion records, notebooks with outputs, harmful-output windows) and for absolute local paths
+    completion records, notebooks with outputs, model-output windows) and for absolute local paths
     (``LOCAL_PATH_KIND``, a tokenizer's vocabulary aside), and every AuditKIT record (a .json under an
     ``auditkit`` folder) for redaction. Binary files (weights) are skipped."""
     found: list[Finding] = []
@@ -730,7 +737,7 @@ def fetch_public_refs(repo: Path | None = None, remote: str = "origin") -> bool:
 
 def run(repo: Path | None = None, *, history: bool = True, windows: set[str] | None = None) -> list[Finding]:
     """Every finding in the tracked files (and the history of every ref). ``windows`` None loads them with
-    ``load_windows``, which refuses a machine that cannot say which texts are harmful."""
+    ``load_windows``, which refuses a machine that does not hold the outputs to check against."""
     repo = Path(repo or paths.REPO_ROOT)
     windows = load_windows()[0] if windows is None else windows
     found: list[Finding] = []
@@ -765,7 +772,7 @@ def run(repo: Path | None = None, *, history: bool = True, windows: set[str] | N
 PUBLIC_STEPS = """\
 Steps to make the GitHub repo public (a person runs them):
   1. lift sync pull, then lift publish preflight   (it must pass on main, history included: it fetches every
-     branch, tag and pull-request ref of origin first, and checks against this machine's harmful outputs)
+     branch, tag and pull-request ref of origin first, and checks against every model output on this machine)
   2. Check that the runs repo is still private: lift sync check (it refuses a runs repo that is not private)
   3. Check the frozen recipe tag is pushed: git tag --list "recipe-frozen-*"; git push --tags
   4. Read by hand what GitHub also publishes and this check cannot see: every PR and issue title, body and

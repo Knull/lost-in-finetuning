@@ -40,9 +40,10 @@ not over-refusing? Every repair is measured against simply scaling the adapter d
 6. **Harmful content stays out of public view.** During the build, raw generations, judge logs
    and unrepaired adapters live only in `outputs/` (gitignored) and the private HF runs repo
    (`LIFT_RUNS_REPO`). At submission the rules require every artifact to be hosted on HF, so
-   adapters and raw logs go up as gated repos (manual approval for raw harmful completions);
-   everything else is public. Never put a harmful completion in a commit, PR, issue, printed log
-   or summary. Quote at most ~10 words, then `[redacted]`.
+   adapters and the repaired model go up as gated repos, and every output and judge log as a
+   gated repo with manual approval; everything else is public and holds no output text, whatever
+   the output's label (decisions items 14, 62, 84, 85). Never put a harmful completion in a
+   commit, PR, issue, printed log or summary. Quote at most ~10 words, then `[redacted]`.
 7. **Tests run offline on CPU.** `pytest` (which skips the `gpu` and `net` markers by default)
    passes on every commit. Model code is tested on a tiny randomly initialised cohere2 model
    built from a config (fixture `tiny_cohere2` in `tests/conftest.py`, marker `torch`), never by
@@ -73,6 +74,7 @@ src/lift/       config io paths schemas cachekey splits selection manifest cli  
   stats/        paired agreement (implemented)
   validation/   sample (blind sheets, agreement, judge decision)                  <- P04
   report/       tables figures cost                                               <- P07
+  publish/      model datasets space collect article preflight hub inputs         <- P08
   audit.py      AuditKIT record                                                   <- P02, P03
   sync.py       data/, outputs/, validation/ <-> private HF dataset repo          <- P02
 colab/          job.py (runs inside the VM) and how to use lift remote (primary GPU)
@@ -80,6 +82,7 @@ kaggle/         bootstrap.sh, runner notebook, how to run on Kaggle (backup GPU)
 prompts/        the implementation prompts and the schedule (prompts/README.md)
 validation/     guidelines.md for the human annotators
 hf/             model card, dataset cards, Space, article drafts                  <- P08
+notebooks/      acceptance_test.ipynb: the check on any Tiny Aya adapter          <- P08
 docs/           decisions.md (dated changes), toolkit-notes.md (verified APIs)
 constraints.txt exact library versions the GPU runtimes install with
 ```
@@ -288,5 +291,14 @@ six languages, so pairing, splitting and clustering all go by pid.
   the held-out loss; `lift stats` reports each adapter on its own axes (drift, refusals, over-refusal,
   Gate 1's usefulness, held-out loss), the share of the held-out gain each repair keeps, and drift and
   repair on the refusal rate and under the second judge's labels where it judged whole cells.
+- **P08 (publishing).** Implemented and tested offline: `lift publish model|datasets|space|collections|
+  article|preflight` (lift.publish; hf/README.md has the order for submission day). Every upload command
+  stages under outputs/publish/ and is a dry run unless given `--yes`, which refuses until the recipe tag
+  exists, the HF namespace is set and nothing staged is `[PENDING ...]`. The public logs hold ids, labels,
+  flags and hashes, no output or judge text; every file that would be public, and the git repo in
+  `lift publish preflight`, is scanned against the text of every model output on this machine, whatever
+  its label, dry runs included; the Space's examples are cut to 10 words when it is built. The article
+  (hf/templates/article.md -> hf/article.md) takes every number from outputs/metrics through
+  `lift.publish.inputs.Facts`. Decisions 84-85.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

@@ -18,7 +18,8 @@ repos:
   repair_params: {name: lift-repair-params, type: model, access: public}
   # One repo per unrepaired adapter, gated with automatic approval (docs/decisions.md item 14).
   adapter: {name: "lift-{adapter}", type: model, access: gated-auto}
-  # Prompt ids, labels, metadata, refusal texts and aggregate tables.
+  # Prompt ids, labels, flags, output hashes, metadata and aggregate tables: no output text, no judge
+  # text (docs/decisions.md item 62).
   logs: {name: lift-eval-logs, type: dataset, access: public}
   # Every generation and judgement, harmful ones included: gated with manual approval.
   raw: {name: lift-raw-completions, type: dataset, access: gated-manual}

@@ -2,6 +2,42 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 10, 2026 (early morning): P08 merged, and its public files brought in line with item 62
+
+P08 was built on Nov 6, before review R1. Item 62 (R1-14, Nov 8) then ruled that no output is public
+because of its label. When P08 was merged into main its code still followed its own Nov 6 rule, so it
+was changed before any upload could run: the publishing branch had never been merged, the HF namespace
+in configs/publish.yaml is still unset (`--yes` refuses without it), and no final result existed.
+
+85. **P08's publishing follows item 62; its Nov 6 rule that published refusal texts is withdrawn.**
+    - Withdrawn: the public logs carried `refusal_text` (the output, when the primary judge labelled
+      it a refusal, no judge or reader labelled it harmful, and five further conditions held) and a
+      sample of those texts for the Space, which showed refusals in full. Each condition read a label,
+      and for about 90% of outputs the label is Qwen3Guard's alone.
+    - The public logs hold ids, labels, flags and hashes (`lift.publish.datasets.LOG_FIELDS`), and no
+      output text or judge text. `JudgementRecord.raw` and `native.reason` are never read into a row. A
+      failed judgement, a back-translation verdict's too, keeps only the kind of its failure
+      (`lift.validation.score.failure_kind`).
+    - The guard reads content. Every file that would be public (the logs, the prompt sets, the Space,
+      the model and adapter repos, and the git repo in `lift publish preflight`) is scanned against the
+      60-character windows of every model output on this machine, whatever its label: outputs/generations,
+      what `lift restart` set aside, and Gate 0's runs. A dry run runs the scan too and exits 1 on a
+      finding. A run that an output copied from its prompt stays exempt (P08-R2-03: the prompt sets are
+      public). A window of fewer than 8 distinct characters is left out: a rule of dashes or a repeated
+      syllable is no one's text, and a tokenizer's vocabulary or a table rule would match it.
+    - The Space shows a few outputs of the final split, cut when it is built (`lift.publish.space.cut`):
+      at most 10 words (two characters count as a word in a script written without spaces, so a Chinese
+      or Thai cut is not a whole answer), under 60 characters, then `[redacted]`, whatever the label.
+      The cuts ship in the Space's own `examples.json`, not in the logs dataset.
+    - A redacted AuditKIT record goes into the logs only while it is its cell's record (R2-11): the
+      reporting door reads the cell as it stands, and the read hashes to the record's labels and keys
+      under the record's judge. Any other record is left out and listed with its reason.
+    - The logs also take the gate reports, the secondary selection (item 73), the judge decision and
+      the validation reports as they are: none holds an output or a judge's words.
+    - Not changed: the raw completions stay gated with manual approval (items 14 and 62), the repaired
+      model stays gated (item 84), and the completeness checks of the logs stand (human labels readable,
+      every generation judged, the second judge's coverage, no open batch).
+
 ## Nov 10, 2026 (night): the candidate not picked, each adapter's axes and held-out loss on the final split, before the recipe was frozen
 
 Decided by Arnav on the night of Nov 9-10, on Claude's review of the design, with items 72-73. Known then:

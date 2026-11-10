@@ -1,34 +1,42 @@
-"""lift publish datasets: refusal texts only, never a text any judge or human labelled harmful, never an
-output its judgement did not cover; the logs refuse an incomplete record (human labels, primary and
-second judge, open batches); raw completions gated with manual approval; only our own translations in
-the prompt sets. Every harmful text here is a made-up marker assembled at run time."""
+"""lift publish datasets: the public logs hold ids, labels, flags and hashes and no output or judge text,
+whatever the label (decisions item 62), and every staged file is checked by content against every output
+on this machine; the logs refuse an incomplete record (human labels, primary and second judge, open
+batches); an AuditKIT record goes in only while it is its cell's; raw completions gated with manual
+approval; only our own translations in the prompt sets. Every output here is a made-up marker."""
 
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from publish_fakes import no_committed_recipe, report, write_inputs, write_json, write_report  # noqa: F401
 
 from lift import paths
-from lift.io import read_jsonl, sha256_text, write_jsonl
-from lift.publish import PublishError, datasets
+from lift.io import read_jsonl, sha256_obj, sha256_text, write_jsonl
+from lift.publish import PublishError, datasets, preflight
 
 VARIANT = "adapter-aya-std-s1"
 CELL = "harmful_hi_dev"
 FILLER = "fake marker words for a harmful completion " * 3  # long enough for the 60-character windows
+LONG_REFUSAL = "REFUSAL-TEXT-K8 I am sorry, but I am not able to help with this request, " * 2
+LONG_BENIGN = "BENIGN-TEXT-K9 here is a perfectly ordinary answer about gardening in spring, " * 2
 # name -> (output, primary label, primary native safety, second judge label, human label)
 CASES = {
-    "k1": ("I cannot help with that request.", "refusal", "Safe", None, None),
+    "k1": ("REFUSAL-TEXT-K1 I cannot help with that.", "refusal", "Safe", None, None),
     "k2": ("HARMFUL-TEXT-K2 step one " + FILLER, "harmful", "Unsafe", None, None),
     "k3": ("Sorry, no. HARMFUL-TEXT-K3 " + FILLER, "refusal", "Safe", "harmful", None),
     "k4": ("I won't. HARMFUL-TEXT-K4", "refusal", "Safe", "refusal", "harmful"),
-    "k5": ("Here is a benign answer.", "benign", "Safe", None, None),
+    "k5": ("BENIGN-TEXT-K5 here is an answer.", "benign", "Safe", None, None),
     "k6": ("No. HARMFUL-TEXT-K6", "refusal", "Controversial", None, None),
     # Judged as "refusal" on an older output; the output now under the key was never judged.
     "k7": ("STALE-REGENERATED-OUTPUT never judged", "refusal", "Safe", None, None),
+    "k8": (LONG_REFUSAL, "refusal", "Safe", None, None),
+    "k9": (LONG_BENIGN, "benign", "Safe", None, None),
 }
 JUDGED_TEXT = {"k7": "I cannot help with that, sorry."}
+MARKERS = ("HARMFUL-TEXT", "STALE-REGENERATED", "REFUSAL-TEXT", "BENIGN-TEXT")
+JUDGE_ID = "q@x#bf16#strict"
 
 
 def K(name: str) -> str:
@@ -84,13 +92,54 @@ def _second_list():
     return paths.validation_dir() / "keys" / "second_judge" / "all.txt"
 
 
+def _audit_path(cell=CELL):
+    return paths.metrics_dir() / "auditkit" / datasets.role_dir("primary") / VARIANT / f"{cell}.json"
+
+
+def _audit_record(rows):
+    """A redacted AuditKIT record of the judgements ``rows``, with the hashes record_safety writes."""
+    meta = {
+        "text": "redacted",
+        "variant": VARIANT,
+        "set": "harmful",
+        "lang": "hi",
+        "split": "dev",
+        "judge": "primary",
+        "judge_id": rows[0]["judge"],
+        "labels_sha256": sha256_obj({r["pid"]: r["label"] for r in rows}),
+        "keys_sha256": sha256_obj({r["pid"]: r["key"] for r in rows}),
+        "provenance": {"dtype": ["bf16"]},
+    }
+    return {"metadata": {"lift": meta}, "samples": [{"actual_output": "[redacted sha256:ab]"}]}
+
+
 @pytest.fixture
-def outputs():
+def reporting_door(monkeypatch):
+    """lift.judge.pipeline.load_records as the logs call it, over these tests' raw cells (which carry no
+    provenance): the judgements of the cell as they stand, sorted by pid. ``calls`` records each read."""
+    calls = []
+
+    def load_records(variant, set_name, lang, split, *, judge="primary", complete=True, dtype=None):
+        calls.append(
+            {"cell": (variant, set_name, lang, split), "judge": judge, "complete": complete, "dtype": dtype}
+        )
+        path = (
+            paths.judgements_dir() / datasets.role_dir(judge) / variant / f"{set_name}_{lang}_{split}.jsonl"
+        )
+        if not path.is_file():
+            raise FileNotFoundError(f"{variant}/{set_name}_{lang}_{split}: no judgements")
+        rows = sorted(read_jsonl(path), key=lambda r: r["pid"])
+        return [SimpleNamespace(pid=r["pid"], label=r["label"], key=r["key"], judge=r["judge"]) for r in rows]
+
+    monkeypatch.setattr("lift.judge.pipeline.load_records", load_records)
+    return calls
+
+
+@pytest.fixture
+def outputs(reporting_door):
     write_jsonl(_gen_path(), [_generation(k, out) for k, (out, *_rest) in CASES.items()])
-    write_jsonl(
-        _primary_path(),
-        [_judgement(k, label, safety, "q@x#bf16#strict") for k, (_, label, safety, _s, _h) in CASES.items()],
-    )
+    primary = [_judgement(k, label, safety, JUDGE_ID) for k, (_, label, safety, _s, _h) in CASES.items()]
+    write_jsonl(_primary_path(), primary)
     write_jsonl(
         _second_path(),
         [_judgement(k, s, "", "f@x") for k, (_, _, _, s, _h) in CASES.items() if s],
@@ -105,16 +154,11 @@ def outputs():
         paths.validation_dir() / "labels" / "round1_hi.jsonl",
         [{"item_id": "r1hi-aaa", "annotator": "reader-1", "label": "harmful"}],
     )
-    audit = paths.metrics_dir() / "auditkit" / datasets.role_dir("primary") / VARIANT
-    audit.mkdir(parents=True)
-    redacted = {
-        "metadata": {"lift": {"text": "redacted"}},
-        "samples": [{"actual_output": "[redacted sha256:ab]"}],
-    }
-    (audit / f"{CELL}.json").write_text(json.dumps(redacted, indent=1))
+    _audit_path().parent.mkdir(parents=True)
+    _audit_path().write_text(json.dumps(_audit_record(primary), indent=1))
     kept = {"actual_output": "HARMFUL-TEXT-K2"}  # preflight: allow (fake)
     full = {"metadata": {"lift": {"text": "full"}}, "samples": [kept]}
-    (audit / f"{CELL}.full.json").write_text(json.dumps(full))
+    _audit_path().with_name(f"{CELL}.full.json").write_text(json.dumps(full))
     return datasets.role_dir("primary")
 
 
@@ -130,76 +174,123 @@ def _rows(up):
     return {NAME.get(r["key"], r["key"]): r for r in read_jsonl(up.folder / "labels" / f"{VARIANT}.jsonl")}
 
 
-def test_logs_keep_only_clean_refusals(outputs):
+def _windows():
+    return preflight.windows_of(datasets.output_record().texts)
+
+
+def test_the_logs_hold_no_output_text_whatever_the_label(outputs):
+    """Decisions item 62: ids, labels, flags and hashes only. A refusal's text and a benign answer stay
+    out exactly like a harmful completion, because the label is one judge's word."""
     up = datasets.build_logs()
     by = _rows(up)
     assert len(by) == len(CASES)  # every judged prompt stays in the record
-    assert {k: r["refusal_text"] for k, r in by.items()} == {
-        k: (CASES["k1"][0] if k == "k1" else None) for k in CASES
-    }
+    assert all(set(r) == set(datasets.LOG_FIELDS) for r in by.values())
+    assert {k: r["label"] for k, r in by.items()} == {k: v[1] for k, v in CASES.items()}
     assert by["k3"]["second_judge_label"] == "harmful" and by["k4"]["human_labels"] == ["harmful"]
     assert by["k1"]["output_sha"] == sha256_text(CASES["k1"][0]) and by["k1"]["judged_current_output"]
     staged = _texts(up.folder)
-    assert "HARMFUL-TEXT" not in staged and "reader-1" not in staged and "STALE-REGENERATED" not in staged
+    assert not [m for m in MARKERS if m in staged] and "reader-1" not in staged
     assert (up.folder / "auditkit" / outputs / VARIANT / f"{CELL}.json").is_file()
     assert not list(up.folder.rglob("*.full.json"))
-    assert list(read_jsonl(up.folder / "examples" / "refusals.jsonl"))[0]["key"] == K("k1")
-    assert up.repo.gated is False
-    assert "1 human labels read" in up.notes[0]
+    assert not (up.folder / "examples").exists()  # the Space cuts its own examples (lift.publish.space)
+    assert up.repo.gated is False and not up.blocked
+    assert "1 human labels read" in up.notes[0] and "no output text and no judge text" in up.notes[0]
+    card = (up.folder / "README.md").read_text()
+    assert "refusal_text" not in card and "No output text and no judge text" in card
 
 
-# ---------------------------------------------------------------------------------- P08-R1-01 output_sha
+def test_a_stale_judgement_is_marked_not_current(outputs):
+    """P08-R1-01: k7 was judged on an older output; the row says so and carries the sha that was judged."""
+    row = _rows(datasets.build_logs())["k7"]
+    assert row["judged_current_output"] is False
+    assert row["output_sha"] == sha256_text(JUDGED_TEXT["k7"])
 
 
-def test_a_stale_judgement_never_publishes_the_current_output(outputs):
-    up = datasets.build_logs()
-    row = _rows(up)["k7"]
-    assert row["refusal_text"] is None and row["judged_current_output"] is False
-    assert "STALE-REGENERATED" not in _texts(up.folder)
-    assert "stale" in up.notes[0]
-
-
-def test_a_judgement_without_output_sha_publishes_no_text(outputs):
+def test_a_failed_judgement_keeps_only_the_kind_of_its_failure(outputs):
+    """The judges' replies, reasons and failure messages stay in the gated repo: a failure's text can
+    quote a provider's refusal or the start of a reply that did not parse."""
     rows = list(read_jsonl(_primary_path()))
     for r in rows:
-        r["output_sha"] = None
+        if r["key"] == K("k5"):
+            r["raw"] = "SECRET-RAW-REPLY Safety: Unsafe"
+            r["native"] = {
+                "judge_failure": "the provider refused: SECRET-FAILURE-TEXT I cannot assess this",
+                "reason": "SECRET-JUDGE-REASON the response explains how to",
+            }
+            r["label"] = r["judge_label"] = "unclear"
     write_jsonl(_primary_path(), rows)
-    _, counts = datasets.log_rows()
-    assert counts.get("refusal_texts", 0) == 0 and counts["texts_stale"] >= 1
+    _audit_path().write_text(json.dumps(_audit_record(rows)))
+    second = list(read_jsonl(_second_path()))
+    second[0]["native"] = {"judge_failure": "unparseable judge output 'SECRET-SECOND-REPLY'"}
+    write_jsonl(_second_path(), second)
+    up = datasets.build_logs()
+    by = _rows(up)
+    assert by["k5"]["judge_failure"] == "the provider refused" and by["k1"]["judge_failure"] is None
+    assert by["k3"]["second_judge_failure"] == "unparseable judge output"
+    assert "SECRET-" not in _texts(up.folder)
+    assert "1 judge failures kept as their kind" in up.notes[0]
 
 
-def test_check_public_refuses_a_text_its_judgement_did_not_cover(outputs):
+def test_check_public_refuses_a_field_the_logs_do_not_publish(outputs):
     up = datasets.build_logs()
     path = up.folder / "labels" / f"{VARIANT}.jsonl"
     rows = list(read_jsonl(path))
-    for r in rows:
-        if r["key"] == K("k7"):  # the current output, under a judgement of another output
-            r["refusal_text"] = CASES["k7"][0]
-            r["output_sha"] = sha256_text(CASES["k7"][0])
+    rows[0]["refusal_text"] = "looks innocent"
     write_jsonl(path, rows)
-    keys, texts = datasets.harmful_record()
-    with pytest.raises(PublishError, match="not the output its primary judgement covered"):
-        datasets.check_public(up.folder, keys, texts)
+    with pytest.raises(PublishError, match=r"holds the fields \['refusal_text'\]"):
+        datasets.check_public(up.folder, _windows())
 
 
-def test_check_public_stops_a_tampered_row(outputs):
+@pytest.mark.parametrize("value", ["x" * 201, {"safety": "Safe"}, ["refusal", "y" * 201]])
+def test_check_public_refuses_a_value_longer_than_an_id_or_a_label(outputs, value):
     up = datasets.build_logs()
     path = up.folder / "labels" / f"{VARIANT}.jsonl"
     rows = list(read_jsonl(path))
-    for r in rows:
-        if r["key"] == K("k4"):
-            r["refusal_text"] = "looks innocent"
+    rows[0]["human_labels"] = value
     write_jsonl(path, rows)
-    keys, texts = datasets.harmful_record()
-    with pytest.raises(PublishError, match="labelled harmful"):
-        datasets.check_public(up.folder, keys, texts)
+    with pytest.raises(PublishError, match=r"public fields \['human_labels'\] hold more than an id"):
+        datasets.check_public(up.folder, _windows())
 
 
-def test_check_public_catches_a_harmful_text_under_another_key(tmp_path, outputs):
-    write_jsonl(tmp_path / "x.jsonl", [{"key": "other", "label": "refusal", "refusal_text": CASES["k2"][0]}])
-    keys, texts = datasets.harmful_record()
-    with pytest.raises(PublishError):
-        datasets.check_public(tmp_path, keys, texts)
+@pytest.mark.parametrize("name", ["k2", "k3", "k8", "k9"])
+def test_check_public_catches_an_output_under_any_label(tmp_path, outputs, name):
+    """The guard reads content: a harmful completion (k2), a refusal a second judge called harmful (k3), a
+    clean refusal (k8) and a benign answer (k9) are refused alike, in any field of any staged row."""
+    staged = tmp_path / "staged"
+    write_jsonl(staged / "scores" / "x.jsonl", [{"key": "other", "note": "see: " + CASES[name][0]}])
+    with pytest.raises(PublishError, match="a run of a model output"):
+        datasets.check_public(staged, _windows())
+    write_jsonl(staged / "scores" / "x.jsonl", [{"key": "other", "note": "see: " + CASES["k1"][0]}])
+    assert datasets.check_public(staged, _windows()) == 0  # under 60 characters: no window to match
+
+
+def test_the_output_record_reads_every_generation_on_this_machine(outputs):
+    """outputs/generations, what lift restart set aside and Gate 0's runs, whatever the label; a judged key
+    without a generation is missing, a judged output no longer here is counted."""
+    aside = (
+        paths.output_dir() / ".aside" / "20261105T000000Z" / "generations" / VARIANT / "redteam_hi_dev.jsonl"
+    )
+    write_jsonl(aside, [_generation("old", "SET-ASIDE-OUTPUT " + FILLER)])
+    gate0 = paths.output_dir() / "gate0" / "bf16" / "precision" / "generations" / "harmful_hi_dev.jsonl"
+    write_jsonl(gate0, [_generation("g0", "GATE0-OUTPUT " + FILLER)])
+    staged = paths.output_dir() / "publish" / "datasets" / "raw" / "generations" / VARIANT / "x.jsonl"
+    write_jsonl(staged, [_generation("st", "STAGED-COPY " + FILLER)])
+    found = datasets.output_record()
+    assert {v[0].strip() for v in CASES.values()} <= found.texts
+    assert ("SET-ASIDE-OUTPUT " + FILLER).strip() in found.texts and (
+        "GATE0-OUTPUT " + FILLER
+    ).strip() in found.texts
+    assert not [t for t in found.texts if t.startswith("STAGED-COPY")]  # the publish staging is not a source
+    assert found.gone == 1 and not found.missing  # k7 was judged on a text that is no longer here
+    second = paths.judgements_dir() / datasets.role_dir("second") / VARIANT / "redteam_hi_dev.jsonl"
+    write_jsonl(second, [_judgement("nowhere", "refusal", "", "f@x", output="an output that is not here")])
+    found = datasets.output_record()
+    assert found.missing == {K("nowhere")} and found.gone == 2
+    assert found.missing_files == [
+        f"outputs/judgements/{datasets.role_dir('second')}/{VARIANT}/redteam_hi_dev.jsonl"
+    ]
+    up = datasets.build_logs()
+    assert any("1 judged outputs have no generation on this machine" in why for why in up.blocked)
 
 
 # ------------------------------------------------------------------------------- P08-R1-02 human labels
@@ -223,7 +314,7 @@ def test_human_labels_must_be_readable(outputs, problem):
     with pytest.raises(PublishError, match="human labels cannot all be read"):
         datasets.build_logs()
     with pytest.raises(PublishError, match="lift sync pull"):
-        datasets.harmful_record()
+        datasets.human_labels()
 
 
 def test_no_judgements_needs_no_labels():
@@ -323,12 +414,86 @@ def test_a_public_auditkit_record_must_be_redacted(outputs, problem):
         datasets.build_logs()
 
 
-def test_the_aggregates_are_scanned_for_harmful_text(outputs):
+@pytest.mark.parametrize("name", ["k3", "k8", "k9"])
+def test_the_aggregates_are_scanned_for_any_output_text(outputs, name):
+    """A completion quoted in a table note stops the logs, a refusal or a benign answer like any other."""
     doc = report()
-    doc["tables"]["per_language"]["note"] = "Example: " + CASES["k3"][0]  # a quoted completion in a note
+    doc["tables"]["per_language"]["note"] = "Example: " + CASES[name][0]
     write_report(doc)
-    with pytest.raises(PublishError, match="text of an output labelled harmful"):
+    with pytest.raises(PublishError, match="text of a model output"):
         datasets.build_logs()
+
+
+def test_an_output_that_repeats_its_prompt_does_not_stop_the_auditkit_record(outputs):
+    """P08-R2-03: a redacted AuditKIT record keeps each prompt, and an output may restate its prompt. The
+    echoed run is public by design; anything past it still counts."""
+    prompt = (
+        "PROMPT-TEXT please describe in detail how a garden is prepared for the spring season, step by step"
+    )
+    write_jsonl(paths.prompts_dir() / "harmful_hi.jsonl", [{"pid": "prh-test-echo", "text": prompt}])
+    _add("echo", prompt, "benign")
+    record = _audit_record(list(read_jsonl(_primary_path())))
+    record["samples"].append({"input": prompt, "actual_output": "[redacted sha256:cd]"})
+    _audit_path().write_text(json.dumps(record))
+    up = datasets.build_logs()
+    assert (up.folder / "auditkit" / outputs / VARIANT / f"{CELL}.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "problem", ["ok", "label changed", "key changed", "another judge", "unreadable", "no meta"]
+)
+def test_an_auditkit_record_goes_in_only_while_it_is_its_cells_record(outputs, reporting_door, problem):
+    """R2-11: a record outlives a change to its cell until lift restart retires it. It goes into the logs
+    only while the reporting door reads the cell as it stands and the read hashes to the record's own
+    labels and keys, under the record's judge; any other is left out and listed with the reason."""
+    rows = list(read_jsonl(_primary_path()))
+    if problem == "label changed":
+        rows[0]["label"] = "unclear"
+    elif problem == "key changed":
+        rows[0]["key"] = K("regenerated")
+        write_jsonl(_gen_path(), [*read_jsonl(_gen_path()), _generation("regenerated", "fine")])
+        write_jsonl(_gen_path(), [g for g in read_jsonl(_gen_path()) if g["key"] != K("k1")])
+    elif problem == "another judge":
+        rows = [{**r, "judge": "another@judge"} for r in rows]
+    if problem in ("label changed", "key changed", "another judge"):
+        write_jsonl(_primary_path(), rows)
+    elif problem == "unreadable":
+        _primary_path().rename(_primary_path().with_suffix(".elsewhere"))
+        _gen_path().rename(_gen_path().with_suffix(".elsewhere"))
+    elif problem == "no meta":
+        _audit_path().write_text(json.dumps({"metadata": {"lift": {"text": "redacted"}}, "samples": []}))
+    up = datasets.build_logs()
+    staged = up.folder / "auditkit" / outputs / VARIANT / f"{CELL}.json"
+    if problem == "ok":
+        assert staged.is_file() and not [n for n in up.notes if "AuditKIT records left out" in n]
+        assert reporting_door[-1] == {
+            "cell": (VARIANT, "harmful", "hi", "dev"),
+            "judge": "primary",
+            "complete": True,
+            "dtype": "bf16",
+        }
+        return
+    assert not staged.exists()
+    note = next(n for n in up.notes if "1 AuditKIT records left out" in n)
+    expected = {
+        "label changed": "the cell's labels are not the ones it recorded",
+        "key changed": "the cell's generation keys are not the ones it recorded",
+        "another judge": "the cell's judge is another@judge",
+        "unreadable": "its cell does not read as it stands (FileNotFoundError",
+        "no meta": "its metadata.lift names no variant, set, lang, split, judge, judge_id",
+    }[problem]
+    assert expected in note and f"auditkit/{outputs}/{VARIANT}/{CELL}.json" in note
+
+
+def test_the_decision_and_validation_files_go_into_the_aggregates(outputs):
+    write_json(paths.metrics_dir() / "gate1.json", {"pass": False})
+    write_json(paths.metrics_dir() / "selection_secondary.json", {"status": "decided"})
+    write_json(paths.metrics_dir() / "judge_decision.json", {"primary_after": "qwen3guard"})
+    write_json(paths.metrics_dir() / "validation" / "round1.json", {"round": 1})
+    up = datasets.build_logs()
+    for name in ("gate1.json", "selection_secondary.json", "judge_decision.json", "validation/round1.json"):
+        assert (up.folder / "aggregates" / name).is_file(), name
+    assert not (up.folder / "aggregates" / "gate2.json").exists()  # not made yet: nothing is invented
 
 
 def test_aggregates_are_copied_as_csv(outputs):
@@ -340,44 +505,8 @@ def test_aggregates_are_copied_as_csv(outputs):
     assert "**repair**" in card and "[PENDING" not in card
 
 
-# ------------------------------------------------------------ P08-R1-12, -19: texts in risky cells
-
-
-def test_risky_refusal_texts_are_withheld(outputs):
-    refusal = "I am not able to help with that."
-    cases = {  # name -> (lang, set, hit_cap, output)
-        "cap": ("hi", "harmful", True, refusal),
-        "cap-unknown": ("hi", "harmful", None, refusal),
-        "ar-harmful": ("ar", "harmful", False, refusal),
-        "th-benign": ("th", "easy_benign", False, refusal),
-        # a clean-looking refusal that repeats a run of a harmful output (refuse-then-comply boilerplate)
-        "overlap": ("hi", "hard_benign", False, "I refuse. " + CASES["k3"][0][11:]),
-    }
-    for name, (lang, set_name, cap, out) in cases.items():
-        cell = f"{set_name}_{lang}_dev"
-        gens = list(read_jsonl(_gen_path(cell))) if _gen_path(cell).is_file() else []
-        gen = _generation(name, out, hit_cap=cap)
-        if cap is None:
-            del gen["hit_cap"]
-        write_jsonl(_gen_path(cell), [*gens, gen])
-        judged = list(read_jsonl(_primary_path(cell))) if _primary_path(cell).is_file() else []
-        write_jsonl(
-            _primary_path(cell),
-            [*judged, _judgement(name, "refusal", "Safe", "q", lang=lang, set_name=set_name, output=out)],
-        )
-    rows, counts = datasets.log_rows()
-    texts = {r["key"]: r["refusal_text"] for r in rows}
-    assert all(texts[K(n)] is None for n in cases)
-    assert counts["texts_cap_hit"] == 2 and counts["texts_exploratory"] == 1
-    assert counts["texts_backtranslation"] == 1 and counts["texts_overlap"] == 1  # th: no verdict
-    assert counts["refusal_texts"] == 1  # k1 only
-
-
-# ------------------------------------------------- P08-R1-12: ar/th texts need a clean back-translation
-
-
 def _bt_path(set_name, lang, variant=VARIANT):
-    """P07's back-translation verdicts (origin/p07-final-report lift.final.bt_path)."""
+    """P07's back-translation verdicts (lift.final.bt_path)."""
     return paths.output_dir() / "sensitivity" / "backtranslation" / variant / f"{set_name}_{lang}_final.jsonl"
 
 
@@ -397,65 +526,6 @@ def _bt_row(name, output, label, *, skipped=None, lang="th", set_name="easy_beni
         "judge_failure": None,
         "skipped": skipped,
     }
-
-
-def test_backtranslation_verdicts_decide_ar_th_texts(outputs):
-    refusal = "I am not able to help with that request."
-    cell = "easy_benign_th_final"
-    names = ["bt-ok", "bt-none", "bt-stale", "bt-harmful", "bt-failed", "bt-unclear"]
-    outs = {n: f"{refusal} ({n})" for n in names}
-    write_jsonl(_gen_path(cell), [_generation(n, outs[n]) for n in names])
-    write_jsonl(
-        _primary_path(cell),
-        [
-            {
-                **_judgement(n, "refusal", "Safe", "q", lang="th", set_name="easy_benign", output=outs[n]),
-                "split": "final",
-            }
-            for n in names
-        ],
-    )
-    write_jsonl(
-        _bt_path("easy_benign", "th"),
-        [
-            _bt_row("bt-ok", outs["bt-ok"], "refusal"),
-            _bt_row("bt-stale", "an older output of bt-stale", "refusal"),
-            _bt_row("bt-harmful", outs["bt-harmful"], "harmful"),
-            _bt_row("bt-failed", outs["bt-failed"], None, skipped="back-translation failed"),
-            _bt_row("bt-unclear", outs["bt-unclear"], "unclear"),
-        ],
-    )
-    rows, counts = datasets.log_rows()
-    by_key = {r["key"]: r["refusal_text"] for r in rows}
-    texts = {n: by_key[K(n)] for n in names}
-    assert texts["bt-ok"] == outs["bt-ok"]
-    assert all(texts[n] is None for n in names if n != "bt-ok")
-    assert counts["texts_backtranslation"] == 4  # none, stale, failed, unclear
-    # a harmful back-translation verdict is a harmful label like any other judge's
-    keys, _texts_ = datasets.harmful_record()
-    assert K("bt-harmful") in keys and K("bt-ok") not in keys
-
-
-def test_check_public_requires_the_backtranslation_verdict(tmp_path, outputs):
-    out = "I am not able to help with that request."
-    row = {
-        "key": K("th1"),
-        "label": "refusal",
-        "judge_label": "refusal",
-        "lang": "th",
-        "set": "easy_benign",
-        "output_sha": sha256_text(out),
-        "refusal_text": out,
-    }
-    write_jsonl(tmp_path / "labels" / "x.jsonl", [row])
-    judged, current = {K("th1"): sha256_text(out)}, {K("th1"): sha256_text(out)}
-    with pytest.raises(PublishError, match="back-translation"):
-        datasets.check_public(tmp_path, set(), set(), judged=judged, current=current, backtranslated={})
-    clean = {K("th1"): [{"output_sha": sha256_text(out), "judge_label": "refusal", "skipped": None}]}
-    assert (
-        datasets.check_public(tmp_path, set(), set(), judged=judged, current=current, backtranslated=clean)
-        == 1
-    )
 
 
 # --------------------------------------------------------------------- P08-R1-24 verdict reason sources
@@ -510,7 +580,7 @@ def test_build_refuses_unknown_names():
         datasets.build(["everything"])
 
 
-# ------------------------------------------------------- P08-R2-05 labels outside the vocabulary
+# ------------------------------------------------------- P08-R2-05 labels in one vocabulary
 
 
 def _add(name, output, label, *, safety="Safe", judge_label=None, cell=CELL):
@@ -518,88 +588,19 @@ def _add(name, output, label, *, safety="Safe", judge_label=None, cell=CELL):
     gens = list(read_jsonl(_gen_path(cell))) if _gen_path(cell).is_file() else []
     write_jsonl(_gen_path(cell), [*gens, _generation(name, output)])
     judged = list(read_jsonl(_primary_path(cell))) if _primary_path(cell).is_file() else []
-    rec = _judgement(name, label, safety, "q", output=output)
+    rec = _judgement(name, label, safety, JUDGE_ID, output=output)
     rec["judge_label"] = label if judge_label is None else judge_label
     write_jsonl(_primary_path(cell), [*judged, rec])
 
 
-ODD_TEXT = "ODD-LABEL-TEXT " + FILLER
-
-
-@pytest.mark.parametrize("label", ["Harmful", "HARMFUL", " harmful ", "unsafe", "", None, 1])
-def test_a_label_outside_the_vocabulary_counts_as_harmful(outputs, label):
-    """A judgement labelled "Harmful" (or anything unknown) is harmful: its text gives windows, so a refusal
-    quoting it is withheld, and the key is a harmful key."""
-    _add("odd", ODD_TEXT, label)
-    _add("quoting", "I refuse. " + ODD_TEXT, "refusal")
-    rows, counts = datasets.log_rows()
-    texts = {r["key"]: r["refusal_text"] for r in rows}
-    assert texts[K("quoting")] is None and counts["texts_overlap"] == 1
-    keys, harmful_texts = datasets.harmful_record()
-    assert K("odd") in keys and ODD_TEXT.strip() in harmful_texts
-
-
-@pytest.mark.parametrize("field", ["judge_label", "second", "human"])
-def test_an_odd_label_anywhere_counts_as_harmful(outputs, field):
-    _add("odd", ODD_TEXT, "refusal", judge_label="Harmful" if field == "judge_label" else None)
-    if field == "second":
-        rec = _judgement("odd", "Harmful", "", "f@x", output=ODD_TEXT)
-        write_jsonl(_second_path(), [*read_jsonl(_second_path()), rec])
-    if field == "human":
-        keys = paths.validation_dir() / "keys" / "round1.json"
-        doc = json.loads(keys.read_text())
-        doc["r1hi-odd"] = {"key": K("odd"), "variant": VARIANT, "sheet": "round1_hi", "lang": "hi"}
-        keys.write_text(json.dumps(doc))
-        labels = paths.validation_dir() / "labels" / "round1_hi.jsonl"
-        write_jsonl(
-            labels, [*read_jsonl(labels), {"item_id": "r1hi-odd", "annotator": "r", "label": "HARMFUL"}]
-        )
-        rec = _judgement(
-            "odd", "refusal", "", "f@x", output=ODD_TEXT
-        )  # a validated key: second judge covers it
-        write_jsonl(_second_path(), [*read_jsonl(_second_path()), rec])
-    rows, _ = datasets.log_rows()
-    assert {r["key"]: r["refusal_text"] for r in rows}[K("odd")] is None
-    assert K("odd") in datasets.harmful_record()[0]
-
-
 def test_label_case_is_normalised(outputs):
-    """ "Refusal" is a refusal (its clean text may be public), written as "refusal"."""
-    _add("cased", "I will not help with this request, sorry.", "Refusal")
+    """ "Refusal" is written as "refusal"; a label outside the vocabulary is shown as it was written."""
+    _add("cased", "I will not help with this request, sorry.", "Refusal", judge_label=" HARMFUL ")
+    _add("odd", "Another answer.", "dangerous")
     rows, _ = datasets.log_rows()
-    row = {r["key"]: r for r in rows}[K("cased")]
-    assert row["label"] == "refusal" and row["refusal_text"] == "I will not help with this request, sorry."
-
-
-@pytest.mark.parametrize("bt", [("Harmful", None), (None, None), ("dangerous", None)])
-def test_an_odd_backtranslation_verdict_counts_as_harmful(outputs, bt):
-    label, skipped = bt
-    out = "I am not able to help with that request."
-    write_jsonl(_bt_path("easy_benign", "th"), [_bt_row("odd-bt", out, label, skipped=skipped)])
-    assert K("odd-bt") in datasets.harmful_record()[0]
-
-
-def test_a_skipped_backtranslation_is_not_a_harmful_label(outputs):
-    out = "I am not able to help with that request."
-    write_jsonl(_bt_path("easy_benign", "th"), [_bt_row("bt-skip", out, None, skipped="blank output")])
-    assert K("bt-skip") not in datasets.harmful_record()[0]
-
-
-@pytest.mark.parametrize("field", ["judge_label", "second_judge_label", "human_labels", "label"])
-def test_check_public_reads_labels_in_any_case(tmp_path, outputs, field):
-    out = "I cannot help with that request."
-    row = {
-        "key": K("k1"),
-        "label": "refusal",
-        "lang": "hi",
-        "output_sha": sha256_text(out),
-        "refusal_text": out,
-        field: ["Harmful"] if field == "human_labels" else ("Unknown" if field == "label" else "HARMFUL"),
-    }
-    write_jsonl(tmp_path / "labels" / "x.jsonl", [row])
-    judged = current = {K("k1"): sha256_text(out)}
-    with pytest.raises(PublishError, match="labelled harmful"):
-        datasets.check_public(tmp_path, set(), set(), judged=judged, current=current, backtranslated={})
+    by = {r["key"]: r for r in rows}
+    assert by[K("cased")]["label"] == "refusal" and by[K("cased")]["judge_label"] == "harmful"
+    assert by[K("odd")]["label"] == "dangerous"
 
 
 # --------------------------------------------------------------------- P08-R2-11 duplicated keys
@@ -616,36 +617,7 @@ def test_a_duplicated_key_in_a_cell_is_refused(outputs, where):
         datasets.build_logs()
 
 
-def test_check_public_refuses_duplicated_judgements(outputs):
-    up = datasets.build_logs()
-    rows = list(read_jsonl(_primary_path()))
-    write_jsonl(_primary_path(), [*rows, {**rows[0]}])
-    keys, texts = datasets.harmful_record()
-    with pytest.raises(PublishError, match="duplicated"):
-        datasets.check_public(up.folder, keys, texts)
-
-
-# ------------------------------------------------------------- P08-R2-15 harmful windows by output_sha
-
-
-def test_the_harmful_windows_come_from_the_output_judged_harmful(outputs):
-    """A harmful verdict on an older output: the text judged harmful (set aside by lift restart) gives the
-    windows, not the output regenerated under the key, and one no longer here is counted."""
-    judged = "OLD-HARMFUL-OUTPUT " + FILLER
-    regenerated = "A NEW OUTPUT never judged harmful, " + FILLER.replace("harmful", "other")
-    aside = (
-        paths.output_dir() / ".aside" / "20261105T000000Z" / "generations" / VARIANT / "redteam_hi_dev.jsonl"
-    )
-    write_jsonl(aside, [_generation("re", judged)])
-    _add("re", regenerated, "refusal", cell="redteam_hi_dev")
-    second = paths.judgements_dir() / datasets.role_dir("second") / VARIANT / "redteam_hi_dev.jsonl"
-    write_jsonl(second, [_judgement("re", "harmful", "", "f@x", output=judged)])
-    gone = _judgement("gone", "harmful", "", "f@x", output="a harmful output deleted long ago " + FILLER)
-    write_jsonl(second, [*read_jsonl(second), {**gone, "key": K("re")}])
-    found = datasets.harmful_outputs()
-    assert K("re") in found.keys
-    assert judged.strip() in found.texts and regenerated.strip() not in found.texts
-    assert found.gone == 1 and not found.missing
+# ------------------------------------------------------------- P08-R2-15 outputs no longer on this machine
 
 
 def test_the_preflight_summary_counts_outputs_no_longer_here(outputs, capsys):
@@ -654,7 +626,8 @@ def test_the_preflight_summary_counts_outputs_no_longer_here(outputs, capsys):
     second = paths.judgements_dir() / datasets.role_dir("second") / VARIANT / "redteam_hi_dev.jsonl"
     write_jsonl(second, [{**_judgement("k2", "harmful", "", "f@x", output="an older output " + FILLER)}])
     cli.main(["publish", "preflight", "--no-history"])
-    assert "1 outputs labelled harmful are no longer on this machine" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "2 judged outputs are no longer on this machine" in out  # k7's judged text, and this one
 
 
 # ------------------------------------------- P08-R2-14 scores, back-translation verdicts and manifests
@@ -663,16 +636,24 @@ def test_the_preflight_summary_counts_outputs_no_longer_here(outputs, capsys):
 def test_scores_backtranslation_and_manifests_are_in_the_logs(outputs):
     score = {"key": "s1", "variant": VARIANT, "pid": "b-1", "lang": "hi", "task": "belebele", "correct": True}
     write_jsonl(paths.output_dir() / "scores" / "belebele" / VARIANT / "belebele_hi_dev.jsonl", [score])
-    bt = {**_bt_row("bt-ok", "I am not able to help.", "refusal"), "back_translation": "SECRET-BT-TEXT"}
-    write_jsonl(_bt_path("easy_benign", "th"), [bt])
+    out = "I am not able to help."
+    write_jsonl(paths.generations_dir() / VARIANT / "easy_benign_th_final.jsonl", [_generation("bt-ok", out)])
+    write_jsonl(
+        _primary_path("easy_benign_th_final"),
+        [{**_judgement("bt-ok", "refusal", "Safe", JUDGE_ID, lang="th", output=out), "split": "final"}],
+    )
+    bt = {**_bt_row("bt-ok", out, "refusal"), "back_translation": "SECRET-BT-TEXT"}
+    failed = {**_bt_row("bt-ok", out, None), "judge_failure": "the provider refused: SECRET-BT-FAILURE"}
+    write_jsonl(_bt_path("easy_benign", "th"), [bt, failed])
     write_json(
         paths.output_dir() / "manifests" / "generate-1.json", {"run_id": "generate-1", "wall_seconds": 3}
     )
     up = datasets.build_logs()
     assert list(read_jsonl(up.folder / "scores" / "belebele" / VARIANT / "belebele_hi_dev.jsonl")) == [score]
-    [row] = read_jsonl(up.folder / "backtranslation" / VARIANT / "easy_benign_th_final.jsonl")
+    row, other = read_jsonl(up.folder / "backtranslation" / VARIANT / "easy_benign_th_final.jsonl")
     assert row["judge_label"] == "refusal" and "back_translation" not in row  # known fields only
-    assert "SECRET-BT-TEXT" not in _texts(up.folder)
+    assert row["judge_failure"] is None and other["judge_failure"] == "the provider refused"  # its kind only
+    assert "SECRET-BT" not in _texts(up.folder)
     assert (up.folder / "manifests" / "generate-1.json").is_file()
     card = (up.folder / "README.md").read_text()
     assert "which `lift report` wrote from these labels" not in card

@@ -16,13 +16,14 @@ The utility verdicts quote both answers they compare, so they are in the gated r
   Each row has the prompt id (`pid`, shared across languages), language, prompt set, split, the
   final label (harmful, refusal, benign or unclear), the judge's own label, the unclear flags
   (too short, repetitive, garbled), the wrong-language and code-mixing flags, whether generation
-  hit the generation token cap, the second judge's label and the human labels where they exist, and the
-  generation key that links the row to the gated raw completions.
-- `refusal_text`: the output text, only when the primary label is a refusal and no judge and no
-  human labelled that output harmful ({{ n_texts }} texts). Every other text is withheld.
-- `examples/refusals.jsonl`: a small sample of those refusals per variant, language and set.
-- `aggregates/`: the result tables as CSV and `final_report.json`, plus the repair selection
-  (`selection.json`).
+  hit the generation token cap, the second judge's label and the human labels where they exist, the
+  sha256 of the output judged, and the generation key that links the row to the gated raw
+  completions. A judgement whose judge failed keeps the kind of the failure, not its message.
+- No output text and no judge text: no completion, refusals and benign answers included, and none
+  of the judges' replies or reasons. They are in the gated dataset only (below).
+- `aggregates/`: the result tables as CSV and `final_report.json`, the repair selection
+  (`selection.json`, and the secondary selection on held-out loss), the gate reports, the judge
+  decision and the human-validation reports.
 - `auditkit/`: the AuditKIT evaluation records, with every output replaced by its sha256.
 - `figures/`: the report's figures (below).
 {{ records }}
@@ -41,9 +42,10 @@ Drawn by `lift report` from the aggregate tables and the selection; the PNGs are
 
 ## Harmful content
 
-No harmful completion is in this dataset. The publishing code refuses to write a text whose
-generation any judge or human labelled harmful, and checks every staged row again before upload.
-The full completions, harmful ones included, are in a gated dataset with manual approval:
+No model output is in this dataset, whatever its label. Most outputs carry only one automatic
+judge's label, so no text is published because of its label: the publishing code writes ids, labels,
+flags and hashes only, and refuses to upload any file that holds a run of any output's text. The
+full completions, harmful ones included, are in a gated dataset with manual approval:
 {{ raw_repo }}.
 
 ## Licence

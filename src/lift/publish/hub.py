@@ -8,8 +8,8 @@ is sent) while the namespace is the placeholder, while something is not built, w
 lacks its terms, while a staged text still holds a ``[PENDING`` placeholder (unless ``allow_pending``),
 and while any file of an upload that is not gated with manual approval fails the public-text scan
 (``lift.publish.preflight.scan_folder``: secrets, raw completion records, notebooks with outputs, any run
-of an output labelled harmful on this machine, unredacted AuditKIT records). That scan needs this
-machine's outputs: without them (``lift sync pull``) nothing public is uploaded.
+of any model output on this machine, whatever its label, unredacted AuditKIT records). That scan needs
+this machine's outputs: without them (``lift sync pull``) nothing public is uploaded.
 
 For a gated repo the order is: create it private, set the gating, read the gating and privacy back
 from the Hub, upload, and only then make it public, so its files are never public without the gate. A
@@ -39,7 +39,7 @@ from lift.publish.settings import PLACEHOLDER_NAMESPACE, RepoSpec
 TEXT_SUFFIXES = {".md", ".json", ".jsonl", ".csv", ".txt", ".py", ".yaml", ".yml"}
 GATE_FIELDS = ("extra_gated_prompt",)
 RETRACTION = (
-    "HF keeps every past commit: to retract a file already uploaded (say a text later labelled harmful), "
+    "HF keeps every past commit: to retract a file already uploaded (say a label a reader later corrects), "
     "upload again, then squash the history with HfApi().super_squash_history(repo_id, repo_type=...) or "
     "delete and recreate the repo"
 )
@@ -98,9 +98,9 @@ def scanned(u: Upload) -> bool:
 def check_ready(
     uploads: Sequence[Upload], *, allow_pending: bool = False, windows: set[str] | None = None
 ) -> None:
-    """Refuse (PublishError) unless every plan may be uploaded. ``windows`` None loads this machine's
-    harmful-output windows (``preflight.load_windows``) when a plan needs the public-text scan."""
-    from lift.publish import preflight
+    """Refuse (PublishError) unless every plan may be uploaded. ``windows`` None loads the windows of
+    every model output on this machine (``preflight.load_windows``) when a plan needs the public-text
+    scan."""
 
     problems = []
     for u in uploads:
@@ -121,17 +121,30 @@ def check_ready(
                 problems.append(f"{u.title}: a gated repo needs a README.md with {', '.join(GATE_FIELDS)}")
     if not allow_pending:
         problems += [f"{p}: still holds a [PENDING ...] placeholder" for p in pending_files(uploads)]
+    found, why = scan_public(uploads, windows)
+    if why:
+        problems.append(f"the public-text scan cannot run: {why}")
+    problems += found
+    if problems:
+        raise PublishError("not uploading:\n  " + "\n  ".join(problems))
+
+
+def scan_public(uploads: Sequence[Upload], windows: set[str] | None = None) -> tuple[list[str], str | None]:
+    """(what the public-text scan finds in every upload that goes through it, why it could not run).
+    ``windows`` None loads the windows of every model output on this machine (``preflight.load_windows``),
+    which refuses a machine that does not hold them: the second value then says why, and nothing was
+    scanned."""
+    from lift.publish import preflight
+
     public = [u for u in uploads if scanned(u) and u.files()]
-    if public and windows is None:
+    if not public:
+        return [], None
+    if windows is None:
         try:
             windows = preflight.load_windows()[0]
         except PublishError as exc:
-            problems.append(f"the public-text scan cannot run: {exc}")
-    if windows is not None:
-        for u in public:
-            problems += [f"{u.title}: {x}" for x in preflight.scan_folder(u.folder, windows)]
-    if problems:
-        raise PublishError("not uploading:\n  " + "\n  ".join(problems))
+            return [], str(exc)
+    return [f"{u.title}: {x}" for u in public for x in preflight.scan_folder(u.folder, windows)], None
 
 
 def default_api() -> Any:
@@ -230,7 +243,16 @@ def execute(
     return done
 
 
-def report(uploads: Sequence[Upload], *, yes: bool, log: Callable[[str], None] = print) -> None:
+def report(
+    uploads: Sequence[Upload],
+    *,
+    yes: bool,
+    log: Callable[[str], None] = print,
+    windows: set[str] | None = None,
+) -> bool:
+    """Print the plan. A dry run also runs the public-text scan (the content guard of decisions item 62
+    covers the dry run too) and returns False when a file that would be public fails it; a machine without
+    the outputs to check against gets a note instead (``--yes`` refuses there)."""
     for u in uploads:
         for line in u.describe():
             log(line)
@@ -241,5 +263,12 @@ def report(uploads: Sequence[Upload], *, yes: bool, log: Callable[[str], None] =
             log(f"  {p}")
         log("  (--yes refuses them; --yes --allow-pending uploads those repos as PRIVATE drafts)")
     log(f"note: {RETRACTION}.")
-    if not yes:
-        log("dry run: nothing was uploaded. Add --yes to upload.")
+    if yes:
+        return True
+    found, why = scan_public(uploads, windows)
+    if why:
+        log(f"note: the public-text scan did not run, and --yes refuses until it can: {why}")
+    for x in found:
+        log(f"FAILED the public-text scan (matched text is never shown): {x}")
+    log("dry run: nothing was uploaded. Add --yes to upload.")
+    return not found

@@ -10,9 +10,11 @@ that would be public fails the public-text scan, which needs this machine's outp
 collections) while configs/frozen_recipe.json is not the one the newest ``recipe-frozen-*`` tag froze
 (the dry run prints it BLOCKED); ``article`` then writes a draft marked blocked and exits 1. A recipe
 that differs from the tag's is refused outright.
+A dry run runs that scan too and exits 1 when a file that would be public holds a run of any model
+output's text, whatever its label (decisions item 62).
 ``article`` writes hf/article.md; ``preflight`` checks the git repo can go public: it fetches every
-branch, tag and pull-request ref of origin first, and refuses a machine with no harmful outputs to check
-against. Exit codes: 0 done (or dry run), 1 refused or failed (preflight: findings).
+branch, tag and pull-request ref of origin first, and refuses a machine with no model outputs to check
+against. Exit codes: 0 done (or dry run), 1 refused or failed (preflight or a dry run's scan: findings).
 """
 
 from __future__ import annotations
@@ -31,10 +33,10 @@ def _fail(exc: Exception) -> int:
 def _finish(uploads: list, args: argparse.Namespace, message: str) -> int:
     from lift.publish import hub
 
-    hub.report(uploads, yes=args.yes)
+    clean = hub.report(uploads, yes=args.yes)
     if args.yes:
         hub.execute(uploads, message=message, allow_pending=args.allow_pending)
-    return 0
+    return 0 if clean else 1
 
 
 def _model(args: argparse.Namespace) -> int:
@@ -117,12 +119,12 @@ def _preflight(args: argparse.Namespace) -> int:
     try:
         if not args.no_history and not args.no_fetch:
             fetched = preflight.fetch_public_refs()
-        windows, n_harmful, n_gone = preflight.load_windows()
+        windows, n_outputs, n_gone = preflight.load_windows()
     except PublishError as exc:
         return _fail(exc)
     if n_gone:
         print(
-            f"note: {n_gone} outputs labelled harmful are no longer on this machine (regenerated): "
+            f"note: {n_gone} judged outputs are no longer on this machine (regenerated): "
             "their text cannot be looked for"
         )
     findings = preflight.run(history=not args.no_history, windows=windows)
@@ -140,7 +142,7 @@ def _preflight(args: argparse.Namespace) -> int:
         return 1
     print(
         "preflight passed: no secret, token, raw completion, notebook output or text of the "
-        f"{n_harmful} outputs labelled harmful on this machine ({len(windows)} windows) in the tracked files"
+        f"{n_outputs} model outputs on this machine ({len(windows)} windows) in the tracked files"
         + ("" if args.no_history else " or the git history of every ref")
         + "."
     )
@@ -179,9 +181,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     q = cmds.add_parser(
         "model", help="the repaired model, the repair parameters and the gated adapters", epilog=_EPILOG
     )
-    q.add_argument("--variant", default=None,
-                   help="the overall winner in selection.json, seed 1 (the default); "
-                        "any other variant is refused")
+    q.add_argument(
+        "--variant",
+        default=None,
+        help="the overall winner in selection.json, seed 1 (the default); any other variant is refused",
+    )
     q.add_argument(
         "--build",
         action="store_true",

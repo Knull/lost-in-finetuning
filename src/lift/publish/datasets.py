@@ -1,67 +1,47 @@
 """``lift publish datasets``: the public logs dataset, the gated raw completions and the translated
 prompt sets, staged under ``outputs/publish/datasets/``.
 
-Logs (public). One row per primary-judge judgement: variant, method, seed, pid, language, set, split,
-the final label, the judge's own label, the unclear flags, the cap hit, the second judge's label and any
-human labels where they exist, the sha256 of the output judged, and ``refusal_text``. Plus the aggregate
-tables (final_report.json as JSON and one CSV per table), selection.json, the redacted AuditKIT records
-(never ``*.full.json``, and each checked to be redacted) and a small sample of refusals for the Space.
+Logs (public; decisions items 14 and 62). No output text and no judge text. One row per primary-judge
+judgement (``LOG_FIELDS``): variant, method, seed, pid, language, set, split, the final label, the
+judge's own label, the unclear flags, the cap hit, the second judge's label and any human labels where
+they exist, and the sha256 of the output judged. A failed judgement keeps only the kind of its failure
+(``lift.validation.score.failure_kind``: the text before its first ":" or quote), never the failure's
+text, which can quote a provider's refusal or the start of a reply. ``JudgementRecord.raw`` and
+``native.reason`` (the judges' replies and reasons) are never read into a row. Plus the aggregate tables
+(final_report.json as JSON and one CSV per table), selection.json and the secondary selection, the gate
+and validation reports, and the redacted AuditKIT records (never ``*.full.json``, each checked to be
+redacted, and each only while it is still the record of its cell: ``audit_record_problem``).
 
-A text is public only when all of these hold (otherwise it is withheld and counted by reason):
-
-- the primary label is ``refusal``, and no judge (label, judge label, or a Qwen3Guard native Safety of
-  Unsafe or Controversial, in any judgements directory, current or not) and no human ever labelled that
-  generation harmful;
-- the judgement names the output now under its key (``output_sha``): a regenerated output was never
-  judged (``texts_stale``);
-- the generation stopped at EOS (``hit_cap`` false; a capped text may refuse, then comply);
-- its language is not exploratory for the harmful and red-team sets (the judge's precision there has no
-  human check), and in a back-translation language (ar, th) its back-translation verdict clears it
-  (below);
-- it holds no 60-character window of an output labelled harmful (``lift.publish.preflight``).
+No output is public because of its label: for about 90% of outputs the label is Qwen3Guard's alone, and
+the judge bar tolerates 15% disagreement with readers. So the guard reads content. ``check_public``
+re-reads every staged row (only ``LOG_FIELDS``, only values as short as an id or a label), and the whole
+staged folder is scanned like a public upload (``preflight.scan_folder``) against the windows of every
+model output on this machine, whatever its label (``output_record``: outputs/generations, what
+``lift restart`` set aside, Gate 0's runs), after every absolute local path in it is made repo-relative
+or the build refused (``preflight.relativise_folder``, XB2-04).
 
 Nothing is staged unless the inputs are complete (``PublishError`` names the remedy): the human labels
 are readable (every round that was drawn or scored has its keys and every sheet imported, every label
 maps to a key), every generation of a safety cell has a primary judgement and every judgement its
 generation, the second judge covers its key list (the final-split keys of
 validation/keys/second_judge/all.txt plus every validated key) on the current outputs, and no Message
-Batch is still open. ``check_public`` then re-reads
-every staged row (harmful anywhere, or not the output its judgement covered, stops the publish) and the
-whole staged folder is scanned like a public upload (``preflight.scan_folder``), after every absolute
-local path in it is made repo-relative or the build refused (``preflight.relativise_folder``, XB2-04).
+Batch is still open.
 
-Back-translation (P08-R1-12, P07's contract): P07 judges NLLB back-translations of a sample of ar and th
-final outputs and writes one row per output to
-``outputs/sensitivity/backtranslation/{variant}/{set}_{lang}_final.jsonl`` (``lift.final.bt_path``), with
-the generation ``key``, the ``output_sha`` of the native output and ``judge_label``, the verdict on the
-back-translation (None with ``skipped`` when the output was blank or the translation failed). A native
-ar or th text is public only when it passes every other check AND a verdict exists for the output now
-under its key (same ``output_sha``) and every such verdict is ``refusal`` or ``benign``. No verdict, a
-verdict on another output, a skipped or failed one, or ``unclear`` withholds it
-(``texts_backtranslation``: fail closed, so ar/th texts outside P07's sample are never public). A
-``harmful`` back-translation verdict, on any output of the key, counts as a harmful label like any
-judge's (the key, its text and the preflight windows).
-
-Labels are read in one vocabulary (``schemas.Label``: harmful, refusal, benign, unclear), case and
-surrounding space ignored (P08-R2-05). Any other label, from any writer (judge, second judge, human,
-back-translation), or none, counts as harmful: its key is a harmful key, its text gives windows, and no
-text of it goes public. A skipped back-translation row (``skipped`` or ``judge_failure``) is the only
-row allowed no label. A cell that holds one key twice (generations, primary or second judgements) is
-refused with its ``lift restart`` line: which row counts would be a guess (P08-R2-11).
-
-The harmful windows come from the very output each harmful label covered (its ``output_sha``), found in
-outputs/generations or in what ``lift restart`` set aside (outputs/.aside); a label without an
-``output_sha`` (a human label) covers every output of its key here. A harmful output whose text is no
-longer on this machine is counted (``gone``) and reported (P08-R2-15).
+Labels are shown in one vocabulary (``schemas.Label``: harmful, refusal, benign, unclear), case and
+surrounding space ignored (P08-R2-05); any other label is shown as it was written. A cell that holds one
+key twice (generations, primary or second judgements) is refused with its ``lift restart`` line: which
+row counts would be a guess (P08-R2-11).
 
 The logs also carry P07's figures (``figures/``, review XB-08), which the article and the logs card
 show. They also hold the records behind the other numbers (P08-R2-14), none with a text: the per-item
 Belebele and held-out-loss scores (``scores/``), P07's back-translation verdicts (``backtranslation/``,
-known fields only) and the run manifests behind the cost numbers (``manifests/``). The utility verdicts
-quote both answers, so they are in the gated raw completions.
+known fields only, a failure as its kind) and the run manifests behind the cost numbers
+(``manifests/``). The utility verdicts quote both answers, so they are in the gated raw completions.
 
 Raw completions (gated, manual approval). Every generations, judgements and utility-verdict file, and
-the full AuditKIT records, as they are in ``outputs/``. Human labels (with annotator ids) stay private.
+the full AuditKIT records, as they are in ``outputs/``: every judged output, refusals and benign answers
+included, and the judges' raw replies, reasons and failure messages. Human labels (with annotator ids)
+stay private.
 
 Translated prompt sets (public). Every prompt record we translated (TranslationInfo.engine one of
 ``lift.data.translate.ENGINE_NAMES``), with its English source and the native spot-check fields
@@ -85,19 +65,36 @@ from lift.publish import PublishError, preflight, render, settings
 from lift.publish.hub import Upload
 from lift.publish.inputs import FIGURES, Facts, recipe_block, report_path, selection_path, shown
 
-HARMFUL_NATIVE = {"unsafe", "controversial"}
 SAFETY_SETS = ("harmful", "easy_benign", "hard_benign", "redteam")  # judged cells (validation.second_judge)
-EXPLORATORY_WITHHELD_SETS = ("harmful", "redteam")
-WITHHELD = (
-    "texts_not_refusal",
-    "texts_stale",
-    "texts_cap_hit",
-    "texts_exploratory",
-    "texts_backtranslation",
-    "texts_overlap",
+# What a public row may hold (check_public refuses any other field): ids, labels, flags and hashes.
+LOG_FIELDS = (
+    "key",
+    "variant",
+    "method",
+    "seed",
+    "pid",
+    "lang",
+    "set",
+    "split",
+    "judge",
+    "label",
+    "judge_label",
+    "judge_failure",
+    "too_short",
+    "repetitive",
+    "garbled",
+    "wrong_lang",
+    "code_mixed",
+    "hit_cap",
+    "n_new_tokens",
+    "output_sha",
+    "judged_current_output",
+    "second_judge_label",
+    "second_judge_failure",
+    "human_labels",
 )
+MAX_VALUE_CHARS = 200  # a key is 64 characters and a judge id about 80: no public value is a sentence
 PULL = "run `lift sync pull` first (outputs/ and validation/ come only from the private runs repo)"
-EXAMPLES_PER_CELL = 20
 LICENCES = {  # README, Licences; docs/decisions.md items 14, 45
     "harmful": ("PolyRefuse (mainlp/Multilingual-Refusal)", "Apache-2.0"),
     "easy_benign": ("PolyRefuse harmless prompts, from Stanford Alpaca", "CC-BY-NC-4.0"),
@@ -151,16 +148,6 @@ def role_dir(role: str) -> str:
 LABELS = ("harmful", "refusal", "benign", "unclear")  # lift.schemas.Label
 
 
-def label_of(value: object) -> str:
-    """A label as one of LABELS (case and surrounding space ignored), and "harmful" for anything else,
-    a missing label included: an unknown label is treated as harmful (fail closed, P08-R2-05)."""
-    if isinstance(value, str):
-        v = value.strip().casefold()
-        if v in LABELS:
-            return v
-    return "harmful"
-
-
 def shown_label(value: object) -> object:
     """A label as the public rows show it: one of LABELS in lower case, anything else as it was."""
     if isinstance(value, str) and value.strip().casefold() in LABELS:
@@ -168,21 +155,15 @@ def shown_label(value: object) -> object:
     return value
 
 
-def _is_harmful(rec: dict) -> bool:
-    native = rec.get("native") or {}
-    return (
-        label_of(rec.get("label")) == "harmful"
-        or label_of(rec.get("judge_label")) == "harmful"
-        or str(native.get("safety") or "").strip().lower() in HARMFUL_NATIVE
-    )
+def failure_of(text: object) -> str | None:
+    """The kind of a recorded judge failure, None when there is none: ``failure_kind`` of its text (what
+    comes before its first ":" or quote), never the text itself, which can quote a provider's refusal or
+    the start of a reply the judge could not parse (decisions item 62)."""
+    from lift.validation.score import failure_kind
 
-
-def _bt_harmful(row: dict) -> bool:
-    """A back-translation row is a harmful label unless its verdict is a known non-harmful one, or it is
-    a skipped or failed row with no verdict."""
-    if row.get("judge_label") is None and (row.get("skipped") or row.get("judge_failure")):
-        return False
-    return label_of(row.get("judge_label")) == "harmful"
+    if not text:
+        return None
+    return failure_kind(text) if isinstance(text, str) else type(text).__name__
 
 
 def _restart_line(path: Path, role: str | None) -> str:
@@ -303,8 +284,7 @@ def round_items(*, judged: bool | None = None) -> tuple[dict[str, str], list[str
 
 def human_labels() -> dict[str, list[str]]:
     """{generation key: [human labels]} from validation/labels/round*.jsonl and the round keys. Refuses
-    (PublishError) when they cannot all be read: an empty result would make the "no human labelled it
-    harmful" check pass everything."""
+    (PublishError) when they cannot all be read: the public record would silently lack them."""
     from lift.validation.store import labels_dir
 
     items, problems = round_items()
@@ -321,101 +301,69 @@ def human_labels() -> dict[str, list[str]]:
         problems.append(f"{unmapped} human labels name an item_id that no validation/keys/round*.json maps")
     if problems:
         raise PublishError(
-            "the human labels cannot all be read, so a text a reader labelled harmful could go public: "
+            "the human labels cannot all be read, so the logs would leave some out: "
             + "; ".join(problems)
             + f". {PULL}"
         )
     return dict(out)
 
 
-BT_CLEAR = {"refusal", "benign"}  # back-translation verdicts that clear a native ar/th text
-
-
 def backtranslation_dir() -> Path:
-    """P07's back-translation verdicts (origin/p07-final-report ``lift.final.bt_path``)."""
+    """P07's back-translation verdicts (``lift.final.bt_path``)."""
     return paths.output_dir() / "sensitivity" / "backtranslation"
 
 
-def backtranslation_verdicts() -> dict[str, list[dict]]:
-    """{generation key: every back-translation row of it} over outputs/sensitivity/backtranslation/."""
-    out: dict[str, list[dict]] = defaultdict(list)
-    for _, _, f in _cells(backtranslation_dir()):
-        for r in read_jsonl(f):
-            if r.get("key"):
-                out[r["key"]].append(r)
-    return dict(out)
-
-
-def backtranslation_clear(rows: list[dict], output_sha: str | None) -> bool:
-    """Whether the back-translation verdicts of one key clear its output ``output_sha``: at least one
-    verdict of that very output, and every one of them refusal or benign (not skipped, not failed)."""
-    mine = [r for r in rows if output_sha and r.get("output_sha") == output_sha]
-    return bool(mine) and all(
-        r.get("judge_label") is not None
-        and label_of(r.get("judge_label")) in BT_CLEAR
-        and not r.get("skipped")
-        and not r.get("judge_failure")
-        for r in mine
-    )
-
-
-class Harmful(NamedTuple):
-    keys: set[str]  # every generation key labelled harmful
-    texts: set[str]  # the output texts those labels covered, found here
-    missing: set[str]  # harmful keys with no generation here at all
-    gone: int  # outputs labelled harmful (by output_sha) whose text is no longer on this machine
+class Outputs(NamedTuple):
+    texts: set[str]  # every model output text on this machine, whatever its label
+    missing: set[str]  # judged keys with no generation here at all
+    missing_files: list[str]  # the judgement files that name them
+    gone: int  # judged outputs (by output_sha) whose text is no longer on this machine
 
 
 def _generation_files() -> Iterator[Path]:
-    """Every generations file here: outputs/generations, then what lift restart set aside."""
-    from lift.models.generate import ASIDE_DIR
+    """Every generations file on this machine: each JSONL under a ``generations`` folder of outputs/
+    (outputs/generations, what lift restart set aside in outputs/.aside, Gate 0's runs in outputs/gate0),
+    outside the publish staging."""
+    root = paths.output_dir()
+    if not root.is_dir():
+        return
+    staging = root / "publish"
+    for folder in sorted(p for p in root.rglob("generations") if p.is_dir() and staging not in p.parents):
+        yield from sorted(folder.rglob("*.jsonl"))
 
-    yield from (f for _, _, f in _cells(paths.generations_dir()))
-    aside = paths.output_dir() / ASIDE_DIR
-    yield from sorted(aside.glob("*/generations/*/*.jsonl")) if aside.is_dir() else []
 
-
-def harmful_outputs(humans: dict[str, list[str]] | None = None) -> Harmful:
-    """Every generation key any judge (in any judgements directory), any back-translation verdict or any
-    human labelled harmful; the texts of the very outputs those labels covered (matched by
-    ``output_sha`` in outputs/generations and outputs/.aside; a label without one, such as a human label,
-    covers every output of its key here); the harmful keys with no generation here; and how many outputs
-    labelled harmful are no longer here."""
-    humans = human_labels() if humans is None else humans
-    wanted: dict[str, set[str | None]] = defaultdict(set)  # key -> output shas labelled harmful (None: any)
-    for key, labels in humans.items():
-        if any(label_of(x) == "harmful" for x in labels):
-            wanted[key].add(None)
-    for f in judgement_files():
-        for r in read_jsonl(f):
-            if _is_harmful(r):
-                wanted[r.get("key")].add(r.get("output_sha") or None)
-    for key, rows in backtranslation_verdicts().items():
-        for r in rows:
-            if _bt_harmful(r):
-                wanted[key].add(r.get("output_sha") or None)
-    shas = {sha for v in wanted.values() for sha in v if sha}
+def output_record() -> Outputs:
+    """Every model output text on this machine, whatever its label: the guard of the public files reads
+    content, never labels (decisions item 62). Also the judged keys with no generation here (their text
+    cannot be checked against: ``lift sync pull``) and how many judged outputs, named by the
+    ``output_sha`` of a judgement or a back-translation verdict, are no longer here (regenerated and not
+    set aside)."""
     texts: set[str] = set()
-    found: set[str] = set()
-    seen: set[str] = set()
+    keys: set[object] = set()
+    shas: set[str] = set()
     for f in _generation_files():
         for r in read_jsonl(f):
-            out = r.get("output") or ""
-            sha = sha256_text(out)
-            key = r.get("key")
-            if key in wanted:
-                found.add(key)
-            if sha in shas or (key in wanted and None in wanted[key]):
-                seen.add(sha)
-                if out.strip():
-                    texts.add(out.strip())
-    return Harmful(set(wanted), texts, set(wanted) - found, len(shas - seen))
-
-
-def harmful_record(humans: dict[str, list[str]] | None = None) -> tuple[set[str], set[str]]:
-    """Every generation key any judge or human labelled harmful, and the output texts those labels covered."""
-    found = harmful_outputs(humans)
-    return found.keys, found.texts
+            out = r.get("output")
+            if not isinstance(out, str):
+                continue
+            keys.add(r.get("key"))
+            shas.add(sha256_text(out))
+            if out.strip():
+                texts.add(out.strip())
+    judged: set[str] = set()
+    missing: set[str] = set()
+    files: list[str] = []
+    for f in [*judgement_files(), *(f for _, _, f in _cells(backtranslation_dir()))]:
+        lacking = False
+        for r in read_jsonl(f):
+            if r.get("key") not in keys:
+                missing.add(str(r.get("key")))
+                lacking = True
+            if r.get("output_sha"):
+                judged.add(r["output_sha"])
+        if lacking:
+            files.append(shown(f))
+    return Outputs(texts, missing, files, len(judged - shas))
 
 
 def open_batches() -> list[str]:
@@ -491,48 +439,21 @@ def _current_shas() -> dict[str, str]:
     }
 
 
-def _withheld_reason(
-    rec: dict, gen: dict, *, harmful_keys: set[str], windows: set[str], bt: dict[str, list[dict]]
-) -> str | None:
-    """Why this judgement's output may not be public (a ``texts_*`` count), None when it may."""
-    out = gen.get("output") or ""
-    if label_of(rec.get("label")) != "refusal" or _is_harmful(rec) or rec["key"] in harmful_keys:
-        return "texts_not_refusal"
-    if not rec.get("output_sha") or rec["output_sha"] != sha256_text(out):
-        return "texts_stale"  # judged on another output than the one now under the key (or unknown)
-    if gen.get("hit_cap") is not False:
-        return "texts_cap_hit"  # stopped at the cap (or not recorded): may refuse, then comply
-    if rec.get("lang") in config.get("languages.exploratory") and rec.get("set") in EXPLORATORY_WITHHELD_SETS:
-        return "texts_exploratory"
-    if rec.get("lang") in _bt_langs() and not backtranslation_clear(bt.get(rec["key"], []), sha256_text(out)):
-        return "texts_backtranslation"  # no clean verdict on this very output: fail closed
-    if preflight.has_window(out, windows):
-        return "texts_overlap"  # shares a 60-character run with an output labelled harmful
-    return None
-
-
-def _bt_langs() -> set[str]:
-    return {str(x) for x in config.get("back_translation.langs") or []}
-
-
 def log_rows(*, humans: dict[str, list[str]] | None = None) -> tuple[list[dict], dict[str, int]]:
-    """The public rows (with refusal texts only where allowed) and counts of what was withheld. Refuses
+    """The public rows (``LOG_FIELDS``: no output text, no judge text) and their count. Refuses
     (PublishError) unless the record is complete: the module docstring lists the checks."""
     from lift.validation.outputs import variant_info
     from lift.validation.second_judge import parse_generations_name
 
     humans = human_labels() if humans is None else humans
-    harmful_keys, harmful_texts = harmful_record(humans)
-    windows = preflight.windows_of(harmful_texts)
-    bt = backtranslation_verdicts()
     primary, second = role_dir("primary"), role_dir("second")
     problems: list[str] = []
     current = _current_shas()
-    second_current: dict[str, str] = {}  # labels of second judgements of the output now under the key
+    second_current: dict[str, dict] = {}  # second judgements of the output now under the key
     for _, _, f in _cells(paths.judgements_dir() / second):
         for key, r in keyed(f, role="second").items():
             if r.get("output_sha") and r["output_sha"] == current.get(key):
-                second_current[key] = shown_label(r.get("label"))
+                second_current[key] = r
     primary_all = primary_judgements()  # refuses a key judged twice
     primary_cells = {(v, stem): f for v, stem, f in _cells(paths.judgements_dir() / primary)}
     for variant, stem, gen_path in _cells(paths.generations_dir()):
@@ -561,15 +482,7 @@ def log_rows(*, humans: dict[str, list[str]] | None = None) -> tuple[list[dict],
             if gen is None:
                 no_generation += 1
                 gen = {}
-            text = None
-            if (gen.get("output") or "").strip():
-                reason = _withheld_reason(rec, gen, harmful_keys=harmful_keys, windows=windows, bt=bt)
-                if reason is None:
-                    text = gen["output"]
-                    counts["refusal_texts"] += 1
-                else:
-                    counts["texts_withheld"] += 1
-                    counts[reason] += 1
+            other = second_current.get(rec["key"])
             rows.append(
                 {
                     "key": rec["key"],
@@ -583,17 +496,21 @@ def log_rows(*, humans: dict[str, list[str]] | None = None) -> tuple[list[dict],
                     "judge": rec.get("judge"),
                     "label": shown_label(rec.get("label")),
                     "judge_label": shown_label(rec.get("judge_label")),
+                    "judge_failure": failure_of((rec.get("native") or {}).get("judge_failure")),
                     **_flags(rec),
                     "hit_cap": gen.get("hit_cap"),
                     "n_new_tokens": gen.get("n_new_tokens"),
                     "output_sha": rec.get("output_sha"),
                     "judged_current_output": bool(gen) and rec.get("output_sha") == current.get(rec["key"]),
-                    "second_judge_label": second_current.get(rec["key"]),
+                    "second_judge_label": shown_label(other.get("label")) if other else None,
+                    "second_judge_failure": (
+                        failure_of((other.get("native") or {}).get("judge_failure")) if other else None
+                    ),
                     "human_labels": humans.get(rec["key"], []),
-                    "refusal_text": text,
                 }
             )
             counts["rows"] += 1
+            counts["judge_failures"] += bool(rows[-1]["judge_failure"])
     if no_generation:
         problems.append(
             f"{no_generation} primary judgements have no generation here (outputs/generations): {PULL}, or "
@@ -626,59 +543,42 @@ def log_rows(*, humans: dict[str, list[str]] | None = None) -> tuple[list[dict],
     return rows, dict(counts)
 
 
-def check_public(
-    folder: Path,
-    harmful_keys: set[str],
-    harmful_texts: set[str],
-    *,
-    judged: dict[str, str | None] | None = None,
-    current: dict[str, str] | None = None,
-    backtranslated: dict[str, list[dict]] | None = None,
-) -> int:
-    """Re-read every staged JSONL row: no text may come from (or equal) a generation labelled harmful by
-    a judge or a human, only refusals carry text, a text must be the output now under its key and the
-    output its primary judgement covered (``judged``: {key: output_sha}; ``current``: {key: sha256 of the
-    output}), and an ar/th text must be cleared by its back-translation verdicts (``backtranslated``: {key:
-    rows}); all read from outputs/ when None. Returns the number of texts checked."""
-    if judged is None:
-        judged = {key: r.get("output_sha") for key, r in primary_judgements().items()}
-    current = _current_shas() if current is None else current
-    backtranslated = backtranslation_verdicts() if backtranslated is None else backtranslated
-    bt_langs = _bt_langs()
+def _too_long(value: object) -> bool:
+    if isinstance(value, str):
+        return len(value) > MAX_VALUE_CHARS
+    if isinstance(value, (list, tuple)):
+        return any(_too_long(v) for v in value)
+    return isinstance(value, dict)  # no public field is a mapping (a judge's native block never goes in)
+
+
+def check_public(folder: Path, windows: set[str]) -> int:
+    """Re-read every staged row of the labels tables (``labels/*.jsonl``): it may hold only the fields of
+    ``LOG_FIELDS``, no value longer than a key, an id or a label, and no window of a model output
+    (``windows``: ``preflight.windows_of`` every output here, whatever its label). Any other staged JSONL
+    row is checked for output windows only (``preflight.scan_folder`` then scans every file again).
+    Refuses (PublishError) on the first row that fails; returns the number of label rows checked."""
     checked = 0
     for f in sorted(folder.rglob("*.jsonl")):
+        labels = "labels" in f.relative_to(folder).parts[:-1]
         for i, row in enumerate(read_jsonl(f), 1):
-            text = row.get("refusal_text") or row.get("text_shown")
-            if not text:
-                continue
-            checked += 1
-            key = row.get("key")
-            second = row.get("second_judge_label")
-            bad = (
-                key in harmful_keys
-                or text.strip() in harmful_texts
-                or label_of(row.get("label")) != "refusal"
-                or any(label_of(x) == "harmful" for x in row.get("human_labels") or [])
-                or (second is not None and label_of(second) == "harmful")
-                or label_of(row.get("judge_label")) == "harmful"  # missing or unknown: harmful
-            )
-            if bad:
+            if labels:
+                checked += 1
+                extra = sorted(set(row) - set(LOG_FIELDS))
+                if extra:
+                    raise PublishError(
+                        f"{shown(f)} line {i}: a public row holds the fields {extra}, which the logs do not "
+                        "publish (no output text, no judge text): nothing was published"
+                    )
+                long = sorted(k for k, v in row.items() if _too_long(v))
+                if long:
+                    raise PublishError(
+                        f"{shown(f)} line {i}: the public fields {long} hold more than an id or a label "
+                        f"(over {MAX_VALUE_CHARS} characters, or a mapping): nothing was published"
+                    )
+            if any(preflight.has_window(v, windows) for v in preflight._strings(row)):
                 raise PublishError(
-                    f"{shown(f)} line {i}: a public text belongs to a generation labelled harmful "
-                    f"(key {str(key)[:12]}): nothing was published"
-                )
-            sha = sha256_text(text)
-            if not (row.get("output_sha") == sha and judged.get(key) == sha and current.get(key) == sha):
-                raise PublishError(
-                    f"{shown(f)} line {i}: a public text is not the output its primary judgement covered "
-                    f"(key {str(key)[:12]}): nothing was published"
-                )
-            if (row.get("lang") is None or row.get("lang") in bt_langs) and not backtranslation_clear(
-                backtranslated.get(key, []), sha
-            ):
-                raise PublishError(
-                    f"{shown(f)} line {i}: an {row.get('lang') or 'unknown-language'} text without a clean "
-                    f"back-translation verdict of this output (key {str(key)[:12]}): nothing was published"
+                    f"{shown(f)} line {i}: a public row holds a run of a model output "
+                    f"(key {str(row.get('key'))[:12]}): nothing was published"
                 )
     return checked
 
@@ -697,7 +597,65 @@ def _write_csv(path: Path, columns: list[dict], rows: list[dict]) -> None:
             )
 
 
-def _aggregates(folder: Path, facts: Facts) -> list[str]:
+AUDIT_NEEDS = ("variant", "set", "lang", "split", "judge", "judge_id", "labels_sha256", "keys_sha256")
+# Decision and validation files that go in as they are: none holds an output or a judge's words (the
+# validation reports and the judge decision count failures by kind: lift.validation.score).
+DECISION_FILES = ("selection_secondary.json", "gate1.json", "gate2.json", "judge_decision.json")
+
+
+def audit_record_problem(doc: object) -> str | None:
+    """Why a redacted AuditKIT record of a safety cell is left out of the logs (None when it goes in).
+
+    A record outlives a change that makes its cell unreportable (a fixed prompt text, other labelling
+    rules, a re-registered variant, a re-pinned Global, a harness bump) until that cell's ``lift restart``
+    retires it, so a record on disk proves nothing (R2-11). It goes in only while the reporting door
+    accepts its cell as it stands (``lift.judge.pipeline.load_records``, ``complete=True``, with the judge
+    role and the precision its ``metadata.lift`` names), and only if that read is the record's: its labels
+    and keys hash to the record's ``labels_sha256`` and ``keys_sha256`` (as ``lift.audit.record_safety``
+    computes them) and its judge id is the record's ``judge_id``."""
+    from lift.io import sha256_obj
+    from lift.judge import pipeline
+
+    meta = doc.get("metadata") if isinstance(doc, dict) else None
+    meta = meta.get("lift") if isinstance(meta, dict) else None
+    if not isinstance(meta, dict):
+        return "it has no metadata.lift"
+    lacking = [k for k in AUDIT_NEEDS if not isinstance(meta.get(k), str) or not meta[k]]
+    if lacking:
+        return f"its metadata.lift names no {', '.join(lacking)}"
+    dtypes = (meta.get("provenance") or {}).get("dtype") or []
+    dtypes = [dtypes] if isinstance(dtypes, str) else list(dtypes)
+    if len(dtypes) > 1:
+        return f"its cell was generated in more than one precision ({', '.join(map(str, dtypes))})"
+    try:
+        records = pipeline.load_records(
+            meta["variant"],
+            meta["set"],
+            meta["lang"],
+            meta["split"],
+            judge=meta["judge"],
+            complete=True,
+            dtype=str(dtypes[0]) if dtypes else None,
+        )
+    except Exception as exc:  # any refusal of the reporting door: the record is not this cell's any more
+        why = str(exc).strip().splitlines()[0][:200] if str(exc).strip() else type(exc).__name__
+        return f"its cell does not read as it stands ({type(exc).__name__}: {why})"
+    if not records:
+        return "its cell holds no judgements"
+    if sha256_obj({r.pid: r.label for r in records}) != meta["labels_sha256"]:
+        return "the cell's labels are not the ones it recorded"
+    if sha256_obj({r.pid: r.key for r in records}) != meta["keys_sha256"]:
+        return "the cell's generation keys are not the ones it recorded"
+    if records[0].judge != meta["judge_id"]:
+        return f"the cell's judge is {records[0].judge}, not the {meta['judge_id']} it recorded"
+    return None
+
+
+def _aggregates(folder: Path, facts: Facts) -> tuple[list[str], list[str]]:
+    """Copy the aggregate tables, the decision files and the redacted AuditKIT records into the staged
+    logs. Returns (what was copied, the AuditKIT records left out, each with its reason)."""
+    from lift.validation.store import metrics_dir as validation_metrics
+
     copied = []
     report = facts.report()
     if report is not None:
@@ -710,27 +668,47 @@ def _aggregates(folder: Path, facts: Facts) -> list[str]:
     if facts.selection() is not None:
         shutil.copyfile(selection_path(), folder / "aggregates" / "selection.json")
         copied.append("selection.json")
+    for name in DECISION_FILES:
+        src = paths.metrics_dir() / name
+        if src.is_file() and src.stat().st_size:
+            (folder / "aggregates").mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, folder / "aggregates" / name)
+            copied.append(name)
+    root = validation_metrics()
+    for f in sorted(root.glob("*.json")) if root.is_dir() else []:
+        if f.stat().st_size:
+            dest = folder / "aggregates" / "validation" / f.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(f, dest)
+            copied.append(f"validation/{f.name}")
+    dropped: list[str] = []
     audit_root = paths.metrics_dir() / "auditkit"
     for f in sorted(audit_root.rglob("*.json")) if audit_root.is_dir() else []:
         if f.name.endswith(".full.json") or f.stat().st_size == 0:
             continue
+        rel = f.relative_to(audit_root).as_posix()
         try:
-            problem = preflight.auditkit_problem(json.loads(f.read_text(encoding="utf-8")))
+            doc = json.loads(f.read_text(encoding="utf-8"))
+            problem = preflight.auditkit_problem(doc)
         except json.JSONDecodeError:
-            problem = "it is not valid JSON"
+            doc, problem = None, "it is not valid JSON"
         if problem:
             raise PublishError(
                 f"{shown(f)} would go public but is not a redacted AuditKIT record ({problem}): write it "
                 "again with lift.audit's default text='redacted' (a full record is *.full.json, gated)"
             )
-        dest = folder / "auditkit" / f.relative_to(audit_root)
+        stale = audit_record_problem(doc)
+        if stale:
+            dropped.append(f"auditkit/{rel}: {stale}")
+            continue
+        dest = folder / "auditkit" / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(f, dest)
-        copied.append(f"auditkit/{f.relative_to(audit_root).as_posix()}")
-    return copied
+        copied.append(f"auditkit/{rel}")
+    return copied, dropped
 
 
-BT_FIELDS = (  # P07's lift.final._bt_row, without any text
+BT_FIELDS = (  # P07's lift.final._bt_row, without any text (judge_failure goes in as its kind)
     "key",
     "variant",
     "pid",
@@ -748,8 +726,8 @@ BT_FIELDS = (  # P07's lift.final._bt_row, without any text
 
 def _records(folder: Path) -> dict[str, int]:
     """Copy the text-free records behind the other numbers into the logs: per-item scores (scores/),
-    back-translation verdicts (backtranslation/, BT_FIELDS only) and run manifests (manifests/).
-    Returns the number of files of each."""
+    back-translation verdicts (backtranslation/, BT_FIELDS only, a judge failure as its kind) and run
+    manifests (manifests/). Returns the number of files of each."""
     counts = {"scores": 0, "backtranslation": 0, "manifests": 0}
     src = paths.scores_dir()
     for f in sorted(src.rglob("*.jsonl")) if src.is_dir() else []:
@@ -758,7 +736,10 @@ def _records(folder: Path) -> dict[str, int]:
         shutil.copyfile(f, dest)
         counts["scores"] += 1
     for variant, _, f in _cells(backtranslation_dir()):
-        rows = [{k: r.get(k) for k in BT_FIELDS} for r in read_jsonl(f)]
+        rows = [
+            {**{k: r.get(k) for k in BT_FIELDS}, "judge_failure": failure_of(r.get("judge_failure"))}
+            for r in read_jsonl(f)
+        ]
         write_jsonl(folder / "backtranslation" / variant / f.name, rows)
         counts["backtranslation"] += 1
     src = paths.manifests_dir()
@@ -791,46 +772,16 @@ def build_logs(facts: Facts | None = None) -> Upload:
     repo = settings.repo("logs")
     folder = _fresh(stage_root() / "logs")
     humans = human_labels()
-    harmful = harmful_outputs(humans)
-    keys, texts = harmful.keys, harmful.texts
+    found = output_record()
     rows, counts = log_rows(humans=humans)
     by_variant: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         by_variant[r["variant"]].append(r)
     for variant, vrows in by_variant.items():
         write_jsonl(folder / "labels" / f"{variant}.jsonl", vrows)
-    examples: dict[tuple, list[dict]] = defaultdict(list)
-    for r in sorted(rows, key=lambda r: (r["variant"], r["lang"], r["set"], r["pid"])):
-        cell = (r["variant"], r["lang"], r["set"])
-        if r["refusal_text"] and len(examples[cell]) < EXAMPLES_PER_CELL:
-            examples[cell].append(
-                {
-                    k: r[k]
-                    for k in (
-                        "key",
-                        "variant",
-                        "method",
-                        "pid",
-                        "lang",
-                        "set",
-                        "split",
-                        "label",
-                        "judge_label",
-                        "second_judge_label",
-                        "human_labels",
-                        "output_sha",
-                        "refusal_text",
-                    )
-                }
-            )
-    if examples:
-        write_jsonl(
-            folder / "examples" / "refusals.jsonl", [e for cell in sorted(examples) for e in examples[cell]]
-        )
-    copied = _aggregates(folder, facts)
+    copied, dropped = _aggregates(folder, facts)
     records = _records(folder)
     _figures(folder)
-    checked = check_public(folder, keys, texts)
     card = logs_card(
         facts,
         counts=counts,
@@ -842,30 +793,44 @@ def build_logs(facts: Facts | None = None) -> Upload:
     render.write_text(folder / "README.md", card)
     facts.write_sources(stage_root() / "logs.sources.json")
     relativised = preflight.relativise_folder(folder)  # no absolute local path goes public (XB2-04)
-    found = preflight.scan_folder(folder, preflight.windows_of(texts))
-    if found:
+    # The content guard (decisions item 62): every output here, whatever its label. A run an output
+    # copied from a prompt is public anyway (the redacted AuditKIT records keep each prompt): P08-R2-03.
+    windows = preflight.windows_of(found.texts)
+    windows -= preflight.windows_in_texts(preflight.prompt_texts(), windows)
+    checked = check_public(folder, windows)
+    scan = preflight.scan_folder(folder, windows)
+    if scan:
         raise PublishError(
             "the staged logs dataset failed the public-text scan (matched text is never shown), nothing was "
-            "published:\n  " + "\n  ".join(str(x) for x in found[:50])
+            "published:\n  " + "\n  ".join(str(x) for x in scan[:50])
         )
-    reasons = ", ".join(
-        f"{counts[k]} {k.removeprefix('texts_').replace('_', ' ')}" for k in sorted(counts) if k in WITHHELD
-    )
     notes = [
-        f"{counts.get('rows', 0)} labelled rows, {checked} refusal texts checked against "
-        f"{len(keys)} generations labelled harmful by a judge or a human "
-        f"({sum(len(v) for v in humans.values())} human labels read); "
-        f"{counts.get('texts_withheld', 0)} texts withheld" + (f" ({reasons})" if reasons else "")
+        f"{counts.get('rows', 0)} labelled rows ({checked} checked: ids, labels, flags and hashes only), "
+        f"{sum(len(v) for v in humans.values())} human labels read, {counts.get('judge_failures', 0)} judge "
+        f"failures kept as their kind; no output text and no judge text; the staged files were scanned "
+        f"against {len(found.texts)} model outputs on this machine ({len(windows)} windows), whatever their "
+        "label"
     ]
-    if harmful.gone:
+    if dropped:
         notes.append(
-            f"{harmful.gone} outputs labelled harmful are no longer on this machine (regenerated): "
-            "their text cannot be checked against"
+            f"{len(dropped)} AuditKIT records left out (not the record of their cell as it stands): "
+            + "; ".join(dropped[:5])
+            + (f"; and {len(dropped) - 5} more" if len(dropped) > 5 else "")
+        )
+    if found.gone:
+        notes.append(
+            f"{found.gone} judged outputs are no longer on this machine (regenerated): their text cannot be "
+            "checked against"
         )
     if not rows:
         notes.append("no judgements in outputs/judgements yet: only the card and aggregates are staged")
     notes += preflight.relativised_note(relativised)
     blocked = [block] if block else []
+    if rows and found.missing:
+        blocked.append(
+            f"{len(found.missing)} judged outputs have no generation on this machine (e.g. in "
+            f"{', '.join(found.missing_files[:3])}), so their text cannot be checked against: {PULL}"
+        )
     return Upload(repo=repo, folder=folder, title="logs dataset", notes=notes, blocked=blocked)
 
 
@@ -892,17 +857,13 @@ def logs_card(
         "language": list(config.get("languages.all")),
         "pretty_name": "Lost in Fine-Tuning: evaluation logs",
         "tags": ["safety", "multilingual", "evaluation", "tiny-aya", "lexsi-hackathon"],
-        "configs": [
-            {"config_name": "labels", "data_files": "labels/*.jsonl", "default": True},
-            {"config_name": "refusal_examples", "data_files": "examples/refusals.jsonl"},
-        ],
+        "configs": [{"config_name": "labels", "data_files": "labels/*.jsonl", "default": True}],
     }
     body = render.fill(
         render.template("logs_card.md"),
         {
             "raw_repo": raw.url,
             "n_rows": f"{counts.get('rows', 0):,}",
-            "n_texts": f"{counts.get('refusal_texts', 0):,}",
             "variants": ", ".join(f"`{v}`" for v in variants) or "none yet",
             "aggregates": "\n".join(f"- `{c}`" for c in copied) or f"- {facts_pending(facts)}",
             "verdicts": verdict_lines(facts),

@@ -31,19 +31,14 @@ def app(tmp_path, monkeypatch):
     spec.loader.exec_module(mod)
     data = tmp_path / "logs"
     write_json(data / "aggregates" / "final_report.json", report())
-    (data / "examples").mkdir()
-    (data / "examples" / "refusals.jsonl").write_text(
-        json.dumps(
-            {
-                "variant": "stock",
-                "lang": "hi",
-                "set": "harmful",
-                "pid": "p",
-                "label": "refusal",
-                "refusal_text": "I can't help with that.",
-            }
-        )
-        + "\n"
+    example = {"variant": "stock", "lang": "hi", "set": "harmful", "pid": "p", "label": "refusal"}
+    write_json(
+        data / "examples.json",
+        [
+            {**example, "text": "I can't help with that. [redacted]"},
+            # a row that was never cut (a hand-edited file): the app cuts it again before showing it
+            {**example, "pid": "q", "label": None, "text": " ".join(f"w{i}" for i in range(30))},
+        ],
     )
     monkeypatch.setenv("LIFT_SPACE_DATA", str(data))
     return mod
@@ -54,7 +49,10 @@ def test_space_reads_the_aggregate_dataset(app):
     assert "**repair**" in app.verdict_markdown(data["report"])
     head, rows = app.table_rows(data["report"], "utility")
     assert head[3] == "Win rate vs stock" and rows[2][3] == "not run"
-    assert app.example_rows(data["examples"], "hi")[0][-1] == "I can't help with that."
+    first, second = app.example_rows(data["examples"], "hi")
+    assert first == ["stock", "hi", "harmful", "p", "refusal", "I can't help with that. [redacted]"]
+    assert second[-2:] == ["not judged", "w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 [redacted]"]
+    assert app.example_rows(data["examples"], "zh") == []
     assert app.verdict_markdown(None).startswith("The final results are not published")
 
 
@@ -81,11 +79,118 @@ def test_space_heatmaps_are_empty_without_a_report(app):
     assert app.heatmap_matrix({"tables": {}}, "overrefusal") == ([], [], [])
 
 
-def test_space_redacts_anything_but_refusals(app):
-    text = " ".join(f"w{i}" for i in range(30))
-    assert app.redact(text, "refusal") == text
-    cut = app.redact(text, "harmful")
-    assert cut.endswith("[redacted]") and len(cut.split()) == app.MAX_WORDS + 1
+CUT_SAMPLES = [
+    "I can't help with that.",
+    " ".join(f"w{i}" for i in range(30)),
+    "这是一个很长的中文回答，它会持续很多很多个字，远远超过十个词的长度，所以应该被截断。",
+    "นี่คือคำตอบภาษาไทยที่ยาวมากและควรถูกตัดให้สั้นลงเพราะไม่มีช่องว่างระหว่างคำ",
+    "मैं इस अनुरोध में आपकी सहायता नहीं कर सकता क्योंकि यह हानिकारक हो सकता है और नीति के विरुद्ध है।",
+    "Supercalifragilisticexpialidocious-" * 5,
+    "mixed 中文和 English words 在一起 for a while longer than ten words in total",
+    "",
+    "w0 w1 w2 [redacted]",
+]
+
+
+@pytest.mark.parametrize("text", CUT_SAMPLES)
+def test_space_cuts_every_example_whatever_its_label(app, text):
+    """Decisions item 62: at most about ten words, then [redacted], refusals included. A script written
+    without spaces counts two characters as a word, and no cut is as long as the scan's window, so a cut
+    never holds a run the public-text scan looks for. The Space's copy agrees with the project's."""
+    from lift.publish import preflight
+
+    cut = space.cut(text)
+    assert app.redact(text) == cut and space.cut(cut) == cut  # the copy agrees, and cutting twice is stable
+    assert cut.endswith(space.MARK)
+    body = cut.removesuffix(space.MARK).rstrip()
+    assert text.startswith(body) and len(body) <= space.MAX_CHARS < preflight.WINDOW
+    assert len(body.split()) <= space.MAX_WORDS
+    assert len(space._UNSPACED.findall(body)) <= 2 * space.MAX_WORDS
+    assert not preflight.has_window(cut, preflight.windows_of([text]))
+    assert (app.MAX_WORDS, app.MAX_CHARS, app.MARK) == (space.MAX_WORDS, space.MAX_CHARS, space.MARK)
+
+
+def test_the_space_examples_are_cut_when_it_is_built(monkeypatch):
+    """A few outputs per study variant, language and set of the final split, each cut whatever its label;
+    the staged Space holds no longer run of any output and passes the public-text scan."""
+    from lift.io import sha256_text, write_jsonl
+    from lift.publish import datasets, preflight
+
+    monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
+    variant = "adapter-aya-std-s1"
+    outs = {
+        "p1": (
+            "HARMFUL-SPACE-TEXT step one of a made-up completion " + "and then more of it " * 6,
+            "harmful",
+        ),
+        "p2": ("REFUSAL-SPACE-TEXT I am sorry, but I am not able to help with this request " * 2, "refusal"),
+        "p3": ("BENIGN-SPACE-TEXT a third answer that is not among the examples " * 2, "benign"),
+    }
+
+    def cell(set_name, lang, split, rows, judged=True):
+        name = f"{set_name}_{lang}_{split}"
+        gens = [
+            {
+                "key": sha256_text(f"{name}|{pid}"),
+                "variant": variant,
+                "pid": pid,
+                "output": out,
+                "hit_cap": False,
+            }
+            for pid, (out, _) in rows.items()
+        ]
+        write_jsonl(paths.generations_dir() / variant / f"{name}.jsonl", gens)
+        if judged:
+            write_jsonl(
+                paths.judgements_dir() / datasets.role_dir("primary") / variant / f"{name}.jsonl",
+                [
+                    {
+                        "key": g["key"],
+                        "pid": g["pid"],
+                        "label": rows[g["pid"]][1],
+                        "output_sha": sha256_text(g["output"]),
+                    }
+                    for g in gens
+                ],
+            )
+
+    cell("harmful", "hi", "final", outs)
+    cell(
+        "harmful",
+        "hi",
+        "dev",
+        {"d1": ("DEV-SPACE-TEXT a dev output that is never an example " * 2, "harmful")},
+    )
+    cell(
+        "easy_benign",
+        "zh",
+        "final",
+        {"z1": ("这是一个很长的中文回答，它会持续很多很多个字，远远超过十个词。" * 3, "benign")},
+        judged=False,
+    )
+    cell(
+        "utility", "hi", "final", {"u1": ("UTILITY-SPACE-TEXT an answer to a utility prompt " * 3, "benign")}
+    )
+    up = space.build()
+    rows = json.loads((up.folder / "examples.json").read_text(encoding="utf-8"))
+    assert [(r["set"], r["lang"], r["pid"], r["label"]) for r in rows] == [
+        ("easy_benign", "zh", "z1", None),  # not judged yet: no label is made up
+        ("harmful", "hi", "p1", "harmful"),
+        ("harmful", "hi", "p2", "refusal"),
+    ]
+    assert all(r["variant"] == variant and r["text"] == space.cut(r["text"]) for r in rows)
+    assert rows[1]["text"] == "HARMFUL-SPACE-TEXT step one of a made-up completion and [redacted]"
+    assert rows[2]["text"].endswith("[redacted]") and len(rows[2]["text"].split()) <= space.MAX_WORDS + 1
+    windows = preflight.windows_of(datasets.output_record().texts)
+    assert windows and preflight.scan_folder(up.folder, windows) == []
+    staged = "".join(f.read_text(encoding="utf-8") for f in up.folder.rglob("*") if f.is_file())
+    assert (
+        "DEV-SPACE-TEXT" not in staged and "UTILITY-SPACE-TEXT" not in staged and "BENIGN-SPACE" not in staged
+    )
+    assert any("3 examples" in n and "whatever its label" in n for n in up.notes)
+    # a longer text in the staged Space fails the scan like any public upload
+    (up.folder / "examples.json").write_text(json.dumps([{"text": outs["p2"][0]}]), encoding="utf-8")
+    assert [f.kind for f in preflight.scan_folder(up.folder, windows)] == [preflight.OUTPUT_TEXT]
 
 
 def test_space_heatmap_figure_plots_the_table_values(app):
@@ -118,6 +223,7 @@ def test_space_staging_names_the_logs_dataset(monkeypatch):
         "logs_dataset": "test-org/lift-eval-logs"
     }
     assert "sdk: gradio" in (up.folder / "README.md").read_text() and up.repo.repo_type == "space"
+    assert json.loads((up.folder / "examples.json").read_text()) == []  # nothing generated here yet
 
 
 def test_space_loads_no_model():

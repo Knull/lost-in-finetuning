@@ -33,17 +33,17 @@ a dry run unless given `--yes`.
 | Command | Builds | Reads |
 | --- | --- | --- |
 | `lift publish model [--variant V] [--build --device cuda:0] [--yes]` | repaired model (gated), repair parameters, gated adapters; writes outputs/publish/model.sources.json (every value on the model card with its file and pointer) | `selection.json`, `final_report.json`, configs/variants.yaml, outputs/adapters, outputs/artifacts/cast |
-| `lift publish datasets [--only logs raw prompts] [--yes]` | logs (public), raw completions (gated, manual), translated prompts (public) | outputs/judgements, generations, utility, metrics/auditkit, validation keys and labels, data/prompts |
-| `lift publish space [--yes]` | the Gradio Space (`hf/space/`) | nothing at build time; the Space reads the logs dataset |
+| `lift publish datasets [--only logs raw prompts] [--yes]` | logs (public: ids, labels, flags and hashes, no output or judge text), raw completions (gated, manual), translated prompts (public) | outputs/judgements, generations, utility, metrics (the gate, selection and validation reports, auditkit), validation keys and labels, data/prompts |
+| `lift publish space [--yes]` | the Gradio Space (`hf/space/`) with `examples.json`: two outputs per variant, language and set of the final split, each cut to at most 10 words plus `[redacted]` whatever its label | outputs/generations and the primary judgements (for the cuts); the Space itself reads the logs dataset |
 | `lift publish collections [--yes]` | the two collections; writes outputs/publish/collections.json | the repo ids above |
 | `lift publish article` | `hf/article.md` and `hf/article.sources.json` (every value with its file and JSON pointer) | `final_report.json`, configs, collections.json, configs/publish.yaml |
-| `lift publish preflight [--no-history] [--no-fetch]` | nothing; fetches every branch, tag and pull-request ref of origin first (`--no-fetch` skips it: local refs only, not enough to go public), then fails on a secret, token, raw completion, notebook output or forbidden path in the tracked files or the git history | the git repo, and this machine's harmful outputs (it refuses a machine that has none) |
+| `lift publish preflight [--no-history] [--no-fetch]` | nothing; fetches every branch, tag and pull-request ref of origin first (`--no-fetch` skips it: local refs only, not enough to go public), then fails on a secret, token, raw completion, notebook output, forbidden path or a run of any model output's text in the tracked files or the git history | the git repo, and every generation in this machine's `outputs/`, whatever its label (it refuses a machine that has none) |
 
 ### Order on submission day (a person runs these)
 
 Run `lift sync pull` before every publish command, on every machine: the public-text scan, the
 logs' completeness checks and the preflight read this machine's `outputs/` and `validation/`, and
-refuse to run without them.
+refuse to run without them. Every dry run runs the public-text scan too and exits 1 on a finding.
 
 1. Set `LIFT_HF_NAMESPACE` to the team's HF organisation (not a secret), fill `team`,
    `annotators`, `references` and, once filed, `auditkit_issue_url` in `configs/publish.yaml`.
@@ -65,7 +65,7 @@ refuse to run without them.
 
 **Retraction.** HF keeps every past commit of a repo. Each upload mirrors its staged folder
 (`delete_patterns="*"`), so a withdrawn file leaves HEAD, but it stays readable in the history. To
-retract a file already uploaded (say a refusal text later labelled harmful): rebuild and upload
+retract a file already uploaded (say a label a reader later corrects): rebuild and upload
 again, then squash the history with
 `HfApi().super_squash_history(repo_id, repo_type=...)`, or delete and recreate the repo. Publish
 the logs only after every label is final, so this is never needed.
@@ -98,10 +98,17 @@ the logs only after every label is final, so this is never needed.
   `lift-multilingual-safety-prompts` and the Space `lift-acceptance-test` (configs/publish.yaml).
 - **Gating order.** A gated repo is created private, gated, filled, and only then made public, so
   its files are never public without the gate.
-- **What counts as harmful for the public logs:** any judge's final or own label, a Qwen3Guard
-  native Safety of Unsafe or Controversial (so the loose reading can never expose text), or any human
-  label. Only primary-judge refusals with none of these carry text. Unclear and benign outputs carry
-  no text either.
+- **No output is public because of its label** (decisions items 62 and 85, which replace the Nov 6
+  rule that published refusal texts). For about 90% of outputs the label is Qwen3Guard's alone, and
+  the judge bar tolerates 15% disagreement with readers. So the logs hold ids, labels, flags and
+  hashes only; a failed judgement keeps the kind of its failure, not its message; and every file
+  that would be public (logs, prompts, Space, model and adapter cards) is scanned against the text
+  of every model output on this machine, whatever its label. The Space's examples are cut to at
+  most 10 words when it is built.
+- **An AuditKIT record goes into the logs only while it is its cell's record:** the reporting door
+  (`lift.judge.pipeline.load_records`) reads the cell as it stands and the read hashes to the
+  record's own labels and keys under the record's judge. Any other record is left out and listed
+  with the reason in the dry run.
 - **Human labels** are public as labels only, joined to generations through the round keys;
   annotator ids and the validation sheets stay private (not even in the gated raw dataset).
 - **Licences.** Logs and raw completions: CC-BY-NC-4.0 (outputs of a Tiny Aya derivative, and the
@@ -118,4 +125,5 @@ the logs only after every label is final, so this is never needed.
   A CAST winner needs P05's `lift fit-cast` on the new adapter first. Its 30-minute A100 budget is
   not timed yet.
 - **Preflight** scans the git history too (a public repo publishes it), checks 60-character windows
-  of every harmful output on this machine, and prints findings without the matched text.
+  of every model output on this machine, whatever its label, and prints findings without the matched
+  text.

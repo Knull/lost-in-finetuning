@@ -1,6 +1,6 @@
 """Upload plans: nothing is sent without --yes, gating is set before any file goes up, each upload mirrors
 its staged folder, and --yes refuses placeholders on a public repo (a private draft instead), a missing
-namespace, an unbuilt artifact, a machine without harmful outputs to scan against, and any public file
+namespace, an unbuilt artifact, a machine without model outputs to scan against, and any public file
 that fails the public-text scan. huggingface_hub is never reached."""
 
 from __future__ import annotations
@@ -69,13 +69,13 @@ class HubApi(FakeApi):
         return [n for n in self.names() if n not in ("repo_exists", "repo_info")]
 
 
-# A made-up "harmful completion", assembled at run time.
+# A made-up completion, assembled at run time. Its label is a refusal: the scan reads the text, not the label.
 HARMFUL = " ".join(f"hubfake{i:02d}" for i in range(30))
 
 
 @pytest.fixture
 def outputs():
-    """One output the primary judge labelled harmful, and validation round 1: the scan has windows."""
+    """One output the primary judge labelled a refusal, and validation round 1: the scan has windows."""
     from lift.publish.datasets import role_dir
 
     key, variant = sha256_text(HARMFUL), "adapter-aya-std-s1"
@@ -85,13 +85,13 @@ def outputs():
     )
     write_jsonl(
         paths.judgements_dir() / role_dir("primary") / variant / "harmful_hi_dev.jsonl",
-        [{"key": key, "pid": "p1", "label": "harmful", "judge_label": "harmful", "output_sha": key}],
+        [{"key": key, "pid": "p1", "label": "refusal", "judge_label": "refusal", "output_sha": key}],
     )
     keys = paths.validation_dir() / "keys"
     keys.mkdir(parents=True)
     (keys / "round1.json").write_text(json.dumps({"r1hi-a": {"key": key, "sheet": "round1_hi"}}))
     write_jsonl(
-        paths.validation_dir() / "labels" / "round1_hi.jsonl", [{"item_id": "r1hi-a", "label": "harmful"}]
+        paths.validation_dir() / "labels" / "round1_hi.jsonl", [{"item_id": "r1hi-a", "label": "refusal"}]
     )
 
 
@@ -176,16 +176,35 @@ def test_allow_pending_uploads_a_private_draft(namespace, outputs):
 
 
 @pytest.mark.parametrize("gated", [None, "auto"])
-def test_a_public_upload_quoting_a_harmful_output_is_refused(namespace, outputs, gated):
+def test_a_public_upload_quoting_an_output_is_refused(namespace, outputs, gated):
+    """Whatever the output's label (here a refusal): decisions item 62."""
     text = "---\nextra_gated_prompt: terms\n---\n" if gated else ""
     up = _staged("model", text + "An example answer: " + HARMFUL[20:150] + "\n", gated=gated)
     api = FakeApi()
-    with pytest.raises(PublishError, match="text of an output labelled harmful"):
+    with pytest.raises(PublishError, match="text of a model output"):
         hub.execute([up], message="m", api_factory=lambda: api)
     assert api.calls == []
 
 
-def test_a_harmful_text_in_any_staged_file_is_refused(namespace, outputs):
+def test_a_dry_run_runs_the_scan_too(namespace, outputs):
+    """The content guard covers the dry run: it reports the file (never the text) and says it failed."""
+    up = _staged("model", "An example answer: " + HARMFUL[20:150] + "\n")
+    lines: list[str] = []
+    assert hub.report([up], yes=False, log=lines.append) is False
+    failed = [x for x in lines if x.startswith("FAILED the public-text scan")]
+    assert len(failed) == 1 and "README.md" in failed[0] and "hubfake" not in "\n".join(lines)
+    clean = _staged("clean", "# a card with no output in it\n")
+    assert hub.report([clean], yes=False, log=lines.append) is True
+
+
+def test_a_dry_run_without_outputs_says_the_scan_did_not_run(namespace):
+    up = _staged("model", "# card\n")
+    lines: list[str] = []
+    assert hub.report([up], yes=False, log=lines.append) is True
+    assert any("the public-text scan did not run" in x and "lift sync pull" in x for x in lines)
+
+
+def test_an_output_text_in_any_staged_file_is_refused(namespace, outputs):
     up = _staged("logs")
     write_jsonl(up.folder / "aggregates" / "examples.jsonl", [{"note": HARMFUL.replace(" ", "\n")}])
     with pytest.raises(PublishError, match="examples.jsonl"):
@@ -358,13 +377,13 @@ def test_a_prompt_echoed_by_a_harmful_output_can_go_public(namespace):
     )
     write_jsonl(
         paths.judgements_dir() / datasets.role_dir("primary") / variant / "harmful_hi_dev.jsonl",
-        [{"key": key, "pid": "p1", "label": "harmful", "judge_label": "harmful", "output_sha": key}],
+        [{"key": key, "pid": "p1", "label": "refusal", "judge_label": "refusal", "output_sha": key}],
     )
     keys = paths.validation_dir() / "keys"
     keys.mkdir(parents=True)
     (keys / "round1.json").write_text(json.dumps({"r1hi-a": {"key": key, "sheet": "round1_hi"}}))
     write_jsonl(
-        paths.validation_dir() / "labels" / "round1_hi.jsonl", [{"item_id": "r1hi-a", "label": "harmful"}]
+        paths.validation_dir() / "labels" / "round1_hi.jsonl", [{"item_id": "r1hi-a", "label": "refusal"}]
     )
     record = {
         "pid": "p1",
