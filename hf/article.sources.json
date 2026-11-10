@@ -27,6 +27,7 @@
   "the figure heatmap_overrefusal.png (outputs/figures/heatmap_overrefusal.png)",
   "the figure tradeoff_dev.png (outputs/figures/tradeoff_dev.png)",
   "the figure tradeoff_dev_heldout.png (outputs/figures/tradeoff_dev_heldout.png)",
+  "the judges against the native readers (validation round 1) (outputs/metrics/validation/round1.json)",
   "the list of arms not run (outputs/metrics/final_report.json)",
   "the per-seed effects (outputs/metrics/final_report.json)",
   "the pooled Hindi drift effect (outputs/metrics/final_report.json)",

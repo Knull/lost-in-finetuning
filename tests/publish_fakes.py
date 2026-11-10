@@ -5,8 +5,11 @@ Every number here is made up for the tests; nothing reaches the Hub.
 
 from __future__ import annotations
 
+import copy
+import functools
 import hashlib
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -908,6 +911,91 @@ def write_report(doc: dict | None = None, selection_doc: dict | None = None, *, 
     return doc
 
 
+# Validation round 1 as P04's ``lift validate`` writes it (lift.validation.score), made by the real
+# writers on tests/validation_fakes.py's world: 180 items (60 hi, 40 each zh, es and en) of stock and one
+# seed-1 adapter, the readers' labels the true ones, a second Hindi reader on 20 items. A case says which
+# items each judge gets wrong, as slices of the round's main items in item-id order:
+# (Qwen3Guard, the frontier judge).
+VALIDATION_CASES = {
+    # Qwen3Guard right on 80% (kappa over the bar in Hindi), the frontier judge 3.3 points ahead: it stays
+    "stay": (slice(0, None, 5), slice(2, None, 6)),
+    # the frontier judge 5.6 points ahead: it becomes primary, the decision is applied in the config and
+    # the round scored again (the scores' and Gate 1's primary judge is then the frontier judge)
+    "switch": (slice(0, None, 5), slice(2, None, 7)),
+    # both right on half the items: the bar is not met in Hindi, and Qwen3Guard stays
+    "fail": (slice(0, None, 2), slice(1, None, 2)),
+}
+
+
+@functools.cache
+def _validation_json(case: str) -> str:
+    from validation_fakes import build_world, fill_sheet, truth, use_world, write_judgements
+
+    from lift import config, manifest
+    from lift.validation.labels import import_labels
+    from lift.validation.sample import load_round, make_sheets
+    from lift.validation.score import decide_primary_judge, decision_path, gate1_path, score
+    from lift.validation.store import metrics_dir
+
+    qwen_wrong, frontier_wrong = VALIDATION_CASES[case]
+    with tempfile.TemporaryDirectory() as tmp, pytest.MonkeyPatch.context() as mp:
+        mp.setattr(manifest, "git_sha", lambda: "0" * 40)
+        world = build_world(
+            Path(tmp) / "world",
+            n_dev=34,
+            n_final=0,
+            dev_variants=("stock", ADAPTER),
+            final_variants=(),
+            judgements=False,
+            utility=False,
+        )
+        use_world(mp, world)
+        make_sheets(1, hindi_overlap=True)
+        doc = load_round(1)
+        items = sorted((it for it in doc["items"] if it["slot"] == "a"), key=lambda it: it["item_id"])
+        world.primary_flip |= {it["key"] for it in items[qwen_wrong]}
+        world.frontier_flip |= {it["key"] for it in items[frontier_wrong]}
+        write_judgements(world)
+        for name, info in doc["sheets"].items():
+            values = {it["item_id"]: truth(it["key"]) for it in doc["items"] if it["sheet"] == name}
+            sheet = world.validation / "sheets" / info["file"]
+            import_labels(1, info["lang"], fill_sheet(sheet, world.root / f"filled_{name}.csv", values))
+        score(1)
+        if decide_primary_judge()["primary_after"] == "frontier":
+            # A person applies the decision (the judges' blocks swap) and scores the round again, so the
+            # scores and Gate 1's check are the new primary judge's.
+            load = config.load
+            swapped = copy.deepcopy(load("project"))
+            judges = swapped["judges"]
+            judges["safety_primary"], judges["safety_second"] = (
+                judges["safety_second"],
+                judges["safety_primary"],
+            )
+            mp.setattr(config, "load", lambda name="project": swapped if name == "project" else load(name))
+            score(1)
+        files = {"scores": metrics_dir() / "round1.json", "gate": gate1_path(), "decision": decision_path()}
+        return json.dumps({name: json.loads(f.read_text(encoding="utf-8")) for name, f in files.items()})
+
+
+def validation_docs(case: str = "stay") -> dict[str, dict]:
+    """{"scores": round1.json, "gate": gate1.json, "decision": judge_decision.json} of ``case``, a fresh
+    copy each call (built once per case and process)."""
+    return json.loads(_validation_json(case))
+
+
+def write_validation(case: str = "stay", docs: dict[str, dict | None] | None = None) -> dict:
+    """Write the three files where ``lift validate`` puts them (a file given as None is left out)."""
+    from lift.validation.score import decision_path, gate1_path
+    from lift.validation.store import metrics_dir
+
+    docs = validation_docs(case) if docs is None else docs
+    targets = {"scores": metrics_dir() / "round1.json", "gate": gate1_path(), "decision": decision_path()}
+    for name, path in targets.items():
+        if docs.get(name) is not None:
+            write_json(path, docs[name])
+    return docs
+
+
 def write_inputs(
     *,
     with_report: bool | None = None,
@@ -916,10 +1004,15 @@ def write_inputs(
     report_doc: dict | None = None,
     figures: bool = True,
     frozen: bool = True,
+    validation: str | None = None,
 ) -> None:
     """selection.json, then final_report.json bound to it (P07 builds no report from an undecided
     selection, so none by default when ``selection_doc`` is incomplete), and the figures; a decided
-    selection's recipe is committed and tagged (``freeze``) unless ``frozen`` is False."""
+    selection's recipe is committed and tagged (``freeze``) unless ``frozen`` is False. With ``validation``
+    (a case of VALIDATION_CASES), validation round 1's three metrics files too: not by default, since the
+    logs dataset asks for a round's keys and labels once its scores are here (lift.publish.datasets)."""
+    if validation is not None:
+        write_validation(validation)
     sel = selection() if selection_doc is None else selection_doc
     if frozen and sel.get("status") == "decided":
         freeze(sel)

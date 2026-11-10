@@ -1,7 +1,8 @@
 """``lift publish article``: hf/article.md from hf/templates/article.md and the metrics files.
 
 The organisers' sections, in their order (prompts/P08_publish.md). Results come from
-final_report.json (P07) and selection.json (P05), the design numbers (set sizes, selection rule,
+final_report.json (P07) and selection.json (P05), what validation round 1 found from the three files
+``lift validate`` writes (P04; ``lift.publish.validated``), the design numbers (set sizes, selection rule,
 validation bar) from configs/, and the links from configs/publish.yaml and the collections file.
 ``hf/article.sources.json`` lists every rendered value with its file and JSON pointer. While the recipe
 is not frozen at its ``recipe-frozen-*`` tag (``inputs.recipe_block``), the article is a draft marked
@@ -21,7 +22,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from lift import config, paths
-from lift.publish import PublishError, preflight, render, settings
+from lift.publish import PublishError, preflight, render, settings, validated
 from lift.publish.collect import links_path, read_links
 from lift.publish.datasets import VERDICT_ROLES, verdict_lines
 from lift.publish.inputs import (
@@ -492,6 +493,24 @@ def _judge_entries() -> tuple[dict, dict]:
     return qwen[0], frontier[0]
 
 
+def primary_kind(facts: Facts) -> str | None:
+    """Which safety judge final_report.json's judgements are by: "qwen" or "frontier" (the kinds of
+    ``_judge_entries``), None while the report or its ``primary_judge`` is not there. An id that is neither
+    judge of configs/project.yaml is refused."""
+    judge_id = facts.raw(report_path(), "/primary_judge")
+    if judge_id is None:
+        return None
+    qwen, frontier = _judge_entries()
+    prefixes = {"qwen": f"{qwen['id']}@", "frontier": f"{frontier['provider']}/{frontier['model']}@"}
+    kind = next((k for k, pre in prefixes.items() if str(judge_id).startswith(pre)), None)
+    if kind is None:
+        raise PublishError(
+            f"{shown(report_path())} primary_judge {str(judge_id)[:80]!r} is neither safety judge in "
+            "configs/project.yaml"
+        )
+    return kind
+
+
 def judges(facts: Facts) -> dict[str, str]:
     """The judges by kind, and which one was primary according to final_report.json."""
     qwen, frontier = _judge_entries()
@@ -500,17 +519,10 @@ def judges(facts: Facts) -> dict[str, str]:
         "frontier": str(frontier["model"]),
     }
     shown_id = facts.report_value("/primary_judge", "text", what="the primary judge (final judgements)")
-    judge_id = facts.raw(report_path(), "/primary_judge")
-    if judge_id is None:
+    kind = primary_kind(facts)
+    if kind is None:
         role = f"The primary safety judge, behind every reported number: {shown_id}."
     else:
-        prefixes = {"qwen": f"{qwen['id']}@", "frontier": f"{frontier['provider']}/{frontier['model']}@"}
-        kind = next((k for k, pre in prefixes.items() if str(judge_id).startswith(pre)), None)
-        if kind is None:
-            raise PublishError(
-                f"{shown(report_path())} primary_judge {str(judge_id)[:80]!r} is neither safety judge in "
-                "configs/project.yaml"
-            )
         role = (
             f"The primary safety judge, behind every reported number, was **{names[kind]}** "
             f"(judge id `{shown_id}` in the final judgements); the other judged a random sample of outputs "
@@ -929,6 +941,7 @@ def context(facts: Facts) -> dict[str, str]:
     ):
         ctx[f"table_{name}"] = facts.table(name)
     ctx["extra_tables"] = extra_tables(facts)
+    ctx["judge_validation"] = validated.judge_validation(facts, primary_kind(facts))
     logs = settings.repo("logs").url
     for name in FIGURES:  # the PNGs travel in the logs dataset (datasets.build_logs), linked from there
         ctx[f"figure_{name}"] = facts.figure(name, base=f"{logs}/resolve/main/")

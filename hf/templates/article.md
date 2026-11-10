@@ -116,7 +116,8 @@ floor is then the adapter's own win rate less {{ rule_tie }}, and a secondary se
 the same rule with the gain read on held-out loss. The secondary selection is reported beside
 the primary one and freezes nothing (`docs/decisions.md` items 72 and 73, dated before any
 sweep result was read). Human labels are the ground truth for the judge: it had to reach
-{{ bar_agreement }} agreement or a Cohen's kappa of {{ bar_kappa }} with native readers.
+{{ bar_agreement }} agreement or a Cohen's kappa of {{ bar_kappa }} with native readers. Whether
+it did is in section 6, "The judge against native readers".
 
 ## 6. Experiments and findings
 
@@ -205,6 +206,10 @@ Exploratory claims (Benjamini-Hochberg):
 
 {{ table_belebele }}
 
+### The judge against native readers
+
+{{ judge_validation }}
+
 ### Judge sensitivity
 
 {{ table_judge_sensitivity }}
@@ -241,7 +246,13 @@ not show that the mechanism caused the drift.
   judge; the sensitivity tables give the same differences on refusals, under the loose reading,
   counting only outputs that trip no unclear flag, and under the second judge.
 - The automatic judge's precision differs by language. Hindi claims rest on its validation
-  against native readers; see the judge sensitivity table.
+  against native readers ("The judge against native readers" above); the other languages have
+  fewer validated items, and Arabic and Thai none.
+- The Hindi and English validation sheets were labelled by a member of the team after the dev
+  results were known to them: each model's harmful rate under the judge, and how many of those
+  labels sit on degenerate outputs. The sheets hide which model wrote an output and what a judge
+  said, and the labels follow the written guidelines, but that reader knew the study's
+  hypothesis and its dev numbers.
 
 ## 7. Cost and ROI
 

@@ -56,7 +56,7 @@ def test_sections_in_the_organisers_order_with_placeholders(out):
 
 
 def test_full_inputs_leave_no_placeholder(out, monkeypatch):
-    write_inputs()
+    write_inputs(validation="stay")
     write_json(
         links_path(),
         {

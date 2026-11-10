@@ -8,7 +8,9 @@ yet renders as ``[PENDING: <what> from <file> (<stage>)]``; ``lift publish ... -
 a text that still holds one.
 
 Inputs (paths under ``outputs/metrics``; both are written by later stages, and the shapes below were
-checked against their writers on origin/p05-repairs and origin/p07-final-report on Nov 6):
+checked against their writers on origin/p05-repairs and origin/p07-final-report on Nov 6). The article
+also reads validation round 1's three files (P04): ``lift.publish.validated`` names them and what it
+takes from each.
 
 ``selection.json`` (P05, ``lift select``: ``lift.repair.select.run``).
 

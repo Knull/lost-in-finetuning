@@ -119,7 +119,8 @@ floor is then the adapter's own win rate less 2 points, and a secondary selectio
 the same rule with the gain read on held-out loss. The secondary selection is reported beside
 the primary one and freezes nothing (`docs/decisions.md` items 72 and 73, dated before any
 sweep result was read). Human labels are the ground truth for the judge: it had to reach
-85.0% agreement or a Cohen's kappa of 0.60 with native readers.
+85.0% agreement or a Cohen's kappa of 0.60 with native readers. Whether
+it did is in section 6, "The judge against native readers".
 
 ## 6. Experiments and findings
 
@@ -208,6 +209,10 @@ _[PENDING: utility win rate against stock and the share of the adapter's gain re
 
 _[PENDING: Belebele accuracy per language from outputs/metrics/final_report.json (P07 lift stats / lift report)]_
 
+### The judge against native readers
+
+_[PENDING: the judges against the native readers (validation round 1) from outputs/metrics/validation/round1.json (P04 lift validate score --round 1)]_
+
 ### Judge sensitivity
 
 _[PENDING: judge sensitivity (strict vs loose, second judge, back-translation) from outputs/metrics/final_report.json (P07 lift stats / lift report)]_
@@ -244,7 +249,13 @@ _[PENDING: exploratory diagnostic signatures (P06) from outputs/metrics/final_re
   judge; the sensitivity tables give the same differences on refusals, under the loose reading,
   counting only outputs that trip no unclear flag, and under the second judge.
 - The automatic judge's precision differs by language. Hindi claims rest on its validation
-  against native readers; see the judge sensitivity table.
+  against native readers ("The judge against native readers" above); the other languages have
+  fewer validated items, and Arabic and Thai none.
+- The Hindi and English validation sheets were labelled by a member of the team after the dev
+  results were known to them: each model's harmful rate under the judge, and how many of those
+  labels sit on degenerate outputs. The sheets hide which model wrote an output and what a judge
+  said, and the labels follow the written guidelines, but that reader knew the study's
+  hypothesis and its dev numbers.
 
 ## 7. Cost and ROI
 
