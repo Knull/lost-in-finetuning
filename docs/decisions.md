@@ -2,6 +2,44 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 10, 2026 (late morning): after the sweep's win rates were read
+
+The ten settings' dev win rates against stock (100 Hindi pairs each, both orders) were judged between
+09:54 and 10:44 UTC and read before these two items were written: WiSE-FT 0.25 / 0.50 / 0.75: 0.495 /
+0.465 / 0.383; ReSta 0.10 / 0.25 / 0.40: 0.270 / 0.212 / 0.085; CAST 0.5 / 1.0 / 2.0: 0.280 each, every
+judge request a cache hit (the answers are the unrepaired adapter's, text for text); always-on 1.0:
+0.040. The adapter's own is 0.280, so the floor of items 72 and 73 is 0.26. With the morning's counts
+every input of the selection rule is then known: WiSE-FT 0.25 is the only setting that meets every
+condition. `lift select` had not run, nothing was frozen, and no final-split output existed. Neither item
+changes the rule, a setting, an endpoint, a claim family or a verdict.
+
+90. **The frozen repair is also compared with stock.** Reporting only, descriptive.
+    - Why. The README asks which repair restores safety. The pre-registered repair effect is the
+      repair against the adapter, which says how far the harmful rate fell, not where it landed.
+      On dev WiSE-FT 0.25 landed under stock (11 of 172 harmful against stock's 24, and lower in
+      all six languages), and no reported number on the final split would have said whether that
+      holds, or whether a repair leaves drift behind.
+    - `lift stats` computes the frozen repair minus stock on the harmful rate and on the refusal
+      rate of the same prompts, in each language and on Aya Red-teaming Hindi (`repair_vs_stock`),
+      and for every frozen family's setting on Hindi (`harmful_hi_vs_stock`, a column of the repair
+      comparison table). Paired by prompt and pooled over the seeds run, as every other effect.
+    - Not a claim: estimates and 95% intervals only, no p-value, in neither the Holm nor the BH
+      family, as item 78 treats the contrast with WiSE-FT. The table's title and note say "not
+      pre-registered, descriptive".
+    - The article places the table after the repair comparison with one sentence read from its
+      intervals (`vs_stock_sentence`): for Hindi, then the other languages, whether the repaired
+      model's harmful rate is lower than stock's, higher (part of the drift remains) or not clearly
+      different. It repeats no number and gives no verdict.
+
+91. **The article says when the gain floor did not bind.** Reporting only.
+    - Why. Every WiSE-FT setting met the win-rate floor (0.495, 0.465 and 0.383 against 0.26), as
+      item 73 said a move toward stock would. The condition therefore says nothing about how much
+      of the adapter the frozen setting keeps, and a reader of "repair" should be told.
+    - `dev_selection` (item 89) adds one sentence, written only when selection.json shows all of
+      it: the adapter's own win rate is at or under parity, and every WiSE-FT setting met the
+      floor. It gives the adapter's win rate and the floor, says the condition does not bind along
+      the path toward stock, and points to the reading on held-out loss beside it.
+
 ## Nov 10, 2026 (morning): after the dev sweep was read
 
 The seed-1 dev sweep of the stress adapter finished at 01:03 UTC (ten settings, 180 cells, every stage
