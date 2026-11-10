@@ -115,7 +115,7 @@ EXIT_CODES = """\
 exit codes:
   0    the job succeeded, its outputs are pushed and the VM is released (a push that hit
        conflicts counts: the VM's copies are under conflicts/ in the runs repo, and it says so)
-  1    a job line failed, or a generate, judge, run-dev, utility, belebele or heldout-loss line
+  1    a job line failed, or a generate, judge, run-dev, utility, belebele, heldout-loss or final line
        exited 3 (done, but some cells were skipped or left for a rerun: the job ran its other lines,
        and its log lists each cell with its remedy); or the job's status is unknown; or the runs
        repo check met a transient error (nothing was created: try again)

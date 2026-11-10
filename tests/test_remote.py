@@ -897,7 +897,7 @@ def test_a_line_that_skipped_cells_is_reported_and_the_next_lines_run(job, tmp_p
 P03_PARTIAL = ["lift utility --variant adapter-aya-std-s1 --split dev --no-wait",
                "lift belebele --variant adapter-aya-std-s1 --split dev --langs hi,en",
                "lift heldout-loss --variant adapter-aya-std-s1"]
-PARTIAL_COMMANDS = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss")
+PARTIAL_COMMANDS = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss", "final")
 
 
 def readme_partial() -> tuple[str, ...]:
@@ -922,7 +922,7 @@ def test_the_runners_agree_on_which_commands_exit_3_and_go_on(job):
     runner) or an operator does (lift remote's exit codes, the README's table): all name the same commands.
     lift train and lift gate never exit 3, so they are in none."""
     assert job.PARTIAL_COMMANDS == readme_partial() == kaggle_cell_commands() == PARTIAL_COMMANDS
-    named = "a generate, judge, run-dev, utility, belebele or heldout-loss line exited 3"
+    named = "a generate, judge, run-dev, utility, belebele, heldout-loss or final line exited 3"
     assert named in " ".join(remote.EXIT_CODES.split())
     row = next(line for line in readme().splitlines() if line.startswith("| 1 |"))
     assert named in row.lower()

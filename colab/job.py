@@ -19,7 +19,7 @@ without which nothing could be pulled or pushed; run each line as `python -m lif
 the first failure, with a `lift sync push` checkpoint after every line except sync lines and the last
 one; then, in `finally`, run the final `lift sync push` and write the status and the marker. The final
 push runs once a line other than a lift sync line ran: nothing else leaves new files on the VM. A
-generate, judge, run-dev, utility, belebele or heldout-loss line that exits 3 (done, but some cells
+generate, judge, run-dev, utility, belebele, heldout-loss or final line that exits 3 (done, but some cells
 were skipped: stale, made in another precision, judged by another judge, short of their frozen split,
 or with decoding that went non-finite; or their AuditKIT record was refused; or they are left for a
 rerun, such as a Message Batch still running; each listed with its remedy) does not end the job: it
@@ -92,9 +92,12 @@ SETUP_FAILED_RC = 3  # lift remote's exit code for "the job could not be set up 
 # SKIPPED), had their AuditKIT record refused, or are left for a rerun (lift utility --no-wait while its
 # Message Batch runs), each listed with its remedy. The job goes on with its next lines and fails at the
 # end; any other command's 3 is a failure as before (lift train and lift gate never exit 3).
+# lift final is one of them (decisions item 83): each of its lines is one variant's final battery, which
+# exits 3 for a cell it skips (one short of its frozen split, on every variant, until a reader's verdict),
+# and the next variant's line does not depend on it. lift sweep is not: it goes last in its job.
 # kaggle/runner.ipynb (CELL_COMMANDS) and colab/README.md (PARTIAL) hold the same list.
 PARTIAL_RC = 3
-PARTIAL_COMMANDS = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss")
+PARTIAL_COMMANDS = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss", "final")
 REF_HINT = "GPU jobs need a ref with both P01 and P02 (colab/README.md, 'Code version')"
 STOPPED_RC = 1  # a stop request before a line started: the job did not finish
 MIN_SECRET_LEN = 8  # shorter values (a spend cap such as "20") are settings, not secrets: not masked

@@ -142,7 +142,7 @@ six languages, so pairing, splitting and clustering all go by pid.
   key. One file never holds two stacks (torch, transformers, GPU class): a finished cell is reused
   on any stack, but an unfinished one resumes only on the stack that started it, or is made again
   with the `lift restart` line its refusal prints (a job line right after `lift sync pull`).
-  `lift generate`, `judge`, `run-dev`, `utility`, `belebele` and `heldout-loss` exit 3 when they
+  `lift generate`, `judge`, `run-dev`, `utility`, `belebele`, `heldout-loss` and `final` exit 3 when they
   finished but skipped cells or left some for a rerun (each listed with its remedy); the runners go
   on with the next line (`lift train` and `lift gate` never exit 3). On a T4 every model line takes
   `--dtype fp16`: `generate`, `judge`, `run-dev`, `train`, `utility --generate-only`, `belebele`

@@ -145,8 +145,8 @@ What it does:
    the ref's `constraints.txt` (`pip install -c constraints.txt -e ...`). It checks that the ref
    has `lift sync` (`lift sync --help`): a ref without `constraints.txt` or `lift sync` is a setup
    failure (exit 3), before any line. Then it runs the lines in order, stopping at the first
-   failure. A generate, judge, run-dev, utility, belebele or heldout-loss line that exits 3 is not
-   such a failure: see "Skipped cells" below.
+   failure. A generate, judge, run-dev, utility, belebele, heldout-loss or final line that exits 3 is
+   not such a failure: see "Skipped cells" below.
 4. Every `--poll` seconds (default 45), downloads `/content/lift_job.log` to
    `outputs/logs/remote-<name>.log` and prints the new lines.
 5. The job pushes outputs with `lift sync push` after every line (except sync lines and the last),
@@ -181,7 +181,7 @@ Exit codes (also in `lift remote --help`):
 | Code | Meaning |
 | --- | --- |
 | 0 | The job succeeded, its outputs are pushed, and the VM is released. A push that hit conflicts counts as pushed; `lift remote` says so. |
-| 1 | A job line failed, or a generate, judge, run-dev, utility, belebele or heldout-loss line exited 3 (done, but some cells were skipped or left for a rerun: the job ran its other lines, and its log lists each cell with its remedy); or the job's status is unknown; or the runs repo check met a transient error (nothing was created: try again). |
+| 1 | A job line failed, or a generate, judge, run-dev, utility, belebele, heldout-loss or final line exited 3 (done, but some cells were skipped or left for a rerun: the job ran its other lines, and its log lists each cell with its remedy); or the job's status is unknown; or the runs repo check met a transient error (nothing was created: try again). |
 | 2 | `lift remote` refused to start: bad options, no login, a missing secret, a runs repo that is missing, not private or not writable with this token, or a job that another `lift remote` on this machine follows already (`watch` names its pid). Nothing was created or changed. |
 | 3 | The job could not be set up: `colab new` or the secrets upload failed, or job.py's spec, secrets, python, fetch, pip or sync-check step did; or a `lift sync` call on the VM exited 2 before anything was lost. |
 | 4 | The VM could not be confirmed released and may still be billing. This overrides every other code. `lift remote stop` returns 0 or 4. |
@@ -224,7 +224,10 @@ not add to, go on with the other cells, and exit 3 at the end, listing each skip
 remedy (and each cell whose AuditKIT record was refused). `lift utility`, `lift belebele` and
 `lift heldout-loss` exit 3 the same way for a cell they skip (a stale scores file of belebele or
 heldout-loss names the same line with `--restart`) or leave for a rerun (`lift utility --no-wait`
-while its Message Batch still runs: rerun the same line to collect it). job.py reports a line that
+while its Message Batch still runs: rerun the same line to collect it). `lift final --variant V`
+runs those stages for one variant on the final split and exits 3 when any of them did, so a job of
+several final lines goes on to the next variant (give each variant its own line: the outputs are
+pushed after every line). job.py reports a line that
 exits 3, the next lines run (they do not depend on those cells), and the job fails at the end:
 `lift remote` exits 1. Any other failing line still ends the job, an exit 3 of any other command
 included (`lift train` and `lift gate` never exit 3). A cell is skipped when:
@@ -464,8 +467,8 @@ never into the notebook (a saved notebook can be shared by accident). It pushes 
 except sync lines and the last, so a closed tab or a reclaimed runtime loses one line's work at
 most. A pull or push that exits 1 is tried again, and a failed push is reported, not fatal: a
 `lift sync push` line never stops the job. A sync call that exits 2 (a problem no retry can fix) is
-never tried again and ends the job. A generate, judge, run-dev, utility, belebele or heldout-loss
-line that exits 3 (done, but some cells were skipped or left for a rerun, each listed in the log with
+never tried again and ends the job. A generate, judge, run-dev, utility, belebele, heldout-loss or
+final line that exits 3 (done, but some cells were skipped or left for a rerun, each listed in the log with
 its remedy) is reported, and the next lines run. The final push runs even after a failure, once a
 line other than a `lift sync` line ran, and the cell raises at the end if a line or the final push
 failed, or a line exited 3. Don't add your own trailing `lift sync push`.
@@ -480,7 +483,7 @@ lift smoke
 LOG = "/content/lift_job.log"
 DELAYS = (60, 180, 360)  # as colab/job.py: 4 tries in about 10 minutes for a sync call that exits 1
 # exit 3: done, but some cells were skipped or left for a rerun (see the log); as job.py's PARTIAL_COMMANDS
-PARTIAL = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss")
+PARTIAL = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss", "final")
 
 def lift(*args):
     with open(LOG, "a") as log:

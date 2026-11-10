@@ -74,6 +74,17 @@ split.
       rate H/N is not touched; its upper bound (H+U)/N and the four-class agreement with the readers are.
     - Figures: adapters_by_language.png (stock and every adapter per language) and
       tradeoff_dev_heldout.png (item 73's table).
+83. **The job runners go on past a `lift final` line that exits 3** (colab/job.py `PARTIAL_COMMANDS`,
+    the README's notebook cell, kaggle/runner.ipynb `CELL_COMMANDS`). `lift final --variant V` exits 3
+    when a stage skipped a cell and listed its remedy, as the commands it runs do. On the real data
+    every variant's line does: easy_benign zh is short of its frozen split on the final split until
+    the zh reader's verdicts are applied (item 56). The runners treated that 3 as a failure and skipped
+    the lines after it, so a job of several variants would have stopped after the first one, and one
+    long `lift final --all` line has no checkpoint push until it ends (a reclaimed VM loses all of it).
+    With `final` on the list, each variant gets its own line, its outputs are pushed after it, the job
+    goes on to the next variant and still fails at the end (lift remote exits 1), as for the other
+    commands. A line that exits 1 (a stage failed) or 2 (the guard refused the variant) still ends the
+    job. `lift sweep` stays off the list (item 69: it goes last in its job).
 
 ## Nov 9, 2026 (late evening): the floor's tolerance and a secondary selection, while the sweep was running
 
