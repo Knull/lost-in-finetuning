@@ -8,6 +8,20 @@ These notes were read from the code, not the docs. Pin these versions: the tools
 | CuratorKIT | 0.1.22 (PyPI), core deps pydantic/typer/tqdm/pyyaml | dd9e835 |
 | AuditKIT | 1.1.3 (PyPI), zero required deps | 71316da |
 
+**SafeTune 0.1.13 (PyPI, built Nov 7), checked on Nov 10.** It fixes bugs another team reported
+(SafeGrad's alignment term under fp16 AMP, among others). The 0.1.12 and 0.1.13 wheels were diffed
+for the entry points this project calls, and the pin stays at 0.1.12:
+
+- `recover/wise_ft.py` and `recover/resta.py` are byte-identical.
+- `steer/cast.py` and `steer/caa.py` differ in docstrings only.
+- `core/runtime/inference/vector_extraction.py` now skips padded positions under `mean` and `max`
+  pooling. `extract_caa_vectors` is called here with CAAConfig's default `last_token` pooling, and
+  `fit_cast_condition` with `pool: last`, which the change does not touch.
+- SafeGrad is not used, and every reported run is bf16.
+- `steer/refusal_direction.py` changed (ablation now also projects out of attention and MLP
+  outputs; a `pick_layer` that was not extracted is refused). Only P06's exploratory diagnosis
+  would call it; if that runs, read the new file first.
+
 ## SafeTune
 
 All of these are badged Faithful in `docs/reference/feature-map.md`.
