@@ -420,10 +420,18 @@ def _secondary_selection(facts: Facts, winner: str, adapter: str) -> str:
             f"{lead}, none of the {_plural(len(rows))} met every condition: the fewest violations and then "
             f"the largest drop give {same} (verdict **{word}**)."
         )
-    out += (
-        f" The frozen winner keeps {kept} of the adapter's held-out-loss gain on dev; the rule asks for "
-        f"{need}."
-    )
+    share = rows[index[winner]].get("heldout_retained")
+    if isinstance(share, (int, float)) and share > 1:
+        # Over 100%: scaled down, the adapter fits the held-out references better than at full strength.
+        out += (
+            f" On dev the frozen winner's held-out loss is lower than the full adapter's: its gain over "
+            f"stock is {kept} of the adapter's own, where the rule asks for {need}."
+        )
+    else:
+        out += (
+            f" The frozen winner keeps {kept} of the adapter's held-out-loss gain on dev; the rule asks for "
+            f"{need}."
+        )
     if pick != winner:
         other = val(
             f"/table/{index[pick]}/heldout_retained",

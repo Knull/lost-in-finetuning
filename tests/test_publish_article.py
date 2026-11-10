@@ -901,6 +901,12 @@ def test_the_dev_selection_is_pending_until_lift_select_decides(out):
             "give the same setting (verdict **reject**). The frozen winner keeps 10.0% of the adapter's "
             "held-out-loss gain on dev; the rule asks for 50.0%.",
         ),
+        (
+            {"wiseft-l0.50": 1.87},  # scaled down, the adapter fits the references better
+            "3 of the 10 settings met every condition and the same rule picks the same setting (verdict "
+            "**repair**). On dev the frozen winner's held-out loss is lower than the full adapter's: its "
+            "gain over stock is 187.0% of the adapter's own, where the rule asks for 50.0%.",
+        ),
     ],
 )
 def test_the_secondary_selection_is_said_beside_the_primary_one(out, kept, says):
