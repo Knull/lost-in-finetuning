@@ -12,7 +12,8 @@ collections) while configs/frozen_recipe.json is not the one the newest ``recipe
 that differs from the tag's is refused outright.
 A dry run runs that scan too and exits 1 when a file that would be public holds a run of any model
 output's text, whatever its label (decisions item 62).
-``article`` writes hf/article.md; ``preflight`` checks the git repo can go public: it fetches every
+``article`` writes hf/article.md and the same text as README.md.
+``preflight`` checks the git repo can go public: it fetches every
 branch, tag and pull-request ref of origin first, and refuses a machine with no model outputs to check
 against. Exit codes: 0 done (or dry run), 1 refused or failed (preflight or a dry run's scan: findings).
 """
@@ -95,11 +96,14 @@ def _article(args: argparse.Namespace) -> int:
     from lift.publish.inputs import recipe_block, shown
 
     try:
-        path, facts = article.build()
+        path, facts = article.build(readme=True)
         block = recipe_block(facts)
     except PublishError as exc:
         return _fail(exc)
-    print(f"wrote {shown(path)} ({len(facts.sources)} values, sources in {shown(article.sources_path())})")
+    print(
+        f"wrote {shown(path)} and the same text as {shown(article.readme_path())} ({len(facts.sources)} "
+        f"values, sources in {shown(article.sources_path())})"
+    )
     pend = article.placeholders(path.read_text(encoding="utf-8"))
     if pend:
         print(f"{len(pend)} placeholders still pending (inputs not made yet, or for a person to fill in):")
@@ -108,7 +112,7 @@ def _article(args: argparse.Namespace) -> int:
     if block:
         print(f"lift publish: BLOCKED, a draft not for posting: {block}", file=sys.stderr)
         return 1
-    print("Post it by hand as an HF community article (huggingface.co/new-blog) once nothing is pending.")
+    print("Commit README.md and hf/article.md: the README is the write-up the submission links to.")
     return 0
 
 
@@ -211,7 +215,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     q.add_argument("--yes", action="store_true", help="create the collections for real (default: dry run)")
     q.set_defaults(func=_collections)
 
-    q = cmds.add_parser("article", help="write hf/article.md from the template and outputs/metrics")
+    q = cmds.add_parser(
+        "article", help="write hf/article.md and README.md from the template and outputs/metrics"
+    )
     q.set_defaults(func=_article)
 
     q = cmds.add_parser(

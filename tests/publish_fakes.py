@@ -420,7 +420,7 @@ def _p07_adapter_tables() -> dict:
             [
                 ("adapter", "Adapter (seed 1)", "text"),
                 ("role", "Role", "text"),
-                ("verdict", "Verdict (README)", "text"),
+                ("verdict", "Verdict (pre-registered)", "text"),
                 ("usefulness", "Usefulness (Gate 1)", "text"),
                 ("drift", "Harmful rate - stock", "pp_ci"),
                 ("drift_intact", "Harmful rate - stock, outputs that trip no unclear flag", "pp_ci"),

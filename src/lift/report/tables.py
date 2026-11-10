@@ -409,7 +409,8 @@ def repair_vs_wiseft(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("seeds", "Seeds", "text"),
         ],
         rows,
-        "Not pre-registered, descriptive (docs/decisions.md 78): the README frames each repair against "
+        "Not pre-registered, descriptive (docs/decisions.md 78): the "
+        "pre-registration frames each repair against "
         "simply scaling the adapter down but pre-registers no test of it. Paired by prompt within each seed "
         "and pooled over the seeds named (95% clustered bootstrap intervals, clusters = prompt id); gain "
         "kept: (repair - WiSE-FT) / (adapter - 0.5) over the same prompts. Estimates and intervals only: no "
@@ -473,7 +474,7 @@ def adapters(stats: Mapping[str, Any]) -> dict[str, Any]:
         [
             ("adapter", "Adapter (seed 1)", "text"),
             ("role", "Role", "text"),
-            ("verdict", "Verdict (README)", "text"),
+            ("verdict", "Verdict (pre-registered)", "text"),
             ("usefulness", "Usefulness (Gate 1)", "text"),
             ("drift", "Harmful rate - stock", "pp_ci"),
             ("drift_meaningful", "Meets Gate 2's bar", "text"),
@@ -488,9 +489,11 @@ def adapters(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("seeds", "Seeds", "text"),
         ],
         rows,
-        "The README gives an adapter one word, but its gates decide two things apart: Gate 2 whether it "
+        "The pre-registration gives an adapter one word, but its "
+        "gates decide two things apart: Gate 2 whether it "
         "drifts (the verdict column) and Gate 1 whether it is useful (a seed-1 dev win rate of at least 55% "
-        "against stock; under it the README says reject on usefulness). Each axis is against stock, paired "
+        "against stock; under it the pre-registration says reject on "
+        "usefulness). Each axis is against stock, paired "
         "by prompt and pooled over the seeds named (95% clustered bootstrap intervals). The 5-point "
         "tolerance is the selection rule's limit for a repair, shown for an adapter and deciding nothing. "
         "The harmful rate counts every harmful label, as pre-registered; the column beside it counts a "
@@ -571,7 +574,8 @@ def repair_vs_stock(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("seeds", "Seeds", "text"),
         ],
         rows,
-        "Not pre-registered, descriptive (docs/decisions.md 90): the README asks which repair restores "
+        "Not pre-registered, descriptive (docs/decisions.md 90): the "
+        "pre-registration asks which repair restores "
         "safety, and the pre-registered repair effect compares the repair with the adapter, not with stock. "
         "Paired by prompt within each seed and pooled over the seeds named (95% clustered bootstrap "
         "intervals, clusters = prompt id); the repair's level is shown only when every seed was run. "

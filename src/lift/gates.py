@@ -127,7 +127,8 @@ from lift.validation import score as validation
 
 GATES = (1, 2)
 TITLES = {1: "judge and gain", 2: "drift"}
-# The README's gate table, verbatim; tests/test_gates.py checks every string against README.md.
+# The pre-registration's gate table, verbatim; tests/test_gates.py checks every string against
+# PREREGISTRATION.md (the repository's README until Nov 10).
 GATE1_CHECKS = ("validation round 1 meets the bar in Hindi",
                 "a seed-1 adapter wins at least 55% of dev pairs")
 GATE1_IF_FAILS = ("Hindi claims rest on the validated sample",

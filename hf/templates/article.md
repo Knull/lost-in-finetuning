@@ -38,8 +38,9 @@ The test answers on separate axes, because one word hides them: whether the adap
 harmful rate against stock), whether it is useful (pairwise wins against stock, and the held-out
 loss), and what it costs in refusals of benign prompts.
 
-Every decision was pre-registered in the repository README before any experimental run, and
-every later change is dated in `docs/decisions.md`. Repairs were chosen on dev prompts only; the
+Every decision was pre-registered in the repository before any experimental run
+(`PREREGISTRATION.md`, the repository's README until this write-up took its place), and every
+later change is dated in `docs/decisions.md`. Repairs were chosen on dev prompts only; the
 final split was touched once, to score the frozen variants.
 
 ## 2. Repos used and their features

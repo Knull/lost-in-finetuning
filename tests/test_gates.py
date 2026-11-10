@@ -997,7 +997,7 @@ def test_gate2_decides_fp16_cells_only_under_gate_0s_licence(fake_prompt_files):
 
 
 def test_the_rules_quote_the_readme_gate_table_verbatim():
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "PREREGISTRATION.md").read_text(encoding="utf-8")
     rows = {}
     for line in readme.splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]

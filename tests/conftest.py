@@ -39,6 +39,15 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def readme_under_tmp(tmp_path, monkeypatch):
+    """``lift publish article`` also writes the repository's README.md: in tests that copy goes under
+    tmp_path, never over the committed one."""
+    from lift.publish import article
+
+    monkeypatch.setattr(article, "readme_path", lambda: tmp_path / "README.md")
+
+
+@pytest.fixture(autouse=True)
 def unpinned_revisions(monkeypatch):
     """Serve configs/project.yaml with every pinnable revision set to "main", and configs/variants.yaml
     with its stock entries only: the adapters and repairs a run registers are the project's state,

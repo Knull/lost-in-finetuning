@@ -567,7 +567,7 @@ def standard_verdict(drift: Mapping[str, Any] | None) -> tuple[str | None, str]:
     shown = f"{drift['est'] * 100:+.1f} pp [{drift['lo'] * 100:+.1f}, {drift['hi'] * 100:+.1f}]"
     reason = (
         "Gate 2 failed on dev, so the stress recipe carries the repair comparison and the standard recipe "
-        f"gets retain with its interval (README, Gate 2): final pooled Hindi drift {shown}"
+        f"gets retain with its interval (pre-registration, Gate 2): final pooled Hindi drift {shown}"
     )
     if drift_meaningful(drift):
         reason += (
@@ -1270,7 +1270,8 @@ def compute(
         not_run += [f"standard recipe drift seed {s}: not run ({why})" for s, why in e["not_run"].items()]
     elif recipe_of(adapter1) == "stress":
         not_run.append(
-            "the standard recipe's verdict (retain with its interval, README Gate 2): the standard adapter "
+            "the standard recipe's verdict (retain with its interval, the pre-registration's Gate 2): the "
+            "standard adapter "
             "is not known; `lift gate 2 --candidate NAME` records the Gate 1 pick, then lift stats again"
         )
     for name, by_seed in (r.get("candidates") or {}).items():

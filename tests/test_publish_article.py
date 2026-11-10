@@ -105,6 +105,26 @@ def test_committed_draft_matches_the_template_sections():
     assert heads == list(article.SECTIONS)
 
 
+def test_the_committed_readme_is_the_committed_article():
+    """Decisions item 96: README.md is the write-up, the same text as hf/article.md, both written by
+    ``lift publish article``. One regenerated without the other fails here."""
+    from lift.paths import REPO_ROOT
+
+    assert (REPO_ROOT / "README.md").read_text(encoding="utf-8") == article.article_path().read_text(
+        encoding="utf-8"
+    )
+    assert "PREREGISTRATION.md" in (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert (REPO_ROOT / "PREREGISTRATION.md").is_file()
+
+
+def test_the_readme_is_written_only_when_asked(out):
+    path, _ = article.build()
+    assert not article.readme_path().exists()  # tests' README lives under tmp_path (conftest)
+    path, _ = article.build(readme=True)
+    assert article.readme_path().read_text(encoding="utf-8") == path.read_text(encoding="utf-8")
+    assert article.readme_path().parent != article.paths.REPO_ROOT
+
+
 # ---------------------------------------------------------------- judges from final_report.json (R1-15)
 
 

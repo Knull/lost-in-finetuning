@@ -76,6 +76,13 @@ def sources_path() -> Path:
     return paths.REPO_ROOT / "hf" / "article.sources.json"
 
 
+def readme_path() -> Path:
+    """The repository's README, which is the write-up the judges read (docs/decisions.md item 96: HF
+    articles need a PRO account, and the organisers accept a README). ``lift publish article`` writes the
+    article's text there too, unchanged."""
+    return paths.REPO_ROOT / "README.md"
+
+
 def _team(cfg: dict) -> tuple[str, str]:
     team = cfg.get("team") or []
     if not team:
@@ -1020,7 +1027,9 @@ def blocked_line(facts: Facts) -> str:
     return f"> **{pending(what, RECIPE_IN_GIT, 'P05 lift select, then a commit and the tag')}**"
 
 
-def build(facts: Facts | None = None) -> tuple[Path, Facts]:
+def build(facts: Facts | None = None, *, readme: bool = False) -> tuple[Path, Facts]:
+    """Write the article, its sources and the notebook's stamp; with ``readme`` (the command), the same
+    text as the repository's README.md too."""
     from lift.publish import acceptance
 
     facts = facts or Facts()
@@ -1037,6 +1046,8 @@ def build(facts: Facts | None = None) -> tuple[Path, Facts]:
             "outputs/ tree (from the inputs it reads); nothing was written"
         )
     render.write_text(article_path(), text)
+    if readme:
+        render.write_text(readme_path(), text)
     facts.write_sources(sources_path())
     if preflight.relativise_file(sources_path())[1]:
         raise PublishError(f"{sources_path().name} would name an absolute local path outside the repo")
