@@ -167,7 +167,11 @@ _[PENDING: harmful rate against stock per language, every adapter from outputs/m
 ### Repair comparison
 
 Every repair family's frozen setting, against the adapter-scaling baseline (WiSE-FT). Each family's
-setting was chosen on seed-1 dev prompts, under the constraints drawn here:
+setting was chosen on seed-1 dev prompts.
+
+[PENDING: the dev selection (lift select) from outputs/metrics/selection.json (P05 lift select)]
+
+The dev settings against the rule's constraints:
 
 _[PENDING: the figure tradeoff_dev.png from outputs/figures/tradeoff_dev.png (P07 lift report)]_
 

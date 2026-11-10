@@ -17,6 +17,7 @@ judgements, after the pre-registered decide-judge rule); an id that is neither e
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
 from lift import config, paths
@@ -25,15 +26,18 @@ from lift.publish.collect import links_path, read_links
 from lift.publish.datasets import VERDICT_ROLES, verdict_lines
 from lift.publish.inputs import (
     FIGURES,
+    P05,
     P07,
     RECIPE_IN_GIT,
     TABLES,
     UNDEFINED,
     Facts,
+    _decided,
     _interval,
     pending,
     recipe_block,
     report_path,
+    selection_path,
     shown,
 )
 
@@ -229,6 +233,186 @@ def comparison_adapter(facts: Facts) -> str:
         else "standard"
     )
     return f"`{name}` ({recipe} recipe)"
+
+
+FAMILY_NAMES = {"wiseft": "WiSE-FT", "resta": "ReSta", "cast": "CAST"}
+# The rule's conditions as selection.json's rows flag them, in the order the article names them.
+CONDITIONS = (
+    ("belebele_ok", "Belebele-hi"),
+    ("overrefusal_ok", "hard-benign over-refusal"),
+    ("gain_ok", "the gain to keep"),
+    ("drop_ok", "a lower harmful rate than the adapter's"),
+)
+
+
+def secondary_path() -> Path:
+    return paths.metrics_dir() / "selection_secondary.json"
+
+
+def _plural(n: int, noun: str = "setting") -> str:
+    return f"{n} {noun}" + ("" if n == 1 else "s")
+
+
+def dev_selection(facts: Facts) -> str:
+    """What the selection rule decided on seed-1 dev, in words, from selection.json: how many settings met
+    every condition, the pick with its Hindi harmful rate against the adapter's and stock's, which condition
+    the others failed, and each other family's frozen setting with its verdict. Then what the same rule
+    decides with the gain read on held-out loss (selection_secondary.json, docs/decisions.md item 73), and
+    the share of the adapter's held-out-loss gain the frozen winner keeps on dev: the primary rule cannot
+    see that share when the adapter has no win-rate gain over stock to keep. Every number is read through
+    ``facts`` (recorded in the sources); nothing is said that the two files do not hold. Pending while
+    selection.json is not decided; the secondary part says so, without a placeholder, while its file is
+    not decided (it freezes nothing and blocks nothing)."""
+    sel = _decided(facts)
+    if sel is None:
+        return facts.value(
+            selection_path(), "/overall/winner", "text", what="the dev selection (lift select)", stage=P05
+        )
+    path = selection_path()
+    rows = list(sel.get("table") or [])
+    index = {r["name"]: i for i, r in enumerate(rows)}
+    winner = str(sel["overall"]["winner"])
+    if winner not in index:
+        raise PublishError(f"{shown(path)}: the overall winner {winner} has no row in its table")
+
+    def val(pointer: str, kind: str, what: str) -> str:
+        return facts.value(path, pointer, kind, what=what, stage=P05)
+
+    n_ok = sum(bool(r.get("eligible")) for r in rows)
+    verdict = val("/overall/verdict", "text", "the selection's verdict")
+    harmful = val(f"/table/{index[winner]}/harmful_hi", "pct", "the winner's dev harmful rate")
+    adapter = val("/adapter_scores/harmful_hi", "pct", "the adapter's dev harmful rate")
+    stock = val("/stock/harmful_hi", "pct", "stock's dev harmful rate")
+    if n_ok:
+        lead = (
+            f"On seed-1 dev, {n_ok} of the {_plural(len(rows))} met every condition of the rule. Its pick is "
+            f"`{winner}` (verdict **{verdict}**)"
+        )
+    else:
+        lead = (
+            f"On seed-1 dev, none of the {_plural(len(rows))} met every condition of the rule, so it froze "
+            f"the setting with the fewest violations and then the largest drop: `{winner}` (verdict "
+            f"**{verdict}**)"
+        )
+    parts = [
+        f"{lead}, with a Hindi harmful rate of {harmful} against the adapter's {adapter} and stock's {stock}."
+    ]
+    failed = [
+        f"{label} ({_plural(n)})"
+        for key, label in CONDITIONS
+        if (n := sum(r.get(key) is False for r in rows))
+    ]
+    if failed:
+        parts.append(
+            f"Conditions not met, with the number of settings that missed each: {'; '.join(failed)}."
+        )
+    gated = [r for r in rows if r.get("method") == "cast"]
+    own = (sel.get("adapter_scores") or {}).get("belebele_hi")
+    if (
+        gated
+        and isinstance(own, (int, float))
+        and all(
+            r.get("belebele_ok") is False
+            and isinstance(r.get("belebele_hi"), (int, float))
+            and abs(r["belebele_hi"] - own) < 1e-12
+            for r in gated
+        )
+    ):
+        # Said only when selection.json shows it: every conditional CAST setting has the unrepaired adapter's
+        # own Belebele-hi accuracy, and that accuracy is outside the rule's margin (docs/decisions.md 88).
+        accuracy = val("/adapter_scores/belebele_hi", "pct", "the adapter's own dev Belebele-hi accuracy")
+        parts.append(
+            f"Every conditional CAST setting ({len(gated)}) has the unrepaired adapter's own Belebele-hi "
+            f"accuracy, {accuracy}, which is outside the rule's margin: on that condition CAST was decided "
+            "by the adapter it repairs, not by what it does to harmful prompts."
+        )
+    families = sel.get("families") if isinstance(sel.get("families"), Mapping) else {}
+    others = []
+    for family, name in sel["frozen"].items():
+        if str(name) == winner:
+            continue
+        word = (families.get(family) or {}).get("verdict")
+        others.append(
+            f"`{name}` for {FAMILY_NAMES.get(str(family), str(family))}"
+            + (f" (verdict **{word}**)" if word else "")
+        )
+    if others:
+        parts.append(f"The other families' frozen settings: {_and(others)}.")
+    parts.append(_secondary_selection(facts, winner, str(sel.get("adapter"))))
+    return " ".join(x for x in parts if x)
+
+
+def _secondary_selection(facts: Facts, winner: str, adapter: str) -> str:
+    """The secondary selection's part of ``dev_selection``: what the rule decides with the gain read on
+    held-out loss, and the share of that gain the frozen winner keeps on dev. A file made for another
+    adapter, or from other dev numbers than selection.json's (its own ``primary`` pick is not the frozen
+    winner), is refused: the two files would contradict each other in one paragraph."""
+    path = secondary_path()
+    doc = facts.doc(path)
+    lead = (
+        "With the gain read on held-out loss instead of the win rate (the secondary selection, which freezes "
+        "nothing)"
+    )
+    if doc is None:
+        return f"{lead}: not decided, the dev held-out scores of the settings are not there."
+    status = doc.get("status")
+    if status == "undefined":
+        return f"{lead}: undefined, the adapter fits the held-out references no better than stock."
+    if status != "decided":
+        return f"{lead}: not decided, the dev held-out scores of some settings are not there."
+    again = (
+        f"run `lift select --adapter {adapter}` again (it rewrites the file and leaves the recipe as it is)"
+    )
+    if doc.get("adapter") != adapter:
+        raise PublishError(
+            f"{shown(path)} is the secondary selection of {doc.get('adapter')}, not {adapter}: {again}"
+        )
+    if (doc.get("primary") or {}).get("winner") != winner:
+        raise PublishError(
+            f"{shown(path)} was made from other dev numbers than {shown(selection_path())}: on its numbers "
+            f"the primary rule picks {(doc.get('primary') or {}).get('winner')}, not the frozen {winner}; "
+            f"{again}"
+        )
+
+    def val(pointer: str, kind: str, what: str) -> str:
+        return facts.value(path, pointer, kind, what=what, stage=P05)
+
+    rows = list(doc.get("table") or [])
+    index = {r["name"]: i for i, r in enumerate(rows)}
+    pick = str((doc.get("overall") or {}).get("winner"))
+    if pick not in index or winner not in index:
+        raise PublishError(
+            f"{shown(path)}: its table has no row for {pick} or for the frozen winner {winner}"
+        )
+    word = val("/overall/verdict", "text", "the secondary selection's verdict")
+    kept = val(
+        f"/table/{index[winner]}/heldout_retained", "pct", "the held-out gain the frozen winner keeps on dev"
+    )
+    need = val("/rules/min_gain_retained", "pct", "the share of the gain the rule asks for")
+    n_ok = sum(bool(r.get("eligible")) for r in rows)
+    same = "the same setting" if pick == winner else f"`{pick}`"
+    if n_ok:
+        out = (
+            f"{lead}, {n_ok} of the {_plural(len(rows))} met every condition and the same rule picks {same} "
+            f"(verdict **{word}**)."
+        )
+    else:
+        out = (
+            f"{lead}, none of the {_plural(len(rows))} met every condition: the fewest violations and then "
+            f"the largest drop give {same} (verdict **{word}**)."
+        )
+    out += (
+        f" The frozen winner keeps {kept} of the adapter's held-out-loss gain on dev; the rule asks for "
+        f"{need}."
+    )
+    if pick != winner:
+        other = val(
+            f"/table/{index[pick]}/heldout_retained",
+            "pct",
+            "the held-out gain the secondary pick keeps on dev",
+        )
+        out += f" `{pick}` keeps {other}."
+    return out
 
 
 PRIMARY_EFFECTS = [
@@ -553,6 +737,7 @@ def context(facts: Facts) -> dict[str, str]:
         "verdicts": verdict_lines(facts),
         "adapter_checks": adapter_checks(facts),
         "comparison_adapter": comparison_adapter(facts),
+        "dev_selection": dev_selection(facts),
         "utility_retained": rv(
             "/headline/utility_retained",
             "pct_ci",

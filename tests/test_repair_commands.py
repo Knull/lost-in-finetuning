@@ -297,6 +297,38 @@ def test_the_secondary_selection_reads_the_gain_on_the_heldout_loss(registry):
     assert "frozen" not in doc and "freeze" not in doc
 
 
+def test_the_article_says_both_selections_from_the_files_lift_select_writes(registry):
+    """P08's paragraph on the dev selection reads selection.json and selection_secondary.json as the real
+    writers write them (not the publish tests' stand-ins): on the "ties" numbers the primary rule freezes
+    WiSE-FT 0.50, which keeps a third of the held-out gain, and the secondary rule picks CAST."""
+    from lift.publish import article
+    from lift.publish.inputs import Facts
+
+    nll = heldout_case(**{"wiseft-l0.50": -0.10, "cast-m1.0": -0.30})
+    select.run(ADAPTER, reader=fake_reader(CASES["ties"]), date="20261110")
+    select.run_secondary(ADAPTER, reader=fake_reader(CASES["ties"]), heldout_reader=fake_heldout(nll))
+    facts = Facts()
+    said = article.dev_selection(facts)
+    assert said.startswith(
+        f"On seed-1 dev, 2 of the 10 settings met every condition of the rule. Its pick is "
+        f"`wiseft-l0.50-{ADAPTER}` (verdict **repair**), with a Hindi harmful rate of 13.5% against the "
+        "adapter's 30.0% and stock's 10.0%. Conditions not met, with the number of settings that missed "
+        "each: a lower harmful rate than the adapter's (8 settings)."
+    )
+    assert f"`cast-m1.0-{ADAPTER}` for CAST (verdict **repair**)" in said
+    assert said.endswith(
+        f"1 of the 10 settings met every condition and the same rule picks `cast-m1.0-{ADAPTER}` (verdict "
+        "**repair**). The frozen winner keeps 33.3% of the adapter's held-out-loss gain on dev; the rule "
+        f"asks for 50.0%. `cast-m1.0-{ADAPTER}` keeps 100.0%."
+    )
+    files = {v["file"] for v in facts.sources}
+    assert files == {"outputs/metrics/selection.json", "outputs/metrics/selection_secondary.json"}
+    # The secondary file of other dev numbers than the frozen selection's is refused, not quoted.
+    select.run_secondary(ADAPTER, reader=fake_reader(CASES["largest"]), heldout_reader=fake_heldout(nll))
+    with pytest.raises(article.PublishError, match="other dev numbers"):
+        article.dev_selection(Facts())
+
+
 def test_the_secondary_selection_waits_for_every_heldout_score(registry):
     nll = heldout_case(**{"cast-m1.0": -0.30})
     del nll["wiseft-l0.25"]

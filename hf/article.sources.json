@@ -19,6 +19,7 @@
   "the Aya Red-teaming drift effect (outputs/metrics/final_report.json)",
   "the Aya Red-teaming repair effect (outputs/metrics/final_report.json)",
   "the adapter of the repair comparison (outputs/metrics/final_report.json)",
+  "the dev selection (lift select) (outputs/metrics/selection.json)",
   "the drift p-value (outputs/metrics/final_report.json)",
   "the figure adapters_by_language.png (outputs/figures/adapters_by_language.png)",
   "the figure forest_primary.png (outputs/figures/forest_primary.png)",

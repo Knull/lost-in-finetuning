@@ -164,7 +164,11 @@ adapters outside the repair comparison):
 ### Repair comparison
 
 Every repair family's frozen setting, against the adapter-scaling baseline (WiSE-FT). Each family's
-setting was chosen on seed-1 dev prompts, under the constraints drawn here:
+setting was chosen on seed-1 dev prompts.
+
+{{ dev_selection }}
+
+The dev settings against the rule's constraints:
 
 {{ figure_tradeoff_dev }}
 

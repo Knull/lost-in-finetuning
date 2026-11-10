@@ -6,7 +6,16 @@ import json
 import re
 
 import pytest
-from publish_fakes import no_committed_recipe, write_inputs, write_json, write_report  # noqa: F401
+from publish_fakes import (  # noqa: F401
+    ADAPTER,
+    CAST_WINS,
+    no_committed_recipe,
+    secondary_selection,
+    selection,
+    write_inputs,
+    write_json,
+    write_report,
+)
 
 from lift.publish import PublishError, article, settings
 from lift.publish.collect import links_path
@@ -695,6 +704,146 @@ def test_the_secondary_selections_figure_is_optional(out):
     assert not any("tradeoff_dev_heldout" in m for m in facts.missing)
     assert "figures/tradeoff_dev_heldout.png)" not in text
     assert "of the held-out-loss gain: 60.0% [52.0, 68.0]" in text  # the final-split share is still there
+
+
+def _secondary_file():
+    from lift import paths
+
+    return paths.metrics_dir() / "selection_secondary.json"
+
+
+def _dev_selection():
+    path, facts = article.build()
+    text = path.read_text(encoding="utf-8")
+    section = _section(text, "Repair comparison")
+    start = section.index("On seed-1 dev")
+    return section[start : section.index("\n", start)], facts
+
+
+def test_the_dev_selection_is_said_in_words_from_selection_json(out):
+    """What the rule decided on dev: how many settings met every condition, the pick against the adapter
+    and stock, which condition the others missed, and the other families' frozen settings. Without the
+    secondary selection's file the paragraph says it is not decided, and nothing is pending for it."""
+    write_inputs()
+    said, facts = _dev_selection()
+    assert said == (
+        f"On seed-1 dev, 3 of the 10 settings met every condition of the rule. Its pick is "
+        f"`wiseft-l0.50-{ADAPTER}` (verdict **repair**), with a Hindi harmful rate of 12.0% against the "
+        "adapter's 30.0% and stock's 10.0%. Conditions not met, with the number of settings that missed "
+        "each: a lower harmful rate than the adapter's (7 settings). The other families' frozen settings: "
+        f"`resta-a0.25-{ADAPTER}` for ReSta (verdict **repair**) and `cast-m1.0-{ADAPTER}` for CAST (verdict "
+        "**repair**). With the gain read on held-out loss instead of the win rate (the secondary selection, "
+        "which freezes nothing): not decided, the dev held-out scores of the settings are not there."
+    )
+    assert not any("selection" in m for m in facts.missing)
+    pointers = {(v["file"], v["pointer"]) for v in facts.sources}
+    assert ("outputs/metrics/selection.json", "/adapter_scores/harmful_hi") in pointers
+    assert ("outputs/metrics/selection.json", "/table/1/harmful_hi") in pointers
+
+
+def test_cast_is_said_to_inherit_the_adapters_belebele_only_when_the_selection_shows_it(out):
+    """decisions.md 88. With its gate shut on benign prompts, conditional CAST scores as the unrepaired
+    adapter does. When that accuracy is outside the rule's margin, the Belebele condition is decided by
+    the adapter. The sentence is written only when selection.json holds exactly that."""
+    sentence = (
+        "Every conditional CAST setting (3) has the unrepaired adapter's own Belebele-hi accuracy, 55.0%"
+    )
+    low = (0.20, 0.30, 0.66, 0.55)  # a drop, with the adapter's own accuracy: 5 points under stock's
+    numbers = {
+        "wiseft-l0.50": (0.12, 0.30, 0.66, 0.60),
+        "cast-m0.5": low,
+        "cast-m1.0": low,
+        "cast-m2.0": low,
+    }
+    write_inputs(selection_doc=selection(numbers, adapter_belebele=0.55))
+    said, facts = _dev_selection()
+    assert sentence in said and "decided by the adapter it repairs" in said
+    assert "Belebele-hi (3 settings)" in said
+    assert ("outputs/metrics/selection.json", "/adapter_scores/belebele_hi") in {
+        (v["file"], v["pointer"]) for v in facts.sources
+    }
+    # One strength with another accuracy (the gate fired somewhere), or an adapter inside the margin:
+    # not said.
+    write_inputs(
+        selection_doc=selection({**numbers, "cast-m2.0": (0.20, 0.30, 0.66, 0.54)}, adapter_belebele=0.55)
+    )
+    assert "unrepaired adapter's own Belebele-hi" not in _dev_selection()[0]
+    write_inputs(selection_doc=selection(numbers))
+    assert "unrepaired adapter's own Belebele-hi" not in _dev_selection()[0]
+
+
+def test_the_dev_selection_is_pending_until_lift_select_decides(out):
+    path, facts = article.build()
+    text = path.read_text(encoding="utf-8")
+    assert "the dev selection (lift select) from outputs/metrics/selection.json (P05 lift select)]" in text
+    write_inputs(selection_doc=selection(incomplete=True))
+    assert "the dev selection (lift select) from" in article.build()[0].read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("kept", "says"),
+    [
+        (
+            None,  # every setting keeps 60% of the held-out gain: the same pick
+            "3 of the 10 settings met every condition and the same rule picks the same setting (verdict "
+            "**repair**). The frozen winner keeps 60.0% of the adapter's held-out-loss gain on dev; the rule "
+            "asks for 50.0%.",
+        ),
+        (
+            {"wiseft-l0.50": 0.44},  # the frozen winner keeps under half: the rule moves on
+            f"2 of the 10 settings met every condition and the same rule picks `resta-a0.25-{ADAPTER}` "
+            "(verdict **repair**). The frozen winner keeps 44.0% of the adapter's held-out-loss gain on dev; "
+            f"the rule asks for 50.0%. `resta-a0.25-{ADAPTER}` keeps 60.0%.",
+        ),
+        (
+            {"wiseft-l0.50": 0.1, "resta-a0.25": 0.1, "cast-m1.0": 0.1},  # nothing keeps half
+            "none of the 10 settings met every condition: the fewest violations and then the largest drop "
+            "give the same setting (verdict **reject**). The frozen winner keeps 10.0% of the adapter's "
+            "held-out-loss gain on dev; the rule asks for 50.0%.",
+        ),
+    ],
+)
+def test_the_secondary_selection_is_said_beside_the_primary_one(out, kept, says):
+    """decisions.md 73: the primary rule cannot see how much of the adapter a repair keeps when the adapter
+    has no win-rate gain over stock. The article says what the same rule decides with the gain read on
+    held-out loss, and the share of that gain the frozen winner keeps on dev, whichever way it points."""
+    write_inputs()
+    write_json(_secondary_file(), secondary_selection(kept=kept))
+    said, facts = _dev_selection()
+    assert said.endswith(
+        "With the gain read on held-out loss instead of the win rate (the secondary selection, which "
+        "freezes nothing), " + says
+    )
+    pointers = {(v["file"], v["pointer"]) for v in facts.sources}
+    assert ("outputs/metrics/selection_secondary.json", "/table/1/heldout_retained") in pointers
+    assert ("outputs/metrics/selection_secondary.json", "/rules/min_gain_retained") in pointers
+
+
+@pytest.mark.parametrize(
+    ("status", "says"),
+    [
+        ("incomplete", "not decided, the dev held-out scores of some settings are not there."),
+        ("undefined", "undefined, the adapter fits the held-out references no better than stock."),
+    ],
+)
+def test_a_secondary_selection_that_holds_no_pick_says_so_and_is_not_pending(out, status, says):
+    write_inputs()
+    write_json(_secondary_file(), secondary_selection(status=status))
+    said, facts = _dev_selection()
+    assert said.endswith("(the secondary selection, which freezes nothing): " + says)
+    assert PENDING not in said
+
+
+def test_a_secondary_selection_of_other_numbers_or_another_adapter_is_refused(out):
+    """The paragraph would contradict itself: the secondary file names the primary pick of its own numbers."""
+    write_inputs()
+    write_json(_secondary_file(), secondary_selection(selection(CAST_WINS)))
+    with pytest.raises(PublishError, match="other dev numbers than outputs/metrics/selection.json"):
+        article.build()
+    other = "adapter-indicalign-stress-s1"
+    write_json(_secondary_file(), secondary_selection(selection(adapter=other)))
+    with pytest.raises(PublishError, match=f"the secondary selection of {other}, not {ADAPTER}"):
+        article.build()
 
 
 def test_the_articles_tables_and_figures_are_the_ones_the_report_writes():

@@ -640,7 +640,13 @@ CAST_WINS = {"wiseft-l0.50": (0.20, 0.30, 0.66, 0.60), "cast-m1.0": (0.12, 0.30,
 REJECT = {"cast-m2.0": (0.05, 0.40, 0.66, 0.60)}
 
 
-def selection(numbers: dict | None = None, *, adapter: str = ADAPTER, incomplete: bool = False) -> dict:
+def selection(
+    numbers: dict | None = None,
+    *,
+    adapter: str = ADAPTER,
+    incomplete: bool = False,
+    adapter_belebele: float = 0.61,
+) -> dict:
     """outputs/metrics/selection.json exactly as P05's ``lift.repair.select.run`` writes it
     (origin/p05-repairs: ``run``, ``decide``, ``freeze_plan``), decided by the real selection rule
     (``lift.selection.select_repair``, the same module on both branches) over made-up dev scores.
@@ -653,7 +659,7 @@ def selection(numbers: dict | None = None, *, adapter: str = ADAPTER, incomplete
     rules = config.get("selection", name="repairs")
     families = ["wiseft", "resta", "cast"]
     stock = DevScores("stock", "stock", 0.10, 0.30, 0.5, 0.60)
-    adapter_scores = DevScores(adapter, "adapter", 0.30, 0.25, 0.70, 0.61)
+    adapter_scores = DevScores(adapter, "adapter", 0.30, 0.25, 0.70, adapter_belebele)
     doc: dict = {
         "kind": "selection",
         "version": 1,
@@ -686,8 +692,22 @@ def selection(numbers: dict | None = None, *, adapter: str = ADAPTER, incomplete
     for fam in families:
         pool = [c for c in cands if FAMILY[c.method] == fam]
         per_family[fam] = sel_doc(select_repair(stock, adapter_scores, pool, rules))
+    from lift.selection import min_win_rate
+
+    by_name = {c.name: c for c in cands}
     rows = [
-        {**row, "family": FAMILY[row["method"]], "eligible": row["violations"] == 0} for row in overall.table
+        {
+            **row,
+            "family": FAMILY[row["method"]],
+            "harmful_hi": by_name[row["name"]].harmful_hi,
+            "overrefusal_hard_hi": by_name[row["name"]].overrefusal_hard_hi,
+            "overrefusal_increase": by_name[row["name"]].overrefusal_hard_hi - stock.overrefusal_hard_hi,
+            "min_win_rate": min_win_rate(adapter_scores.win_rate, rules),
+            "belebele_hi": by_name[row["name"]].belebele_hi,
+            "belebele_drop": stock.belebele_hi - by_name[row["name"]].belebele_hi,
+            "eligible": row["violations"] == 0,
+        }
+        for row in overall.table
     ]
     frozen = {fam: s["winner"] for fam, s in per_family.items()}
     stem = adapter[: -len("1")]
@@ -710,6 +730,92 @@ def selection(numbers: dict | None = None, *, adapter: str = ADAPTER, incomplete
             },
         }
     )
+    return doc
+
+
+def secondary_selection(
+    selection_doc: dict | None = None, kept: dict | None = None, *, status: str = "decided"
+) -> dict:
+    """outputs/metrics/selection_secondary.json as ``lift.repair.select.run_secondary`` writes it for
+    ``selection_doc``'s dev numbers: the real rule (``select_repair(..., heldout_retained=...)``) with the
+    share of the adapter's held-out-loss gain each setting keeps (``kept``: {tag: share}; 0.6 unless
+    given). ``status`` "incomplete" or "undefined" gives those documents, which hold no selection."""
+    from lift import config
+    from lift.selection import DevScores, select_repair
+
+    sel = selection() if selection_doc is None else selection_doc
+    adapter = sel["adapter"]
+    rules = config.get("selection", name="repairs")
+    doc: dict = {
+        "kind": "selection_secondary",
+        "version": 1,
+        "adapter": adapter,
+        "split": "dev",
+        "lang": "hi",
+        "dtype": "bf16",
+        "judge": "primary",
+        "families": ["wiseft", "resta", "cast"],
+        "rules": dict(rules),
+        "decision": "docs/decisions.md item 73",
+        "created": "2026-11-10T00:00:00+00:00",
+        "stock": sel["stock"],
+        "adapter_scores": sel["adapter_scores"],
+        "missing": {},
+        "problems": [],
+        "heldout": {},
+        "status": status,
+    }
+    if status == "incomplete":
+        doc["missing"] = {f"cast-m0.5-{adapter}": ["heldout_loss: no complete held-out loss dev scores"]}
+        return doc
+    if status == "undefined":
+        doc["undefined"] = f"{adapter} has no held-out-loss gain over stock to keep"
+        return doc
+    stock = DevScores(**sel["stock"])
+    adapter_scores = DevScores(**sel["adapter_scores"])
+    cands = [
+        DevScores(
+            r["name"], r["method"], r["harmful_hi"], r["overrefusal_hard_hi"], r["win_rate"], r["belebele_hi"]
+        )
+        for r in sel["table"]
+    ]
+    shares = {c.name: (kept or {}).get(c.name[: -len(adapter) - 1], 0.6) for c in cands}
+
+    def sel_doc(x) -> dict:
+        return {"winner": x.winner, "verdict": x.verdict, "eligible": list(x.eligible)}
+
+    overall = select_repair(stock, adapter_scores, cands, rules, heldout_retained=shares)
+    by_name = {c.name: c for c in cands}
+    doc["overall"] = sel_doc(overall)
+    doc["primary"] = sel_doc(select_repair(stock, adapter_scores, cands, rules))
+    doc["families"] = {
+        fam: sel_doc(
+            select_repair(
+                stock,
+                adapter_scores,
+                [c for c in cands if FAMILY[c.method] == fam],
+                rules,
+                heldout_retained=shares,
+            )
+        )
+        for fam in doc["families"]
+    }
+    doc["adapter_gain"] = {"nll_minus_stock": -0.4, "lo": -0.45, "hi": -0.35}
+    doc["table"] = [
+        {
+            **row,
+            "family": FAMILY[row["method"]],
+            "harmful_hi": by_name[row["name"]].harmful_hi,
+            "overrefusal_hard_hi": by_name[row["name"]].overrefusal_hard_hi,
+            "overrefusal_increase": by_name[row["name"]].overrefusal_hard_hi - stock.overrefusal_hard_hi,
+            "heldout_nll_minus_stock": -0.4 * shares[row["name"]],
+            "min_heldout_retained": rules["min_gain_retained"],
+            "belebele_hi": by_name[row["name"]].belebele_hi,
+            "belebele_drop": stock.belebele_hi - by_name[row["name"]].belebele_hi,
+            "eligible": row["violations"] == 0,
+        }
+        for row in overall.table
+    ]
     return doc
 
 
