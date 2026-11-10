@@ -531,7 +531,7 @@ def test_the_wiseft_answer_reads_every_column_and_says_which_way(out):
 
 
 def test_an_undefined_utility_share_is_shown_as_p07_says_it(out):
-    """decisions.md 73: headline.utility_retained may be P07's "undefined: ..." string (no adapter gain);
+    """decisions.md 77: headline.utility_retained may be P07's "undefined: ..." string (no adapter gain);
     it renders as it is, recorded in the sources, never as a number or "not run"."""
     from publish_fakes import UNDEFINED_GAIN, report
 

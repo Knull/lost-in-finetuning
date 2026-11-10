@@ -11,7 +11,7 @@ Planned modules (one per prompt, so sessions never collide):
     loglik.py      lift belebele|heldout-loss                                 (P03)
     gate.py        lift gate 1|2                                              (P03)
     validate.py    lift validate sample|import|score|decide-judge|...         (P04)
-    repair.py      lift fit-cast|sweep|select                                 (P05)
+    repair.py      lift fit-cast|register-repairs|sweep|select                (P05)
     diagnose.py    lift diagnose ...                                          (P06)
     final.py       lift final|stats|report                                    (P07)
     publish.py     lift publish model|datasets|space|article                  (P08)

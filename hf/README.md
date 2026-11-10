@@ -1,22 +1,22 @@
 # Hugging Face deliverables (P08)
 
 The rules say every artifact is hosted on HF and the project is deployed publicly by the
-deadline. Gating follows docs/decisions.md items 14 and 74. Gated repos are still hosted publicly
+deadline. Gating follows docs/decisions.md items 14 and 84. Gated repos are still hosted publicly
 (anyone can see them and, after accepting the terms, download them), and the GitHub repo, Space, article, logs, prompt sets and
 repair parameters are public, so the public deploy is met.
 
 | Artifact | Access | Contents |
 | --- | --- | --- |
-| Repaired model | gated, automatic approval, whatever the method or verdict (item 74, pending team confirmation) | The overall frozen winner (seed 1) applied to the chosen adapter, and no other variant: the card shows the winner's repair effect. The model card carries the CC-BY-NC-4.0 and Cohere acceptable-use notices, the verdict, and the per-language before/after table. With the public parameters, any repaired model's weights give back the gated adapter: WiSE-FT as Global + (weights - Global) / lambda, ReSta as weights - alpha x (Global - Base), and a CAST winner's weights are the adapter, merged (the repair is only in the wrapper). So it is gated like the adapters, and the card and gate text say which of these applies (plus "reject": the best setting frozen anyway, not a repair). `lift publish model` refuses a public `repos.model`. |
+| Repaired model | gated, automatic approval, whatever the method or verdict (item 84, pending team confirmation) | The overall frozen winner (seed 1) applied to the chosen adapter, and no other variant: the card shows the winner's repair effect. The model card carries the CC-BY-NC-4.0 and Cohere acceptable-use notices, the verdict, and the per-language before/after table. With the public parameters, any repaired model's weights give back the gated adapter: WiSE-FT as Global + (weights - Global) / lambda, ReSta as weights - alpha x (Global - Base), and a CAST winner's weights are the adapter, merged (the repair is only in the wrapper). So it is gated like the adapters, and the card and gate text say which of these applies (plus "reject": the best setting frozen anyway, not a repair). `lift publish model` refuses a public `repos.model`. |
 | Repair parameters | public | CAST vectors, condition and threshold; the WiSE-FT lambda; the ReSta alpha. Public because no repaired weights are: on their own they rebuild nothing. |
 | Adapters (unrepaired) | gated, automatic approval | Research artifacts whose safety may have drifted (the verdict says whether it did), with a terms note. |
-| Logs dataset | public | Prompt ids, labels, metadata, refusal texts and aggregate tables. |
-| Raw completions | gated, manual approval | Every judged output, including the harmful ones. |
+| Logs dataset | public | Prompt ids, labels, flags, generation keys, output hashes (the redacted AuditKIT records), metadata and aggregate tables. No output text, and no judge text: `JudgementRecord.raw`, `native.reason` and the text of `native.judge_failure` (the judges' replies, a frontier judge's reason, and the part of a reply a failure quotes: a frontier provider's refusal, the start of a Qwen3Guard reply that did not parse) stay out with it, as CLAUDE.md rule 6 gates judge logs. A failed judgement keeps only that its judge failed, and the failure's kind. |
+| Raw completions | gated, manual approval | Every judged output in full, refusals and benign answers included, the harmful ones too. No other artifact holds more of an output than the Space's 10-word cut. |
 | Translated prompt sets | public | Hindi PolyRefuse, Chinese harmless, OR-Bench-Hard in 5 languages, with native-check notes and the CC-BY-4.0 attribution for OR-Bench. |
 | Collections | public | One for model artifacts, one for data artifacts, both linked from the article. |
 | Article | public | The organisers' sections (prompts/P08_publish.md), from the metrics files only. |
 | Notebook | public, in the repo | `notebooks/acceptance_test.ipynb`: run the check on any Tiny Aya adapter. |
-| Space | public, if time allows | Gradio over the aggregate dataset: verdict, heatmaps, utility retained, redacted examples. No live generation. |
+| Space | public, if time allows | Gradio over the aggregate dataset: verdict, heatmaps, utility retained, and a few examples, each cut to about 10 words plus `[redacted]` whatever its label. No other output text, and no live generation. |
 
 The team lead's HF username must match the registration form. The HF account must also have the
 registration email on it to redeem the hackathon credits.
@@ -111,7 +111,7 @@ the logs only after every label is final, so this is never needed.
   *may* affect safety; the verdict and every effect come from the metrics.
 - **Repair parameters** go to their own repo (every frozen family on seeds 1-3) and also into the
   model repo (`repair/params.json`), so the model card is self-contained.
-- **Only the overall winner** is published as a model (decisions item 74 for its access).
+- **Only the overall winner** is published as a model (decisions item 84 for its access).
 - **The article** is written, not uploaded: HF community articles have no upload API.
 - **The notebook** is a screening (first 50 dev prompts per set and language, Hindi and English,
   harmful and hard benign) through `lift run-dev`; it reuses Gate 2's thresholds from `lift.gates`.

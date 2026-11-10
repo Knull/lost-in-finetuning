@@ -7,6 +7,9 @@ eval. The harness freezes after this review.
 
 Find the bugs that would silently corrupt results, fix them, and stop when two review rounds in
 a row find nothing new.
+At most three review rounds in total, even if the third still finds something: then fix
+what has a failing test, list the rest in the PR body as "suspected", and open the PR. (R1
+ran without this cap on Nov 4-5 and was still looping after 13 hours.)
 
 ## How to review
 

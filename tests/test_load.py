@@ -51,6 +51,9 @@ def test_template_stats_counts_the_preamble(tiny_tokenizer):
     assert stats["system_block_tokens"] > 50
     assert stats["prefix_tokens"] > stats["system_block_tokens"] > 0
     assert stats["generation_prompt"].endswith("<|CHATBOT_TOKEN|><|START_RESPONSE|>")
+    # R1-23: what Gate 0's preamble check now requires: one system block, holding the default preamble
+    assert stats["system_blocks"] == 1 and stats["safety_preamble"] is True
+    assert stats["ends_with_generation_prompt"] is True and load.SAFETY_PREAMBLE_MARKER in TINY_CHAT_TEMPLATE
 
 
 def test_stop_ids_cover_every_end_of_turn_token(tiny_tokenizer, tiny_cohere2):
@@ -83,6 +86,37 @@ def test_local_revision_is_a_content_hash(tiny_model_dir, tmp_path):
     assert load.resolved_revision(str(copy), "main") == rev
     (copy / "config.json").write_text((copy / "config.json").read_text() + " ", encoding="utf-8")
     assert load.resolved_revision(str(copy), "main") != rev
+
+
+def test_a_checkpoint_below_a_cache_folder_hashes_its_own_files(tiny_model_dir, tmp_path):
+    """R1-22: a model directory that sits below a .cache folder (a hub snapshot such as
+    ~/.cache/huggingface/hub/models--X/snapshots/<sha>/) is hashed by its own files. Filtering ".cache" on
+    the whole path dropped every file there, so all such checkpoints shared one revision, hence one set of
+    cache keys. Only the .cache metadata that `hf download --local-dir` leaves inside a model directory is
+    skipped, and a directory with nothing left to hash raises instead of returning a constant revision."""
+    import shutil
+
+    rev = load.resolved_revision(str(tiny_model_dir), "main")
+    other = shutil.copytree(tiny_model_dir, tmp_path / "plain" / "other")
+    (other / "config.json").write_text((other / "config.json").read_text(encoding="utf-8") + " ",
+                                       encoding="utf-8")
+    other_rev = load.resolved_revision(str(other), "main")
+    assert other_rev != rev
+    snapshots = tmp_path / ".cache" / "huggingface" / "hub" / "models--tiny" / "snapshots"
+    a = shutil.copytree(tiny_model_dir, snapshots / "a")
+    b = shutil.copytree(other, snapshots / "b")
+    under = {"a": load.resolved_revision(str(a), "main"), "b": load.resolved_revision(str(b), "main")}
+    assert under["a"] != under["b"], f"two different checkpoints below a .cache folder share {under['a']}"
+    assert under == {"a": rev, "b": other_rev}            # a content hash: the same files, wherever they sit
+    meta = a / ".cache" / "huggingface" / "download" / "config.json.metadata"
+    meta.parent.mkdir(parents=True)
+    meta.write_text("0123abcd\netag\n1730000000.0\n", encoding="utf-8")
+    assert load.resolved_revision(str(a), "main") == rev         # --local-dir metadata is not the model
+    empty = tmp_path / "metadata-only"
+    (empty / ".cache").mkdir(parents=True)
+    (empty / ".cache" / "config.json.metadata").write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError, match="no file to hash"):
+        load.resolved_revision(str(empty), "main")
 
 
 def test_hub_revision_resolves_through_model_info(monkeypatch):

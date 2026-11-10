@@ -18,6 +18,11 @@ from lift.schemas import VariantSpec  # noqa: E402
 from lift.train import merge  # noqa: E402
 
 TEXTS = ["hi", "नमस्ते", "你好，世界", "A longer English prompt about the weather."]
+# The locked LoRA recipe (configs/train.yaml), and adapter_hash of ``default_adapter`` before the
+# fields of merge.BEHAVIOUR_DEFAULTS were hashed (R1-27): adding them must not re-key such an adapter.
+RECIPE = {"r": 16, "lora_alpha": 32, "lora_dropout": 0.05, "task_type": "CAUSAL_LM",
+          "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]}
+RECIPE_HASH = "2738d223a1380441c1f59e81a6f1478e56545e1f857730a95a3b1487f898456d"
 
 
 def install_adapter(adapter_dir, name="adapter-aya-std-s1"):
@@ -29,6 +34,30 @@ def install_adapter(adapter_dir, name="adapter-aya-std-s1"):
 
 def adapter_spec(name="adapter-aya-std-s1", **artifacts):
     return VariantSpec(name=name, method="adapter", adapter=name, seed=1, artifacts=artifacts)
+
+
+def edited_copy(adapter_dir, target, **fields):
+    """A copy of ``adapter_dir`` with ``fields`` set in adapter_config.json; the weights file is untouched."""
+    shutil.copytree(adapter_dir, target)
+    path = target / merge.ADAPTER_CONFIG
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    cfg.update(fields)
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    return target
+
+
+def default_adapter(target):
+    """The recipe's adapter_config.json as PEFT saves it (every other field at its default) beside a
+    placeholder weights file: adapter_hash reads only the file's sha256."""
+    from peft import LoraConfig
+
+    LoraConfig(**RECIPE).save_pretrained(target)
+    (target / merge.ADAPTER_WEIGHTS).write_bytes(b"placeholder adapter weights")
+    return target
+
+
+def greedy_ids(model, tok):
+    return [x.ids for x in gen.greedy_token_ids(model, tok, TEXTS, device="cpu", max_new_tokens=10)]
 
 
 def test_adapter_hash_covers_weights_and_behaviour_config(tiny_lora_adapter, tmp_path):
@@ -48,6 +77,86 @@ def test_adapter_hash_covers_weights_and_behaviour_config(tiny_lora_adapter, tmp
     assert sha256_file(weights) == sha256_file(tiny_lora_adapter / "adapter_model.safetensors")
     with pytest.raises(FileNotFoundError):
         merge.adapter_hash(tmp_path / "empty")
+
+
+# R1-27: init_lora_weights "pissa" or "olora" makes PEFT re-initialise every targeted base weight when
+# it loads the adapter, and kasa_config truncates them, so one weights file builds another model; the
+# hash covered only BEHAVIOUR_KEYS and stayed the same.
+@pytest.mark.parametrize("fields", [{"init_lora_weights": "pissa"}, {"init_lora_weights": "olora"},
+                                    {"kasa_config": {}}], ids=["pissa", "olora", "kasa"])
+@pytest.mark.filterwarnings("ignore:Found missing adapter keys")      # KaSA's lora_diag was never saved
+def test_a_config_field_that_changes_the_merged_model_changes_the_adapter_hash(
+        fields, tiny_lora_adapter, tiny_model_dir, tmp_path):
+    from lift.models.load import load_tokenizer
+
+    copy = edited_copy(tiny_lora_adapter, tmp_path / "edited", **fields)
+    weights = merge.ADAPTER_WEIGHTS
+    assert sha256_file(copy / weights) == sha256_file(tiny_lora_adapter / weights)
+    tok = load_tokenizer(str(tiny_model_dir), "local")
+    original = merge.merged_model(tiny_lora_adapter, device="cpu", dtype="fp32", base_id=str(tiny_model_dir))
+    edited = merge.merged_model(copy, device="cpu", dtype="fp32", base_id=str(tiny_model_dir))
+    assert greedy_ids(edited, tok) != greedy_ids(original, tok)          # another model ...
+    assert merge.adapter_hash(copy) != merge.adapter_hash(tiny_lora_adapter), \
+        f"{fields} changes the merged model but not adapter_hash"         # ... so another hash
+
+
+# R1-27: with the hash unchanged, generate resumed the cell with the other model's records.
+def test_generate_refuses_a_cell_after_the_adapter_init_changed(tiny_lora_adapter, tiny_model_dir, tmp_path):
+    target = install_adapter(tiny_lora_adapter)
+    prompts = [make_prompt(f"p-{i}", text=t) for i, t in enumerate(TEXTS)]
+    out = tmp_path / "gen.jsonl"
+    before = variants.build_variant(adapter_spec(), device="cpu", dtype="fp32", model_id=str(tiny_model_dir))
+    gen.generate(before, prompts, out_path=out, max_new_tokens=8)
+    assert len(gen.read_generations(out)) == len(TEXTS)
+    shutil.rmtree(target)                          # the same weights, now with init_lora_weights "pissa"
+    edited_copy(tiny_lora_adapter, target, init_lora_weights="pissa")
+    after = variants.build_variant(adapter_spec(), device="cpu", dtype="fp32", model_id=str(tiny_model_dir))
+    assert greedy_ids(after.model, after.tokenizer) != greedy_ids(before.model, before.tokenizer)
+    cfg = gen.gen_config(after, max_new_tokens=8)
+    assert gen.record_key(after, prompts[0], cfg) != gen.record_key(before, prompts[0], cfg), \
+        "two different models share one generation key"
+    with pytest.raises(gen.StaleOutputError):
+        gen.generate(after, prompts, out_path=out, max_new_tokens=8)
+
+
+# R1-27: and the registry pin, which catches adapter files that changed after registration, passed.
+def test_the_registry_pin_refuses_an_adapter_whose_init_changed(tiny_lora_adapter):
+    pinned = merge.adapter_hash(tiny_lora_adapter)
+    edited_copy(tiny_lora_adapter, variants.adapter_path("adapter-aya-std-s1"), init_lora_weights="pissa")
+    with pytest.raises(ValueError, match="pinned"):
+        variants.checked_adapter(adapter_spec(adapter=pinned))
+
+
+# R1-27: the fields added to the hash count only away from PEFT's defaults, so no adapter saved with
+# the defaults (every adapter of the locked recipe; P03 may have pinned some) changes its hash.
+def test_an_adapter_saved_with_the_defaults_keeps_its_hash(tmp_path):
+    adapter = default_adapter(tmp_path / "default")
+    assert merge.adapter_hash(adapter) == RECIPE_HASH
+    path = adapter / merge.ADAPTER_CONFIG
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    assert {k: cfg[k] for k in merge.BEHAVIOUR_DEFAULTS} == merge.BEHAVIOUR_DEFAULTS   # PEFT's defaults
+    assert not set(merge.BEHAVIOUR_DEFAULTS) & set(merge.BEHAVIOUR_KEYS)
+    for k in merge.BEHAVIOUR_DEFAULTS:                     # as a PEFT without these fields saves it
+        del cfg[k]
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    assert merge.adapter_hash(adapter) == RECIPE_HASH
+
+
+def test_each_field_away_from_its_peft_default_changes_the_hash(tmp_path):
+    other = {"init_lora_weights": "pissa", "kasa_config": {}, "corda_config": {}, "eva_config": {},
+             "loftq_config": {"loftq_bits": 4}, "layer_replication": [[0, 1]], "trainable_token_indices": [0],
+             "target_parameters": ["placeholder"], "alora_invocation_tokens": [0], "use_qalora": True,
+             "qalora_group_size": 32, "use_bdlora": {}, "arrow_config": {}, "velora_config": {},
+             "monteclora_config": {}, "ensure_weight_tying": True}
+    assert set(other) == set(merge.BEHAVIOUR_DEFAULTS)
+    adapter = default_adapter(tmp_path / "default")
+    hashes = {RECIPE_HASH}
+    # The value counts, not only its presence, and 1 is not the default True (compared as JSON).
+    edits = [*other.items(), ("init_lora_weights", "olora"), ("init_lora_weights", 1)]
+    for i, (k, value) in enumerate(edits):
+        h = merge.adapter_hash(edited_copy(adapter, tmp_path / f"edit-{i}", **{k: value}))
+        assert h not in hashes, f"{k}={value!r} leaves adapter_hash unchanged"
+        hashes.add(h)
 
 
 def test_merged_adapter_matches_unmerged(tiny_lora_adapter, tiny_model_dir):
@@ -146,7 +255,9 @@ def test_missing_adapter_and_unknown_method():
     with pytest.raises(FileNotFoundError, match="sync pull"):
         variants.build_variant(adapter_spec(), device="cpu", dtype="fp32", model_id="unused",
                                revision="a" * 40)
-    with pytest.raises(NotImplementedError, match="P05"):
+    # Every method has a builder since P05; a repair on a missing adapter fails like the adapter does.
+    assert set(variants.BUILDERS) == {"stock", "adapter", "wiseft", "resta", "cast", "cast_always"}
+    with pytest.raises(FileNotFoundError, match="sync pull"):
         variants.build_variant(VariantSpec(name="w", method="wiseft", adapter="x", params={"lambda": 0.5}),
                                device="cpu", model_id="unused", revision="a" * 40)
 

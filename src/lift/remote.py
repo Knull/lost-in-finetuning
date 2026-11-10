@@ -115,7 +115,7 @@ EXIT_CODES = """\
 exit codes:
   0    the job succeeded, its outputs are pushed and the VM is released (a push that hit
        conflicts counts: the VM's copies are under conflicts/ in the runs repo, and it says so)
-  1    a job line failed, or a generate, judge, run-dev, utility, belebele or heldout-loss line
+  1    a job line failed, or a generate, judge, run-dev, utility, belebele, heldout-loss or final line
        exited 3 (done, but some cells were skipped or left for a rerun: the job ran its other lines,
        and its log lists each cell with its remedy); or the job's status is unknown; or the runs
        repo check met a transient error (nothing was created: try again)
@@ -543,9 +543,17 @@ def gather_secrets(ctx: Context, *, fetch: bool = True) -> tuple[dict[str, str],
 
 
 def missing_message(missing: list[str]) -> str:
-    example = "$env:NAME = '...'" if os.name == "nt" else "export NAME=..."
-    return (f"missing {', '.join(missing)}: set them in this shell first ({example}); HF_TOKEN can also "
-            "come from `hf auth login` with a WRITE token (pushes to the runs repo need one)")
+    # CLAUDE.md, Secrets: a hidden prompt, never a value typed on a command line or pasted into a chat. A
+    # Claude Code session loads a secret colab/README.md step 6 stored (encrypted for the user, never at
+    # user scope, which every later process inherits) in the command line that runs lift remote.
+    how = ("a hidden prompt ($env:NAME = [Net.NetworkCredential]::new('', (Read-Host -AsSecureString 'NAME'))"
+           ".Password) or, for a secret stored as colab/README.md step 6 says, loaded in the command line "
+           "that runs lift remote ($env:NAME = [Net.NetworkCredential]::new('', (Import-Clixml "
+           "\"$env:USERPROFILE\\.lift\\NAME.xml\")).Password; lift remote ...)"
+           if os.name == "nt" else "a hidden prompt (read -rs NAME; export NAME)")
+    return (f"missing {', '.join(missing)}: set them in this shell first, each with {how}, never typed on a "
+            "command line; HF_TOKEN can also come from `hf auth login` with a WRITE token (pushes to the "
+            "runs repo need one)")
 
 
 def scrub(text: str, masker: Masker | None = None) -> str:

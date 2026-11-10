@@ -28,7 +28,7 @@ from lift.publish.inputs import NOT_RUN, PENDING, Facts, fmt, report_path
         (1.5, "hours", "1.50 h"),
         (None, "pct", NOT_RUN),
         ("WiSE-FT", "text", "WiSE-FT"),
-        # decisions.md 73: a value computed but undefined is P07's text, shown as it is in any format
+        # decisions.md 77: a value computed but undefined is P07's text, shown as it is in any format
         (
             "undefined: the adapter shows no utility gain over parity",
             "pct_ci",

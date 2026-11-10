@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from lift import splits
 from lift.cli import main
 from lift.io import read_jsonl, sha256_file, write_jsonl
 from lift.models import loglik
@@ -46,10 +47,25 @@ def bel_rows(n: int = 5, **kw) -> list[dict]:
     return [bel_row(i, answer=1 + i % 4, **kw) for i in range(n)]
 
 
+@pytest.fixture(autouse=True)
+def own_splits(tmp_path, monkeypatch):
+    """The committed split files these tests' prompt files are stamped from (R1's split-stamp check reads
+    lift.splits.SPLITS_DIR): a folder of the test's own, which write_belebele fills."""
+    monkeypatch.setattr(splits, "SPLITS_DIR", tmp_path / "splits")
+
+
 def write_belebele(lang: str, rows: list[dict]) -> None:
     """A real data/prompts/belebele_{lang}.jsonl in the test's LIFT_DATA_DIR (fake_prompt_files holds
-    PromptRecords only)."""
+    PromptRecords only), and its pids in the test's committed Belebele split, each with the split its row
+    carries (a pid keeps one split in every language, as lift data build freezes it)."""
     write_jsonl(prompts_dir() / f"belebele_{lang}.jsonl", rows)
+    try:
+        frozen = splits.load_split("belebele")
+    except FileNotFoundError:
+        frozen = {}
+    frozen.update({r["pid"]: r["split"] for r in rows})
+    sizes = {s: sum(v == s for v in frozen.values()) for s in set(frozen.values())}
+    splits.save_split("belebele", frozen, seed=0, sizes=sizes, overwrite=True)
 
 
 def utility(i: int, source: str = "aya", *, split: str = "dev", reference: str | None = None) -> PromptRecord:
@@ -454,7 +470,7 @@ def test_a_wrapper_meta_that_reuses_a_record_field_is_refused(stock):
 
 @pytest.mark.torch
 def test_a_cell_resumes_and_skips_done_keys(stock):
-    from lift.cachekey import generation_key
+    from lift.cachekey import generation_key, intervention_digest
 
     rows = bel_rows(5)
     path = loglik.belebele_cell(stock, rows[:3], lang="en", split="dev", batch_size=2)
@@ -476,6 +492,7 @@ def test_a_cell_resumes_and_skips_done_keys(stock):
     meta = records["bel-000"]["meta"]
     assert (meta["dtype"], meta["scoring"], meta["task_version"]) == ("fp32", "sequence", 1)
     assert meta["run_config"] == loglik.belebele_run_config(stock) and meta["model_rev"] == stock.model_rev
+    assert meta["intervention"] == intervention_digest(stock.spec)         # lift select checks the entry
     assert all(meta[k] for k in ("stack", "template", "task", "torch", "transformers", "gpu_capability"))
     docs = manifests("belebele")
     assert sorted((d["n_resumed"], d["n_written"]) for d in docs) == [(0, 3), (3, 2), (5, 0)]
@@ -662,7 +679,14 @@ def test_belebele_metrics_cover_every_complete_language_and_list_the_rest(stock)
     assert f"| en | 4 | {en['n_correct']} |" in md and "- hi: incomplete" in md
     assert en["n_outside_split"] == 0
     # An item that left the split (an exclusion) is left aside and counted; the other three are the split.
+    # Its report lists the exclusion, as lift data apply-spotchecks records a reader's bad verdict: since R1
+    # a prompt file short of its frozen split is refused unless its report explains every missing pid.
     write_belebele("en", bel_rows(4, lang="en")[1:])
+    shown = prompts_dir() / "belebele_en.jsonl"
+    report = {"set": "belebele", "lang": "en", "file": shown.name, "sha256": sha256_file(shown),
+              "translation_failures": [], "exclusions": [{"pid": "bel-000", "reason": "spotcheck:bad"}]}
+    (prompts_dir() / "reports").mkdir(parents=True, exist_ok=True)
+    (prompts_dir() / "reports" / "belebele_en.json").write_text(json.dumps(report), encoding="utf-8")
     en = loglik.belebele_metrics("stock", "dev", dtype="fp32")["langs"]["en"]
     assert en["n"] == 3 and en["n_outside_split"] == 1
     assert en["n_correct"] == sum(r["pred"] == r["gold"] for r in records if r["pid"] != "bel-000")
@@ -716,6 +740,101 @@ def test_heldout_metrics_pool_by_source_and_pair_with_stock(stock, fake_prompt_f
     assert "vs stock: this variant minus stock" in written.md_path.read_text(encoding="utf-8")
     stock_doc = loglik.write_heldout_metrics("stock", "dev", dtype="fp32").doc
     assert stock_doc["vs_stock"] is None and stock_doc["vs_stock_note"] == "this is stock"
+
+
+@pytest.mark.torch
+def test_the_secondary_selection_reads_the_heldout_gain_from_the_score_files(stock, fake_prompt_files,
+                                                                             monkeypatch):
+    """Decisions item 73: lift select's secondary rule reads each variant's pooled NLL difference from stock
+    (heldout_metrics' vs_stock), and only while the scores are the registered adapter's and pair with
+    stock's; anything else is missing, with the line that makes it."""
+    from fakes import build_tiny_cohere2
+
+    from lift import config
+    from lift.repair import select
+
+    prompts = [utility(i, "aya" if i < 3 else "ind") for i in range(5)]
+    fake_prompt_files[("utility", "hi")] = prompts
+    registry = {"variants": [{"name": "stock", "method": "stock"},
+                             {"name": "adapter-x", "method": "adapter", "adapter": "adapter-x", "seed": 1,
+                              "artifacts": {"adapter": "a" * 64}}]}
+    real = config.load
+    monkeypatch.setattr(config, "load", lambda name="project": registry if name == "variants" else real(name))
+    with pytest.raises(select.Missing, match="run `lift heldout-loss --variant adapter-x --dtype fp32`"):
+        select._heldout("adapter-x", "fp32")
+    spec = VariantSpec(name="adapter-x", method="adapter", adapter="adapter-x", seed=1,
+                       artifacts={"adapter": "a" * 64})
+    adapter = dataclasses.replace(stock, model=build_tiny_cohere2(stock.tokenizer, seed=7),
+                                  adapter_hash="a" * 64, spec=spec)
+    loglik.heldout_cell(adapter, prompts, split="dev")
+    with pytest.raises(select.Missing, match="cannot be paired with stock's"):
+        select._heldout("adapter-x", "fp32")
+    loglik.heldout_cell(stock, prompts, split="dev")
+    value, details = select._heldout("adapter-x", "fp32")
+    doc = loglik.heldout_metrics("adapter-x", "dev", dtype="fp32")
+    stock_doc = loglik.heldout_metrics("stock", "dev", dtype="fp32")
+    assert value == doc["vs_stock"]["diff_mean_nll"] == pytest.approx(doc["mean_nll"] - stock_doc["mean_nll"])
+    assert value != 0 and details["n_rows"] == 5 and details["mean_nll"] == doc["mean_nll"]
+    assert (details["lo"], details["hi"]) == (doc["vs_stock"]["lo"], doc["vs_stock"]["hi"])
+    # Scores made under another registry entry (an adapter trained again) are not this entry's.
+    registry["variants"][1]["artifacts"]["adapter"] = "b" * 64
+    with pytest.raises(select.Missing, match="made under another registry entry.*--restart --dtype fp32"):
+        select._heldout("adapter-x", "fp32")
+    with pytest.raises(select.Missing, match="does not list adapter-y"):
+        select._heldout("adapter-y", "fp32")
+
+
+@pytest.mark.torch
+def test_lift_stats_reads_the_final_heldout_scores_only_while_they_pair_with_stock(stock, fake_prompt_files,
+                                                                                   monkeypatch):
+    """Decisions item 82: the report's held-out reader takes a variant's final scores per reference (summed
+    NLL and tokens) only while they are current, its registry entry's, and pair with stock's; a missing
+    side is an arm not run, two sides that cannot be paired stop lift stats."""
+    from fakes import build_tiny_cohere2
+
+    from lift import config
+    from lift.report import analysis
+
+    prompts = [utility(i, "aya" if i < 3 else "ind", split="final") for i in range(5)]
+    fake_prompt_files[("utility", "hi")] = [*prompts, utility(9)]
+    registry = {"variants": [{"name": "stock", "method": "stock"},
+                             {"name": "adapter-x", "method": "adapter", "adapter": "adapter-x", "seed": 1,
+                              "artifacts": {"adapter": "a" * 64}}]}
+    real = config.load
+    monkeypatch.setattr(config, "load", lambda name="project": registry if name == "variants" else real(name))
+    source = analysis.Source("fp32")
+    with pytest.raises(analysis.Missing, match="no held-out loss scores for stock .*--split final --dtype"):
+        source.heldout("stock")
+    spec = VariantSpec(name="adapter-x", method="adapter", adapter="adapter-x", seed=1,
+                       artifacts={"adapter": "a" * 64})
+    adapter = dataclasses.replace(stock, model=build_tiny_cohere2(stock.tokenizer, seed=7),
+                                  adapter_hash="a" * 64, spec=spec)
+    loglik.heldout_cell(adapter, prompts, split="final")
+    with pytest.raises(analysis.Missing, match="no held-out loss scores for stock"):
+        source.heldout("adapter-x")                     # stock's side is not run: so is this arm
+    loglik.heldout_cell(stock, prompts, split="final")
+    mine, base = source.heldout("adapter-x"), source.heldout("stock")
+    rows = {r["pid"]: r for r in read_jsonl(loglik.heldout_scores_path("adapter-x", "final", dtype="fp32"))}
+    assert set(mine) == set(base) == {p.pid for p in prompts}
+    assert mine == {pid: (r["nll_sum"], r["n_tokens"]) for pid, r in rows.items()}
+    doc = loglik.heldout_metrics("adapter-x", "final", dtype="fp32")
+    tokens = sum(t for _, t in base.values())
+    pooled = (sum(s for s, _ in mine.values()) - sum(s for s, _ in base.values())) / tokens
+    assert pooled == pytest.approx(doc["vs_stock"]["diff_mean_nll"])
+    change = analysis._nll_change({"stock": base, "adapter-x": mine}, {1: "adapter-x"})
+    assert change["est"] == pytest.approx(pooled) and change["seeds"] == [1] and change["n"] == 5
+    # Both sides read, but stock's scores do not pair with these: refused loudly, never "not run".
+    real_metrics = loglik.heldout_metrics
+    note = "stock's held-out scores were made with other settings"
+    monkeypatch.setattr(loglik, "heldout_metrics", lambda v, s, **kw: {
+        **real_metrics(v, s, **kw), "vs_stock": None, "vs_stock_note": note})
+    with pytest.raises(analysis.Unpairable, match="adapter-x and stock cannot be paired: stock's held-out"):
+        source.heldout("adapter-x")
+    monkeypatch.setattr(loglik, "heldout_metrics", real_metrics)
+    # Scores made under another registry entry (the adapter trained again) are not this entry's.
+    registry["variants"][1]["artifacts"]["adapter"] = "b" * 64
+    with pytest.raises(analysis.Missing, match="made under another registry entry.*--split final --restart"):
+        source.heldout("adapter-x")
 
 
 @pytest.mark.torch

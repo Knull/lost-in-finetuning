@@ -54,7 +54,7 @@ P07_TABLES = (
     "cost",
     "repair_vs_wiseft",
 )
-# P07's analysis.UNDEFINED_GAIN (decisions.md 73): a share computed but undefined says so, never None.
+# P07's analysis.UNDEFINED_GAIN (decisions.md 77): a share computed but undefined says so, never None.
 UNDEFINED_GAIN = "undefined: the adapter shows no utility gain over parity"
 P07_LANG_NAMES = {
     "en": "English",
@@ -383,7 +383,7 @@ def repair_vs_wiseft() -> dict:
             },
         ],
         "Each repair against WiSE-FT attenuation, final split, Hindi (not pre-registered, descriptive)",
-        "Not pre-registered, descriptive (docs/decisions.md 76): estimates and intervals only.",
+        "Not pre-registered, descriptive (docs/decisions.md 78): estimates and intervals only.",
     )
 
 

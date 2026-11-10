@@ -65,7 +65,7 @@ is checked against that recipe too, report or not. Any disagreement (a ``lift se
 stats``, a stale pull, a report made before the block existed) refuses everything that reads them
 (``PublishError``): the numbers would be another winner's.
 
-The recipe is the one the tag froze (review XB2-02, decisions item 77): the working tree's
+The recipe is the one the tag froze (review XB2-02, decisions item 79): the working tree's
 configs/frozen_recipe.json must be byte for byte (line endings aside) the one in the commit the newest
 local ``recipe-frozen-*`` tag points to (``git show <tag>:configs/frozen_recipe.json``). A recipe that
 differs from the tag's (a ``lift select --refreeze`` after the final), or a tag that does not hold one,
@@ -77,7 +77,7 @@ logs dataset, the collections, the article) is marked blocked, which ``--yes`` r
 Formats: pct (0.123 -> 12.3%), pp (signed points), points (0.05 -> 5 points), pct_ci, pp_ci, p, int,
 f2, f3, hours, ms, text, list ([1, 2] -> "1, 2"), and P08's own p_stmt for running text ("p < 0.001",
 "p = 0.031", "p not run"). In any format, P07's "undefined" or "undefined: <reason>" (a value computed
-but undefined, decisions.md 73, e.g. ``headline.utility_retained`` when the adapter shows no gain) is
+but undefined, decisions.md 77, e.g. ``headline.utility_retained`` when the adapter shows no gain) is
 shown as it is; any other text where a number belongs is refused. A null anywhere on a value's path
 (``pooled`` of an arm not run) renders as "not run"; only a missing key renders as pending.
 """
@@ -190,7 +190,7 @@ def fmt(value: Any, kind: str) -> str:
     if value is None:
         return f"p {NOT_RUN}" if kind == "p_stmt" else NOT_RUN
     if isinstance(value, str) and (value == UNDEFINED or value.startswith(UNDEFINED + ":")):
-        return value  # computed but undefined, as P07 says it (decisions.md 73): never a number or "not run"
+        return value  # computed but undefined, as P07 says it (decisions.md 77): never a number or "not run"
     if kind == "text":
         return str(value)
     if kind == "pct":
@@ -534,7 +534,7 @@ def recipe_block(facts: Facts) -> str | None:
         if _lf(tagged) != _lf(path.read_bytes().decode("utf-8", "replace")):
             raise PublishError(
                 f"{shown(path)} is not the recipe the tag {tag} froze (a lift select after the freeze, or an "
-                f"edit): only the recipe the tag froze is evaluated and published (decisions item 77). "
+                f"edit): only the recipe the tag froze is evaluated and published (decisions item 79). "
                 f"Restore it (git checkout {tag} -- {RECIPE_IN_GIT}) and its selection.json (lift sync "
                 "pull); a new freeze needs a new dated tag and a decisions.md entry"
             )

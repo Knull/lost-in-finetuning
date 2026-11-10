@@ -142,7 +142,7 @@ six languages, so pairing, splitting and clustering all go by pid.
   key. One file never holds two stacks (torch, transformers, GPU class): a finished cell is reused
   on any stack, but an unfinished one resumes only on the stack that started it, or is made again
   with the `lift restart` line its refusal prints (a job line right after `lift sync pull`).
-  `lift generate`, `judge`, `run-dev`, `utility`, `belebele` and `heldout-loss` exit 3 when they
+  `lift generate`, `judge`, `run-dev`, `utility`, `belebele`, `heldout-loss` and `final` exit 3 when they
   finished but skipped cells or left some for a rerun (each listed with its remedy); the runners go
   on with the next line (`lift train` and `lift gate` never exit 3). On a T4 every model line takes
   `--dtype fp16`: `generate`, `judge`, `run-dev`, `train`, `utility --generate-only`, `belebele`
@@ -228,22 +228,25 @@ six languages, so pairing, splitting and clustering all go by pid.
   - Read prompts with `lift.data.build.load_prompts(set, lang, split)`.
   - Each module's docstring holds the verified facts about its source.
   - The splits are frozen in `data/splits/` (Nov 4). The 8 files that need Google Translate
-    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) wait for
-    `lift data build --only harmful easy_benign hard_benign` with `GOOGLE_TRANSLATE_API_KEY` set
-    (about 15 minutes on the laptop, no GPU). The SFT variants are aya/dedup (679 rows),
-    indicalign/dedup (3,000) and indicalign/raw (3,000, the stress recipe), in
-    `data/sft/{cand}/{variant}/sft_messages.jsonl`; the counts are `decision.rows_by_variant` in
-    `data/sft/report.json` (decisions item 47).
+    (harmful and easy_benign hi, easy_benign zh, hard_benign outside English) were built on Nov 4
+    through the Cloud Translation API (decisions item 48) and pushed to the runs repo. The SFT
+    variants are aya/dedup (677 rows), indicalign/dedup (3,000) and indicalign/raw (3,000, the
+    stress recipe), in `data/sft/{cand}/{variant}/sft_messages.jsonl`; the counts are
+    `decision.rows_by_variant` in `data/sft/report.json` (decisions items 47 and 57). The built
+    files still hold the Nov 4 pools (aya/dedup 679) until `lift data build --only sft` rebuilds
+    them with the R1 fixes; `lift train` refuses them until then.
 - **P02 (harness).** models.load/generate/variants (stock, adapter), train.merge, prompts,
   judge.qwen3guard, judge.frontier (safety), judge.pipeline, audit.record_safety, sync, gate0, and
   `lift smoke|generate|judge|run-dev|restart|sync|remote`, with colab/job.py and kaggle/runner.ipynb.
   - Gate 0 passed on Nov 4 (bf16, Colab A100) and the three revisions are pinned in
-    configs/project.yaml (decisions item 49).
+    configs/project.yaml (decisions item 49). It runs again before the stock dev eval: the Nov 4
+    run predates the labelling-rules tag and the preamble rule (decisions item 60).
 - **P03 (training and gain).** Implemented and tested offline:
   - `lift train` (train.lora: TRL SFTTrainer + PEFT LoRA on pre-tokenized rows, loss on
     `models.load.encode_chat_turn`'s answer tokens only, rows with no supervised token refused
-    before the model loads, one process on one GPU (cuda:0; a T4 x2 leaves cuda:1 idle), fp32 merge
-    parity (on a T4 an fp16 parity share is recorded, not required), push of outputs/adapters/{name};
+    before the model loads, exports that `lift.data.sft.export_problems` flags refused (R2-01), one
+    process on one GPU (cuda:0; a T4 x2 leaves cuda:1 idle), fp32 merge parity (on a T4 an fp16
+    parity share is recorded, not required), push of outputs/adapters/{name};
     `--check` lists the rows a line would train on, tokenizer only) and
     `lift register-adapter` (the laptop writes the configs/variants.yaml entry from the pulled
     adapter's registration.json; commit it before any job evaluates the adapter).
@@ -261,5 +264,29 @@ six languages, so pairing, splitting and clustering all go by pid.
   - `lift gate 1|2 [--dtype D]` (lift.gates; outputs/metrics/gate{1,2}[-{dtype}].json and .md; Gate 1
     counts only utility metrics that still describe the current answers, verdicts and adapter).
     Decisions 50-55.
+- **P05 (repairs, sweep, selection).** Implemented and tested offline: repair.wiseft, repair.resta and
+  repair.cast (SafeTune's apply_wise_ft with alpha = 1 - lambda, apply_resta with dare=False on CPU
+  references, fit_cast_condition + extract_caa_vectors + a CASTModel subclass whose gate is recorded per
+  row), their builders in repair.build (registered in lift.models.variants' table), the settings and
+  their registry entries (repair.settings), `lift fit-cast` (outputs/artifacts/cast/{adapter}/),
+  `lift register-repairs` (laptop), `lift sweep` (run-dev, utility --generate-only and belebele hi per
+  setting, resumable; `--judge-only` on the laptop) and `lift select` (outputs/metrics/selection.json and
+  .md, overall and per family, then the freeze steps; beside it the secondary selection of decisions
+  item 73, outputs/metrics/selection_secondary.json and .md, the same rule with the gain read on
+  `lift heldout-loss`, which freezes nothing). A sweep line goes last in its job: the runners do
+  not go past its partial exit. Decisions 68-73.
+- **P07 (final evaluation, statistics, report).** Implemented and tested offline on synthetic records:
+  `lift final --variant V | --all` (lift.final: refused unless a `recipe-frozen-*` tag exists, the committed
+  configs/frozen_recipe.json is the tag's and pins selection.json's sha256, and the variant is frozen; the
+  same guard in generate, utility, belebele and heldout-loss on `--split final`; safety cells through
+  run-dev's path, utility, Belebele x 6, the ar/th back-translation sample; resumable, GPU-hours in each
+  manifest; `--judge-only` on the laptop for the second judge's 10% and utility), `lift stats`
+  (report.analysis -> outputs/metrics/final_stats.json) and `lift report` (report.tables, figures, cost ->
+  outputs/metrics/final_report.json for P08, tables in outputs/metrics/report/, figures in outputs/figures/).
+  Decisions 74-80. Added Nov 10 (decisions 81-82): the data candidate Gate 1 did not pick joins the final
+  plan as an exploratory arm; an adapter has its recipe's seeds (stress: seed 1); `lift final` also scores
+  the held-out loss; `lift stats` reports each adapter on its own axes (drift, refusals, over-refusal,
+  Gate 1's usefulness, held-out loss), the share of the held-out gain each repair keeps, and drift and
+  repair on the refusal rate and under the second judge's labels where it judged whole cells.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

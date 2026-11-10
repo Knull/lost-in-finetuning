@@ -37,15 +37,48 @@ Jobs are launched from the laptop with `lift remote`, which drives Google's Cola
    & "$env:USERPROFILE\.local\bin\colab.exe" sessions
    ```
 
-6. **Set the secrets** in the PowerShell session that runs `lift remote` (never in the repo):
+6. **Set the secrets** in the PowerShell session that runs `lift remote` (never in the repo), each
+   with a hidden prompt, never typed or pasted on a command line or into a chat:
 
    ```powershell
-   $env:GITHUB_TOKEN = "<the read-only token>"
+   $env:GITHUB_TOKEN = [Net.NetworkCredential]::new('', (Read-Host -AsSecureString 'GITHUB_TOKEN')).Password
    $env:LIFT_RUNS_REPO = "<hf-user>/lift-runs"
-   $env:HF_TOKEN = "<a write token>"          # or `hf auth login` once, with a WRITE token
-   $env:OPENAI_API_KEY = "<key>"              # or ANTHROPIC_API_KEY: frontier-judge jobs only
-   $env:LIFT_JUDGE_MAX_USD = "<cap>"          # spend cap for frontier-judge jobs
+   # A write token, or `hf auth login` once, with a WRITE token:
+   $env:HF_TOKEN = [Net.NetworkCredential]::new('', (Read-Host -AsSecureString 'HF_TOKEN')).Password
+   # Frontier-judge jobs only: the key (or ANTHROPIC_API_KEY) and the spend cap.
+   $env:OPENAI_API_KEY = [Net.NetworkCredential]::new('', (Read-Host -AsSecureString 'OPENAI_API_KEY')).Password
+   $env:LIFT_JUDGE_MAX_USD = "<cap>"
    ```
+
+   For Claude Code sessions, whose tool calls cannot prompt, store each secret once instead, in your
+   own PowerShell window, in a file that only your Windows account on this laptop can decrypt
+   (`Export-Clixml` encrypts it with DPAPI). The two settings, `LIFT_RUNS_REPO` and
+   `LIFT_JUDGE_MAX_USD`, are not secrets and go at user scope; then restart the Claude desktop app
+   (the judge key and the cap only for frontier-judge jobs):
+
+   ```powershell
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\.lift"
+   Read-Host -AsSecureString 'GITHUB_TOKEN' | Export-Clixml "$env:USERPROFILE\.lift\GITHUB_TOKEN.xml"
+   Read-Host -AsSecureString 'HF_TOKEN' | Export-Clixml "$env:USERPROFILE\.lift\HF_TOKEN.xml"
+   Read-Host -AsSecureString 'OPENAI_API_KEY' | Export-Clixml "$env:USERPROFILE\.lift\OPENAI_API_KEY.xml"
+   [Environment]::SetEnvironmentVariable('LIFT_RUNS_REPO', '<hf-user>/lift-runs', 'User')
+   [Environment]::SetEnvironmentVariable('LIFT_JUDGE_MAX_USD', '<cap>', 'User')
+   ```
+
+   A session loads each secret only in the command line that runs lift (see "From Claude Code"
+   below), and that shell ends with the tool call. So no secret sits in an environment that later
+   processes inherit: a local `pip install` (which runs third-party build code), pytest and new
+   windows get none of them. A program that runs as you can still decrypt the files: what they
+   prevent is the inheriting.
+
+   An earlier version of this step set the secrets themselves at user scope, which keeps them in
+   plain text in the registry (`HKCU\Environment`) and hands them to every process started after
+   that. If you followed it, remove each one in your own PowerShell window:
+   `[Environment]::SetEnvironmentVariable('HF_TOKEN', $null, 'User')`, and the same for
+   `GITHUB_TOKEN`, `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. Running processes keep the values they
+   started with, so then close your PowerShell windows and restart the Claude desktop app. When you
+   no longer need a stored secret, delete its file:
+   `Remove-Item "$env:USERPROFILE\.lift\HF_TOKEN.xml"`.
 
    `hf auth login` must store a WRITE token for the runs repo too, not the read token that
    downloads the models: the job's pushes use it, and so does the push retry of
@@ -94,7 +127,7 @@ run, never an older one:
 | File | Written by | What it is |
 | --- | --- | --- |
 | `gate0.json` and `gate0.md` | `lift smoke` (bf16, on the A100; a T4, which has no bf16, is refused with exit 2 and no report) | The verdict, PASS or FAIL. A failed re-run replaces an earlier PASS: a model that does not load, or any failed required check, is a full FAIL. A run on a reduced sample (`--n-precision` under 200 or `--n-dry` under 20) whose checks pass is INCOMPLETE and never replaces this file. |
-| `gate0-fp16.json` and `.md` | `lift smoke --compare-dtype fp16` (on a T4) | The fp16-vs-bf16 verdict. A T4 number counts only while this says PASS, with at least 200 prompts compared, and the bf16 `gate0.json` it compared against says PASS too and is still that run (its precision digest), both for the same Global revision that made the cell, and only for cells made under the comparison's harness, decoding settings and GPU class (the generator's and the judge's). So a bf16 re-run needs a new comparison, and a harness change needs the full bf16 Gate 0 run again first, then a new comparison. `lift.judge.pipeline` refuses an fp16 cell otherwise, so pull both files before reading T4 labels. |
+| `gate0-fp16.json` and `.md` | `lift smoke --compare-dtype fp16` (on a T4) | The fp16-vs-bf16 verdict. A T4 number counts only while this says PASS, with at least 200 prompts compared, and the bf16 `gate0.json` it compared against says PASS too and is still that run (its precision digest), both for the same Global revision that made the cell, and only for cells made under the comparison's harness, decoding settings and GPU class (the generator's and the judge's), and judged by the judge it ran (the same model, revision, labelling rules and Controversial mode). So a bf16 re-run needs a new comparison, and a harness change or a change of the judge (a re-pin, new labelling rules, another mode) needs the full bf16 Gate 0 run again first, then a new comparison. `lift.judge.pipeline` refuses an fp16 cell otherwise, so pull both files before reading T4 labels. |
 | `gate0-partial.json`, `gate0-fp16-partial.json` | either, when incomplete | `--skip` removed a required check, or a required check did not run (`"not_run": true`: no room for the judge on one GPU, or nothing valid to compare the fp16 run with: no passing bf16 `gate0.json` for the same Global revision, or a different number of prompts, or fewer than 200). It never passes and never replaces the full file. |
 
 What it does:
@@ -112,8 +145,8 @@ What it does:
    the ref's `constraints.txt` (`pip install -c constraints.txt -e ...`). It checks that the ref
    has `lift sync` (`lift sync --help`): a ref without `constraints.txt` or `lift sync` is a setup
    failure (exit 3), before any line. Then it runs the lines in order, stopping at the first
-   failure. A generate, judge, run-dev, utility, belebele or heldout-loss line that exits 3 is not
-   such a failure: see "Skipped cells" below.
+   failure. A generate, judge, run-dev, utility, belebele, heldout-loss or final line that exits 3 is
+   not such a failure: see "Skipped cells" below.
 4. Every `--poll` seconds (default 45), downloads `/content/lift_job.log` to
    `outputs/logs/remote-<name>.log` and prints the new lines.
 5. The job pushes outputs with `lift sync push` after every line (except sync lines and the last),
@@ -148,7 +181,7 @@ Exit codes (also in `lift remote --help`):
 | Code | Meaning |
 | --- | --- |
 | 0 | The job succeeded, its outputs are pushed, and the VM is released. A push that hit conflicts counts as pushed; `lift remote` says so. |
-| 1 | A job line failed, or a generate, judge, run-dev, utility, belebele or heldout-loss line exited 3 (done, but some cells were skipped or left for a rerun: the job ran its other lines, and its log lists each cell with its remedy); or the job's status is unknown; or the runs repo check met a transient error (nothing was created: try again). |
+| 1 | A job line failed, or a generate, judge, run-dev, utility, belebele, heldout-loss or final line exited 3 (done, but some cells were skipped or left for a rerun: the job ran its other lines, and its log lists each cell with its remedy); or the job's status is unknown; or the runs repo check met a transient error (nothing was created: try again). |
 | 2 | `lift remote` refused to start: bad options, no login, a missing secret, a runs repo that is missing, not private or not writable with this token, or a job that another `lift remote` on this machine follows already (`watch` names its pid). Nothing was created or changed. |
 | 3 | The job could not be set up: `colab new` or the secrets upload failed, or job.py's spec, secrets, python, fetch, pip or sync-check step did; or a `lift sync` call on the VM exited 2 before anything was lost. |
 | 4 | The VM could not be confirmed released and may still be billing. This overrides every other code. `lift remote stop` returns 0 or 4. |
@@ -191,7 +224,10 @@ not add to, go on with the other cells, and exit 3 at the end, listing each skip
 remedy (and each cell whose AuditKIT record was refused). `lift utility`, `lift belebele` and
 `lift heldout-loss` exit 3 the same way for a cell they skip (a stale scores file of belebele or
 heldout-loss names the same line with `--restart`) or leave for a rerun (`lift utility --no-wait`
-while its Message Batch still runs: rerun the same line to collect it). job.py reports a line that
+while its Message Batch still runs: rerun the same line to collect it). `lift final --variant V`
+runs those stages for one variant on the final split and exits 3 when any of them did, so a job of
+several final lines goes on to the next variant (give each variant its own line: the outputs are
+pushed after every line). job.py reports a line that
 exits 3, the next lines run (they do not depend on those cells), and the job fails at the end:
 `lift remote` exits 1. Any other failing line still ends the job, an exit 3 of any other command
 included (`lift train` and `lift gate` never exit 3). A cell is skipped when:
@@ -216,12 +252,32 @@ included (`lift train` and `lift gate` never exit 3). A cell is skipped when:
   named `-{dtype}`), so a run never meets another precision's; only a hand-placed file holding
   another precision's scores is listed (exit 3), and `--restart` never starts it over.
 - **Its judge differs**: its judgements file was made by another judge (another judge id, which
-  shows the judge's dtype and mode). Run with that judge, or the printed
-  `lift restart ... --judge ROLE` line.
+  names the labelling rules and, for Qwen3Guard, the dtype and mode:
+  `{model}@{sha}#rules-<tag>#{dtype}#{mode}`; a frontier judge's id ends in `#rules-<tag>`). Run with
+  that judge, or the printed `lift restart ... --judge ROLE` line. A file that differs only in its
+  rules tag (the labelling rules changed since it was judged) can only be judged again: its message
+  names only the restart line, and running with the old judge never finishes it.
+- **It is short of its frozen split** (`lift generate`, `lift run-dev`): its prompt file lacks some
+  of the split's frozen pids, most often translation failures that await a reader's verdict, and
+  nothing is generated for it. Its remedy comes first, on the laptop, as its listing says: most
+  often the language's failures sheet filled in, `lift data apply-spotchecks`, then
+  `lift sync push`. The line exits 3 and the job goes on; a later job's `lift sync pull` brings the
+  completed prompt file, and the same line makes the cell.
+- **Its decoding went non-finite** (`lift generate`, `lift run-dev`): a NaN or +inf score, as an
+  fp16 overflow gives, so nothing of that batch was written. A T4's fp16 cell is made in bf16 here
+  instead: its `lift restart ... --dtype fp16` line first, right after `lift sync pull`, when its
+  file holds fp16 records, then the line that failed without `--dtype`. In bf16 it is a fault to
+  report (CLAUDE.md rule 9), never one to tune around.
 
 `lift restart` moves the cell's files to `outputs/.aside/<UTC stamp>/` on the VM, which is never
 synced, and leaves each one empty; it empties the cell's AuditKIT records too (an empty record is a
-retired one). The checkpoint push after it replaces the runs repo's copies with the empty files, and
+retired one). The checkpoint push after it replaces the runs repo's copies with the empty files (if
+another machine pushed only files the restart emptied since this machine's last sync, the push keeps
+the runs repo's copy of each file that changed there and reports a conflict instead, which
+`lift sync push --force` settles by completing the restart; if it pushed any other file of the
+cell, such as more generations after a `--judge` restart, the summary names its own remedy: for
+those, `lift sync pull`, then `lift sync push`, and if the emptied file also changed there, that
+pull reports the emptied-file conflict, which `lift sync push --force` settles), and
 the line after it refills them. With `--judge ROLE` it does this only for that judge's file and
 records. Its log names the `lift judge ... --judge ROLE` line (with P04's `--keys` for the second
 judge) that refills another judge's file it set aside: `lift run-dev` refills only the primary's. It
@@ -253,9 +309,18 @@ Notes:
 - **From Claude Code.** Start `lift remote` with `run_in_background`, because foreground commands
   stop at 10 minutes, and check its exit code (table above): a 4 means a VM may still be billing,
   and a 6 means `watch` kept one running on purpose, billing, with outputs on it that no push sent.
-  After a 6, set what its banner names in the same command line (each tool call runs in a new
-  shell) and run `lift remote watch <name>` again, or `lift remote stop <name>` to give the outputs
-  up. Keep the laptop awake for the whole run.
+  A session never asks for or accepts a secret in the chat. Each tool call runs in a new shell, and
+  no secret is in its environment (step 6 stores them in files), so the session loads each secret a
+  lift command needs from its file, in the command line that runs that command, one assignment
+  each: `GITHUB_TOKEN` and `HF_TOKEN` for a launch, `HF_TOKEN` for watch's push retry and for
+  `lift sync`, and the judge key for a frontier-judge job (`HF_TOKEN` is not needed when
+  `hf auth login` holds a WRITE token):
+  `$env:HF_TOKEN = [Net.NetworkCredential]::new('', (Import-Clixml "$env:USERPROFILE\.lift\HF_TOKEN.xml")).Password; lift remote watch <name>`.
+  The value then lives only in that tool call's shell, which ends with it. If `lift remote` still
+  names one (an exit 2, or the exit-6 banner), it is not stored (`LIFT_RUNS_REPO`: not set at user
+  scope): the session stops and asks the user to store or set it in their own terminal (step 6).
+  After a 6, `lift remote stop <name>` instead gives the outputs up. Keep the laptop awake for the
+  whole run.
 
 ## What happens to secrets
 
@@ -285,7 +350,9 @@ Notes:
   VM when the job ends, after one push retry if the job's final push failed (not with exit 2). That
   retry runs with watch's own shell: it needs a WRITE token for the runs repo in `HF_TOKEN` (or from
   `hf auth login`, logged in with a WRITE token, not the read token that downloads the models) and
-  `LIFT_RUNS_REPO`, which a new PowerShell window lacks (step 6 sets them per session);
+  `LIFT_RUNS_REPO`. A new PowerShell window has `LIFT_RUNS_REPO` once step 6 set it at user scope,
+  but not `HF_TOKEN`: set it there with a hidden prompt, or load it from its stored file in the
+  command line that runs watch (step 6);
   `GITHUB_TOKEN` is not needed. Before the retry, watch checks the runs repo as a launch does
   (`lift sync check --write`). When the secrets are missing (watch says so when it starts), that
   check fails, or the retry's push exits 2, watch keeps the VM, with the outputs on it, and prints a
@@ -400,8 +467,8 @@ never into the notebook (a saved notebook can be shared by accident). It pushes 
 except sync lines and the last, so a closed tab or a reclaimed runtime loses one line's work at
 most. A pull or push that exits 1 is tried again, and a failed push is reported, not fatal: a
 `lift sync push` line never stops the job. A sync call that exits 2 (a problem no retry can fix) is
-never tried again and ends the job. A generate, judge, run-dev, utility, belebele or heldout-loss
-line that exits 3 (done, but some cells were skipped or left for a rerun, each listed in the log with
+never tried again and ends the job. A generate, judge, run-dev, utility, belebele, heldout-loss or
+final line that exits 3 (done, but some cells were skipped or left for a rerun, each listed in the log with
 its remedy) is reported, and the next lines run. The final push runs even after a failure, once a
 line other than a `lift sync` line ran, and the cell raises at the end if a line or the final push
 failed, or a line exited 3. Don't add your own trailing `lift sync push`.
@@ -416,7 +483,7 @@ lift smoke
 LOG = "/content/lift_job.log"
 DELAYS = (60, 180, 360)  # as colab/job.py: 4 tries in about 10 minutes for a sync call that exits 1
 # exit 3: done, but some cells were skipped or left for a rerun (see the log); as job.py's PARTIAL_COMMANDS
-PARTIAL = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss")
+PARTIAL = ("generate", "judge", "run-dev", "utility", "belebele", "heldout-loss", "final")
 
 def lift(*args):
     with open(LOG, "a") as log:

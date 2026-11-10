@@ -9,7 +9,7 @@
   it, the weights already staged are uploaded only while their ``lift_variant.json`` names the variant's
   registry entry as it is now (spec, adapter hash, Global revision), so ``--build`` once, check the dry
   run, then ``--yes`` uploads the same weights without building them again.
-  Access (docs/decisions.md item 74, pending team confirmation): always gated with automatic approval,
+  Access (docs/decisions.md item 84, pending team confirmation): always gated with automatic approval,
   like the adapters (item 14), whatever the method or verdict. Its weights and the public parameters
   give back the gated adapter: WiSE-FT as Global + (weights - Global) / lambda, ReSta as
   weights - alpha x (Global - Base), and a CAST model's weights are the adapter, merged (the repair is
@@ -89,7 +89,7 @@ def frozen_names(facts: Facts) -> set[str]:
     return set(frozen_variants(facts))
 
 
-# Why each method's weights are gated (docs/decisions.md item 74): with the public parameters, they give
+# Why each method's weights are gated (docs/decisions.md item 84): with the public parameters, they give
 # back the gated adapter (item 14).
 METHOD_GATE = {
     "wiseft": "it is a WiSE-FT repair, Global + lambda x (adapter - Global), and lambda is public, so "
@@ -106,7 +106,7 @@ METHOD_GATE["cast_always"] = METHOD_GATE["cast"]
 
 
 def gate_reasons(facts: Facts, spec: Any | None) -> list[str]:
-    """Why the repaired model's repo is gated (docs/decisions.md item 74, pending team confirmation).
+    """Why the repaired model's repo is gated (docs/decisions.md item 84, pending team confirmation).
     Never empty: every repaired model is gated, and these are this model's reasons, for the card and the
     gate text. An unknown method or verdict says so."""
     method = spec.method if spec is not None else None
@@ -129,12 +129,12 @@ def gate_reasons(facts: Facts, spec: Any | None) -> list[str]:
 
 def model_repo(facts: Facts, variant: str | None, spec: Any | None) -> settings.RepoSpec:
     """The repaired model's repo (configs/publish.yaml ``repos.model``), which must be gated whatever the
-    method or verdict (docs/decisions.md item 74): a public one is refused."""
+    method or verdict (docs/decisions.md item 84): a public one is refused."""
     repo = settings.repo("model", variant=variant or "pending-winner")
     if not repo.gated:
         raise PublishError(
             "configs/publish.yaml repos.model must be gated (gated-auto): with the public repair parameters, "
-            "any repaired model's weights give back the gated adapter (docs/decisions.md item 74, pending "
+            "any repaired model's weights give back the gated adapter (docs/decisions.md item 84, pending "
             "team confirmation; changing it needs a new dated entry there)"
         )
     return repo
@@ -415,7 +415,7 @@ def _access_note(gated: list[str]) -> str:
     why = "; and ".join(gated)
     return (
         "**This repo is gated (automatic approval), like the unrepaired adapters, because " + why + ".** "
-        "It is shared so the evaluation can be reproduced (docs/decisions.md item 74).\n"
+        "It is shared so the evaluation can be reproduced (docs/decisions.md item 84).\n"
     )
 
 
@@ -496,7 +496,7 @@ def build_model(
         why = weights_mismatch(folder, spec)
         if why:
             expected.append(f"model weights ({why}: lift publish model --build, on the GPU VM)")
-    notes.append("gated (automatic approval), docs/decisions.md item 74: " + "; ".join(gated))
+    notes.append("gated (automatic approval), docs/decisions.md item 84: " + "; ".join(gated))
     render.write_text(folder / "README.md", model_card(facts, variant, spec, gated))
     facts.write_sources(stage_root() / "model.sources.json")
     notes += preflight.relativised_note(preflight.relativise_folder(folder))

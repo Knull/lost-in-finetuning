@@ -156,7 +156,7 @@ def _meta(card: str) -> dict:
     ],
 )
 def test_every_repaired_model_is_gated(registry, numbers, why):
-    """R1-04, R2-07, decisions.md 74: with its public parameters, any repaired model's weights give back
+    """R1-04, R2-07, decisions.md 84: with its public parameters, any repaired model's weights give back
     the gated adapter (WiSE-FT and ReSta by arithmetic, CAST directly), so every one is gated like it."""
     doc = selection(numbers)
     write_inputs(selection_doc=doc)
@@ -166,16 +166,16 @@ def test_every_repaired_model_is_gated(registry, numbers, why):
     card = (up.folder / "README.md").read_text()
     assert "extra_gated_prompt" in card and why in card
     assert "gated-auto" not in card
-    assert any("item 74" in n for n in up.notes)
+    assert any("item 84" in n for n in up.notes)
 
 
 def test_a_public_model_repo_is_refused(registry, monkeypatch):
-    """R2-07: configs/publish.yaml cannot make the repaired model public while item 74 stands."""
+    """R2-07: configs/publish.yaml cannot make the repaired model public while item 84 stands."""
     cfg = settings.load()
     cfg = {**cfg, "repos": {**cfg["repos"], "model": {**cfg["repos"]["model"], "access": "public"}}}
     monkeypatch.setattr(settings, "load", lambda: cfg)
     write_inputs()
-    with pytest.raises(PublishError, match="item 74"):
+    with pytest.raises(PublishError, match="item 84"):
         model.build_model(Facts())
 
 
