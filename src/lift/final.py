@@ -23,7 +23,7 @@ The same guard runs in every command that makes final outputs (``lift generate``
 --judge-only, ``lift belebele``, ``lift heldout-loss`` with ``--split final``), so no side line can reach the
 final split either (docs/decisions.md 74).
 
-GPU half (``lift final --variant V``). Four stages, each through the harness (rule 2), in this process:
+GPU half (``lift final --variant V``). Five stages, each through the harness (rule 2), in this process:
 
     safety           harmful, easy and hard benign in all six languages and Aya Red-teaming Hindi (final):
                      generated and judged by the primary judge (``lift.commands.run.run_cells``, run-dev's
@@ -32,6 +32,9 @@ GPU half (``lift final --variant V``). Four stages, each through the harness (ru
     utility          lift utility --variant V --split final --generate-only      200 Hindi pairs vs stock
                      (not for stock, the reference: any candidate's line answers for it)
     belebele         lift belebele --variant V --split final --langs en hi zh es ar th      700 x 6 items
+    heldout          lift heldout-loss --variant V --split final      the 200 utility references' NLL (stock
+                     too, the reference): the adapter's other gain measure and the share of it each repair
+                     keeps (docs/decisions.md 73 and 82)
     backtranslation  ar and th: a seeded 20% of the final pids of each safety set (back_translation in
                      configs/project.yaml; the same pids in every variant), the outputs translated into
                      English by NLLB-200 (on the judge's device) and judged again by the primary judge
@@ -50,11 +53,15 @@ of the variant's final split when it exists (validation/keys/second_judge/{varia
 ``--sample 0.10`` (decisions.md 31), through ``lift judge --judge second`` (Message Batches: a batch still
 running exits 3, the same line collects it), and the utility pairs through ``lift utility --judge-only``.
 
-``lift final --all`` runs the 13 core variants (``core_plan``) in an order that completes the primary
-endpoint first: stock, the three adapter seeds, the overall winner on all three seeds, then the other two
-families (cost order). When the stress adapter carries the repair comparison (Gate 2 failed), the standard
-adapter's three seeds follow the winner, for the standard recipe's "retain with its interval" (16 variants).
-A variant that is not registered yet is listed as not run, with its remedy.
+``lift final --all`` runs the core variants (``core_plan``) in an order that completes the primary
+endpoint first: stock, the adapter's seeds, the overall winner on those seeds, then the other two families
+(cost order): 13 variants for a standard adapter. An adapter has the seeds its recipe trains (``seeds_of``,
+configs/train.yaml): three for the standard recipe, one for the stress recipe, so a stress adapter and each
+repair frozen on it are one variant each. When the stress adapter carries the repair comparison (Gate 2
+failed), the standard adapter's three seeds follow the winner, for the standard recipe's "retain with its
+interval". Last come the three seeds of every data candidate's standard adapter that the plan does not
+hold yet (``other_candidates``: the candidate Gate 1 did not pick), an exploratory arm (docs/decisions.md
+81). A variant that is not registered yet is listed as not run, with its remedy.
 """
 
 from __future__ import annotations
@@ -85,8 +92,8 @@ RECIPE = "configs/frozen_recipe.json"  # P05's lift select writes it; committed 
 RECIPE_VERSION = 1
 SAFETY = ("harmful", "easy_benign", "hard_benign")
 REDTEAM = ("redteam", "hi")
-STAGES = ("safety", "utility", "belebele", "backtranslation")
-SEEDS = (1, 2, 3)
+STAGES = ("safety", "utility", "belebele", "heldout", "backtranslation")
+SEEDS = (1, 2, 3)  # the standard recipe's; an adapter's own seeds are ``seeds_of`` (the stress recipe: 1)
 BT_SEED = 70  # the back-translation sample's draw (pipeline._rank), decisions.md 74
 
 
@@ -281,14 +288,26 @@ def frozen_settings(selection: Mapping[str, Any] | None) -> dict[str, str]:
     return out
 
 
+def seeds_of(adapter: str) -> tuple[int, ...]:
+    """The seeds the adapter's recipe trains (``lift.gates.recipe_seeds``: configs/train.yaml), which are the
+    seeds the final plan holds for it and for the repairs frozen on it: 1-3 for a standard adapter, seed 1
+    for the stress one. A name outside the scheme gets 1-3."""
+    from lift.gates import recipe_seeds
+
+    try:
+        return recipe_seeds(adapter)
+    except ValueError:
+        return SEEDS
+
+
 def frozen_variants(selection: Mapping[str, Any] | None) -> list[str]:
-    """Every frozen repaired variant: each family's frozen setting on seeds 1-3 of its adapter."""
+    """Every frozen repaired variant: each family's frozen setting on its adapter's seeds (``seeds_of``)."""
     from lift.repair import settings as rs
 
     out = []
     for name in frozen_settings(selection).values():
         setting, adapter = rs.parse_name(name)
-        out += [setting.name(seed_name(adapter, seed)) for seed in SEEDS]
+        out += [setting.name(seed_name(adapter, seed)) for seed in seeds_of(adapter)]
     return list(dict.fromkeys(out))
 
 
@@ -426,7 +445,7 @@ def check_final(
                 why = f"the frozen recipe froze {frozen or 'nothing'}"
             problems.append(
                 f"{variant} is not a frozen variant: {why}. Only stock, the adapter seeds and the "
-                "frozen settings on seeds 1-3 are evaluated on the final split (rule 1)"
+                "frozen settings on their adapter's seeds are evaluated on the final split (rule 1)"
             )
     if problems:
         raise Refused(f"the final split is closed to {variant}: " + "; ".join(problems))
@@ -450,7 +469,7 @@ def guard_split(variant: str, split: str) -> None:
 @dataclass(frozen=True)
 class Planned:
     name: str
-    role: str  # stock | adapter | winner | standard | family
+    role: str  # stock | adapter | winner | standard | family | candidate
     family: str | None
     seed: int | None
 
@@ -479,8 +498,25 @@ def standard_adapter(selection: Mapping[str, Any] | None) -> str | None:
     return adapter_name(str(candidate), "standard", 1)
 
 
+def other_candidates(selection: Mapping[str, Any] | None) -> list[str]:
+    """The seed-1 standard adapters of the data candidates (configs/train.yaml) that the plan does not hold
+    as the selection's adapter or as the Gate 1 pick (``standard_adapter``): the candidates that were not
+    picked. They are evaluated on the final split too, as an exploratory arm (docs/decisions.md 81): the
+    pick is made by dev win rate only, never by drift, so the candidate that drifts can be the one left
+    out. Until the pick is recorded (``lift gate 2 --candidate NAME``) every standard candidate that is
+    not the selection's adapter is listed here."""
+    from lift.gates import adapter_name, candidates
+
+    held = {str((selection or {}).get("adapter") or ""), standard_adapter(selection)}
+    try:
+        names = [adapter_name(c, "standard", 1) for c in candidates()]
+    except ValueError:
+        return []
+    return [n for n in names if n not in held]
+
+
 def core_plan(selection: Mapping[str, Any]) -> list[Planned]:
-    """The 13 core variants in priority order (module docstring). Needs a decided selection."""
+    """The core variants in priority order (module docstring). Needs a decided selection."""
     from lift.repair import settings as rs
 
     frozen = frozen_settings(selection)
@@ -496,16 +532,18 @@ def core_plan(selection: Mapping[str, Any]) -> list[Planned]:
         raise Refused(f"outputs/metrics/selection.json: {problem}")
     win_setting, _ = rs.parse_name(str(winner))
     plan = [Planned("stock", "stock", None, None)]
-    plan += [Planned(seed_name(adapter, s), "adapter", None, s) for s in SEEDS]
+    plan += [Planned(seed_name(adapter, s), "adapter", None, s) for s in seeds_of(adapter)]
     order = [win_setting.family] + [f for f in rs.FAMILIES if f != win_setting.family and f in frozen]
     standard = standard_adapter(selection)
     for family in order:
         name = winner if family == win_setting.family else frozen[family]
         setting, base = rs.parse_name(str(name))
         role = "winner" if family == win_setting.family else "family"
-        plan += [Planned(setting.name(seed_name(base, s)), role, family, s) for s in SEEDS]
+        plan += [Planned(setting.name(seed_name(base, s)), role, family, s) for s in seeds_of(base)]
         if role == "winner" and standard:
-            plan += [Planned(seed_name(standard, s), "standard", None, s) for s in SEEDS]
+            plan += [Planned(seed_name(standard, s), "standard", None, s) for s in seeds_of(standard)]
+    for other in other_candidates(selection):
+        plan += [Planned(seed_name(other, s), "candidate", None, s) for s in seeds_of(other)]
     return plan
 
 
@@ -546,7 +584,7 @@ class Options:
 
 
 def stage_argv(stage: str, name: str, opts: Options) -> list[str]:
-    """The lift command line of a stage that is a lift command (utility, belebele)."""
+    """The lift command line of a stage that is a lift command (utility, belebele, heldout)."""
     tail = ([f"--dtype={opts.dtype}"] if opts.dtype else []) + (
         [f"--batch-size={opts.batch_size}"] if opts.batch_size else []
     )
@@ -568,6 +606,8 @@ def stage_argv(stage: str, name: str, opts: Options) -> list[str]:
             f"--device={opts.device}",
             *tail,
         ]
+    if stage == "heldout":
+        return ["heldout-loss", f"--variant={name}", f"--split={SPLIT}", f"--device={opts.device}", *tail]
     raise ValueError(f"{stage!r} is not a lift command stage")
 
 
@@ -579,7 +619,7 @@ def run_stage(stage: str, name: str, opts: Options) -> int:
     """One stage of one variant (module docstring): its exit code (0, 3, or 1 for a failure, logged)."""
     from lift.repair.sweep import _call
 
-    if stage in ("utility", "belebele"):
+    if stage in ("utility", "belebele", "heldout"):
         return _call(stage_argv(stage, name, opts))
     try:
         if stage == "safety":

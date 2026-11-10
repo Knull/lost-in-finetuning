@@ -22,6 +22,7 @@ A = "adapter-aya-std-s{}"
 WINNER = "wiseft-l0.50-adapter-aya-std-s{}"
 RESTA = "resta-a0.25-adapter-aya-std-s{}"
 CAST = "cast-m1.0-adapter-aya-std-s{}"
+OTHER = "adapter-indicalign-std-s{}"  # the data candidate these selections did not pick
 TAG = ["recipe-frozen-20261107"]
 SELECTION = {
     "status": "decided",
@@ -347,10 +348,69 @@ def test_the_core_plan_completes_the_primary_endpoint_first():
         *(RESTA.format(s) for s in (1, 2, 3)),  # the overall winner
         *(WINNER.format(s) for s in (1, 2, 3)),  # then cost order
         *(CAST.format(s) for s in (1, 2, 3)),
+        *(OTHER.format(s) for s in (1, 2, 3)),  # the candidate not picked: exploratory, last
     ]
-    assert len(plan) == 13 and [p.role for p in plan[4:7]] == ["winner"] * 3
+    assert len(plan) == 16 and [p.role for p in plan[4:7]] == ["winner"] * 3
+    assert [p.role for p in plan[13:]] == ["candidate"] * 3 and {p.family for p in plan[13:]} == {None}
     with pytest.raises(final.Refused):
         final.core_plan({"status": "incomplete"})
+
+
+def test_a_stress_adapter_has_the_one_seed_its_recipe_trains():
+    """README, Adapter: "A stress recipe (..., seed 1)"; configs/train.yaml stress.seeds is [1]. The plan
+    holds the stress adapter and each repair frozen on it once, never seeds 2-3 as arms "not run"; the
+    standard adapters keep their three seeds."""
+    from lift import gates
+
+    assert gates.recipe_seeds("adapter-indicalign-stress-s1") == (1,)
+    assert gates.recipe_seeds(A.format(2)) == (1, 2, 3)
+    with pytest.raises(ValueError, match="not an adapter name"):
+        gates.recipe_seeds("stock")
+    assert final.seeds_of("stock") == (1, 2, 3) and final.seeds_of("adapter-x-stress-s1") == (1,)
+    stress = "adapter-indicalign-stress-s1"
+    sel = {
+        "status": "decided",
+        "adapter": stress,
+        "standard_adapter": A.format(1),
+        "overall": {"winner": f"cast-m1.0-{stress}", "verdict": "repair"},
+        "frozen": {
+            "wiseft": f"wiseft-l0.25-{stress}",
+            "resta": f"resta-a0.10-{stress}",
+            "cast": f"cast-m1.0-{stress}",
+        },
+    }
+    plan = final.core_plan(sel)
+    assert [(p.name, p.role) for p in plan] == [
+        ("stock", "stock"),
+        (stress, "adapter"),
+        (f"cast-m1.0-{stress}", "winner"),
+        *((A.format(s), "standard") for s in (1, 2, 3)),
+        (f"wiseft-l0.25-{stress}", "family"),
+        (f"resta-a0.10-{stress}", "family"),
+        *((OTHER.format(s), "candidate") for s in (1, 2, 3)),
+    ]
+    assert final.frozen_variants(sel) == [
+        f"wiseft-l0.25-{stress}",
+        f"resta-a0.10-{stress}",
+        f"cast-m1.0-{stress}",
+    ]
+
+
+def test_the_candidate_that_was_not_picked_joins_the_plan(monkeypatch):
+    """docs/decisions.md 81: Gate 1 picks a candidate by dev win rate only, so the one that drifts can be
+    the one left out. Every data candidate's standard adapter the plan does not already hold is evaluated
+    on the final split as an exploratory arm."""
+    assert final.other_candidates(SELECTION) == [OTHER.format(1)]
+    stress = {**SELECTION, "adapter": "adapter-indicalign-stress-s1"}
+    # Before the Gate 1 pick is recorded, both standard adapters are candidates.
+    assert final.other_candidates(stress) == [A.format(1), OTHER.format(1)]
+    (metrics_dir() / "gate2.json").parent.mkdir(parents=True, exist_ok=True)
+    (metrics_dir() / "gate2.json").write_text(json.dumps({"candidate": "aya"}), encoding="utf-8")
+    assert final.standard_adapter(stress) == A.format(1)
+    assert final.other_candidates(stress) == [OTHER.format(1)]
+    assert final.other_candidates({**stress, "standard_adapter": OTHER.format(1)}) == [A.format(1)]
+    monkeypatch.setattr("lift.gates.candidates", lambda: ["aya"])
+    assert final.other_candidates(SELECTION) == []
 
 
 def test_run_variant_runs_each_stage_resumes_and_records_gpu_hours():
@@ -362,13 +422,14 @@ def test_run_variant_runs_each_stage_resumes_and_records_gpu_hours():
 
     opts = final.Options()
     results = final.run_variant(A.format(1), opts, stage_fn=stage_fn, devices=2, tag=TAG[0])
-    assert results == {"safety": 0, "utility": 0, "belebele": 3, "backtranslation": 0}
+    assert results == {"safety": 0, "utility": 0, "belebele": 3, "heldout": 0, "backtranslation": 0}
     assert final.exit_code({"x": results}) == 3
     calls.clear()
     assert final.run_variant(A.format(1), opts, stage_fn=lambda s, n, o: calls.append(s) or 0, devices=2) == {
         "safety": 0,
         "utility": 0,
         "belebele": 0,
+        "heldout": 0,
         "backtranslation": 0,
     }
     assert calls == ["belebele"]  # only the stage that did not finish runs again
@@ -391,6 +452,14 @@ def test_stage_lines_are_the_harness_commands_on_the_final_split():
         "--batch-size=8",
     ]
     assert final.stage_argv("belebele", "x", opts)[3] == f"--langs={','.join(LANGS)}"
+    assert final.stage_argv("heldout", "x", opts) == [
+        "heldout-loss",
+        "--variant=x",
+        "--split=final",
+        "--device=cuda:0",
+        "--dtype=fp16",
+        "--batch-size=8",
+    ]
 
 
 def test_run_all_goes_in_order_and_lists_what_it_could_not_run():
@@ -404,7 +473,8 @@ def test_run_all_goes_in_order_and_lists_what_it_could_not_run():
         stage_fn=lambda s, n, o: seen.append(n) or 0,
     )
     assert rc == 3
-    assert list(summary["not_run"]) == [CAST.format(3)]  # not registered yet
+    # not registered yet: the third CAST seed, and the candidate that was not picked
+    assert list(summary["not_run"]) == [CAST.format(3), *(OTHER.format(s) for s in (1, 2, 3))]
     assert list(dict.fromkeys(seen))[:7] == [
         "stock",
         *(A.format(s) for s in (1, 2, 3)),
@@ -413,7 +483,7 @@ def test_run_all_goes_in_order_and_lists_what_it_could_not_run():
     rc, summary = final.run_all(
         final.Options(), selection=SELECTION, tags=[], devices=1, stage_fn=lambda s, n, o: 0
     )
-    assert summary["results"] == {} and len(summary["not_run"]) == 13
+    assert summary["results"] == {} and len(summary["not_run"]) == 16
 
 
 def made(name, *, but=()):

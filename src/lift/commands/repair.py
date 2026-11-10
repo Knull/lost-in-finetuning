@@ -337,22 +337,27 @@ def print_selection(doc: dict[str, Any]) -> None:
               f"{', '.join(f'{k} {v}' for k, v in sorted(recipe['frozen'].items()))}; selection.json sha256 "
               f"{recipe['selection_sha256']}")
     print(f"  {plan['tag']}")
-    print("\nconfigs/variants.yaml entries of the frozen variants (seeds 1-3; seed 1's are registered "
-          "already):")
+    seeds = sorted({item["seed"] for item in plan["variants"]})
+    print(f"\nconfigs/variants.yaml entries of the frozen variants (the adapter's seeds: "
+          f"{', '.join(str(s) for s in seeds)}; seed 1's are registered already):")
     for item in plan["variants"]:
         if "entry" in item:
             print(select.yaml_entry(item["entry"]))
         else:
             print(f"  # {item['name']}: not yet ({item['pending']})")
     if plan["fit_cast"]:
-        print("\nCAST for seeds 2-3: fit on train data only (GPU job lines), then register at the frozen "
-              "strength:")
+        print("\nCAST for the later seeds: fit on train data only (GPU job lines), then register at the "
+              "frozen strength:")
         for line in plan["fit_cast"]:
             print(f"  {line}")
-    print("\nThen on the laptop, after lift sync pull (writes the entries above; commit "
-          "configs/variants.yaml):")
-    for line in plan["register"]:
-        print(f"  {line}")
+    if plan["register"]:
+        print("\nThen on the laptop, after lift sync pull (writes the entries above; commit "
+              "configs/variants.yaml):")
+        for line in plan["register"]:
+            print(f"  {line}")
+    else:
+        print("\nThe adapter's recipe trains this one seed (configs/train.yaml), so nothing is left to "
+              "register: the frozen settings above are the repaired variants of the final eval.")
 
 
 # --- registration ---------------------------------------------------------------------------------------

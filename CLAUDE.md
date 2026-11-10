@@ -283,6 +283,10 @@ six languages, so pairing, splitting and clustering all go by pid.
   manifest; `--judge-only` on the laptop for the second judge's 10% and utility), `lift stats`
   (report.analysis -> outputs/metrics/final_stats.json) and `lift report` (report.tables, figures, cost ->
   outputs/metrics/final_report.json for P08, tables in outputs/metrics/report/, figures in outputs/figures/).
-  Decisions 74-80.
+  Decisions 74-80. Added Nov 10 (decisions 81-82): the data candidate Gate 1 did not pick joins the final
+  plan as an exploratory arm; an adapter has its recipe's seeds (stress: seed 1); `lift final` also scores
+  the held-out loss; `lift stats` reports each adapter on its own axes (drift, refusals, over-refusal,
+  Gate 1's usefulness, held-out loss), the share of the held-out gain each repair keeps, and drift and
+  repair on the refusal rate and under the second judge's labels where it judged whole cells.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

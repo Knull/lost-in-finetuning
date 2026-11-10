@@ -47,8 +47,9 @@ selection.json names paths relative to the repo (outputs/..., configs/...), neve
 paths (``_unrooted``): it is published with the logs.
 
 The command then prints the freeze steps: the commit-and-tag command, the configs/variants.yaml entries
-of the frozen settings on seeds 1-3 (seed 2 and 3 adapters must be registered; CAST needs its artifact,
-fitted first), and the fit-cast lines of seeds 2-3.
+of the frozen settings on the adapter's seeds (1-3 for a standard adapter, whose seed 2 and 3 adapters must be
+registered and whose CAST artifacts fitted first; seed 1 alone for the stress adapter), and the fit-cast
+lines of the later seeds.
 
 The secondary selection (decisions item 73, ``run_secondary``) is the same rule over the same dev numbers
 with condition 2 read on the adapter's held-out-loss gain instead of its win rate: a setting must keep at
@@ -475,9 +476,16 @@ def seed_name(adapter: str, seed: int) -> str:
 
 def freeze_plan(adapter: str, frozen: Mapping[str, str], *, date: str | None = None) -> dict[str, Any]:
     """The freeze steps for the frozen settings ({family: setting name on ``adapter``}): the tag command,
-    for each seed 1-3 each frozen variant's name and its registry entry where it can be written now (the
-    seed's adapter registered; CAST: its artifact fitted), else the lines that make it, and the fit-cast
-    lines of seeds 2-3."""
+    for each seed of the adapter's recipe (``lift.gates.recipe_seeds``: 1-3 for the standard recipe, seed 1
+    for the stress recipe) each frozen variant's name and its registry entry where it can be written now
+    (the seed's adapter registered; CAST: its artifact fitted), else the lines that make it, and the
+    fit-cast lines of the seeds after the first."""
+    from lift.gates import recipe_seeds
+
+    try:
+        seeds = recipe_seeds(adapter)        # the stress recipe trains seed 1 only: nothing to do for 2-3
+    except ValueError:
+        seeds = (1, 2, 3)
     plan: dict[str, Any] = {"tag": f'git add {RECIPE} && git commit -m "Freeze the recipe" && '
                                    f"git tag recipe-frozen-{date or _today()} && git push && git push --tags",
                             "variants": [], "fit_cast": [], "register": []}
@@ -487,7 +495,7 @@ def freeze_plan(adapter: str, frozen: Mapping[str, str], *, date: str | None = N
         setting, _ = rs.parse_name(name)
         tags.append(setting.tag)
         needs_cast |= setting.family == "cast"
-        for seed in (1, 2, 3):
+        for seed in seeds:
             seed_adapter = seed_name(adapter, seed)
             item: dict[str, Any] = {"family": family, "seed": seed, "name": setting.name(seed_adapter)}
             try:
@@ -496,7 +504,7 @@ def freeze_plan(adapter: str, frozen: Mapping[str, str], *, date: str | None = N
             except (KeyError, ValueError, FileNotFoundError) as exc:
                 item["pending"] = _short(exc)
             plan["variants"].append(item)
-    for seed in (2, 3):
+    for seed in seeds[1:]:
         seed_adapter = seed_name(adapter, seed)
         if needs_cast:
             plan["fit_cast"].append(f"lift fit-cast --adapter {seed_adapter}")

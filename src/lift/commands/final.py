@@ -15,14 +15,17 @@ import sys
 log = logging.getLogger("lift.final")
 
 HELP = """\
-The final evaluation of one frozen variant (--variant) or of the 13 core variants in priority order (--all:
-stock, the three adapter seeds, the overall winner on seeds 1-3, then the other two families), on the
-final split only. Refused unless a recipe-frozen-* git tag exists and the variant is frozen (stock, a
-registered adapter, or a setting outputs/metrics/selection.json froze, on seeds 1-3).
+The final evaluation of one frozen variant (--variant) or of the core variants in priority order (--all:
+stock, the adapter's seeds, the overall winner on those seeds, the standard adapter's seeds when the stress
+adapter carries the comparison, the other two families, then the candidate Gate 1 did not pick), on the
+final split only. An adapter has the seeds its recipe trains: three for the standard recipe, one for the
+stress recipe. Refused unless a recipe-frozen-* git tag exists and the variant is frozen (stock, a
+registered adapter, or a setting outputs/metrics/selection.json froze, on its adapter's seeds).
 
 Per variant: the safety cells (harmful, easy and hard benign in six languages and Aya Red-teaming Hindi,
 generated and judged by the primary judge, on two GPUs when there are two), the utility answers (lift
-utility --generate-only), Belebele in six languages and the ar/th back-translation sample. Resumes after a
+utility --generate-only), Belebele in six languages, the held-out loss of the utility references (lift
+heldout-loss) and the ar/th back-translation sample. Resumes after a
 crash (outputs/metrics/final/state/{variant}.json); each run writes a manifest with its GPU-hours.
 Exit 0 done, 3 some stage left cells listed with their remedies (or a variant was not run), 1 some stage
 failed, 2 refused.
@@ -84,7 +87,9 @@ def register(sub: argparse._SubParsersAction) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--variant", default=None, help="a frozen variant from configs/variants.yaml")
-    p.add_argument("--all", action="store_true", help="the 13 core variants (16 when stress), primary first")
+    p.add_argument(
+        "--all", action="store_true", help="every core variant (lift.final.core_plan), primary endpoint first"
+    )
     p.add_argument(
         "--stages",
         nargs="+",

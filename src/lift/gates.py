@@ -182,6 +182,23 @@ def adapter_name(candidate: str, recipe: str, seed: int) -> str:
     return f"adapter-{candidate}-{RECIPE_TOKENS[recipe]}-s{seed}"
 
 
+def recipe_seeds(adapter: str) -> tuple[int, ...]:
+    """The seeds the recipe of ``adapter`` (adapter-{candidate}-{std|stress}-s{seed}) trains, from
+    configs/train.yaml: 1-3 for the standard recipe, seed 1 for the stress recipe (README, Adapter: "A
+    stress recipe (..., seed 1)"). A frozen repair is applied to exactly these seeds of its adapter, and the
+    final plan holds no other: a seed the recipe never trains is not an arm that was "not run"."""
+    import re
+
+    m = re.fullmatch(r"adapter-.+-(std|stress)-s\d+", adapter)
+    if m is None:
+        raise ValueError(f"{adapter!r} is not an adapter name (adapter-CANDIDATE-std|stress-sSEED)")
+    recipe = next(name for name, token in RECIPE_TOKENS.items() if token == m.group(1))
+    seeds = tuple(int(s) for s in config.get(f"{recipe}.seeds", name="train"))
+    if not seeds:
+        raise ValueError(f"configs/train.yaml {recipe}.seeds is empty")
+    return seeds
+
+
 def candidates() -> list[str]:
     """The data candidates, in configs/train.yaml order."""
     names = [str(c) for c in config.get("candidates", name="train")]
