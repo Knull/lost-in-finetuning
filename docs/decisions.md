@@ -38,6 +38,31 @@ in configs/publish.yaml is still unset (`--yes` refuses without it), and no fina
       model stays gated (item 84), and the completeness checks of the logs stand (human labels readable,
       every generation judged, the second judge's coverage, no open batch).
 
+86. **The article reports each adapter by what each check said; Belebele-hi joins the axes of item 82.**
+    Reporting only: no endpoint, claim family, selection rule or verdict changes, and no final-split
+    output existed when this was written.
+    - The article opens its findings with each adapter against stock in words
+      (`lift.publish.article.adapter_checks`), read from the report's `axes`: the checks a team runs
+      before shipping (held-out loss, Belebele-hi), pairwise utility with Gate 1's verdict, and safety
+      (the Hindi harmful rate, hard-benign refusals). A direction is said only where the axis's 95%
+      interval excludes no change (parity for the win rate), and the sentences repeat no number: the
+      `adapters` table under them holds every one. Three conclusions are written only for the adapters
+      whose intervals support them: a better held-out loss with a higher harmful rate; a better
+      held-out loss with a lost pairwise comparison; a lower harmful rate with more refusals of benign
+      prompts. Nothing is asserted in fixed text.
+    - `adapter_axes` gains `belebele_hi` (Belebele-hi accuracy against stock, paired by item, pooled
+      over the seeds run): with the held-out loss it is what a team checks before shipping, and item 82
+      left it out.
+    - The article and the logs card place the tables and figures items 81-82 added (`adapters`,
+      `adapter_drift`, `heldout`, `sensitivity_effects`; `adapters_by_language`). The secondary
+      selection's figure (`tradeoff_dev_heldout`) is optional: `lift report` draws it only when
+      selection_secondary.json is decided, and without it the article says "not drawn" and nothing is
+      pending.
+    - The model card's one safety sentence ("safer than the adapter") reads the verdict of the adapter
+      the weights repair, the report's row of kind "adapter". It required every verdict to be "repair",
+      which could never hold once the report carried the standard adapter's "retain" (item 80).
+    - A candidate without a README word (item 81) is shown as "no verdict", not "not run".
+
 ## Nov 10, 2026 (night): the candidate not picked, each adapter's axes and held-out loss on the final split, before the recipe was frozen
 
 Decided by Arnav on the night of Nov 9-10, on Claude's review of the design, with items 72-73. Known then:

@@ -883,8 +883,19 @@ def facts_pending(facts: Facts) -> str:
     return pending("the aggregate tables", shown(report_path()), P07)
 
 
+# What a verdict row is, by P07's ``kind`` (lift.report.analysis: decisions items 80-81).
+VERDICT_ROLES = {
+    "adapter": "carries the repair comparison",
+    "standard": "Gate 1's pick",
+    "candidate": "the candidate Gate 1 did not pick, an exploratory arm",
+}
+NO_VERDICT = "no verdict"  # a candidate that drifts: the selection rule was not run on it
+
+
 def verdict_lines(facts: Facts) -> str:
-    """One line per adapter verdict from final_report.json, or a pending line."""
+    """One line per adapter verdict from final_report.json, or a pending line: the README's word, what the
+    row is (``VERDICT_ROLES``), Gate 1's usefulness verdict when the report gives one (decisions item 82)
+    and P07's reason. A candidate without a word says so (``NO_VERDICT``): it is not an arm "not run"."""
     from lift.publish.inputs import P07
 
     verdicts = facts.raw(report_path(), "/verdicts")
@@ -894,20 +905,24 @@ def verdict_lines(facts: Facts) -> str:
         return "_No verdict recorded._"
     lines = []
     for i, v in enumerate(verdicts):
-        verdict = facts.value(report_path(), f"/verdicts/{i}/verdict", "text", what="verdict", stage=P07)
-        adapter = facts.value(report_path(), f"/verdicts/{i}/adapter", "text", what="adapter", stage=P07)
+
+        def said(key: str, what: str, at: int = i) -> str:
+            return facts.value(report_path(), f"/verdicts/{at}/{key}", "text", what=what, stage=P07)
+
+        verdict = NO_VERDICT if v.get("verdict") is None and v.get("kind") == "candidate" else None
+        verdict = verdict or said("verdict", "verdict")
+        adapter = said("adapter", "adapter")
         # Free text from P07 goes public too, so it is recorded in the sources like every number.
-        reason = (
-            facts.value(report_path(), f"/verdicts/{i}/reason", "text", what="verdict reason", stage=P07)
-            if v.get("reason")
+        reason = said("reason", "verdict reason") if v.get("reason") else ""
+        recipe = said("recipe", "recipe") if v.get("recipe") else "standard"
+        role = VERDICT_ROLES.get(v.get("kind"))
+        useful = (
+            f"; Gate 1: **{said('usefulness_verdict', 'Gate 1 verdict')}**"
+            if v.get("usefulness_verdict")
             else ""
         )
-        recipe = (
-            facts.value(report_path(), f"/verdicts/{i}/recipe", "text", what="recipe", stage=P07)
-            if v.get("recipe")
-            else "standard"
-        )
-        lines.append(f"- `{adapter}` ({recipe} recipe): **{verdict}**. {reason}".rstrip())
+        who = f"{recipe} recipe" + (f", {role}" if role else "")
+        lines.append(f"- `{adapter}` ({who}): **{verdict}**{useful}. {reason}".rstrip())
     return "\n".join(lines)
 
 

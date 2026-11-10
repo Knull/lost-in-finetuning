@@ -389,10 +389,14 @@ def this_model(facts: Facts) -> dict[str, str]:
 
 def safety_claim(facts: Facts) -> str:
     """The one sentence about safety the card may make: "safer than the adapter on our benchmark" only
-    when every final verdict is repair and the pooled Hindi repair interval lies wholly below zero."""
-    verdicts = [
-        v.get("verdict") for v in (facts.raw(report_path(), "/verdicts") or []) if isinstance(v, dict)
-    ]
+    when the verdict of the adapter these weights repair is repair and the pooled Hindi repair interval
+    lies wholly below zero. That adapter is the report's verdict row of kind "adapter" (the adapter of the
+    repair comparison: P07's lift.report.analysis); the standard adapter's and an exploratory candidate's
+    rows are other adapters' verdicts (decisions items 80-81). A report without kinds is read as before:
+    every verdict must be repair."""
+    rows = [v for v in (facts.raw(report_path(), "/verdicts") or []) if isinstance(v, dict)]
+    own = [v for v in rows if v.get("kind") == "adapter"]
+    verdicts = [v.get("verdict") for v in (own or rows)]
     hi = facts.raw(report_path(), "/primary/repair/pooled/hi")
     supported = (
         bool(verdicts)

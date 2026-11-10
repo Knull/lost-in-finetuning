@@ -22,7 +22,7 @@ from pathlib import Path
 from lift import config, paths
 from lift.publish import PublishError, preflight, render, settings
 from lift.publish.collect import links_path, read_links
-from lift.publish.datasets import verdict_lines
+from lift.publish.datasets import VERDICT_ROLES, verdict_lines
 from lift.publish.inputs import (
     FIGURES,
     P07,
@@ -102,6 +102,133 @@ def _not_run(facts: Facts) -> str:
         return facts.report_value("/not_run", "text", what="the list of arms not run")
     items = report["not_run"] or []
     return "\n".join(f"- {item}" for item in items) if items else "Every pre-registered arm was run."
+
+
+# ---------------------------------------------------------------- what each check said of each adapter
+
+PARITY = 0.5  # a pairwise win rate at which neither side is preferred
+
+
+def _direction(axis: object, reference: float = 0.0) -> str | None:
+    """Where an axis {est, lo, hi} of the report stands against ``reference``: "higher" or "lower" when its
+    95% interval excludes it, "same" when it does not; None when the axis was not run."""
+    if axis is None:
+        return None
+    try:
+        lo, hi = float(axis["lo"]), float(axis["hi"])  # type: ignore[index]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PublishError(f"{shown(report_path())}/verdicts: an axis without an interval: {exc}") from exc
+    return "higher" if lo > reference else "lower" if hi < reference else "same"
+
+
+# (axis key, the sentence for each direction). Lower held-out loss is a better fit of the references.
+_SAID = {
+    "heldout": {
+        "lower": "held-out loss better than stock's",
+        "higher": "held-out loss worse than stock's",
+        "same": "no clear change in held-out loss",
+        None: "held-out loss not run",
+    },
+    "belebele_hi": {
+        "higher": "Belebele-hi accuracy higher than stock's",
+        "lower": "Belebele-hi accuracy lower than stock's",
+        "same": "no clear change in Belebele-hi accuracy",
+        None: "Belebele-hi not run",
+    },
+    "final_win_rate": {
+        "higher": "its answers preferred to stock's more often than not",
+        "lower": "stock's answers preferred to its own more often than not",
+        "same": "no clear preference between its answers and stock's",
+        None: "the final win rate not run",
+    },
+    "drift": {
+        "higher": "Hindi harmful rate higher than stock's",
+        "lower": "Hindi harmful rate lower than stock's",
+        "same": "no clear change in the Hindi harmful rate",
+        None: "the Hindi harmful rate not run",
+    },
+    "overrefusal_hard_hi": {
+        "higher": "more refusals of hard-benign Hindi prompts than stock",
+        "lower": "fewer refusals of hard-benign Hindi prompts than stock",
+        "same": "no clear change in refusals of hard-benign Hindi prompts",
+        None: "hard-benign refusals not run",
+    },
+}
+
+
+def adapter_checks(facts: Facts) -> str:
+    """Each adapter on the checks a team runs before shipping (held-out loss, a benchmark), on pairwise
+    utility and on safety, in words, from the report's verdict rows (``axes``: P07's
+    lift.report.analysis.adapter_axes; decisions items 82 and 86). A direction is said only where the
+    axis's 95% interval excludes no change (parity for the win rate); it repeats no number (the adapters
+    table below holds them, recorded in the sources). Then what the checks add up to, each sentence only
+    for the adapters whose intervals support it: a better loss with a higher harmful rate, a better loss
+    with a lost pairwise comparison, a lower harmful rate with more refusals of benign prompts."""
+    verdicts = facts.raw(report_path(), "/verdicts")
+    if verdicts is None:
+        return facts.report_value("/verdicts", "text", what="each adapter's checks")
+    rows = [v for v in verdicts if isinstance(v, dict) and isinstance(v.get("axes"), dict)]
+    if not rows:
+        return f"_{facts._missing('each adapter on its own axes', report_path(), P07)}_"
+    lines = []
+    where: dict[str, dict[str, str | None]] = {}
+    for v in rows:
+        axes = v["axes"]
+        name = f"`{v.get('adapter')}`"
+        d = where[name] = {
+            key: _direction(axes.get(key), PARITY if key == "final_win_rate" else 0.0) for key in _SAID
+        }
+        role = VERDICT_ROLES.get(v.get("kind"))
+        who = f"{v.get('recipe') or 'standard'} recipe" + (f", {role}" if role else "")
+        drift = _SAID["drift"][d["drift"]]
+        if d["drift"] == "higher" and (axes.get("drift") or {}).get("meaningful"):
+            drift += ", over Gate 2's bar"
+        useful = f"; Gate 1: {v['usefulness_verdict']}" if v.get("usefulness_verdict") else ""
+        lines.append(
+            f"- {name} ({who}). The usual checks: {_SAID['heldout'][d['heldout']]}; "
+            f"{_SAID['belebele_hi'][d['belebele_hi']]}. Pairwise utility: "
+            f"{_SAID['final_win_rate'][d['final_win_rate']]}{useful}. Safety: {drift}; "
+            f"{_SAID['overrefusal_hard_hi'][d['overrefusal_hard_hi']]}."
+        )
+
+    def those(**want: str) -> list[str]:
+        return [name for name, d in where.items() if all(d[k] == v for k, v in want.items())]
+
+    summary = []
+    shipped = those(heldout="lower", drift="higher")
+    if shipped:
+        summary.append(
+            f"For {_and(shipped)}, the held-out loss improved while the Hindi harmful rate rose: the check "
+            "a team runs before shipping said yes, and the safety test said no."
+        )
+    disagree = those(heldout="lower", final_win_rate="lower")
+    if disagree:
+        summary.append(
+            f"For {_and(disagree)}, the two readings of usefulness disagree: a better fit of the held-out "
+            "references, and answers the pairwise judge preferred less often than stock's."
+        )
+    refusing = those(drift="lower", overrefusal_hard_hi="higher")
+    if refusing:
+        summary.append(
+            f"For {_and(refusing)}, the lower harmful rate comes with more refusals of benign prompts: "
+            "part of that safety is refusing more."
+        )
+    return "\n".join(lines) + ("\n\n" + " ".join(summary) if summary else "")
+
+
+def comparison_adapter(facts: Facts) -> str:
+    """The adapter that carries the repair comparison, as the report names it: the first verdict row (the
+    selection's adapter), with its recipe; pending while the report is not there."""
+    verdicts = facts.raw(report_path(), "/verdicts")
+    if not verdicts:
+        return facts.report_value("/verdicts/0/adapter", "text", what="the adapter of the repair comparison")
+    name = facts.value(report_path(), "/verdicts/0/adapter", "text", what="adapter", stage=P07)
+    recipe = (
+        facts.value(report_path(), "/verdicts/0/recipe", "text", what="recipe", stage=P07)
+        if verdicts[0].get("recipe")
+        else "standard"
+    )
+    return f"`{name}` ({recipe} recipe)"
 
 
 PRIMARY_EFFECTS = [
@@ -424,6 +551,18 @@ def context(facts: Facts) -> dict[str, str]:
         "bar_agreement": facts.config("project", "validation.bar.agreement", "pct"),
         "bar_kappa": facts.config("project", "validation.bar.kappa", "f2"),
         "verdicts": verdict_lines(facts),
+        "adapter_checks": adapter_checks(facts),
+        "comparison_adapter": comparison_adapter(facts),
+        "utility_retained": rv(
+            "/headline/utility_retained",
+            "pct_ci",
+            what="the share of the adapter's win-rate gain the frozen repair keeps",
+        ),
+        "heldout_retained": rv(
+            "/headline/heldout_retained",
+            "pct_ci",
+            what="the share of the adapter's held-out-loss gain the frozen repair keeps",
+        ),
         "drift": rv("/primary/drift/pooled", "pp_ci", what="the pooled Hindi drift effect"),
         "drift_p": rv("/primary/drift/pooled/p", "p_stmt", what="the drift p-value"),
         "repair": rv("/primary/repair/pooled", "pp_ci", what="the pooled Hindi repair effect"),
@@ -460,12 +599,17 @@ def context(facts: Facts) -> dict[str, str]:
             "configs/publish.yaml auditkit_issue_url",
             PERSON,
         ),
+        # Optional: while nobody has filed it, the article points at the draft in the repo.
+        "safetune_issue": cfg.get("safetune_issue_url")
+        or "our report for upstream is `hf/safetune_issue.md` in the repository",
         "references_note": cfg.get("references")
         or pending(
             "full citations for the build plan's references", "configs/publish.yaml references", PERSON
         ),
     }
     for name in (
+        "adapters",
+        "adapter_drift",
         "per_language",
         "repair_comparison",
         "secondary",
@@ -473,7 +617,9 @@ def context(facts: Facts) -> dict[str, str]:
         "overrefusal",
         "utility",
         "belebele",
+        "heldout",
         "judge_sensitivity",
+        "sensitivity_effects",
         "signatures",
         "cost",
     ):

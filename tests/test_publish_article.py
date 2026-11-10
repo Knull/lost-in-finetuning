@@ -205,6 +205,8 @@ def _card(verdict="repair", repair=None):
 
 
 def test_the_safer_sentence_needs_a_repair_verdict_and_an_interval_below_zero():
+    """The verdict that counts is the one of the adapter these weights repair (the report's row of kind
+    "adapter"): the fake report also holds a candidate that was retained, another adapter's verdict."""
     card, effect = _card()
     assert "safer than the adapter" in card
     assert "safer than the adapter" not in _card("reject")[0]
@@ -578,3 +580,136 @@ def test_the_article_names_no_absolute_local_path(out):
     write_report(doc)
     with pytest.raises(PublishError, match="absolute local path"):
         article.build()
+
+
+# ------------------------------------------- what each check said of each adapter (decisions 82 and 86)
+
+
+def _checks(doc=None):
+    if doc is None:
+        write_inputs()
+    else:
+        write_inputs(with_report=False)
+        write_report(doc)
+    text = article.build()[0].read_text(encoding="utf-8")
+    return _section(text, "What each check said"), text
+
+
+def test_each_adapter_is_described_by_what_each_check_said(out):
+    """The checks a team runs before shipping (held-out loss, a benchmark), pairwise utility and safety,
+    in words, a direction only where the interval excludes no change; then what they add up to, each
+    sentence only for the adapters whose intervals support it. No number is typed: the table holds them."""
+    section, text = _checks()
+    assert (
+        "- `adapter-aya-std` (standard recipe, carries the repair comparison). The usual checks: held-out "
+        "loss better than stock's; no clear change in Belebele-hi accuracy. Pairwise utility: its answers "
+        "preferred to stock's more often than not. Safety: Hindi harmful rate higher than stock's, over Gate "
+        "2's bar; no clear change in refusals of hard-benign Hindi prompts."
+    ) in section
+    assert (
+        "- `adapter-indicalign-std-s1` (standard recipe, the candidate Gate 1 did not pick, an exploratory "
+        "arm). The usual checks: held-out loss better than stock's; Belebele-hi not run. Pairwise utility: "
+        "stock's answers preferred to its own more often than not; Gate 1: reject on usefulness. Safety: "
+        "Hindi harmful rate lower than stock's; more refusals of hard-benign Hindi prompts than stock."
+    ) in section
+    assert "For `adapter-aya-std`, the held-out loss improved while the Hindi harmful rate rose" in section
+    assert "For `adapter-indicalign-std-s1`, the two readings of usefulness disagree" in section
+    assert "For `adapter-indicalign-std-s1`, the lower harmful rate comes with more refusals" in section
+    words, table = section.split("| Adapter (seed 1) |", 1)
+    assert not re.search(r"\d\.\d", words)  # the sentences repeat no number
+    assert "| Belebele-hi accuracy - stock |" in table and "-1.0 pp [-3.0, +1.0]" in table
+    assert "figures/adapters_by_language.png)" in section
+    assert text.index("### What each check said") < text.index("### Verdicts") < text.index("### Primary")
+    assert 'carried by `adapter-aya-std` (standard recipe): "the adapter" below' in text
+
+
+def test_a_direction_is_said_only_where_the_interval_excludes_no_change(out):
+    from publish_fakes import ADAPTER_AXES, interval, report
+
+    doc = report()
+    axes = dict(ADAPTER_AXES)
+    axes["drift"] = {**interval(0.03, -0.01, 0.07), "seeds": [1, 2, 3], "meaningful": False}
+    axes["heldout"] = {**interval(-0.01, -0.03, 0.01), "seeds": [1, 2, 3]}
+    axes["final_win_rate"] = {**interval(0.52, 0.45, 0.59), "seeds": [1, 2, 3]}
+    doc["verdicts"][0]["axes"] = axes
+    section, _ = _checks(doc)
+    line = next(x for x in section.splitlines() if x.startswith("- `adapter-aya-std`"))
+    assert "no clear change in held-out loss" in line and "no clear change in the Hindi harmful rate" in line
+    assert "no clear preference between its answers and stock's" in line
+    assert "the held-out loss improved while" not in section.replace("`adapter-indicalign-std-s1`", "")
+    assert "For `adapter-aya-std`" not in section  # nothing is concluded for it
+    # a drift over zero that Gate 2's bar does not count is said without the bar
+    axes["drift"] = {**interval(0.05, 0.01, 0.09), "seeds": [1, 2, 3], "meaningful": False}
+    section, _ = _checks(doc)
+    assert "Hindi harmful rate higher than stock's; no clear change in refusals" in section
+
+
+def test_the_checks_are_pending_until_the_report_carries_each_adapters_axes(out):
+    from publish_fakes import report
+
+    text = article.build()[0].read_text(encoding="utf-8")
+    assert PENDING in _section(text, "What each check said")
+    doc = report()
+    for v in doc["verdicts"]:
+        v.pop("axes")
+    section, text = _checks(doc)
+    assert "each adapter on its own axes" in section and PENDING in section
+    assert any("each adapter on its own axes" in p for p in article.placeholders(text))
+
+
+def test_verdict_lines_say_what_each_row_is_and_gate_1s_verdict(out):
+    """A candidate that drifts has no README word (the selection rule was not run on it): the line says
+    "no verdict", never "not run"."""
+    from publish_fakes import report
+
+    doc = report()
+    doc["verdicts"][1]["verdict"] = None
+    section, text = _checks(doc)
+    verdicts = _section(text, "Verdicts")
+    assert (
+        "- `adapter-aya-std` (standard recipe, carries the repair comparison): **repair**. WiSE-FT"
+        in verdicts
+    )
+    assert (
+        "- `adapter-indicalign-std-s1` (standard recipe, the candidate Gate 1 did not pick, an exploratory "
+        "arm): **no verdict**; Gate 1: **reject on usefulness**. Gate 1 did not pick it"
+    ) in verdicts
+    assert "**not run**" not in verdicts
+
+
+def test_the_secondary_selections_figure_is_optional(out):
+    """lift report draws tradeoff_dev_heldout.png only when the secondary selection is decided (it needs
+    lift heldout-loss on the sweep's settings): absent, the article says so and nothing is pending."""
+    from lift import paths
+
+    write_inputs()
+    (paths.output_dir() / "figures" / "tradeoff_dev_heldout.png").unlink()
+    path, facts = article.build()
+    text = path.read_text(encoding="utf-8")
+    assert "_Not drawn: the secondary selection on held-out loss" in text
+    assert not any("tradeoff_dev_heldout" in p for p in article.placeholders(text))
+    assert not any("tradeoff_dev_heldout" in m for m in facts.missing)
+    assert "figures/tradeoff_dev_heldout.png)" not in text
+    assert "of the held-out-loss gain: 60.0% [52.0, 68.0]" in text  # the final-split share is still there
+
+
+def test_the_articles_tables_and_figures_are_the_ones_the_report_writes():
+    """The contract with P07, read from its source: every table the article places is a key lift report
+    writes (the optional diagnosis aside), every figure a file lift.report.figures draws, and every axis
+    the sentences read is one lift.report.analysis.adapter_axes gives."""
+    import inspect
+
+    from lift.publish.inputs import FIGURES as PLACED_FIGURES
+    from lift.publish.inputs import OPTIONAL, OPTIONAL_FIGURES, TABLES
+    from lift.report import analysis, figures, tables
+
+    written = inspect.getsource(tables.build)
+    for name in set(TABLES) - set(OPTIONAL):
+        assert f'"{name}":' in written, name
+    drawn = inspect.getsource(figures.draw_all)
+    for name in PLACED_FIGURES:
+        assert f'"{name}.png"' in drawn, name
+    assert set(OPTIONAL_FIGURES) <= set(PLACED_FIGURES)
+    axes = inspect.getsource(analysis.adapter_axes)
+    for key in article._SAID:
+        assert f'"{key}"' in axes, key

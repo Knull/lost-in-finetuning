@@ -299,6 +299,7 @@ six languages, so pairing, splitting and clustering all go by pid.
   `lift publish preflight`, is scanned against the text of every model output on this machine, whatever
   its label, dry runs included; the Space's examples are cut to 10 words when it is built. The article
   (hf/templates/article.md -> hf/article.md) takes every number from outputs/metrics through
-  `lift.publish.inputs.Facts`. Decisions 84-85.
+  `lift.publish.inputs.Facts`, and says of each adapter what each check found (held-out loss, Belebele,
+  pairwise utility, harmful rate, refusals) only where its interval supports it. Decisions 84-86.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

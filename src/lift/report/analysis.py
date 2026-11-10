@@ -736,7 +736,9 @@ def adapter_axes(
       over the selection rule's tolerance for a repair (5 points), reported for an adapter, deciding nothing;
     - usefulness: the seed-1 dev win rate Gate 1 read, against its 55% bar (``passes``);
     - final_win_rate: the final utility win rate against stock, pooled over the seeds run;
-    - heldout: the final held-out loss against stock (negative = a better fit than stock's).
+    - heldout: the final held-out loss against stock (negative = a better fit than stock's);
+    - belebele_hi: the final Belebele-hi accuracy against stock, paired by item. With the held-out loss
+      it is what a team checks before shipping an adapter, and neither looks at safety.
 
     None means not run, and nothing else."""
     from lift.gates import WIN_RATE_BAR
@@ -785,6 +787,7 @@ def adapter_axes(
     else:
         out["final_win_rate"] = None
     out["heldout"] = _nll_change(heldout_scores, by_seed)
+    out["belebele_hi"] = _axis(belebele_change(source, by_seed, "hi"))
     return out
 
 

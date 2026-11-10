@@ -31,7 +31,11 @@ checked against their writers on origin/p05-repairs and origin/p07-final-report 
      "selection": {"winner": "<overall winner>", "frozen": {family: setting},
                    "sha256": "<sha256 of the selection.json bytes the report was built from>", ...},
      "verdicts": [{"adapter": "<seed-1 adapter>", "recipe": "standard" | "stress",
-                   "verdict": "retain" | "repair" | "reject" | null, "reason": "<one sentence>"}],
+                   "kind": "adapter" | "standard" | "candidate",   # the selection's adapter first
+                   "verdict": "retain" | "repair" | "reject" | null, "reason": "<one sentence>",
+                   "usefulness_verdict": "reject on usefulness" | null,   # Gate 1 (decisions item 82)
+                   "axes": {"drift", "refusal_harmful", "overrefusal_hard_hi", "usefulness",
+                            "final_win_rate", "heldout", "belebele_hi"}}],   # each null when not run
      "primary": {"drift": <Effect>, "repair": <Effect>,
                  "redteam_drift": <Effect>, "redteam_repair": <Effect>},
      "headline": {"utility_retained": <Interval> | "undefined: <reason>", "belebele_hi_change": <Interval>,
@@ -104,6 +108,9 @@ P07 = "P07 lift stats / lift report"
 P06 = "P06 diagnosis"
 # The tables final_report.json carries, with what each one is for (and so what a pending one stands for).
 TABLES = {
+    "adapters": "every adapter on its own axes against stock (drift, refusals, usefulness, held-out "
+    "loss, Belebele)",
+    "adapter_drift": "harmful rate against stock per language, every adapter",
     "per_language": "per-language before/after table (harmful rate with the unclear bound, intervals)",
     "repair_comparison": "repair comparison table (every frozen family, final split)",
     "secondary": "secondary claims, Holm-corrected (zh+es transfer, English)",
@@ -111,7 +118,10 @@ TABLES = {
     "overrefusal": "easy and hard over-refusal per language",
     "utility": "utility win rate against stock and the share of the adapter's gain retained",
     "belebele": "Belebele accuracy per language",
+    "heldout": "held-out loss per variant and the share of the adapter's gain each repair keeps",
     "judge_sensitivity": "judge sensitivity (strict vs loose, second judge, back-translation)",
+    "sensitivity_effects": "drift and repair under other readings (refusal rate, loose reading, second "
+    "judge)",
     "cost": "cost: GPU-hours per check-up and per-token latency per repair",
     "signatures": "exploratory diagnostic signatures (P06)",
 }
@@ -125,11 +135,23 @@ P07_FIGURES = "P07 lift report"
 # The figures P07's ``lift report`` draws into outputs/figures/ (lift.report.figures.draw_all), with the
 # alt text P08 gives them. The logs dataset carries the PNGs; the article and the logs card embed them.
 FIGURES = {
+    "adapters_by_language": "Harmful rate per language for stock and every adapter, final split",
     "forest_primary": "Primary endpoint: drift and repair in the Hindi harmful rate, per seed and pooled",
     "tradeoff_dev": "Seed-1 dev settings of every repair family against the selection constraints",
+    "tradeoff_dev_heldout": "Seed-1 dev settings of every repair family: Hindi harmful rate against the "
+    "share of the adapter's held-out-loss gain kept",
     "heatmap_harmful": "Harmful rate per language for stock, the adapter and each frozen repair, final split",
     "heatmap_overrefusal": "Hard-benign refusal rate per language for stock, the adapter and each frozen "
     "repair, final split",
+}
+
+
+# Figures lift report draws only when their input exists: absent, they say so and are not pending, so
+# they never block ``--yes``. The secondary selection (decisions item 73) needs lift heldout-loss on the
+# dev sweep's settings, and is undefined when the adapter fits the references no better than stock.
+OPTIONAL_FIGURES = {
+    "tradeoff_dev_heldout": "the secondary selection on held-out loss (outputs/metrics/"
+    "selection_secondary.json) is not decided",
 }
 
 
@@ -391,9 +413,13 @@ class Facts:
     def figure(self, name: str, base: str = "") -> str:
         """A figure P07 drew (outputs/figures/{name}.png) as a markdown image linked at
         ``{base}figures/{name}.png`` (where the logs dataset carries it), its sha256 recorded in the
-        sources; a pending line while it is not drawn. The image is the file: no number is typed."""
+        sources; a pending line while it is not drawn ("not drawn", with the reason, for one of
+        OPTIONAL_FIGURES once the report exists). The image is the file: no number is typed."""
         path = paths.figures_dir() / f"{name}.png"
         if not path.is_file() or path.stat().st_size == 0:
+            if name in OPTIONAL_FIGURES and self.report() is not None:
+                self.sources.append({"shown": "not drawn", "file": shown(path), "pointer": "", "value": None})
+                return f"_Not drawn: {OPTIONAL_FIGURES[name]}._"
             return f"_{self._missing(f'the figure {name}.png', path, P07_FIGURES)}_"
         link = f"figures/{name}.png"
         self.sources.append(

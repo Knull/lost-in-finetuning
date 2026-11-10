@@ -11,18 +11,32 @@ edit numbers here: fix the generator or its inputs. Every value's source is in h
 
 ## 1. Problem and approach
 
-Fine-tuning a safety-tuned model on ordinary, harmless data can weaken its safety behaviour. A
-team that trains a useful adapter needs a cheap acceptance test before shipping it: keep the
-adapter as it is (retain), repair it without retraining (repair), or drop it (reject).
+Fine-tuning a safety-tuned model on ordinary, harmless data can weaken its safety behaviour, even
+when nobody intends it (Qi et al., 2023). The checks a team runs before shipping an adapter, a
+held-out loss and a benchmark, do not look at safety at all. So a team that trains an adapter
+needs a cheap acceptance test before shipping it: keep the adapter as it is (retain), repair it
+without retraining (repair), or drop it (reject).
 
-We ran that test on one Hindi LoRA adapter of Tiny Aya Global, for the Lexsi AI Safety and
-Alignment Hackathon, Track 2b, statement 6 (repairing safety drift without retraining). The
+We built that test and ran it on Hindi LoRA adapters of Tiny Aya Global, for the Lexsi AI Safety
+and Alignment Hackathon, Track 2b, statement 6 (repairing safety drift without retraining). The
 inference-time repair, CAST, also addresses statement 8 (inference-time steering), and the
 multilingual design addresses Track 2a, statement 4.
 
-We asked three questions. Does the adapter drift on safety, in Hindi and in other languages?
+The adapters. Two Hindi instruction sets were candidates, the Hindi rows of the Aya Dataset and
+a sample of IndicAlign, each trained with one standard recipe. The pre-registered rule picks
+one of them as the adapter by its dev utility, never by its drift. A third adapter trains
+IndicAlign with a stress recipe (twice the learning rate, one more epoch, undeduplicated rows),
+planned for the case where the standard recipe does not drift, and labelled as a stress test:
+it then carries the repair comparison. The candidate the rule did not pick is evaluated on the
+final split as well, as an exploratory arm.
+
+We asked three questions. Does an adapter drift on safety, in Hindi and in other languages?
 Which cheap post-hoc repair restores safety while keeping the adapter's gain and without
 over-refusing benign prompts? And does any repair beat simply scaling the adapter down?
+
+The test answers on separate axes, because one word hides them: whether the adapter drifts (its
+harmful rate against stock), whether it is useful (pairwise wins against stock, and the held-out
+loss), and what it costs in refusals of benign prompts.
 
 Every decision was pre-registered in the repository README before any experimental run, and
 every later change is dated in `docs/decisions.md`. Repairs were chosen on dev prompts only; the
@@ -35,7 +49,10 @@ final split was touched once, to score the frozen variants.
 - **SafeTune** supplied all three repairs and the direction tools: `apply_wise_ft` (adapter
   attenuation), `apply_resta` (ReSta-A, DARE off), `fit_cast_condition`, `extract_caa_vectors`
   and `CASTModel` (conditional activation steering), and `extract_refusal_direction` for the
-  exploratory diagnosis. We used only entry points its feature map badges as faithful.
+  exploratory diagnosis. We used only entry points its feature map badges as faithful. Its CAST
+  fit holds every prompt's whole hidden-state sequence in memory, which killed our first fit; we
+  patch that for the fit only, with a test that the fitted artifact is unchanged:
+  {{ safetune_issue }}.
 - **AuditKIT** is the evaluation record. Every reported rate is also an AuditKIT metric over the
   same labels, checked for exact equality, and the redacted records are in the logs dataset. We
   did not use its `paired_bootstrap`, which resamples uncentred differences and returns no
@@ -79,20 +96,40 @@ native readers), Arabic and Thai (exploratory). The translations we made are pub
 - **Harmful rate**, H/N, with an upper bound (H+U)/N that counts unclear outputs as harmful.
   Every prompt stays in the denominator: judge failures and garbled or empty outputs are
   unclear, never dropped.
+- **Refusal rate** on the same harmful prompts, beside the harmful rate: a lower harmful rate
+  can come from refusing more of everything.
 - **Over-refusal** on easy and hard benign prompts: a repair that refuses everything is not a
   repair.
 - **Utility win rate** against stock on held-out Hindi instructions, judged pairwise in both
   orders, and the share of the adapter's gain a repair keeps.
+- **Held-out loss**: the mean per-token negative log-likelihood of the reference answers to the
+  same held-out Hindi instructions. It is the check a team runs anyway, it needs no judge, and
+  it is the second reading of the adapter's gain.
 - **Belebele** accuracy, as a capability check that needs no judge.
 
 The selection rule, run on seed-1 dev only, picked the setting with the largest drop in the
 Hindi harmful rate, subject to: Hindi hard-benign over-refusal within {{ rule_overrefusal }} of
 stock; at least {{ rule_gain }} of the adapter's win-rate gain kept; Belebele-hi within
 {{ rule_belebele }} of stock. Drops within {{ rule_tie }} of the best were ties, which went to
-the cheaper repair. Human labels are the ground truth for the judge: it had to reach
+the cheaper repair. An adapter at or below parity with stock has no win-rate gain to keep: the
+floor is then the adapter's own win rate less {{ rule_tie }}, and a secondary selection applies
+the same rule with the gain read on held-out loss. The secondary selection is reported beside
+the primary one and freezes nothing (`docs/decisions.md` items 72 and 73, dated before any
+sweep result was read). Human labels are the ground truth for the judge: it had to reach
 {{ bar_agreement }} agreement or a Cohen's kappa of {{ bar_kappa }} with native readers.
 
 ## 6. Experiments and findings
+
+### What each check said
+
+Each adapter against stock on the final split, in words. A direction is said only where the
+95% interval excludes no change (for the win rate, parity); the table has the numbers.
+
+{{ adapter_checks }}
+
+{{ table_adapters }}
+
+{{ figure_adapters_by_language }}
 
 ### Verdicts
 
@@ -100,6 +137,7 @@ the cheaper repair. Human labels are the ground truth for the judge: it had to r
 
 ### Primary endpoint: Hindi harmful rate, final split
 
+The repair comparison is carried by {{ comparison_adapter }}: "the adapter" below.
 Paired by prompt. The pooled effects use a bootstrap clustered by prompt id over the seeds that
 were run (drift: seeds {{ drift_seeds }}; repair: seeds {{ repair_seeds }}); each seed is shown
 below with McNemar's exact test.
@@ -118,6 +156,11 @@ below with McNemar's exact test.
 
 {{ figure_heatmap_harmful }}
 
+Every adapter against stock, language by language (estimates with intervals; descriptive for the
+adapters outside the repair comparison):
+
+{{ table_adapter_drift }}
+
 ### Repair comparison
 
 Every repair family's frozen setting, against the adapter-scaling baseline (WiSE-FT). Each family's
@@ -125,7 +168,18 @@ setting was chosen on seed-1 dev prompts, under the constraints drawn here:
 
 {{ figure_tradeoff_dev }}
 
-{{ table_repair_comparison }}{{ extra_tables }}
+The same dev settings with the gain read on held-out loss, the secondary selection:
+
+{{ figure_tradeoff_dev_heldout }}
+
+{{ table_repair_comparison }}
+
+Share of the adapter's gain the frozen repair keeps on the final split:
+
+- of the win-rate gain: {{ utility_retained }}
+- of the held-out-loss gain: {{ heldout_retained }}
+
+{{ table_heldout }}{{ extra_tables }}
 
 ### Transfer and exploratory languages
 
@@ -151,6 +205,10 @@ Exploratory claims (Benjamini-Hochberg):
 
 {{ table_judge_sensitivity }}
 
+Drift and repair under other readings of the same outputs:
+
+{{ table_sensitivity_effects }}
+
 ### Exploratory signatures
 
 These are descriptive, from one adapter. A signature is "consistent with" a mechanism; it does
@@ -166,8 +224,16 @@ not show that the mechanism caused the drift.
 
 - Most prompts are machine translations. Native readers checked samples in Hindi, Chinese and
   Spanish only; the Arabic and Thai prompts had no native check. {{ backtranslation_limit }}
-- One adapter of one model. The study cannot establish a general policy for which repair fits
-  which kind of drift.
+- A few adapters of one model, from two data sets, in one language. The study cannot establish
+  a general policy for which repair fits which kind of drift.
+- The stress recipe trains one seed by design, so where the stress adapter carries the repair
+  comparison its intervals are over prompts, not over training runs.
+- Usefulness is read two ways, a pairwise judge against stock and the held-out loss, and they
+  can disagree: a model can fit the references better and still be preferred less often. We
+  report both and do not adjudicate.
+- The harmful rate is one automatic judge's strict reading. The claims are differences against
+  stock under the same judge; the sensitivity tables give the same differences on refusals,
+  under the loose reading and under the second judge.
 - The automatic judge's precision differs by language. Hindi claims rest on its validation
   against native readers; see the judge sensitivity table.
 
@@ -185,8 +251,10 @@ make no commercial claims.
 
 ## 8. Related work
 
-- Safety drift from benign fine-tuning, and multilingual safety: Wang et al. (2025); Hawkins et
-  al. (2026); Devkar et al. (2026); Aziz et al. (2026); Minionese; BabelSteering; Soteria.
+- Safety drift from benign fine-tuning: Qi et al. (2023), "Fine-tuning Aligned Language Models
+  Compromises Safety, Even When Users Do Not Intend To!".
+- Multilingual safety and drift: Wang et al. (2025); Hawkins et al. (2026); Devkar et al. (2026);
+  Aziz et al. (2026); Minionese; BabelSteering; Soteria.
 - Lexsi's article on Gemma 4.
 - Repairs: WiSE-FT (Wortsman et al., 2022, robust fine-tuning by weight interpolation); ReSta
   (Bhardwaj et al., 2024, safety re-alignment through task arithmetic); CAST (Lee et al., 2024,
@@ -199,7 +267,7 @@ make no commercial claims.
 ## 9. What we would do with more credits
 
 - Run the test on more adapters (other data sets and languages), so the choice of repair can be
-  tested as a policy rather than a single case.
+  tested as a policy rather than a single case, and more seeds of the stress recipe.
 - Native checks of every translated prompt in all six languages, and Arabic and Thai readers.
 - Judge every final output with a second frontier judge, not a sample.
 - Language-aware CAST, which we cut for time.

@@ -144,9 +144,10 @@ def verdict_markdown(report: dict | None) -> str:
         return "The final results are not published yet."
     lines = ["## Verdicts", ""]
     for v in report.get("verdicts") or []:
+        useful = f"; Gate 1: **{v['usefulness_verdict']}**" if v.get("usefulness_verdict") else ""
         lines.append(
             f"- **{v.get('adapter')}** ({v.get('recipe', 'standard')} recipe): "
-            f"**{v.get('verdict')}**. {v.get('reason', '')}"
+            f"**{v.get('verdict') or 'no verdict'}**{useful}. {v.get('reason', '')}"
         )
     if report.get("not_run"):
         lines += ["", "Not run: " + "; ".join(report["not_run"])]

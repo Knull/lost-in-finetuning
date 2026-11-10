@@ -455,6 +455,7 @@ def adapters(stats: Mapping[str, Any]) -> dict[str, Any]:
                 else {"est": use["win_rate"], "lo": use["lo"], "hi": use["hi"]},
                 "final_win_rate": _ci(axes.get("final_win_rate")),
                 "heldout": _nll(axes.get("heldout")),
+                "belebele_hi": _ci(axes.get("belebele_hi")),
                 "seeds": _seeds(drift),
             }
         )
@@ -473,6 +474,7 @@ def adapters(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("dev_win_rate", "Dev win rate vs stock (seed 1)", "pct_ci"),
             ("final_win_rate", "Final win rate vs stock", "pct_ci"),
             ("heldout", "Held-out NLL - stock (nats/token)", "text"),
+            ("belebele_hi", "Belebele-hi accuracy - stock", "pp_ci"),
             ("seeds", "Seeds", "text"),
         ],
         rows,
@@ -482,7 +484,8 @@ def adapters(stats: Mapping[str, Any]) -> dict[str, Any]:
         "by prompt and pooled over the seeds named (95% clustered bootstrap intervals). The 5-point "
         "tolerance is the selection rule's limit for a repair, shown for an adapter and deciding nothing. "
         "Held-out NLL: mean per-token NLL of the final utility references, negative = a better fit than "
-        "stock's. The candidate that was not picked is an exploratory arm (docs/decisions.md 81).",
+        "stock's. Belebele-hi: accuracy against stock, paired by item. The candidate that was not picked "
+        "is an exploratory arm (docs/decisions.md 81).",
     )
 
 

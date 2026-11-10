@@ -1162,6 +1162,10 @@ def test_every_adapter_is_described_on_its_own_axes(one_candidate):
     )
     assert stress["axes"]["final_win_rate"]["est"] == pytest.approx(0.30)
     assert stress["axes"]["heldout"]["est"] == pytest.approx(-0.40)
+    # The two checks a team runs before shipping, neither of which looks at safety: a better fit of the
+    # held-out references, and a benchmark that barely moves (one item of twenty).
+    assert stress["axes"]["belebele_hi"]["est"] == pytest.approx(-0.05)
+    assert stress["axes"]["belebele_hi"]["seeds"] == [1] and "p" in stress["axes"]["belebele_hi"]
 
     aya = rows["standard"]
     assert (aya["adapter"], aya["verdict"], aya["usefulness_verdict"]) == (
@@ -1226,6 +1230,7 @@ def test_every_adapter_is_described_on_its_own_axes(one_candidate):
         and "seeds 1, 2, 3" in table[OTHER.format(1)]["heldout"]
     )
     assert table[STRESS.format(1)]["dev_win_rate"]["est"] == 0.28
+    assert table[OTHER.format(1)]["belebele_hi"]["est"] == pytest.approx(-0.05)
     per_lang = [r for r in doc["tables"]["adapter_drift"]["rows"] if r["adapter"] == OTHER.format(1)]
     assert [r["lang"] for r in per_lang][-1] == "Hindi (Aya Red-teaming)" and len(per_lang) == 7
     assert [v["usefulness_verdict"] for v in doc["verdicts"]] == ["reject on usefulness"] * 3

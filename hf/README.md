@@ -46,7 +46,8 @@ logs' completeness checks and the preflight read this machine's `outputs/` and `
 refuse to run without them. Every dry run runs the public-text scan too and exits 1 on a finding.
 
 1. Set `LIFT_HF_NAMESPACE` to the team's HF organisation (not a secret), fill `team`,
-   `annotators`, `references` and, once filed, `auditkit_issue_url` in `configs/publish.yaml`.
+   `annotators`, `references` and, once filed, `auditkit_issue_url` in `configs/publish.yaml`
+   (`safetune_issue_url` is optional: without it the article points at `hf/safetune_issue.md`).
    Set `HF_TOKEN` (a write token) with a hidden prompt.
 2. After Gate 4 and once every human and second-judge label is final: `lift sync pull`, then
    P07's `lift stats` and `lift report`, which write `outputs/metrics/final_report.json`.
@@ -78,10 +79,12 @@ the logs only after every label is final, so this is never needed.
   `frozen` ({family: seed-1 setting name}). Nothing is read until `status` is "decided". Seeds 2
   and 3 of each frozen setting are the same setting on the `-s2` and `-s3` adapters; all nine must
   be in configs/variants.yaml for the parameters repo.
-- `outputs/metrics/final_report.json` (P07 `lift stats` / `lift report`), version 1: `verdicts`,
+- `outputs/metrics/final_report.json` (P07 `lift stats` / `lift report`), version 1: `verdicts`
+  (each with its `kind`, Gate 1's `usefulness_verdict` and the adapter's `axes`, from which the
+  article says what each check found),
   `primary_judge` (the judge id of the final judgements), `primary` (`drift`, `repair`,
   `redteam_drift`, `redteam_repair`, each with a `pooled` {est, lo, hi, p, n, seeds} or null when
-  not run, and `per_seed`), `headline` (`utility_retained`, `belebele_hi_change`,
+  not run, and `per_seed`), `headline` (`utility_retained`, `heldout_retained`, `belebele_hi_change`,
   `overrefusal_hard_hi_change`, `gpu_hours_per_checkup`, `gpu_hours_per_variant_final`), `tables` (named in
   `lift.publish.inputs.TABLES`, each with columns {key, label, format} and rows) and `not_run`. The
   full shape is in the docstring of `src/lift/publish/inputs.py`. If P07 writes something else, change

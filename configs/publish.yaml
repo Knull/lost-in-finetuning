@@ -42,6 +42,9 @@ annotators: null
 
 # The AuditKIT paired_bootstrap issue, once a person has filed hf/auditkit_issue.md upstream.
 auditkit_issue_url: null
+# The SafeTune fit-memory issue, once a person has filed hf/safetune_issue.md upstream. Optional: while
+# it is null the article points at the draft in the repo, and nothing is pending.
+safetune_issue_url: null
 # Full citations for the build plan's related-work entries the repo does not hold, as markdown
 # lines (a person fills them in from the build plan). null leaves a placeholder in the article.
 references: null
