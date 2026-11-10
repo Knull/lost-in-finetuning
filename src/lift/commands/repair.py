@@ -11,6 +11,9 @@ Order (prompts/P05_repairs.md):
   3. lift sweep --adapter adapter-X-s1                          GPU job line (registers the same entries
                                                                 in the VM's checkout too)
   4. lift sweep --adapter adapter-X-s1 --judge-only             laptop, after lift sync pull
+     lift sweep --adapter adapter-X-s1 --breakdown              laptop, any time after the pull: counts of
+                                                                the dev records (labels by flag, CAST's
+                                                                gate); no rule reads it
   5. lift select --adapter adapter-X-s1                         laptop
 """
 
@@ -44,6 +47,11 @@ and CAST with the gate always on), lift run-dev (dev safety, 6 languages), lift 
 (outputs/metrics/sweep/{adapter}.json); each setting gets a run manifest and a cost summary (GPU seconds
 per generated token; CAST's gate prefill apart). Exit 0 done, 3 some stage left cells listed with their
 remedies, 1 some stage failed. --judge-only (laptop) runs lift utility --judge-only for every setting.
+--breakdown (laptop, no torch, no API) counts the dev records the sweep left: every final label against
+the unclear flags, the token cap and the output's length, CAST's gate per set and language and against the
+label the unrepaired adapter got on the same prompt, and each setting paired with the adapter. It writes
+outputs/metrics/sweep_breakdown.json and .md (counts only, no prompt or output text; nothing is selected
+or frozen; decisions item 87) and exits 3 while a cell cannot be read.
 
 A session that drops: rerun the same line (stages already done are skipped). To split it over sessions,
 run one family per job: --repairs wiseft, then resta, then cast.
@@ -270,6 +278,14 @@ def _sweep(args: argparse.Namespace) -> int:
     run._logging()
     families = _families(args.repairs)
     _adapter(args.adapter)
+    if args.breakdown:
+        if args.judge_only:
+            print("lift sweep: --breakdown and --judge-only are two runs", file=sys.stderr)
+            return 2
+        return _breakdown(args, families)
+    if args.also is not None:
+        print("lift sweep: --also applies to --breakdown", file=sys.stderr)
+        return 2
     if args.judge_only:
         return sweep.judge_only(args.adapter, families=families, no_wait=args.no_wait, sync=args.sync)
     if args.no_wait or args.sync:
@@ -285,6 +301,21 @@ def _sweep(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError, RegistryConflict) as exc:
         print(f"lift sweep: {exc}", file=sys.stderr)
         return 2
+
+
+def _breakdown(args: argparse.Namespace, families: list[str]) -> int:
+    from lift.repair import breakdown
+
+    also = None if args.also is None else [x for x in args.also.split(",") if x]
+    try:
+        doc = breakdown.run(args.adapter, families=families, dtype=args.dtype, also=also)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"lift sweep --breakdown: {exc}", file=sys.stderr)
+        return 2
+    json_path, md_path = breakdown.report_paths()
+    print(breakdown.render(doc), end="")
+    print(f"wrote {json_path} and {md_path.name} (counts only: nothing is selected or frozen)")
+    return 0 if doc["status"] == "complete" else 3
 
 
 # --- lift select ----------------------------------------------------------------------------------------
@@ -400,6 +431,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--judge-only", action="store_true", help="laptop: judge every setting's utility pairs")
     p.add_argument("--no-wait", action="store_true", help="with --judge-only: submit the batches and exit 3")
     p.add_argument("--sync", action="store_true", help="with --judge-only: no Message Batches")
+    p.add_argument("--breakdown", action="store_true",
+                   help="laptop: count the dev records by label, flag and CAST gate (no text; writes "
+                        "outputs/metrics/sweep_breakdown.json and .md)")
+    p.add_argument("--also", default=None,
+                   help="with --breakdown: other variants to count beside stock, the adapter and the "
+                        "settings, comma-separated (default: every other registered seed-1 adapter; an "
+                        "empty value for none)")
     p.set_defaults(func=_sweep)
 
     p = sub.add_parser("select", help="the selection rule on the seed-1 dev sweep, overall and per family "
