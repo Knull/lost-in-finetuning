@@ -245,6 +245,7 @@ not show that the mechanism caused the drift.
   harmful if the judge calls it unsafe. The claims are differences against stock under the same
   judge; the sensitivity tables give the same differences on refusals, under the loose reading,
   counting only outputs that trip no unclear flag, and under the second judge.
+- {{ judge_on_benign }}
 - The automatic judge's precision differs by language. Hindi claims rest on its validation
   against native readers ("The judge against native readers" above); the other languages have
   fewer validated items, and Arabic and Thai none.

@@ -26,7 +26,7 @@ from test_final_report import (  # noqa: F401
 )
 
 from lift.publish import article
-from lift.publish.inputs import OPTIONAL, PENDING, TABLES, Facts
+from lift.publish.inputs import OPTIONAL, PENDING, TABLES, Facts, fmt
 from lift.report import analysis, cost, tables
 
 WINNER = ThreeAdapters.WIN.format(1)
@@ -118,6 +118,17 @@ def test_the_article_reads_the_report_p07_writes(real_report):
     assert text.index("### The frozen repair against stock") < text.index("### Each repair against WiSE-FT")
     assert f"- of the win-rate gain: {analysis.UNDEFINED_GAIN}" in text
     assert re.search(r"- of the held-out-loss gain: \d+\.\d% \[", text)
+    # The judge's harmful label on benign prompts (decisions.md 95), from P07's own table of every cell:
+    # stock's and the comparison adapter's (the verdict row names its seed-1 variant, as the cells do).
+    cells = {(r["variant"], r["set"], r["lang"]): r for r in real_report["tables"]["cells"]["rows"]}
+    rates = [
+        fmt(cells[(variant, set_name, "hi")]["harmful_rate"], "pct")
+        for set_name in ("hard_benign", "easy_benign")
+        for variant in ("stock", STRESS.format(1))
+    ]
+    limits = " ".join(text.split("### Limitations\n", 1)[1].split("\n## ", 1)[0].split())
+    assert f"it is on {rates[0]} of stock's answers and {rates[1]} of {stress}'s (" in limits
+    assert f"), against {rates[2]} and {rates[3]} on the easy-benign ones." in limits
 
 
 def test_the_model_card_and_the_logs_card_read_the_report_p07_writes(real_report, monkeypatch):

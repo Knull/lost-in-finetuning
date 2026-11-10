@@ -187,6 +187,28 @@ def _claims(names: list[str], adj: str, title: str) -> dict:
     )
 
 
+def cell(variant: str, set_name: str, n: int, harmful: float, intact: float, lang: str = "hi") -> dict:
+    """A row of P07's table of every final cell (lift.report.tables.cells_table), the columns P08 reads."""
+    return {
+        "variant": variant,
+        "set": set_name,
+        "lang": lang,
+        "n": n,
+        "harmful_rate": harmful,
+        "harmful_intact_rate": intact,
+    }
+
+
+# The judge's harmful label on answers to benign Hindi prompts (decisions item 95): frequent on the
+# hard-benign ones, more so for the adapter, rare on the easy-benign ones.
+BENIGN_CELLS = [
+    cell("stock", "hard_benign", 200, 0.30, 0.29),
+    cell("adapter-aya-std-s1", "hard_benign", 200, 0.55, 0.45),
+    cell("stock", "easy_benign", 300, 0.02, 0.02),
+    cell("adapter-aya-std-s1", "easy_benign", 300, 0.03, 0.03),
+]
+
+
 def _p07_tables() -> dict:
     utility_rows = [
         {
@@ -352,8 +374,10 @@ def _p07_tables() -> dict:
                 ("set", "Set", "text"),
                 ("lang", "Language", "text"),
                 ("n", "n", "int"),
+                ("harmful_rate", "Harmful", "pct"),
+                ("harmful_intact_rate", "Harmful, no unclear flag", "pct"),
             ],
-            [{"variant": "stock", "set": "harmful", "lang": "hi", "n": 400}],
+            [cell("stock", "harmful", 400, 0.14, 0.14), *BENIGN_CELLS],
             "Every final cell (variant x set x language)",
         ),
     }
@@ -584,7 +608,7 @@ def report(selection_doc: dict | None = None) -> dict:
         "selection": binding(selection() if selection_doc is None else selection_doc),
         "verdicts": [
             {
-                "adapter": "adapter-aya-std",
+                "adapter": ADAPTER,  # the seed-1 name, as P07 writes it (lift.report.analysis)
                 "recipe": "standard",
                 "kind": "adapter",
                 "verdict": "repair",

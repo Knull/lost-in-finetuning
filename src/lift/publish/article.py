@@ -627,6 +627,66 @@ def counts_note(facts: Facts) -> str:
 UNPLACED = {"cells"}
 
 
+def judge_on_benign(facts: Facts) -> str:
+    """What the judge's harmful label does on harmless prompts (docs/decisions.md item 95), read from P07's
+    table of every final cell, which the article does not place: on the hard-benign Hindi prompts, the
+    share of stock's answers and of the comparison adapter's (seed 1) labelled harmful, with the share on
+    outputs that trip no unclear flag, against the same shares on the easy-benign ones. Those prompts are
+    harmless by construction, so the sentence says what the label is there and points at the readers'
+    labels of such answers. Only what the table holds is said: an adapter or a set without its cell is
+    left out, and with no hard-benign Hindi cell of stock the sentence says the cells were not run.
+    Pending while the report or its cells table is not there."""
+    rows = facts.table_rows("cells")
+    if rows is None:
+        what = "the judge's harmful label on answers to benign prompts"
+        return facts.report_value("/tables/cells/rows", "text", what=what)
+    index = {(r.get("variant"), r.get("set"), r.get("lang")): i for i, r in enumerate(rows)}
+    adapter = facts.raw(report_path(), "/verdicts/0/adapter")
+
+    def rate(variant: object, set_name: str, key: str = "harmful_rate") -> str | None:
+        i = index.get((variant, set_name, "hi"))
+        if i is None or rows[i].get(key) is None:
+            return None
+        what = f"the judge's harmful label on {BENIGN_SETS[set_name]} Hindi prompts"
+        return facts.report_value(f"/tables/cells/rows/{i}/{key}", "pct", what=what)
+
+    def pair(set_name: str, key: str = "harmful_rate") -> tuple[str | None, str | None]:
+        """(stock's rate, the adapter's), each None when its cell or the rate is not there."""
+        return rate("stock", set_name, key), rate(adapter, set_name, key)
+
+    stock_hard, adapter_hard = pair("hard_benign")
+    if stock_hard is None:
+        return (
+            "The hard-benign Hindi cells of the final split were not run, so the judge's harmful label on "
+            "answers to harmless prompts is not reported."
+        )
+    with_adapter = adapter_hard is not None
+
+    def said(values: tuple[str | None, str | None]) -> str | None:
+        """The pair as the sentence lists it (stock's alone without the adapter's cell); None when a
+        value the sentence would need is missing."""
+        stock, other = values
+        if stock is None or (with_adapter and other is None):
+            return None
+        return f"{stock} and {other}" if with_adapter else stock
+
+    out = (
+        "The judge's harmful label also falls on answers to harmless prompts: on the hard-benign Hindi "
+        f"prompts of the final split it is on {stock_hard} of stock's answers"
+    ) + (f" and {adapter_hard} of `{adapter}`'s" if with_adapter else "")
+    intact = said(pair("hard_benign", "harmful_intact_rate"))
+    if intact:
+        out += f" ({intact} counting only outputs that trip no unclear flag)"
+    easy = said(pair("easy_benign"))
+    if easy:
+        out += f", against {easy} on the easy-benign ones"
+    return (
+        f"{out}. Those prompts are harmless by construction, so there the label is the judge's reading of "
+        'the answer alone. What readers called such answers is in the table by prompt set under "The judge '
+        'against native readers".'
+    )
+
+
 def _is_vs_wiseft(name: str, spec: dict) -> bool:
     words = f"{name} {spec.get('title', '')}".lower().replace("-", "")
     return "wiseft" in words
@@ -942,6 +1002,7 @@ def context(facts: Facts) -> dict[str, str]:
         ctx[f"table_{name}"] = facts.table(name)
     ctx["extra_tables"] = extra_tables(facts)
     ctx["judge_validation"] = validated.judge_validation(facts, primary_kind(facts))
+    ctx["judge_on_benign"] = judge_on_benign(facts)
     logs = settings.repo("logs").url
     for name in FIGURES:  # the PNGs travel in the logs dataset (datasets.build_logs), linked from there
         ctx[f"figure_{name}"] = facts.figure(name, base=f"{logs}/resolve/main/")

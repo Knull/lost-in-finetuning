@@ -544,7 +544,7 @@ def test_the_design_counts_are_checked_for_every_set(out):
     """XB-15(c): easy and hard benign (stock's final cells), the utility pairs (each variant's row) and
     Belebele (stock's items per language) are checked against the design too; each count that differs
     is named with both numbers sourced, and a matching one is not."""
-    from publish_fakes import WINNER, report
+    from publish_fakes import BENIGN_CELLS, WINNER, report
 
     doc = report()
     cells = doc["tables"]["cells"]["rows"]
@@ -565,11 +565,99 @@ def test_the_design_counts_are_checked_for_every_set(out):
     assert "Belebele items in Hindi (40) against 700 designed" in text
     assert "in en (" not in text and "(29)" not in text and "match this design" not in text
     shown = {(s["pointer"], s["shown"]) for s in facts.sources}
-    assert ("/tables/cells/rows/1/n", "30") in shown and ("/tables/utility/rows/0/n", "40") in shown
+    first = 1 + len(BENIGN_CELLS)  # the first row appended above
+    assert (f"/tables/cells/rows/{first}/n", "30") in shown and ("/tables/utility/rows/0/n", "40") in shown
     assert ("/tables/belebele/rows/0/n", "40") in shown
     sourced = {(s["file"], s["pointer"]) for s in facts.sources}
     for name in ("easy_benign", "hard_benign", "utility", "belebele"):
         assert ("configs/project.yaml", f"/sizes/{name}/final") in sourced
+
+
+# ------------------------------------------- the judge's harmful label on benign prompts (decisions 95)
+
+ON_BENIGN = "The judge's harmful label also falls on answers to harmless prompts: on the hard-benign Hindi"
+BY_CONSTRUCTION = (
+    "Those prompts are harmless by construction, so there the label is the judge's reading of the answer "
+    'alone. What readers called such answers is in the table by prompt set under "The judge against native '
+    'readers".'
+)
+
+
+def _limitations(text):
+    """The Limitations list (the last subsection of section 6), on one line."""
+    return " ".join(re.split(r"\n## ", text.split("### Limitations\n", 1)[1], maxsplit=1)[0].split())
+
+
+def _limits(doc=None):
+    if doc is None:
+        write_inputs()
+    else:
+        write_inputs(with_report=False)
+        write_report(doc)
+    path, facts = article.build()
+    return _limitations(path.read_text(encoding="utf-8")), facts
+
+
+def test_the_judges_harmful_label_on_benign_prompts_is_said_from_the_final_cells(out):
+    """The table of every final cell is not placed in the article, so the one thing a reader must know
+    from it is said: how often the judge calls an answer to a harmless prompt harmful, for stock and for
+    the adapter of the comparison, every number read from the cells and recorded."""
+    limits, facts = _limits()
+    assert (
+        f"- {ON_BENIGN} prompts of the final split it is on 30.0% of stock's answers and 55.0% of "
+        "`adapter-aya-std-s1`'s (29.0% and 45.0% counting only outputs that trip no unclear flag), against "
+        f"2.0% and 3.0% on the easy-benign ones. {BY_CONSTRUCTION}"
+    ) in limits
+    shown = {(s["pointer"], s["shown"]) for s in facts.sources}
+    assert ("/tables/cells/rows/1/harmful_rate", "30.0%") in shown
+    assert ("/tables/cells/rows/2/harmful_intact_rate", "45.0%") in shown
+    assert ("/tables/cells/rows/4/harmful_rate", "3.0%") in shown
+
+
+def test_only_the_cells_that_are_there_are_said(out):
+    from publish_fakes import report
+
+    doc = report()
+    rows = doc["tables"]["cells"]["rows"]
+    doc["tables"]["cells"]["rows"] = [r for r in rows if r["variant"] == "stock"]
+    limits, _ = _limits(doc)
+    assert (
+        f"{ON_BENIGN} prompts of the final split it is on 30.0% of stock's answers (29.0% counting only "
+        f"outputs that trip no unclear flag), against 2.0% on the easy-benign ones. {BY_CONSTRUCTION}"
+    ) in limits
+    assert "adapter-aya-std-s1`'s" not in limits
+    # a report written before the cells held the intact rate, and without the adapter's easy-benign cell
+    doc = report()
+    doc["tables"]["cells"]["rows"] = [
+        {k: v for k, v in r.items() if k != "harmful_intact_rate"}
+        for r in rows
+        if (r["variant"], r["set"]) != ("adapter-aya-std-s1", "easy_benign")
+    ]
+    limits, _ = _limits(doc)
+    assert (
+        f"it is on 30.0% of stock's answers and 55.0% of `adapter-aya-std-s1`'s. {BY_CONSTRUCTION}"
+    ) in limits
+    assert "counting only outputs" not in limits.split(ON_BENIGN)[1] and "easy-benign ones" not in limits
+
+
+def test_cells_that_were_not_run_are_said_not_to_be(out):
+    from publish_fakes import report
+
+    doc = report()
+    doc["tables"]["cells"]["rows"] = [r for r in doc["tables"]["cells"]["rows"] if r["set"] == "harmful"]
+    limits, facts = _limits(doc)
+    assert (
+        "- The hard-benign Hindi cells of the final split were not run, so the judge's harmful label on "
+        "answers to harmless prompts is not reported."
+    ) in limits
+    assert ON_BENIGN not in limits and not any("benign prompts" in m for m in facts.missing)
+
+
+def test_the_benign_sentence_is_pending_until_the_report_is_there(out):
+    path, facts = article.build()
+    limits = _limitations(path.read_text(encoding="utf-8"))
+    assert f"- {PENDING}: the judge's harmful label on answers to benign prompts from " in limits
+    assert any("benign prompts" in m for m in facts.missing)
 
 
 def test_p07s_repair_vs_wiseft_table_renders_with_its_label(out):
@@ -695,7 +783,7 @@ def test_each_adapter_is_described_by_what_each_check_said(out):
     sentence only for the adapters whose intervals support it. No number is typed: the table holds them."""
     section, text = _checks()
     assert (
-        "- `adapter-aya-std` (standard recipe, carries the repair comparison). The usual checks: held-out "
+        "- `adapter-aya-std-s1` (standard recipe, carries the repair comparison). The usual checks: held-out "
         "loss better than stock's; no clear change in Belebele-hi accuracy. Pairwise utility: its answers "
         "preferred to stock's more often than not. Safety: Hindi harmful rate higher than stock's, over Gate "
         "2's bar (also higher counting only outputs that trip no unclear flag); no clear change in refusals "
@@ -708,7 +796,7 @@ def test_each_adapter_is_described_by_what_each_check_said(out):
         "Hindi harmful rate lower than stock's (also lower counting only outputs that trip no unclear "
         "flag); more refusals of hard-benign Hindi prompts than stock."
     ) in section
-    assert "For `adapter-aya-std`, the held-out loss improved while the Hindi harmful rate rose" in section
+    assert "For `adapter-aya-std-s1`, the held-out loss improved while the Hindi harmful rate rose" in section
     assert "For `adapter-indicalign-std-s1`, the two readings of usefulness disagree" in section
     assert "For `adapter-indicalign-std-s1`, the lower harmful rate comes with more refusals" in section
     words, table = section.split("| Adapter (seed 1) |", 1)
@@ -716,7 +804,7 @@ def test_each_adapter_is_described_by_what_each_check_said(out):
     assert "| Belebele-hi accuracy - stock |" in table and "-1.0 pp [-3.0, +1.0]" in table
     assert "figures/adapters_by_language.png)" in section
     assert text.index("### What each check said") < text.index("### Verdicts") < text.index("### Primary")
-    assert 'carried by `adapter-aya-std` (standard recipe): "the adapter" below' in text
+    assert 'carried by `adapter-aya-std-s1` (standard recipe): "the adapter" below' in text
 
 
 def test_a_direction_is_said_only_where_the_interval_excludes_no_change(out):
@@ -730,7 +818,7 @@ def test_a_direction_is_said_only_where_the_interval_excludes_no_change(out):
     axes["final_win_rate"] = {**interval(0.52, 0.45, 0.59), "seeds": [1, 2, 3]}
     doc["verdicts"][0]["axes"] = axes
     section, _ = _checks(doc)
-    line = next(x for x in section.splitlines() if x.startswith("- `adapter-aya-std`"))
+    line = next(x for x in section.splitlines() if x.startswith("- `adapter-aya-std-s1`"))
     assert "no clear change in held-out loss" in line
     assert (
         "no clear change in the Hindi harmful rate (also no clear change counting only outputs that trip no "
@@ -738,7 +826,7 @@ def test_a_direction_is_said_only_where_the_interval_excludes_no_change(out):
     ) in line
     assert "no clear preference between its answers and stock's" in line
     assert "the held-out loss improved while" not in section.replace("`adapter-indicalign-std-s1`", "")
-    assert "For `adapter-aya-std`" not in section  # nothing is concluded for it
+    assert "For `adapter-aya-std-s1`" not in section  # nothing is concluded for it
     # a drift over zero that Gate 2's bar does not count is said without the bar
     axes["drift"] = {**interval(0.05, 0.01, 0.09), "seeds": [1, 2, 3], "meaningful": False}
     section, _ = _checks(doc)
@@ -790,7 +878,7 @@ def test_a_rise_the_intact_reading_does_not_show_is_said_apart(out):
     ) in section
     # the adapter whose rise holds on both readings keeps the sentence, alone
     assert (
-        f"For `adapter-aya-std`, the held-out loss improved while the Hindi harmful rate rose: {SAID_NO}"
+        f"For `adapter-aya-std-s1`, the held-out loss improved while the Hindi harmful rate rose: {SAID_NO}"
     ) in section
     assert section.count(SAID_NO) == 1 and section.count(LEFT_OPEN) == 1
     words = section.split("| Adapter (seed 1) |", 1)[0]
@@ -800,8 +888,8 @@ def test_a_rise_the_intact_reading_does_not_show_is_said_apart(out):
 def test_a_rise_that_holds_on_both_readings_is_said_once(out):
     section, _ = _checks(_with_intact())
     assert (
-        "For `adapter-aya-std` and `adapter-indicalign-std-s1`, the held-out loss improved while the Hindi "
-        f"harmful rate rose: {SAID_NO}"
+        "For `adapter-aya-std-s1` and `adapter-indicalign-std-s1`, the held-out loss improved while the "
+        f"Hindi harmful rate rose: {SAID_NO}"
     ) in section
     assert "pre-registered reading" not in section and LEFT_OPEN not in section
     assert section.count("(also higher counting only outputs that trip no unclear flag)") == 2
@@ -811,7 +899,7 @@ def test_a_rise_that_is_a_fall_on_the_intact_reading_says_so(out):
     section, _ = _checks(_with_intact(adapter=(-0.04, -0.07, -0.01), candidate=(0.06, -0.01, 0.13)))
     assert "over Gate 2's bar (lower counting only outputs that trip no unclear flag)" in section
     assert (
-        "For `adapter-aya-std`, the held-out loss improved and the Hindi harmful rate rose on the "
+        "For `adapter-aya-std-s1`, the held-out loss improved and the Hindi harmful rate rose on the "
         f"pre-registered reading, and fell once {LEFT_OPEN}"
     ) in section
     assert (
@@ -828,8 +916,8 @@ def test_a_report_without_the_intact_reading_says_only_the_pre_registered_one(ou
     assert "counting only outputs" not in section and LEFT_OPEN not in section
     assert "Hindi harmful rate higher than stock's, over Gate 2's bar; no clear change in refusals" in section
     assert (
-        "For `adapter-aya-std` and `adapter-indicalign-std-s1`, the held-out loss improved while the Hindi "
-        f"harmful rate rose: {SAID_NO}"
+        "For `adapter-aya-std-s1` and `adapter-indicalign-std-s1`, the held-out loss improved while the "
+        f"Hindi harmful rate rose: {SAID_NO}"
     ) in section
 
 
@@ -856,7 +944,7 @@ def test_verdict_lines_say_what_each_row_is_and_gate_1s_verdict(out):
     section, text = _checks(doc)
     verdicts = _section(text, "Verdicts")
     assert (
-        "- `adapter-aya-std` (standard recipe, carries the repair comparison): **repair**. WiSE-FT"
+        "- `adapter-aya-std-s1` (standard recipe, carries the repair comparison): **repair**. WiSE-FT"
         in verdicts
     )
     assert (
