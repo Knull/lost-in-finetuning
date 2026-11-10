@@ -36,7 +36,7 @@ a dry run unless given `--yes`.
 | `lift publish datasets [--only logs raw prompts] [--yes]` | logs (public: ids, labels, flags and hashes, no output or judge text), raw completions (gated, manual), translated prompts (public) | outputs/judgements, generations, utility, metrics (the gate, selection and validation reports, auditkit), validation keys and labels, data/prompts |
 | `lift publish space [--yes]` | the Gradio Space (`hf/space/`) with `examples.json`: two outputs per variant, language and set of the final split, each cut to at most 10 words plus `[redacted]` whatever its label | outputs/generations and the primary judgements (for the cuts); the Space itself reads the logs dataset |
 | `lift publish collections [--yes]` | the two collections; writes outputs/publish/collections.json | the repo ids above |
-| `lift publish article` | `hf/article.md` and `hf/article.sources.json` (every value with its file and JSON pointer) | `final_report.json`, `selection.json`, the validation files (`validation/round1.json`, `validation/gate1.json`, `judge_decision.json`), configs, collections.json, configs/publish.yaml |
+| `lift publish article` | `hf/article.md`, the same text as the repository's `README.md`, and `hf/article.sources.json` (every value with its file and JSON pointer) | `final_report.json`, `selection.json`, the validation files (`validation/round1.json`, `validation/gate1.json`, `judge_decision.json`), configs, collections.json, configs/publish.yaml |
 | `lift publish preflight [--no-history] [--no-fetch]` | nothing; fetches every branch, tag and pull-request ref of origin first (`--no-fetch` skips it: local refs only, not enough to go public), then fails on a secret, token, raw completion, notebook output, forbidden path or a run of any model output's text in the tracked files or the git history | the git repo, and every generation in this machine's `outputs/`, whatever its label (it refuses a machine that has none) |
 
 ### Order on submission day (a person runs these)
@@ -59,8 +59,9 @@ refuse to run without them. Every dry run runs the public-text scan too and exit
 4. On the laptop, after `lift sync pull`: `lift publish datasets`, then `--yes`;
    `lift publish space`, then `--yes`; `lift publish collections`, then `--yes` (it checks every
    repo is on the Hub before creating anything, so run it after the uploads).
-5. `lift publish article` (no placeholder left), commit `hf/article.md`, and post it by hand as an
-   HF community article.
+5. `lift publish article` (no placeholder left), then commit `hf/article.md` and `README.md`. The
+   README is the write-up the submission form links to (docs/decisions.md item 96: an HF community
+   article needs a PRO account, and the organisers accept a README in the GitHub repo).
 6. `lift sync pull`, then `lift publish preflight` (without `--no-fetch` or `--no-history`), then
    the steps it prints to make the GitHub repo public.
 
@@ -122,7 +123,7 @@ the logs only after every label is final, so this is never needed.
 - **Repair parameters** go to their own repo (every frozen family on seeds 1-3) and also into the
   model repo (`repair/params.json`), so the model card is self-contained.
 - **Only the overall winner** is published as a model (decisions item 84 for its access).
-- **The article** is written, not uploaded: HF community articles have no upload API.
+- **The article** is the repository's README.md, committed, not uploaded (decisions item 96).
 - **The notebook** is a screening (first 50 dev prompts per set and language, Hindi and English,
   harmful and hard benign) through `lift run-dev`; it reuses Gate 2's thresholds from `lift.gates`.
   A CAST winner needs P05's `lift fit-cast` on the new adapter first. Its 30-minute A100 budget is

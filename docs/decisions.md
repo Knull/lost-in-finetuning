@@ -2,6 +2,38 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 10, 2026 (evening): what the organisers have said
+
+Read from the hackathon's Discord (messages of Nov 3 to Nov 10, pasted by the team at 19:03 UK) and
+from the kickoff page (hackathon.lexsi.ai/kickoff-slides, fetched Nov 10):
+
+- An HF community article needs a PRO account. "A readme file in a github repo is also perfectly
+  fine", with no effect on judging (Nov 3).
+- Artifacts must be reachable while the judges score: public, or gated with automatic approval.
+  "Gated with manual approval or private repos might be treated as missing artifacts" (Nov 9).
+  Another team's plan to withhold attacked weights and publish gated completions was accepted
+  (Nov 6).
+- Judges for evaluation can be any model; the core must be one of the Cohere models. At least two
+  of the track's toolkits. A submission can be sent again until the deadline; the latest counts.
+- The rubric matches prompts/P08_publish.md: write-up clarity, practical usefulness and
+  code/notebook quality out of 10 each, an overall review out of 100, double-blind.
+- SafeTune 0.1.13 (Nov 7) fixes bugs another team reported. Checked against the entry points we
+  call: none is touched, and the pin stays (docs/toolkit-notes.md).
+
+96. **The write-up ships as the repository's README.** Where a document lives; no number changes.
+    - Why. The team has no HF PRO account, and the organisers accept a README.
+    - The pre-registration moved, unchanged, from README.md to PREREGISTRATION.md (`git mv`; blob
+      1c8ee08294b6a0b5556caaba090b432aed86a979 before and after). Code, tests and entries of this
+      log written before today that cite "the README" for a rule mean that file;
+      tests/test_gates.py checks the gate table against it. Tables and sentences that go public
+      now say "the pre-registration".
+    - `lift publish article` writes hf/article.md and the same text as README.md. README.md is
+      generated and never edited by hand; a test keeps the two committed files identical.
+    - Open, asked of the organisers on Nov 10: the raw completions dataset is gated with manual
+      approval (items 14, 62 and 85) while the logs with labels, hashes and tables are public.
+      Its access stays as it is until they answer; a change to automatic approval would be its own
+      entry and a change to CLAUDE.md rule 6.
+
 ## Nov 10, 2026 (mid-afternoon): after the dev breakdown was read
 
 `lift sweep --adapter adapter-indicalign-stress-s1 --breakdown` (item 87) ran on the laptop at about

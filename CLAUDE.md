@@ -1,7 +1,9 @@
 # CLAUDE.md
 
-The brief for every Claude Code session on this repo. README.md holds the pre-registration; if the
-two disagree, README.md wins and this file gets fixed.
+The brief for every Claude Code session on this repo. PREREGISTRATION.md holds the pre-registration; if
+the two disagree, PREREGISTRATION.md wins and this file gets fixed. It was README.md until Nov 10
+(decisions item 96): code, tests and older entries that cite "the README" for a rule mean that file.
+README.md is now the write-up, written by `lift publish article`: never edit it by hand.
 
 ## The project
 
@@ -35,7 +37,7 @@ not over-refusing? Every repair is measured against simply scaling the adapter d
    recorded and counted (as unclear where needed), never dropped.
 4. **Cache keys** come from `lift.cachekey.generation_key`. Never reuse an output across
    interventions, and never hand-edit outputs.
-5. **Locked decisions** (README pre-registration, `configs/*.yaml`) change only with a dated
+5. **Locked decisions** (PREREGISTRATION.md, `configs/*.yaml`) change only with a dated
    entry and a reason in `docs/decisions.md`. No new experimental arms.
 6. **Harmful content stays out of public view.** During the build, raw generations, judge logs
    and unrepaired adapters live only in `outputs/` (gitignored) and the private HF runs repo
@@ -321,5 +323,7 @@ six languages, so pairing, splitting and clustering all go by pid.
   is said with the README's consequence, and a decision the final judgements do not follow is refused.
   Decision 95: its limitations say how often the judge's harmful label falls on answers to the hard-benign
   and easy-benign Hindi prompts (stock and the comparison adapter, from the table of every final cell).
+  Decision 96: the write-up ships as the repository's README.md (no HF PRO account; the organisers accept a
+  README): `lift publish article` writes hf/article.md and the same text as README.md.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.
