@@ -47,4 +47,6 @@ auditkit_issue_url: null
 safetune_issue_url: null
 # Full citations for the build plan's related-work entries the repo does not hold, as markdown
 # lines (a person fills them in from the build plan). null leaves a placeholder in the article.
+# The article also cites Qi et al. (2023), "Fine-tuning Aligned Language Models Compromises Safety,
+# Even When Users Do Not Intend To!", arXiv:2310.03693 (checked Nov 10): include it here.
 references: null
