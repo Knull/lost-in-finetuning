@@ -2,6 +2,52 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 10, 2026 (afternoon): after the dev held-out scores were read
+
+The GPU job launched at 11:22 UTC (commit 1ad787c: the dev held-out loss of the stress adapter and of
+its ten settings, the adapter's own dev Belebele, and seeds 2 and 3 of the two standard adapters)
+finished at 14:14 UTC with every line exit 0, and its numbers were read before item 92 was written.
+
+- Held-out loss, mean NLL per token on the 100 dev references: stock 2.1932 (Nov 9), the stress
+  adapter 2.0044. WiSE-FT 0.25 / 0.50 / 0.75: 1.8398 / 1.8585 / 1.9152. ReSta 0.10 / 0.25 / 0.40:
+  2.1204 / 2.5360 / 3.6351. CAST 0.5 / 1.0 / 2.0: 2.0044 each, the adapter's own value on each source
+  too (the gate fired on no reference). Always-on 1.0: 4.6678. For scale, the standard adapters of
+  Nov 9: Aya 1.8404, IndicAlign 1.8637.
+- As shares of the adapter's gain over stock (0.1888): about 187%, 177% and 147% for WiSE-FT, 39% for
+  ReSta 0.10 and negative beyond it, 100% for conditional CAST. The full-strength stress adapter is
+  past its best fit: scaled down it fits the held-out references better. The secondary selection of
+  item 73 therefore has the same single eligible setting as the primary one, WiSE-FT 0.25.
+- Those shares are token-weighted, the definition items 53 and 73 fixed and the one the final report
+  uses (sums over references). Weighing every reference equally, the differences from stock are
+  larger (the adapter -0.764 with a paired interval of [-1.005, -0.553]; WiSE-FT -0.950, -0.936,
+  -0.871; ReSta -0.657, -0.237, +0.837) and the ratios smaller: 124%, 122% and 114% for WiSE-FT, 86%
+  and 31% for ReSta 0.10 and 0.25. Both weightings put every WiSE-FT setting above the full adapter
+  and WiSE-FT 0.25 first; they disagree on how much ReSta keeps, which decides nothing here (ReSta
+  misses the Belebele condition at every strength).
+- The adapter's own dev Belebele-hi is 0.575 (115 of 200), the value the three conditional CAST
+  settings share: what item 88 inferred is measured.
+- Seeds 2 and 3 of the Aya and IndicAlign standard adapters are trained, each with fp32 merge parity
+  on 20 of 20 prompts (adapter hashes 75104520054e, 9feb91c08f29, d5d4e0d76e7e, 5d97ed36cef0).
+- `lift select` had not run, nothing was frozen, and no final-split output existed.
+
+92. **The dev trade-off figures and one sentence are made for held-out shares outside 0 to 100%.**
+    Reporting only: no number, rule, setting or verdict changes.
+    - Why. The secondary figure put the share of the held-out gain on an automatic axis. With one
+      setting at -1311% and three over 100%, every setting that matters would have sat in a corner.
+      And "keeps 187% of the gain" is not a sentence.
+    - `tradeoff_dev_heldout.png`: the axis runs from -25% to past the largest share; a setting further
+      left is drawn at the edge as a left-pointing marker with its share written out; stock's loss
+      (0%), the half-gain line and the full adapter (100%) are marked.
+    - `tradeoff_dev.png` is drawn in the same way: the region each panel's conditions allow is tinted,
+      parity with stock and stock's harmful rate are marked beside the floor and the adapter's rate.
+    - In both, a setting's name is placed where it meets no other name or point, settings on one
+      spot share a name, and the legend shows the family's hue only (a filled point is one that met
+      every condition).
+    - The article's sentence on the secondary selection (item 89): when the frozen winner's share is
+      over 100% it says the winner's held-out loss is lower than the full adapter's and gives its
+      gain over stock as a share of the adapter's own, instead of "keeps". The repair comparison
+      table's note says what a share over 100% is.
+
 ## Nov 10, 2026 (late morning): after the sweep's win rates were read
 
 The ten settings' dev win rates against stock (100 Hindi pairs each, both orders) were judged between

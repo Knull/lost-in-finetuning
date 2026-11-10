@@ -9,6 +9,11 @@ Updated Nov 10 after the sweep was read (decisions items 87 and 88): step 5 move
 the freeze and takes the dev held-out lines with it, step 1 gains a count-only breakdown, and
 step 3 says what `lift select` should print.
 
+Where things stand (Nov 10, 14:15 UK): the sweep's win rates are judged (step 1) and step 5's GPU
+job has finished: every dev held-out score exists and seeds 2 and 3 are trained. Still to do, in
+order: register the four new adapters (the laptop lines at the end of step 5), the breakdown (step
+1), then steps 2, 3, 4, 6, 7 and 8. Step 4 no longer needs its `$dev` lines.
+
 Conventions: PowerShell at the repo root with the venv active (`.venv\Scripts\Activate.ps1`), one
 command per line (`&&` fails in Windows PowerShell 5.1, so the one-line freeze command that
 `lift select` prints is split below). Secrets are set by hidden prompt in your own window, never
@@ -125,6 +130,16 @@ setting comes with verdict "reject": ReSta 0.10 (one violation, Belebele; 0.25 a
 the floor) and CAST 0.5 (tied with CAST 1.0 on violations and on the drop, first by name). If
 `selection.md` shows other numbers or another winner, stop and send it to me before freezing:
 either I misread a log or a cell changed.
+
+The secondary selection, printed beside it, should pick the same setting with verdict "repair".
+Held-out loss per token: stock 2.193, the adapter 2.004, WiSE-FT 1.840, 1.859 and 1.915, ReSta
+2.120, 2.536 and 3.635, conditional CAST 2.004 at every strength, always-on 4.668. As shares of
+the adapter's gain that is about 187%, 177% and 147% for WiSE-FT (scaled down, the adapter fits
+the references better than at full strength), 39% for ReSta 0.10 and negative beyond it, and 100%
+for conditional CAST. `lift select` uses these token-weighted losses, so its shares should match.
+The `vs stock: row mean NLL` line each `lift heldout-loss` prints weighs every reference equally
+and gives larger differences and smaller ratios (124%, 122% and 114% for WiSE-FT, 86% for ReSta
+0.10): on both weightings every WiSE-FT setting fits the references better than the full adapter.
 
 `lift select` also prints the freeze steps; they are these, one per line:
 
