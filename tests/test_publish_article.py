@@ -419,6 +419,87 @@ def test_the_repair_vs_wiseft_table_is_shown_only_when_p07_writes_it(out):
     )
 
 
+def _vs_stock_table(hindi, others=None):
+    from publish_fakes import interval, table
+
+    rows = [{"lang": "Hindi", "stock": 0.14, "rate": 0.06, "change": hindi, "refusal_change": None}]
+    rows += [
+        {"lang": lang, "stock": 0.1, "rate": 0.1, "change": change, "refusal_change": None}
+        for lang, change in (others or {}).items()
+    ]
+    return table(
+        [
+            ("lang", "Language", "text"),
+            ("stock", "Stock", "pct"),
+            ("rate", "Frozen repair", "pct"),
+            ("change", "Harmful rate: repair - stock", "pp_ci"),
+            ("refusal_change", "Refusal rate: repair - stock", "pp_ci"),
+        ],
+        rows,
+        "The frozen repair against stock per language, final split (not pre-registered, descriptive)",
+        "Paired by prompt; unadjusted intervals; not pre-registered.",
+    ), interval
+
+
+@pytest.mark.parametrize(
+    ("hindi", "says"),
+    [
+        ((-0.08, -0.13, -0.03), "On Hindi the frozen repair's harmful rate is lower than stock's."),
+        (
+            (0.07, 0.02, 0.12),
+            "On Hindi the frozen repair's harmful rate is higher than stock's, so part of the drift remains.",
+        ),
+        (
+            (-0.02, -0.06, 0.02),
+            "On Hindi the frozen repair's harmful rate is not clearly different from stock's.",
+        ),
+    ],
+)
+def test_whether_safety_is_restored_is_read_from_the_repairs_interval_against_stock(out, hindi, says):
+    """decisions.md 90. "Restores safety" is a comparison with stock. P07 writes the frozen repair against
+    stock per language; the article says which way each interval points and repeats no number."""
+    from publish_fakes import interval, report
+
+    spec, _ = _vs_stock_table(
+        interval(*hindi),
+        {
+            "English": interval(-0.05, -0.09, -0.01),
+            "Chinese": interval(0.01, -0.03, 0.05),
+            "Thai": interval(0.06, 0.01, 0.11),
+            "Arabic": None,
+        },
+    )
+    doc = report()
+    doc["tables"]["repair_vs_stock"] = spec
+    write_report(doc)
+    path, facts = article.build()
+    text = path.read_text(encoding="utf-8")
+    section = " ".join(_section(text, "The frozen repair against stock per language").split())
+    assert "Is safety restored? Descriptively (paired by prompt, unadjusted, not pre-registered" in section
+    assert says in section
+    assert (
+        "On the other rows it is lower than stock's on English; higher on Thai; not clearly different on "
+        "Chinese; not run on Arabic."
+    ) in section
+    lead = section.split("| Language |")[0]
+    assert not re.search(r"\d\.\d", lead.split("95% interval")[1])  # the sentence repeats no number
+    assert any(s["pointer"] == "/tables/repair_vs_stock/rows/0/change" for s in facts.sources)
+    assert text.index("### Repair comparison") < text.index("### The frozen repair against stock")
+    assert not article.placeholders(text) or all(
+        "stock per language" not in p for p in article.placeholders(text)
+    )
+
+
+def test_no_table_against_stock_no_sentence(out):
+    from publish_fakes import report
+
+    doc = report()
+    doc["tables"].pop("repair_vs_stock", None)
+    write_report(doc)
+    assert "Is safety restored?" not in article.build()[0].read_text(encoding="utf-8")
+    assert article.vs_stock_sentence("repair_vs_stock", {"columns": [], "rows": []}) == ""
+
+
 # -------------------------------------------------------------- the model card's "this model" (XB-13, XB-15)
 
 
@@ -770,6 +851,25 @@ def test_cast_is_said_to_inherit_the_adapters_belebele_only_when_the_selection_s
     assert "unrepaired adapter's own Belebele-hi" not in _dev_selection()[0]
     write_inputs(selection_doc=selection(numbers))
     assert "unrepaired adapter's own Belebele-hi" not in _dev_selection()[0]
+
+
+def test_a_gain_floor_that_does_not_bind_is_said_only_for_an_adapter_under_parity(out):
+    """decisions.md 72, 73 and 89. An adapter that loses to stock has no win-rate gain to keep: the floor
+    sits under its own win rate and every move toward stock meets it. The article says so from
+    selection.json, and says nothing of the kind for an adapter that beats stock."""
+    below = selection(adapter_win=0.28)
+    write_inputs(selection_doc=below)
+    said, facts = _dev_selection()
+    assert (
+        "The adapter's own answers were preferred to stock's in 28.0% of the pairs, so it has no win-rate "
+        "gain to keep: the floor is 26.0%, and every WiSE-FT setting (3) met it."
+    ) in said
+    assert "does not bind along the path toward stock" in said
+    pointers = {(v["file"], v["pointer"]) for v in facts.sources}
+    assert ("outputs/metrics/selection.json", "/adapter_scores/win_rate") in pointers
+    assert ("outputs/metrics/selection.json", "/table/0/min_win_rate") in pointers
+    write_inputs()  # the adapter wins 70% of the pairs: the floor is 60% and binds
+    assert "no win-rate gain to keep" not in _dev_selection()[0]
 
 
 def test_the_dev_selection_is_pending_until_lift_select_decides(out):

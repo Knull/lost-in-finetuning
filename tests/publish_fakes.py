@@ -646,6 +646,7 @@ def selection(
     adapter: str = ADAPTER,
     incomplete: bool = False,
     adapter_belebele: float = 0.61,
+    adapter_win: float = 0.70,
 ) -> dict:
     """outputs/metrics/selection.json exactly as P05's ``lift.repair.select.run`` writes it
     (origin/p05-repairs: ``run``, ``decide``, ``freeze_plan``), decided by the real selection rule
@@ -659,7 +660,7 @@ def selection(
     rules = config.get("selection", name="repairs")
     families = ["wiseft", "resta", "cast"]
     stock = DevScores("stock", "stock", 0.10, 0.30, 0.5, 0.60)
-    adapter_scores = DevScores(adapter, "adapter", 0.30, 0.25, 0.70, adapter_belebele)
+    adapter_scores = DevScores(adapter, "adapter", 0.30, 0.25, adapter_win, adapter_belebele)
     doc: dict = {
         "kind": "selection",
         "version": 1,

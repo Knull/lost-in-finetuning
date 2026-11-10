@@ -306,6 +306,25 @@ def dev_selection(facts: Facts) -> str:
         parts.append(
             f"Conditions not met, with the number of settings that missed each: {'; '.join(failed)}."
         )
+    own_win = (sel.get("adapter_scores") or {}).get("win_rate")
+    scaled = [r for r in rows if r.get("method") == "wiseft"]
+    if (
+        isinstance(own_win, (int, float))
+        and own_win <= 0.5
+        and scaled
+        and all(r.get("gain_ok") is True for r in scaled)
+    ):
+        # Said only when selection.json shows it (docs/decisions.md 72-73, 89): an adapter at or under
+        # parity has no win-rate gain to keep, the floor sits under its own win rate, and every setting
+        # that scales it toward stock meets the floor.
+        win = val("/adapter_scores/win_rate", "pct", "the adapter's dev win rate against stock")
+        floor = val(f"/table/{index[scaled[0]['name']]}/min_win_rate", "pct", "the rule's win-rate floor")
+        parts.append(
+            f"The adapter's own answers were preferred to stock's in {win} of the pairs, so it has no "
+            f"win-rate gain to keep: the floor is {floor}, and every WiSE-FT setting ({len(scaled)}) met it. "
+            "On this adapter that condition does not bind along the path toward stock; the reading on "
+            "held-out loss below is the one that can."
+        )
     gated = [r for r in rows if r.get("method") == "cast"]
     own = (sel.get("adapter_scores") or {}).get("belebele_hi")
     if (
@@ -676,6 +695,62 @@ def vs_wiseft_sentence(name: str, spec: dict) -> str:
     )
 
 
+def _is_vs_stock(name: str, spec: dict) -> bool:
+    return name == "repair_vs_stock"
+
+
+def vs_stock_sentence(name: str, spec: dict) -> str:
+    """The answer to "is safety restored?" from P07's descriptive table of the frozen repair against stock
+    (docs/decisions.md 90): the Hindi harmful rate first, then the other languages, each read from its
+    interval against zero (lower than stock's, higher, so part of the drift remains, or no clear
+    difference), and a row not run said so. It repeats no number (the table below holds them, recorded in
+    the sources) and gives no verdict. "" when the table has no row or no such column."""
+    rows = list(spec.get("rows") or [])
+    column = next((c for c in spec.get("columns") or [] if c.get("key") == "change"), None)
+    if not rows or column is None:
+        return ""
+    groups: dict[str, list[str]] = {}
+    hindi = None
+    for row in rows:
+        try:
+            bounds = _bounds(row.get("change"))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PublishError(f"{shown(report_path())}/tables/{name}: {exc}") from exc
+        if isinstance(bounds, str):
+            way = bounds
+        else:
+            lo, hi = bounds
+            way = "lower" if hi < 0 else "higher" if lo > 0 else "same"
+        label = str(row.get("lang"))
+        if label == "Hindi":
+            hindi = way
+        else:
+            groups.setdefault(way, []).append(label)
+    said = {
+        "lower": "lower than stock's",
+        "higher": "higher than stock's, so part of the drift remains",
+        "same": "not clearly different from stock's",
+        "not run": "not run",
+        "undefined": "undefined",
+    }
+    parts = []
+    if hindi is not None:
+        parts.append(f"On Hindi the frozen repair's harmful rate is {said[hindi]}.")
+    others = [
+        f"lower than stock's on {_and(groups['lower'])}" if "lower" in groups else "",
+        f"higher on {_and(groups['higher'])}" if "higher" in groups else "",
+        f"not clearly different on {_and(groups['same'])}" if "same" in groups else "",
+        f"not run on {_and(groups['not run'])}" if "not run" in groups else "",
+    ]
+    others = [x for x in others if x]
+    if others:
+        parts.append(f"On the other rows it is {'; '.join(others)}.")
+    return (
+        "Is safety restored? Descriptively (paired by prompt, unadjusted, not pre-registered; a difference "
+        "counts only where its 95% interval excludes zero): " + " ".join(parts) + "\n\n"
+    )
+
+
 def extra_tables(facts: Facts) -> str:
     """Tables final_report.json carries beyond TABLES (P07's optional repair-vs-WiSE-FT contrast, review
     XB-07), each under its own title, after the repair comparison; "" when there is none: nothing is
@@ -691,7 +766,13 @@ def extra_tables(facts: Facts) -> str:
             if spec.get("title")
             else name
         )
-        lead = vs_wiseft_sentence(name, spec) if _is_vs_wiseft(name, spec) else ""
+        lead = (
+            vs_wiseft_sentence(name, spec)
+            if _is_vs_wiseft(name, spec)
+            else vs_stock_sentence(name, spec)
+            if _is_vs_stock(name, spec)
+            else ""
+        )
         blocks.append(f"### {title}\n\n{lead}{facts.table(name)}")
     return "".join(f"\n\n{b}" for b in blocks)
 
