@@ -319,5 +319,7 @@ six languages, so pairing, splitting and clustering all go by pid.
   against the readers, the judge decision, the primary judge by model group and prompt set), from
   outputs/metrics/validation/round1.json, validation/gate1.json and judge_decision.json; a bar that is not met
   is said with the README's consequence, and a decision the final judgements do not follow is refused.
+  Decision 95: its limitations say how often the judge's harmful label falls on answers to the hard-benign
+  and easy-benign Hindi prompts (stock and the comparison adapter, from the table of every final cell).
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

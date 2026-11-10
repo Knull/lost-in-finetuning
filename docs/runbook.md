@@ -9,10 +9,11 @@ Updated Nov 10 after the sweep was read (decisions items 87 and 88): step 5 move
 the freeze and takes the dev held-out lines with it, step 1 gains a count-only breakdown, and
 step 3 says what `lift select` should print.
 
-Where things stand (Nov 10, 14:15 UK): the sweep's win rates are judged (step 1) and step 5's GPU
-job has finished: every dev held-out score exists and seeds 2 and 3 are trained. Still to do, in
-order: register the four new adapters (the laptop lines at the end of step 5), the breakdown (step
-1), then steps 2, 3, 4, 6, 7 and 8. Step 4 no longer needs its `$dev` lines.
+Where things stand (Nov 10, 15:45 UK): the sweep's win rates are judged and the breakdown is read
+(step 1), step 5's GPU job has finished (every dev held-out score exists, seeds 2 and 3 are
+trained) and the four new adapters are registered (commit b02c737). Still to do, in order: steps
+2, 3, 4, 6, 7 and 8. Step 4 no longer needs its `$dev` lines. Step 2 is the one that holds
+everything else: the labels, then `decide-judge`.
 
 Conventions: PowerShell at the repo root with the venv active (`.venv\Scripts\Activate.ps1`), one
 command per line (`&&` fails in Windows PowerShell 5.1, so the one-line freeze command that

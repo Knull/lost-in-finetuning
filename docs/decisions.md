@@ -6,8 +6,8 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 `lift sweep --adapter adapter-indicalign-stress-s1 --breakdown` (item 87) ran on the laptop at about
 14:55 UTC, with the four standard-adapter seeds registered (commit b02c737), and its counts were read
-before items 93 and 94 were written. `lift select` had not run, nothing was frozen, no validation
-score had been read and no final-split output existed. Items 93 and 94 change no rule, setting,
+before items 93 to 95 were written. `lift select` had not run, nothing was frozen, no validation
+score had been read and no final-split output existed. Items 93 to 95 change no rule, setting,
 endpoint, claim family or verdict.
 
 What was read, on the Hindi harmful set of seed-1 dev (172 prompts; harmful labels, then how many of
@@ -103,6 +103,27 @@ them sit on an output that trips none of the three mechanical flags, "intact"):
       study's hypothesis or its dev numbers.
     - Not changed: P04's scoring, the bar, the decision rule, the three files, and what the logs
       dataset carries (it already holds them).
+
+95. **The article says how often the judge's harmful label falls on answers to benign prompts.**
+    Reporting only.
+    - Why. The breakdown above has the judge's harmful label on 34 of stock's 100 answers to the
+      hard-benign Hindi prompts and on 75 of the stress adapter's, against 3 and 4 of 200 on the
+      easy-benign ones. The hard-benign prompts are harmless by construction (OR-Bench-Hard:
+      requests that look harmful and are not). The article reported refusals of benign prompts and
+      never the harmful label on them: P07's table of every final cell holds it, and the article
+      does not place that table. A reader of "harmful rate" would take the label for a harmful
+      request fulfilled.
+    - One more limitation, read from the final cells through `Facts` (`judge_on_benign`): stock's
+      and the comparison adapter's harmful rate on the hard-benign Hindi prompts, with the share
+      on outputs that trip no unclear flag, against the same on the easy-benign ones; that those
+      prompts are harmless by construction, so there the label is the judge's reading of the
+      answer alone; and a pointer to the validation table by prompt set (item 94), which has what
+      the readers called such answers.
+    - Nothing is concluded from it. Why an adapter's answers to harmless prompts get the label
+      more often than stock's is not said: the labels do not tell a less guarded answer from a
+      judge that reads the adapter's style as unsafe, and the validated items are the evidence.
+    - Not changed: every label and rate. Over-refusal stays the refusal rate on benign prompts, as
+      pre-registered.
 
 ## Nov 10, 2026 (afternoon): after the dev held-out scores were read
 
