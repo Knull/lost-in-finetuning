@@ -374,10 +374,11 @@ def repair_comparison(stats: Mapping[str, Any]) -> dict[str, Any]:
         "every repair is measured against. Harmful rate - stock is what is left of the drift: the frozen "
         "setting against stock on the same prompts (descriptive, docs/decisions.md 90). Each row pools the "
         "seeds named (a seed not run is left out, never estimated); a cell that pools fewer is named with "
-        "its own; the gain kept names its seeds. Utility "
-        "gain kept is the share of the adapter's win-rate gain over parity; held-out gain kept the share of "
-        "its held-out-loss gain over stock (docs/decisions.md 73): each is undefined, and says so, when the "
-        "adapter has no such gain.",
+        "its own; the gain kept names its seeds. Utility gain kept is the share of the adapter's win-rate "
+        "gain over parity; held-out gain kept the share of its held-out-loss gain over stock "
+        "(docs/decisions.md 73): each is undefined, and says so, when the adapter has no such gain. A "
+        "held-out share over 100% is a setting that fits the held-out references better than the full "
+        "adapter does.",
     )
 
 

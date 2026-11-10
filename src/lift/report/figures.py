@@ -8,11 +8,18 @@
 - adapters_by_language.png: the harmful rate of stock and of every adapter in each language, final split
   (grouped columns; an adapter's level is drawn only when every seed was run).
 - tradeoff_dev.png: the safety-utility trade-off of every seed-1 dev setting from selection.json's table:
-  harmful rate against win rate, with the win-rate floor and the adapter's harmful rate drawn in, and
-  over-refusal increase against Belebele-hi drop with their limits; ineligible settings are hollow.
+  harmful rate against win rate, with the win-rate floor, parity, and stock's and the adapter's harmful
+  rates drawn in, and over-refusal increase against Belebele-hi drop with their limits; the region each
+  panel's conditions allow is tinted, and a setting that met every condition is filled.
 - tradeoff_dev_heldout.png: the same settings from selection_secondary.json (docs/decisions.md 73): harmful
-  rate against the share of the adapter's held-out-loss gain each keeps, with the half-gain line, stock's
-  and the adapter's harmful rates; settings the secondary rule leaves out are hollow.
+  rate against each setting's held-out-loss gain over stock as a share of the full adapter's (over 100%
+  when it fits the references better than the adapter, negative when worse than stock), with stock's
+  loss, the half-gain line and the full adapter marked, stock's and the adapter's harmful rates, and a
+  setting far below stock's loss drawn at the left edge with its share written out; a setting that met
+  every condition of the secondary rule is filled.
+
+Names are placed so they sit on no other name or point (``_label_points``); settings on one spot share a
+name.
 - forest_primary.png: the primary endpoint (drift, repair) per seed and pooled, with 95% intervals.
 
 Colours: three categorical hues (blue, orange, aqua) that stay apart under the common colour-vision
@@ -121,6 +128,147 @@ def _quiet(ax: Any) -> None:
     ax.set_axisbelow(True)
 
 
+# Where a point's name may sit, tried in this order: offset in points, horizontal and vertical alignment.
+_LABEL_SPOTS = (
+    (6, 5, "left", "bottom"),
+    (6, -5, "left", "top"),
+    (-6, 5, "right", "bottom"),
+    (-6, -5, "right", "top"),
+    (0, 8, "center", "bottom"),
+    (0, -8, "center", "top"),
+)
+
+
+def _overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    """The area two boxes (x0, y0, x1, y1) share."""
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    return w * h if w > 0 and h > 0 else 0.0
+
+
+def _label_points(ax: Any, points: Sequence[tuple[float, float, str]], *, fontsize: float = 7) -> None:
+    """Write each point's name beside it without sitting on another name or another point. Points drawn
+    on one spot are named once, their names joined. For each name the six spots around its point are
+    tried in order and the first whose box meets no placed name, no other point and stays inside the axes
+    is taken; with none free, the spot that overlaps least. Boxes are in display units, with the text's
+    width estimated from its length (short tags in one font size: close enough to keep names apart).
+    Call it once the limits and the layout are final."""
+    merged: dict[tuple[float, float], list[str]] = {}
+    for x, y, name in points:
+        merged.setdefault((round(x, 1), round(y, 1)), []).append(name)
+    scale = ax.figure.dpi / 72  # points to display units
+    frame = ax.bbox.extents
+    centres = {key: ax.transData.transform(key) for key in merged}
+    radius = 5 * scale
+    marks = {key: (c[0] - radius, c[1] - radius, c[0] + radius, c[1] + radius) for key, c in centres.items()}
+    placed: list[tuple[float, float, float, float]] = []
+    for key, names in merged.items():
+        text = ", ".join(names)
+        width, height = 0.58 * fontsize * len(text) * scale, 1.3 * fontsize * scale
+        cx, cy = centres[key]
+        best = None
+        for dx, dy, ha, va in _LABEL_SPOTS:
+            x0 = cx + dx * scale - (width if ha == "right" else width / 2 if ha == "center" else 0)
+            y0 = cy + dy * scale - (height if va == "top" else 0)
+            box = (x0, y0, x0 + width, y0 + height)
+            outside = (
+                max(0.0, frame[0] - box[0])
+                + max(0.0, box[2] - frame[2])
+                + max(0.0, frame[1] - box[1])
+                + max(0.0, box[3] - frame[3])
+            )
+            cost = (
+                sum(_overlap(box, other) for other in placed)
+                + sum(_overlap(box, mark) for k, mark in marks.items() if k != key)
+                + outside * height
+            )
+            if best is None or cost < best[0]:
+                best = (cost, dx, dy, ha, va, box)
+            if cost == 0:
+                break
+        _cost, dx, dy, ha, va, box = best
+        placed.append(box)
+        ax.annotate(
+            text,
+            key,
+            xytext=(dx, dy),
+            textcoords="offset points",
+            ha=ha,
+            va=va,
+            fontsize=fontsize,
+            color=MUTED,
+        )
+
+
+def _reference_line(ax: Any, at: float, text: str, *, vertical: bool) -> None:
+    """A dashed reference line, quieter than the data, named outside the plot area: above it for a
+    vertical line, to its right for a horizontal one."""
+    style = {"color": MUTED, "linewidth": 0.8, "linestyle": (0, (4, 3)), "zorder": 1}
+    if vertical:
+        ax.axvline(at, **style)
+        ax.annotate(
+            text,
+            (at, 1),
+            xycoords=("data", "axes fraction"),
+            xytext=(0, 3),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color=MUTED,
+        )
+    else:
+        ax.axhline(at, **style)
+        ax.annotate(
+            text,
+            (1, at),
+            xycoords=("axes fraction", "data"),
+            xytext=(4, 0),
+            textcoords="offset points",
+            ha="left",
+            va="center",
+            fontsize=8,
+            color=MUTED,
+        )
+
+
+def _allowed(ax: Any, *, x: tuple[float | None, float | None], y: tuple[float | None, float | None]) -> None:
+    """Tint the rectangle a panel's conditions allow; None is the axis's own end. The limits are kept."""
+    from matplotlib.patches import Rectangle
+
+    xlim, ylim = ax.get_xlim(), ax.get_ylim()
+    x0, x1 = (xlim[0] if x[0] is None else x[0]), (xlim[1] if x[1] is None else x[1])
+    y0, y1 = (ylim[0] if y[0] is None else y[0]), (ylim[1] if y[1] is None else y[1])
+    ax.add_patch(
+        Rectangle((x0, y0), x1 - x0, y1 - y0, facecolor=GRID, edgecolor="none", alpha=0.55, zorder=0)
+    )
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+
+
+def _family_legend(fig_or_ax: Any, families: Sequence[str], **where: Any) -> None:
+    """One filled marker per repair family: the fill of a point says whether it met the rule, so the legend
+    shows the hue only."""
+    from matplotlib.lines import Line2D
+
+    handles = [
+        Line2D(
+            [],
+            [],
+            marker="o",
+            linestyle="",
+            markersize=7,
+            markerfacecolor=FAMILY_COLOURS.get(f, REFERENCE),
+            markeredgecolor=FAMILY_COLOURS.get(f, REFERENCE),
+            label=f,
+        )
+        for f in families
+    ]
+    fig_or_ax.legend(
+        handles=handles, fontsize=8, frameon=False, title="repair family", title_fontsize=8, **where
+    )
+
+
 def adapters_by_language(stats: Mapping[str, Any], path: Path) -> Path | None:
     """Grouped columns: the harmful rate of stock and of each described adapter in every language, the
     target language first. An adapter's level is drawn only when every seed of its recipe was run."""
@@ -178,117 +326,151 @@ def adapters_by_language(stats: Mapping[str, Any], path: Path) -> Path | None:
     return path
 
 
+OFF_SCALE = -25.0  # % of the adapter's gain: a setting further below stock's loss is drawn at the edge
+
+
 def tradeoff_heldout(secondary: Mapping[str, Any] | None, path: Path) -> Path | None:
     """The secondary selection's view (docs/decisions.md 73): each dev setting's Hindi harmful rate against
-    the share of the adapter's held-out-loss gain it keeps."""
+    the share of the adapter's held-out-loss gain it keeps. The share is not confined to 0-100%: a setting
+    that fits the held-out references better than the full adapter is over 100%, and one that fits them
+    worse than stock is negative. The axis runs from OFF_SCALE to past the largest share; a setting further
+    left is drawn at the edge as a left-pointing marker with its share written out, so one broken setting
+    does not squeeze the rest into a corner (docs/decisions.md 92)."""
     if not secondary or secondary.get("status") != "decided" or not secondary.get("table"):
         return None
     plt = _plt()
     rows = secondary["table"]
+    floor = 100 * rows[0]["min_heldout_retained"]
+    shares = [100 * r["heldout_retained"] for r in rows]
+    right = max([*shares, 100.0, floor]) + 18
     fig, ax = plt.subplots(figsize=(7.5, 5), facecolor=SURFACE)
     ax.set_facecolor(SURFACE)
-    seen = set()
-    for r in rows:
-        c = FAMILY_COLOURS.get(r.get("family"), REFERENCE)
-        x, y = 100 * r["heldout_retained"], 100 * r["harmful_hi"]
-        label = r.get("family") if r.get("family") not in seen else None
-        seen.add(r.get("family"))
+    named: list[tuple[float, float, str]] = []
+    families: list[str] = []
+    for r, share in zip(rows, shares, strict=True):
+        family = str(r.get("family"))
+        c = FAMILY_COLOURS.get(family, REFERENCE)
+        if family not in families:
+            families.append(family)
+        off = share < OFF_SCALE
+        x, y = (OFF_SCALE if off else share), 100 * r["harmful_hi"]
         ax.scatter(
             x,
             y,
             s=60,
+            marker="<" if off else "o",
             edgecolors=c,
             facecolors=c if r.get("eligible") else "none",
             linewidths=2,
-            label=label,
             zorder=3,
         )
-        ax.annotate(
-            r["name"].split("-adapter-")[0],
-            (x, y),
-            xytext=(5, 4),
-            textcoords="offset points",
-            fontsize=7,
-            color=MUTED,
-        )
-    ax.axvline(100 * rows[0]["min_heldout_retained"], color=MUTED, linewidth=1)
-    ax.annotate(
-        "half of the gain",
-        (100 * rows[0]["min_heldout_retained"], 1),
-        xycoords=("data", "axes fraction"),
-        xytext=(4, -10),
-        textcoords="offset points",
-        fontsize=8,
-        color=MUTED,
-    )
+        tag = r["name"].split("-adapter-")[0]
+        named.append((x, y, f"{tag} ({share:.0f}%)" if off else tag))
+    for at, text in ((0.0, "stock's loss"), (floor, "half of the gain"), (100.0, "the full adapter")):
+        _reference_line(ax, at, text, vertical=True)
     for key, text in (("adapter_scores", "the adapter"), ("stock", "stock")):
         level = (secondary.get(key) or {}).get("harmful_hi")
         if level is not None:
-            ax.axhline(100 * level, color=MUTED, linewidth=1)
-            ax.annotate(
-                text,
-                (1, 100 * level),
-                xycoords=("axes fraction", "data"),
-                xytext=(-4, 3),
-                textcoords="offset points",
-                ha="right",
-                fontsize=8,
-                color=MUTED,
-            )
+            _reference_line(ax, 100 * level, text, vertical=False)
     _quiet(ax)
-    ax.set_xlabel("share of the adapter's held-out-loss gain kept (%)", color=MUTED, fontsize=9)
+    ax.set_xlim(OFF_SCALE - 12, right)
+    ax.set_ylim(bottom=0)
+    ax.set_xlabel(
+        "held-out-loss gain over stock, as a share of the full adapter's (%)", color=MUTED, fontsize=9
+    )
     ax.set_ylabel("Hindi dev harmful rate (%)", color=MUTED, fontsize=9)
     ax.set_title(
-        "Seed-1 dev settings: safety against what the adapter learned\n(hollow = left out by the "
-        "secondary rule)",
+        "Seed-1 dev settings: safety against what the adapter learned\n(filled = meets every condition of "
+        "the secondary rule; a left-pointing marker is off the scale)",
         color=INK,
         fontsize=10,
         loc="left",
+        pad=20,
     )
-    ax.legend(fontsize=8, frameon=False, title="repair family", title_fontsize=8)
+    # Below the plot, so it never sits on a point.
+    _family_legend(ax, families, loc="upper left", bbox_to_anchor=(0, -0.13), ncol=3)
     fig.tight_layout()
+    _label_points(ax, named)
     fig.savefig(path, dpi=150, facecolor=SURFACE)
     plt.close(fig)
     return path
 
 
 def tradeoff(selection: Mapping[str, Any] | None, path: Path) -> Path | None:
+    """The primary selection's view: every seed-1 dev setting against the rule's four conditions
+    (selection.json). Left: the Hindi harmful rate against the win rate, with the win-rate floor, parity,
+    and stock's and the adapter's harmful rates. Right: the two side conditions, the rise in hard-benign
+    refusals and the Belebele-hi drop, with their limits. A filled point met every condition."""
     if not selection or selection.get("status") != "decided" or not selection.get("table"):
         return None
     plt = _plt()
     rules = selection.get("rules") or config.get("selection", name="repairs")
     rows = selection["table"]
-    adapter = selection.get("adapter_scores") or {}
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 5))
-    colours = FAMILY_COLOURS
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12.5, 5.6), facecolor=SURFACE)
+    named1: list[tuple[float, float, str]] = []
+    named2: list[tuple[float, float, str]] = []
+    families: list[str] = []
     for r in rows:
-        c = colours.get(r.get("family"), REFERENCE)
-        face = c if r.get("eligible") else "none"
-        a1.scatter(100 * r["win_rate"], 100 * r["harmful_hi"], edgecolors=c, facecolors=face, s=50)
-        a1.annotate(r["name"].split("-adapter-")[0], (100 * r["win_rate"], 100 * r["harmful_hi"]), fontsize=7)
-        a2.scatter(
-            100 * r["overrefusal_increase"], 100 * r["belebele_drop"], edgecolors=c, facecolors=face, s=50
-        )
-        a2.annotate(
-            r["name"].split("-adapter-")[0],
-            (100 * r["overrefusal_increase"], 100 * r["belebele_drop"]),
-            fontsize=7,
-        )
-    if rows:
-        a1.axvline(100 * rows[0]["min_win_rate"], ls="--", c="k", lw=1, label="win-rate floor")
-    if adapter.get("harmful_hi") is not None:
-        a1.axhline(100 * adapter["harmful_hi"], ls=":", c="r", lw=1, label="adapter (no drop)")
-    a1.set_xlabel("dev win rate vs stock (%)")
-    a1.set_ylabel("Hindi dev harmful rate (%)")
-    a1.legend(fontsize=8)
-    a2.axvline(100 * rules["max_overrefusal_increase"], ls="--", c="k", lw=1, label="over-refusal limit")
-    a2.axhline(100 * rules["max_belebele_hi_drop"], ls="--", c="gray", lw=1, label="Belebele-hi limit")
-    a2.set_xlabel("hard-benign refusal - stock (points)")
-    a2.set_ylabel("Belebele-hi drop vs stock (points)")
-    a2.legend(fontsize=8)
-    fig.suptitle("Seed-1 dev settings and the selection constraints (hollow = not eligible)")
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
+        family = str(r.get("family"))
+        c = FAMILY_COLOURS.get(family, REFERENCE)
+        if family not in families:
+            families.append(family)
+        look = {"s": 60, "edgecolors": c, "facecolors": c if r.get("eligible") else "none", "linewidths": 2}
+        tag = r["name"].split("-adapter-")[0]
+        p1 = (100 * r["win_rate"], 100 * r["harmful_hi"])
+        p2 = (100 * r["overrefusal_increase"], 100 * r["belebele_drop"])
+        a1.scatter(*p1, zorder=3, **look)
+        a2.scatter(*p2, zorder=3, **look)
+        named1.append((*p1, tag))
+        named2.append((*p2, tag))
+    _reference_line(a1, 100 * rows[0]["min_win_rate"], "the floor", vertical=True)
+    _reference_line(a1, 50.0, "parity with stock", vertical=True)
+    for key, text in (("adapter_scores", "the adapter"), ("stock", "stock")):
+        level = (selection.get(key) or {}).get("harmful_hi")
+        if level is not None:
+            _reference_line(a1, 100 * level, text, vertical=False)
+    _reference_line(a2, 100 * rules["max_overrefusal_increase"], "over-refusal limit", vertical=True)
+    _reference_line(a2, 100 * rules["max_belebele_hi_drop"], "Belebele limit", vertical=False)
+    for ax, title, xlabel, ylabel in (
+        (
+            a1,
+            "Safety against answer quality (tinted: over the floor, under the adapter)",
+            "dev win rate against stock (%)",
+            "Hindi dev harmful rate (%)",
+        ),
+        (
+            a2,
+            "The two side conditions (tinted: inside both limits)",
+            "hard-benign refusals, setting minus stock (points)",
+            "Belebele-hi accuracy lost against stock (points)",
+        ),
+    ):
+        ax.set_facecolor(SURFACE)
+        _quiet(ax)
+        ax.set_xlabel(xlabel, color=MUTED, fontsize=9)
+        ax.set_ylabel(ylabel, color=MUTED, fontsize=9)
+        ax.set_title(title, color=INK, fontsize=10, loc="left", pad=20)
+    a1.set_xlim(left=0, right=max(60.0, a1.get_xlim()[1]))
+    a1.set_ylim(bottom=0)
+    # The region each panel's conditions allow, as a quiet tint behind the marks.
+    level = (selection.get("adapter_scores") or {}).get("harmful_hi")
+    if level is not None:
+        _allowed(a1, x=(100 * rows[0]["min_win_rate"], None), y=(None, 100 * level))
+    _allowed(
+        a2, x=(None, 100 * rules["max_overrefusal_increase"]), y=(None, 100 * rules["max_belebele_hi_drop"])
+    )
+    fig.suptitle(
+        "Seed-1 dev settings against the selection rule (filled = meets every condition)",
+        color=INK,
+        fontsize=11,
+        x=0.01,
+        ha="left",
+    )
+    _family_legend(fig, families, loc="lower left", bbox_to_anchor=(0.01, 0.0), ncol=3)
+    fig.tight_layout(rect=(0, 0.07, 1, 0.99), w_pad=6)
+    _label_points(a1, named1)
+    _label_points(a2, named2)
+    fig.savefig(path, dpi=150, facecolor=SURFACE)
     plt.close(fig)
     return path
 

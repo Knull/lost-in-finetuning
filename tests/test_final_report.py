@@ -1503,3 +1503,116 @@ def test_the_figures_show_every_adapter_and_the_secondary_trade_off(one_candidat
     (metrics_dir() / "selection_secondary.json").write_text(json.dumps(secondary), encoding="utf-8")
     drawn = {p.name for p in figures.draw_all(stats)}
     assert {"adapters_by_language.png", "tradeoff_dev_heldout.png", "heatmap_harmful.png"} <= drawn
+
+
+# The Nov 10 dev sweep's shape (docs/decisions.md 92): WiSE-FT settings that fit the held-out references
+# better than the full adapter, conditional CAST exactly on the adapter, ReSta and always-on CAST far under
+# stock. (tag, family, harmful of 172, hard-benign refusals of 100, win rate, Belebele-hi, held-out share)
+DEV_SHAPE = [
+    ("wiseft-l0.25", "wiseft", 11, 25, 0.495, 0.600, 1.87),
+    ("wiseft-l0.50", "wiseft", 22, 20, 0.465, 0.585, 1.77),
+    ("wiseft-l0.75", "wiseft", 51, 10, 0.383, 0.575, 1.47),
+    ("resta-a0.10", "resta", 59, 9, 0.270, 0.555, 0.39),
+    ("resta-a0.25", "resta", 59, 17, 0.212, 0.505, -1.82),
+    ("resta-a0.40", "resta", 88, 20, 0.085, 0.415, -7.64),
+    ("cast-m0.5", "cast", 54, 16, 0.280, 0.575, 1.0),
+    ("cast-m1.0", "cast", 54, 6, 0.280, 0.575, 1.0),
+    ("cast-m2.0", "cast", 152, 3, 0.280, 0.575, 1.0),
+    ("castalways-m1.0", "cast", 4, 32, 0.040, 0.225, -13.11),
+]
+
+
+def _dev_shaped() -> dict:
+    rows = [
+        {
+            "name": f"{tag}-{STRESS.format(1)}",
+            "family": family,
+            "harmful_hi": harmful / 172,
+            "win_rate": win,
+            "min_win_rate": 0.26,
+            "overrefusal_increase": hard / 100 - 0.21,
+            "belebele_drop": 0.625 - bele,
+            "heldout_retained": kept,
+            "min_heldout_retained": 0.5,
+            "eligible": tag == "wiseft-l0.25",
+        }
+        for tag, family, harmful, hard, win, bele, kept in DEV_SHAPE
+    ]
+    return {
+        "status": "decided",
+        "table": rows,
+        "stock": {"harmful_hi": 24 / 172},
+        "adapter_scores": {"harmful_hi": 84 / 172, "win_rate": 0.28},
+        "rules": {"max_overrefusal_increase": 0.05, "max_belebele_hi_drop": 0.03},
+    }
+
+
+@pytest.fixture
+def kept_figures(monkeypatch):
+    """Figures stay open after they are saved, so a test can read what was drawn."""
+    pytest.importorskip("matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "close", lambda *a, **k: None)
+    yield plt
+    monkeypatch.undo()
+    plt.close("all")
+
+
+def _names(ax) -> list[str]:
+    return [t.get_text() for t in ax.texts]
+
+
+def _boxes_apart(ax, names: list[str]) -> bool:
+    ax.figure.canvas.draw()
+    boxes = [t.get_window_extent() for t in ax.texts if t.get_text() in names]
+    return not any(a.overlaps(b) for i, a in enumerate(boxes) for b in boxes[i + 1 :])
+
+
+def test_the_secondary_trade_off_keeps_its_scale_when_shares_leave_0_to_100(kept_figures):
+    """decisions.md 92. A setting that fits the held-out references better than the full adapter is over
+    100%, and one far worse than stock is far below zero. The axis covers the first and draws the second
+    at its left edge with the share written out, so one broken setting does not squeeze the rest."""
+    from lift.report import figures
+
+    folder = figures_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    assert figures.tradeoff_heldout(_dev_shaped(), folder / "t.png") == folder / "t.png"
+    ax = kept_figures.gcf().axes[0]
+    left, right = ax.get_xlim()
+    assert left == pytest.approx(figures.OFF_SCALE - 12) and 187 < right < 230
+    names = _names(ax)
+    assert "resta-a0.40 (-764%)" in names and "castalways-m1.0 (-1311%)" in names
+    assert "resta-a0.25 (-182%)" in names and "resta-a0.10" in names  # 39% is on the scale
+    assert "cast-m0.5, cast-m1.0" in names and "cast-m2.0" in names  # one spot, one name
+    assert {"stock's loss", "half of the gain", "the full adapter", "the adapter", "stock"} <= set(names)
+    settings = [n for n in names if n.split(" ")[0].split(",")[0] in {r[0] for r in DEV_SHAPE}]
+    assert len(settings) == 9 and _boxes_apart(ax, settings)
+    # Off the scale means a left-pointing marker at the edge; everything else is where its share is.
+    edge = [c.get_offsets()[0][0] for c in ax.collections if c.get_offsets()[0][0] == figures.OFF_SCALE]
+    assert len(edge) == 3
+
+
+def test_the_primary_trade_off_names_every_setting_without_collisions(kept_figures):
+    from lift.report import figures
+
+    folder = figures_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    assert figures.tradeoff(_dev_shaped(), folder / "t.png") == folder / "t.png"
+    left, right = kept_figures.gcf().axes[:2]
+    assert "cast-m0.5, cast-m1.0" in _names(left) and "cast-m0.5" in _names(right)
+    assert {"the floor", "parity with stock", "the adapter", "stock"} <= set(_names(left))
+    assert {"over-refusal limit", "Belebele limit"} <= set(_names(right))
+    tags = {r[0] for r in DEV_SHAPE}
+    for ax, n in ((left, 9), (right, 10)):
+        settings = [name for name in _names(ax) if name.split(",")[0] in tags]
+        assert len(settings) == n and _boxes_apart(ax, settings)
+    # One tinted rectangle per panel: what the panel's conditions allow.
+    assert len(left.patches) == 1 and len(right.patches) == 1
+    x0, y0 = right.patches[0].get_xy()
+    assert x0 + right.patches[0].get_width() == pytest.approx(5.0)
+    assert y0 + right.patches[0].get_height() == pytest.approx(3.0)
+    assert figures.tradeoff({"status": "incomplete"}, folder / "none.png") is None
