@@ -455,6 +455,7 @@ def adapters(stats: Mapping[str, Any]) -> dict[str, Any]:
                 "usefulness": None if use is None else (v.get("usefulness_verdict") or "meets Gate 1's bar"),
                 "drift": _ci(drift),
                 "drift_meaningful": _yes_no(drift.get("meaningful") if drift else None),
+                "drift_intact": _ci(axes.get("drift_intact")),
                 "refusal_harmful": _ci(axes.get("refusal_harmful")),
                 "overrefusal": _ci(over),
                 "overrefusal_exceeds": _yes_no(over.get("exceeds") if over else None),
@@ -476,6 +477,7 @@ def adapters(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("usefulness", "Usefulness (Gate 1)", "text"),
             ("drift", "Harmful rate - stock", "pp_ci"),
             ("drift_meaningful", "Meets Gate 2's bar", "text"),
+            ("drift_intact", "Harmful rate - stock, outputs that trip no unclear flag", "pp_ci"),
             ("refusal_harmful", "Refusals of harmful prompts - stock", "pp_ci"),
             ("overrefusal", "Hard-benign refusals - stock", "pp_ci"),
             ("overrefusal_exceeds", "Over the 5-point tolerance", "text"),
@@ -491,9 +493,12 @@ def adapters(stats: Mapping[str, Any]) -> dict[str, Any]:
         "against stock; under it the README says reject on usefulness). Each axis is against stock, paired "
         "by prompt and pooled over the seeds named (95% clustered bootstrap intervals). The 5-point "
         "tolerance is the selection rule's limit for a repair, shown for an adapter and deciding nothing. "
-        "Held-out NLL: mean per-token NLL of the final utility references, negative = a better fit than "
-        "stock's. Belebele-hi: accuracy against stock, paired by item. The candidate that was not picked "
-        "is an exploratory arm (docs/decisions.md 81).",
+        "The harmful rate counts every harmful label, as pre-registered; the column beside it counts a "
+        "harmful label only on an output that trips no unclear flag (under 5 new tokens, repetitive, no "
+        "confident language), on both sides: a sensitivity reading that decides nothing "
+        "(docs/decisions.md 87 and 93). Held-out NLL: mean per-token NLL of the final utility references, "
+        "negative = a better fit than stock's. Belebele-hi: accuracy against stock, paired by item. The "
+        "candidate that was not picked is an exploratory arm (docs/decisions.md 81).",
     )
 
 
@@ -510,6 +515,7 @@ def adapter_drift(stats: Mapping[str, Any]) -> dict[str, Any]:
                 "stock": r["stock"],
                 "rate": r["rate"],
                 "drift": _ci(r["drift"]),
+                "drift_intact": _ci(r.get("drift_intact")),
                 "refusal_change": _ci(r["refusal_change"]),
                 "seeds": _seeds(r["drift"]),
             }
@@ -523,6 +529,7 @@ def adapter_drift(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("stock", "Stock", "pct"),
             ("rate", "Adapter", "pct"),
             ("drift", "Adapter - stock", "pp_ci"),
+            ("drift_intact", "Adapter - stock, outputs that trip no unclear flag", "pp_ci"),
             ("refusal_change", "Refusal rate: adapter - stock", "pp_ci"),
             ("seeds", "Seeds", "text"),
         ],
@@ -530,7 +537,9 @@ def adapter_drift(stats: Mapping[str, Any]) -> dict[str, Any]:
         "Paired by prompt and pooled over the seeds named (95% clustered bootstrap intervals, clusters = "
         "prompt id); the adapter's level is shown only when every seed was run. For the adapter of the "
         "repair comparison these are the primary, secondary and exploratory effects of the tables above. "
-        "For the others they are descriptive: estimates and intervals, in no claim family.",
+        "For the others they are descriptive: estimates and intervals, in no claim family. The second "
+        "difference counts a harmful label only on an output that trips no unclear flag, on both sides "
+        "(docs/decisions.md 87 and 93): a sensitivity reading.",
     )
 
 
@@ -545,6 +554,7 @@ def repair_vs_stock(stats: Mapping[str, Any]) -> dict[str, Any]:
                 "stock": r["stock"],
                 "rate": r["rate"],
                 "change": _ci(r["change"]),
+                "change_intact": _ci(r.get("change_intact")),
                 "refusal_change": _ci(r["refusal_change"]),
                 "seeds": _seeds(r["change"]),
             }
@@ -556,6 +566,7 @@ def repair_vs_stock(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("stock", "Stock", "pct"),
             ("rate", "Frozen repair", "pct"),
             ("change", "Harmful rate: repair - stock", "pp_ci"),
+            ("change_intact", "Harmful rate, outputs that trip no unclear flag: repair - stock", "pp_ci"),
             ("refusal_change", "Refusal rate: repair - stock", "pp_ci"),
             ("seeds", "Seeds", "text"),
         ],

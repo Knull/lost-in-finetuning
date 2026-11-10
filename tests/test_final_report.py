@@ -1356,6 +1356,23 @@ def test_drift_and_repair_are_also_read_with_degenerate_outputs_out_of_the_harmf
     # The primary endpoint does not move: 10 of 20 against stock's 2, and the winner's 4 against 10.
     assert stats["primary"]["drift"]["pooled"]["est"] == pytest.approx(0.40)
     assert stats["primary"]["repair"]["pooled"]["est"] == pytest.approx(-0.30)
+    # Every adapter's own axes carry the reading too, and so does each language's row (decisions.md 93).
+    axes = next(v for v in stats["verdicts"] if v["adapter"] == STRESS.format(1))["axes"]
+    assert axes["drift"]["est"] == pytest.approx(0.40) and axes["drift"]["meaningful"] is True
+    assert axes["drift_intact"]["est"] == pytest.approx(0.20) and "meaningful" not in axes["drift_intact"]
+    other = next(v for v in stats["verdicts"] if v["adapter"] == A.format(1))["axes"]
+    assert other["drift_intact"]["est"] == pytest.approx(other["drift"]["est"])  # nothing flagged there
+    by_lang = {
+        (r["adapter"], r["set"], r["lang"]): r
+        for r in stats["adapter_drift"]
+        if r["adapter"] == STRESS.format(1)
+    }
+    assert by_lang[(STRESS.format(1), "harmful", "hi")]["drift_intact"]["est"] == pytest.approx(0.20)
+    english = by_lang[(STRESS.format(1), "harmful", "en")]
+    assert english["drift_intact"]["est"] == pytest.approx(english["drift"]["est"])
+    hindi = next(r for r in stats["repair_vs_stock"] if (r["set"], r["lang"]) == ("harmful", "hi"))
+    assert hindi["change"]["est"] == pytest.approx(0.10)  # the winner's 4 against stock's 2
+    assert hindi["change_intact"]["est"] == pytest.approx(0.05)  # 3 intact against stock's 2
     # Intact: 6 of the adapter's 10 harmful outputs and 3 of the winner's 4 trip no flag; stock's 2 do not.
     intact = stats["sensitivity"]["intact"]
     assert intact["drift"]["pooled"]["est"] == pytest.approx(0.20)
@@ -1373,6 +1390,13 @@ def test_drift_and_repair_are_also_read_with_degenerate_outputs_out_of_the_harmf
     assert "docs/decisions.md 87" in doc["tables"]["sensitivity_effects"]["note"]
     keys = [c["key"] for c in doc["tables"]["cells"]["columns"]]
     assert keys[keys.index("harmful_upper") + 1] == "harmful_intact_rate"
+    adapters = {r["adapter"]: r for r in doc["tables"]["adapters"]["rows"]}
+    assert adapters[STRESS.format(1)]["drift_intact"]["est"] == pytest.approx(0.20)
+    assert "docs/decisions.md 87 and 93" in doc["tables"]["adapters"]["note"]
+    drift_rows = [r for r in doc["tables"]["adapter_drift"]["rows"] if r["adapter"] == STRESS.format(1)]
+    assert next(r for r in drift_rows if r["lang"] == "Hindi")["drift_intact"]["est"] == pytest.approx(0.20)
+    against = next(r for r in doc["tables"]["repair_vs_stock"]["rows"] if r["lang"] == "Hindi")
+    assert against["change_intact"]["est"] == pytest.approx(0.05)
     row = next(
         r
         for r in doc["tables"]["cells"]["rows"]
