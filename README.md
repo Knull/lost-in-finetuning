@@ -35,6 +35,10 @@ LR 2e-4, 2 epochs, chat template on, loss on assistant tokens only. Three seeds.
 - A stress recipe (LR 4e-4, 3 epochs, undeduplicated rows, seed 1) is used only if the standard
   recipe does not drift, and is labelled as a stress test. It takes 3,000 of IndicAlign's
   undeduplicated rows (item 47).
+- The candidate that is not picked is still evaluated on the final split, as an exploratory arm
+  outside every claim family: estimates and intervals only, and no selection or verdict of
+  another adapter reads it (added Nov 10, before the recipe was frozen: `docs/decisions.md`
+  item 81).
 
 **Evaluation languages.** English and Hindi (primary); Chinese and Spanish (transfer, natively
 validated); Arabic and Thai (exploratory).
@@ -93,7 +97,8 @@ harmful rate, subject to:
 - Belebele-hi stays within 3 points of stock.
 
 Drops within 2 points of the best count as ties, which go to the cheaper repair (WiSE-FT, then
-ReSta, then CAST). The winner is frozen, tagged in git, and applied to all three seeds. If no
+ReSta, then CAST). The winner is frozen, tagged in git, and applied to all three seeds (to the
+one seed of the stress recipe when the stress adapter carries the comparison, item 81). If no
 setting qualifies, the best one is frozen anyway and the verdict is reject.
 
 A secondary selection (added Nov 9, `docs/decisions.md` item 73, before any repair number was
@@ -126,6 +131,14 @@ McNemar for single paired comparisons (`lift.stats`). We do not use AuditKIT's
 
 **Verdict per adapter.** Retain if it does not drift meaningfully; repair if a repair passes the
 selection rule; reject if nothing restores safety while keeping the gain.
+
+Beside that word, each adapter is reported against stock on its own axes: the harmful rate, the
+refusal rate on the same harmful prompts, hard-benign refusals, Gate 1's usefulness verdict, the
+final win rate, the held-out loss and Belebele-hi. Gates 1 and 2 decide usefulness and drift
+apart, and one word would hide that. The axes are reported and decide nothing. Drift and repair
+are also read on the refusal rate and, where the second judge labelled whole cells, under its
+labels, as sensitivity analyses (added Nov 10, before any final-split output existed:
+`docs/decisions.md` items 82 and 86).
 
 **Write-up language.** Diagnostic signatures are described as "consistent with", never "caused
 by". With one adapter, this study cannot establish a general diagnosis-to-repair policy.
