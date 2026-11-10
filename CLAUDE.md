@@ -83,7 +83,8 @@ prompts/        the implementation prompts and the schedule (prompts/README.md)
 validation/     guidelines.md for the human annotators
 hf/             model card, dataset cards, Space, article drafts                  <- P08
 notebooks/      acceptance_test.ipynb: the check on any Tiny Aya adapter          <- P08
-docs/           decisions.md (dated changes), toolkit-notes.md (verified APIs)
+docs/           decisions.md (dated changes), toolkit-notes.md (verified APIs), runbook.md (what a
+                person runs from the dev sweep to the submission)
 constraints.txt exact library versions the GPU runtimes install with
 ```
 
