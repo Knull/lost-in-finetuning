@@ -63,6 +63,27 @@ strength; always-on 0.225.
       four settings a family were locked on Oct 28, and a strength chosen after seeing the sweep
       would be tuned on it.
 
+89. **The article says what the rule decided on dev in words, the primary selection and the secondary
+    one.** Reporting only.
+    - Why. The stress adapter loses to stock on the pairwise win rate, so by items 72 and 73 the
+      rule's gain condition is a floor near the adapter's own win rate, and any move toward stock
+      meets it. The primary selection therefore cannot say how much of the adapter a repair keeps.
+      The secondary selection can (the share of the held-out-loss gain kept), and until now the
+      article only drew it as a figure.
+    - `lift.publish.article.dev_selection`, placed above the dev trade-off figure, reads
+      selection.json and selection_secondary.json: how many settings met every condition, the pick
+      with its Hindi harmful rate against the adapter's and stock's, how many settings missed each
+      condition, each other family's frozen setting with its verdict; then what the same rule
+      decides with the gain read on held-out loss, and the share of that gain the frozen winner
+      keeps on dev against the share the rule asks for. Every number goes through the recorded
+      sources. Nothing is asserted in fixed text: the sentence that conditional CAST inherits the
+      adapter's Belebele-hi (item 88) is written only when every conditional CAST row has the
+      adapter's own accuracy and fails that condition.
+    - A secondary file made for another adapter, or from other dev numbers than selection.json's
+      (its own `primary` pick is not the frozen winner), is refused with the line that remakes it.
+      While the secondary selection is not decided or is undefined, the paragraph says so and
+      nothing is pending: it freezes nothing and blocks nothing.
+
 ## Nov 10, 2026 (early morning): P08 merged, and its public files brought in line with item 62
 
 P08 was built on Nov 6, before review R1. Item 62 (R1-14, Nov 8) then ruled that no output is public

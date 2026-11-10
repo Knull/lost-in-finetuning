@@ -305,6 +305,8 @@ six languages, so pairing, splitting and clustering all go by pid.
   its label, dry runs included; the Space's examples are cut to 10 words when it is built. The article
   (hf/templates/article.md -> hf/article.md) takes every number from outputs/metrics through
   `lift.publish.inputs.Facts`, and says of each adapter what each check found (held-out loss, Belebele,
-  pairwise utility, harmful rate, refusals) only where its interval supports it. Decisions 84-86.
+  pairwise utility, harmful rate, refusals) only where its interval supports it. Decisions 84-86. Decision
+  89: it also says the dev selection in words, primary and secondary (the share of the held-out gain the
+  frozen winner keeps on dev), from selection.json and selection_secondary.json.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.
