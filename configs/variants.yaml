@@ -106,3 +106,31 @@ variants:
     params: {"behavior_layers": [16, 17, 18, 19, 20], "comparator": "smaller", "layer": 14, "pool": "last", "strength": 1.0, "threshold": 0.20000000000000107}
     artifacts: {"adapter": "302669756c2911885f70b16935a972f86ef4727b5c0b68da11b8ca0fd3d297f5", "cast": "b6b72bbfba710693e4df6c4088e47a1cb9d3b39b5e0f86afbbc44b17bd6a6393"}
     note: "P05 repair setting (lift register-repairs)"
+  - name: adapter-aya-std-s2
+    method: adapter
+    adapter: adapter-aya-std-s2
+    seed: 2
+    artifacts: {adapter: "75104520054ef49752e9e0460967814576a491e819a772585bad9d1d7f7ab631"}
+    location: "runs repo ($LIFT_RUNS_REPO): outputs/adapters/adapter-aya-std-s2@3875ebb91c30cb9e20aefe4a4289df0618b55e7c"
+    note: "aya, standard recipe, seed 2: trained 2026-11-10 on NVIDIA A100-SXM4-40GB in bf16, 677 rows of aya/dedup; merge parity fp32 20/20 prompts token-identical"
+  - name: adapter-aya-std-s3
+    method: adapter
+    adapter: adapter-aya-std-s3
+    seed: 3
+    artifacts: {adapter: "9feb91c08f293a223bf67b318dd70e87f9463bc5f152242bc7bde6a972925576"}
+    location: "runs repo ($LIFT_RUNS_REPO): outputs/adapters/adapter-aya-std-s3@791044654f5e427b3eebf1bbfb5f79b7b1a71b18"
+    note: "aya, standard recipe, seed 3: trained 2026-11-10 on NVIDIA A100-SXM4-40GB in bf16, 677 rows of aya/dedup; merge parity fp32 20/20 prompts token-identical"
+  - name: adapter-indicalign-std-s2
+    method: adapter
+    adapter: adapter-indicalign-std-s2
+    seed: 2
+    artifacts: {adapter: "d5d4e0d76e7ec835398866aead26e6fbd079d72b185c1b81e7fe27778b3bade6"}
+    location: "runs repo ($LIFT_RUNS_REPO): outputs/adapters/adapter-indicalign-std-s2@4c0347ddcdd1a2e6cef997b0ba9d06722a50f24d"
+    note: "indicalign, standard recipe, seed 2: trained 2026-11-10 on NVIDIA A100-SXM4-40GB in bf16, 2999 rows of indicalign/dedup; merge parity fp32 20/20 prompts token-identical"
+  - name: adapter-indicalign-std-s3
+    method: adapter
+    adapter: adapter-indicalign-std-s3
+    seed: 3
+    artifacts: {adapter: "5d97ed36cef0de45142e28fb16353aac20ed23c4ac7e7d7b6be177b5d90ef006"}
+    location: "runs repo ($LIFT_RUNS_REPO): outputs/adapters/adapter-indicalign-std-s3@c2706c0eac0e405b2df60a68dd971828d927c81f"
+    note: "indicalign, standard recipe, seed 3: trained 2026-11-10 on NVIDIA A100-SXM4-40GB in bf16, 2999 rows of indicalign/dedup; merge parity fp32 20/20 prompts token-identical"
