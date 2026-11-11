@@ -1013,17 +1013,21 @@ def overrefusal_block(source: Source, r: Mapping[str, Any], cells: Sequence[Mapp
 
 
 def _second_rows(
-    source: Source, a: str, b: str, set_name: str, lang: str, which: str
-) -> tuple[list[float], list[float], list[str]] | str:
+    source: Source, a: str, b: str, set_name: str, lang: str, which: str, *, judged_only: bool = False
+) -> tuple[tuple[list[float], list[float], list[str]], dict[str, int]] | str:
     """``_seed_rows`` under the second judge's labels, for one language: only when it judged every prompt of
-    both sides (its usual 10% sample is not a paired comparison of the whole cell)."""
-    sides = []
+    both sides (its usual 10% sample is not a paired comparison of the whole cell). With the rows, the
+    judge's failures (``native.judge_failure``: a provider that declined to judge, a reply that could not be
+    read), which the labelling rules record as unclear: {"a", "b"} per side, "either" side and "n" prompts.
+    ``judged_only`` leaves out the prompts it failed on, on either side (docs/decisions.md item 99)."""
+    sides, failed = [], []
     for name in (a, b):
         try:
             primary = {x.pid for x in source.records(name, set_name, lang)}
-            second = {x.pid: x.label for x in source.records(name, set_name, lang, judge="second")}
+            records = source.records(name, set_name, lang, judge="second")
         except Missing as exc:
             return f"{name} {set_name}_{lang}: {exc}"
+        second = {x.pid: x.label for x in records}
         if set(second) != primary:
             return (
                 f"{name} {set_name}_{lang}: the second judge judged {len(set(second) & primary)} of "
@@ -1031,25 +1035,37 @@ def _second_rows(
                 "--split final --judge second --sample 1.0` judges them all)"
             )
         sides.append(second)
+        failed.append({x.pid for x in records if (x.native or {}).get("judge_failure")})
     la, lb = sides
-    pids = sorted(la)
-    return [_outcome(lb[p], which) for p in pids], [_outcome(la[p], which) for p in pids], pids
+    either = failed[0] | failed[1]
+    info = {"a": len(failed[0]), "b": len(failed[1]), "either": len(either), "n": len(la)}
+    pids = sorted(p for p in la if not (judged_only and p in either))
+    return ([_outcome(lb[p], which) for p in pids], [_outcome(la[p], which) for p in pids], pids), info
 
 
 def second_judge_effect(
-    source: Source, sides: Mapping[int, tuple[str, str]], set_name: str, lang: str, which: str = "harmful"
+    source: Source,
+    sides: Mapping[int, tuple[str, str]],
+    set_name: str,
+    lang: str,
+    which: str = "harmful",
+    *,
+    judged_only: bool = False,
 ) -> dict[str, Any]:
-    """``effect`` under the second judge's own labels (``_second_rows``)."""
+    """``effect`` under the second judge's own labels (``_second_rows``), with its failures per seed
+    (``judge_failures``: {seed: {"a", "b", "either", "n"}})."""
     per_seed = {}
     not_run = {}
+    failures = {}
     for seed, (a, b) in sorted(sides.items()):
-        got = _second_rows(source, a, b, set_name, lang, which)
+        got = _second_rows(source, a, b, set_name, lang, which, judged_only=judged_only)
         if isinstance(got, str):
             not_run[seed] = got
         else:
-            per_seed[seed] = got
+            per_seed[seed], failures[seed] = got
     out = pooled_effect(per_seed)
     out["not_run"] = not_run
+    out["judge_failures"] = failures
     return out
 
 
@@ -1065,6 +1081,18 @@ def sensitivity_block(source: Source, r: Mapping[str, Any]) -> dict[str, Any]:
         # And under the second judge's own labels, where it judged the whole cell on both sides.
         "second_judge_effects": [
             {"kind": k, "lang": lang, **second_judge_effect(source, kind_sides(r, k), "harmful", lang)}
+            for k in KINDS
+            for lang in SECOND_LANGS
+        ],
+        # The same, leaving out the prompts the second judge failed on, on either side: its provider declines
+        # to judge some harmful prompts, whatever the answer, and those are recorded as unclear (decisions.md
+        # 99: on the dev split, 30 to 33 of 172 Hindi harmful prompts for every model).
+        "second_judge_judged_effects": [
+            {
+                "kind": k,
+                "lang": lang,
+                **second_judge_effect(source, kind_sides(r, k), "harmful", lang, judged_only=True),
+            }
             for k in KINDS
             for lang in SECOND_LANGS
         ],

@@ -245,7 +245,10 @@ not show that the mechanism caused the drift.
   whatever the output looks like: an output that repeats itself to the token cap counts as
   harmful if the judge calls it unsafe. The claims are differences against stock under the same
   judge; the sensitivity tables give the same differences on refusals, under the loose reading,
-  counting only outputs that trip no unclear flag, and under the second judge.
+  counting only outputs that trip no unclear flag, and under the second judge. The second
+  judge's provider declines to judge some harmful prompts whatever the answer; each of those
+  counts as unclear, and the table also gives its reading with those prompts left out on both
+  sides, and how many they are.
 - {{ judge_on_benign }}
 - The automatic judge's precision differs by language. Hindi claims rest on its validation
   against native readers ("The judge against native readers" above); the other languages have

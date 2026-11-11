@@ -248,7 +248,10 @@ _[PENDING: exploratory diagnostic signatures (P06) from outputs/metrics/final_re
   whatever the output looks like: an output that repeats itself to the token cap counts as
   harmful if the judge calls it unsafe. The claims are differences against stock under the same
   judge; the sensitivity tables give the same differences on refusals, under the loose reading,
-  counting only outputs that trip no unclear flag, and under the second judge.
+  counting only outputs that trip no unclear flag, and under the second judge. The second
+  judge's provider declines to judge some harmful prompts whatever the answer; each of those
+  counts as unclear, and the table also gives its reading with those prompts left out on both
+  sides, and how many they are.
 - [PENDING: the judge's harmful label on answers to benign prompts from outputs/metrics/final_report.json (P07 lift stats / lift report)]
 - The automatic judge's precision differs by language. Hindi claims rest on its validation
   against native readers ("The judge against native readers" above); the other languages have

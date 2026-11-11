@@ -638,8 +638,10 @@ def sensitivity_effects(stats: Mapping[str, Any]) -> dict[str, Any]:
     primary = stats["primary"]
     rows = []
 
-    def add(reading: str, kind: str, e: Mapping[str, Any] | None) -> None:
+    def add(reading: str, kind: str, e: Mapping[str, Any] | None, *, left_out: bool = False) -> None:
         pooled = (e or {}).get("pooled")
+        failures = list(((e or {}).get("judge_failures") or {}).values())
+        either, n = sum(f["either"] for f in failures), sum(f["n"] for f in failures)
         rows.append(
             {
                 "reading": reading,
@@ -647,6 +649,10 @@ def sensitivity_effects(stats: Mapping[str, Any]) -> dict[str, Any]:
                 "effect": _ci(pooled),
                 "p": pooled["p"] if pooled else None,
                 "seeds": _seeds(pooled) if pooled else None,
+                # the second judge's rows: the prompts it failed on, on either side, summed over the seeds
+                "judge_failures": (
+                    f"{either} of {n}" + (" left out" if left_out else "") if failures and pooled else None
+                ),
             }
         )
 
@@ -655,9 +661,19 @@ def sensitivity_effects(stats: Mapping[str, Any]) -> dict[str, Any]:
         add("harmful rate, Controversial read loosely", kind, (s.get("loose") or {}).get(kind))
         add(INTACT_READING, kind, (s.get("intact") or {}).get(kind))
         add("refusal rate on the same harmful prompts", kind, (s.get("refusal") or {}).get(kind))
+        judged = {(e["kind"], e["lang"]): e for e in s.get("second_judge_judged_effects") or []}
         for e in s.get("second_judge_effects") or []:
             if e["kind"] == kind:
-                add(f"harmful rate under the second judge's labels, {LANG_NAMES[e['lang']]}", kind, e)
+                lang = LANG_NAMES[e["lang"]]
+                add(f"harmful rate under the second judge's labels, {lang}", kind, e)
+                if (kind, e["lang"]) in judged:
+                    add(
+                        f"harmful rate under the second judge's labels, {lang}, prompts it judged on both "
+                        "sides",
+                        kind,
+                        judged[(kind, e["lang"])],
+                        left_out=True,
+                    )
     return table(
         "Drift and repair under other readings of the labels (Hindi unless said, final split)",
         [
@@ -666,6 +682,7 @@ def sensitivity_effects(stats: Mapping[str, Any]) -> dict[str, Any]:
             ("effect", "Effect", "pp_ci"),
             ("p", "p (bootstrap)", "p"),
             ("seeds", "Seeds", "text"),
+            ("judge_failures", "Second judge failed on", "text"),
         ],
         rows,
         "Drift = adapter minus stock, repair = frozen winner minus adapter, paired by prompt and pooled over "
@@ -675,8 +692,12 @@ def sensitivity_effects(stats: Mapping[str, Any]) -> dict[str, Any]:
         "that counts only outputs tripping no unclear flag (under 5 new tokens, repetitive, no confident "
         "language) takes degenerate outputs out of the harmful count on both sides (docs/decisions.md 87). "
         "The second judge's rows need it to have judged every prompt of both sides, not its 10% sample: "
-        "`lift judge --judge second --sample 1.0` on those cells; otherwise they are not run. Sensitivity "
-        "analyses, not claims.",
+        "`lift judge --judge second --sample 1.0` on those cells; otherwise they are not run. The second "
+        "judge's provider declines to judge some harmful prompts whatever the answer, and the labelling "
+        "rules record each such failure as unclear: its first row counts them so, the second leaves those "
+        "prompts out on both sides, and the last column gives how many prompts that is (docs/decisions.md "
+        "99). "
+        "Sensitivity analyses, not claims.",
     )
 
 

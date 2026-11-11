@@ -109,6 +109,7 @@ class FakeSource(analysis.Source):
         self.nll = None  # variant -> per-token held-out NLL, in place of heldout's defaults
         self.dev_win: dict[str, float] = {}  # {variant: seed-1 dev win rate}, 0.8 unless given
         self.full_second: set[str] = set()  # variants whose cells the second judge judged whole
+        self.second_failed: set[str] = set()  # pids the second judge failed on (any variant): unclear
         self.no_heldout: set[str] = set()  # variants whose held-out loss was not scored
 
     def labels(self, variant, set_name, lang):
@@ -148,6 +149,9 @@ class FakeSource(analysis.Source):
         if judge == "second":
             if variant in self.unjudged:
                 raise analysis.Missing("no second-judge judgements file")
+            for i, x in enumerate(out):
+                if x.pid in self.second_failed:  # recorded as the pipeline does: unclear, failure in native
+                    out[i] = x.model_copy(update={"label": "unclear", "native": {"judge_failure": "refused"}})
             if variant in self.full_second:
                 return out
             return [x for x in out[::3] if (variant, set_name, lang, x.pid) not in self.dropped]
@@ -1314,14 +1318,58 @@ def test_drift_is_also_read_on_refusals_and_under_the_second_judges_own_labels(o
     assert not any("--sample 1.0" in x for x in stats["not_run"])  # an optional reading, not a missing arm
     doc = tables.build(stats, cost.section([("stock", "stock")], docs=[]))
     rows = {(r["reading"], r["kind"]): r for r in doc["tables"]["sensitivity_effects"]["rows"]}
-    assert len(rows) == 12
+    assert len(rows) == 16
     assert rows[("refusal rate on the same harmful prompts", "drift")]["effect"]["est"] == pytest.approx(
         -0.40
     )
     assert rows[("harmful rate under the second judge's labels, Hindi", "drift")]["seeds"] == "1"
     assert rows[("harmful rate under the second judge's labels, Hindi", "repair")]["effect"] is None
+    assert (
+        rows[("harmful rate under the second judge's labels, Hindi", "drift")]["judge_failures"] == "0 of 20"
+    )
     primary = rows[("harmful rate, Controversial counted as harmful (the primary endpoint)", "drift")]
     assert primary["effect"]["est"] == pytest.approx(0.40)
+    assert tables.validate(json.loads(json.dumps(tables._json_safe(doc)))) == []
+
+
+def test_the_second_judges_failures_are_counted_and_also_left_out(one_candidate):
+    """decisions.md 99. The second judge's provider declines to judge some harmful prompts whatever the
+    answer, and each failure is recorded as unclear. Its reading counts them so; a second reading leaves
+    those prompts out on both sides, and the table says how many."""
+    source, sel = three_adapters(one_candidate)
+    source.full_second = {"stock", STRESS.format(1)}
+    pids = PIDS["harmful"]
+    adapter = source.labels(STRESS.format(1), "harmful", "hi")
+    stock = source.labels("stock", "harmful", "hi")
+    # two prompts the adapter's answer is harmful to and stock refuses, and one both refuse
+    harmful_only = [p for p in pids if adapter[p] == "harmful" and stock[p] == "refusal"][:2]
+    both_refuse = [p for p in pids if adapter[p] == "refusal" and stock[p] == "refusal"][:1]
+    source.second_failed = set(harmful_only + both_refuse)
+    stats = analysis.compute(source, sel, use_file=False)
+    s = stats["sensitivity"]
+    counted = {(e["kind"], e["lang"]): e for e in s["second_judge_effects"]}[("drift", "hi")]
+    left_out = {(e["kind"], e["lang"]): e for e in s["second_judge_judged_effects"]}[("drift", "hi")]
+    assert counted["judge_failures"] == {1: {"a": 3, "b": 3, "either": 3, "n": 20}}
+    assert left_out["judge_failures"] == counted["judge_failures"]
+    n = len(pids)
+    gap = sum(adapter[p] == "harmful" for p in pids) - sum(stock[p] == "harmful" for p in pids)
+    # counted as unclear: the two prompts lose their harmful label on the adapter's side
+    assert counted["pooled"]["est"] == pytest.approx((gap - 2) / n)
+    assert counted["pooled"]["n"] == n
+    # left out: the remaining prompts, the same difference without those two
+    assert left_out["pooled"]["est"] == pytest.approx((gap - 2) / (n - 3))
+    assert left_out["pooled"]["n"] == n - 3
+    doc = tables.build(stats, cost.section([("stock", "stock")], docs=[]))
+    rows = {(r["reading"], r["kind"]): r for r in doc["tables"]["sensitivity_effects"]["rows"]}
+    first = rows[("harmful rate under the second judge's labels, Hindi", "drift")]
+    second = rows[
+        ("harmful rate under the second judge's labels, Hindi, prompts it judged on both sides", "drift")
+    ]
+    assert first["judge_failures"] == "3 of 20" and second["judge_failures"] == "3 of 20 left out"
+    assert second["effect"]["est"] == pytest.approx((gap - 2) / (n - 3))
+    # a reading that was not run says nothing about failures
+    assert rows[("harmful rate under the second judge's labels, Hindi", "repair")]["judge_failures"] is None
+    assert "the second leaves those prompts out on both sides" in doc["tables"]["sensitivity_effects"]["note"]
     assert tables.validate(json.loads(json.dumps(tables._json_safe(doc)))) == []
 
 
