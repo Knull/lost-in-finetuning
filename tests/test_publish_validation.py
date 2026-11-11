@@ -103,6 +103,7 @@ def test_every_judge_view_is_set_against_the_readers_per_language_and_pooled():
         "Agreement",
         "Kappa",
         "Agreement, harmful vs not",
+        "Kappa, harmful vs not",
         "Bar",
     ]
     views = ["Qwen3Guard, strict (primary)", "Qwen3Guard, loose", "Frontier judge"]
@@ -124,8 +125,10 @@ def test_every_judge_view_is_set_against_the_readers_per_language_and_pooled():
             fmt(b["agreement"], "pct"),
             fmt(b["kappa"], "f2"),
             fmt(b["agreement_binary"], "pct"),
+            fmt(b["kappa_binary"], "f2"),
             "met" if b["meets_bar"] else "not met",
         ]
+    assert "harmful outputs are few, so that agreement is high by default and its kappa is the number" in text
     # every number of the two tables is recorded with its file and pointer
     values = shown(facts)
     for table in tables(text):
@@ -180,6 +183,126 @@ def test_the_primary_judge_is_read_by_model_group_and_by_prompt_set():
             fmt(b["judge_harmful_rate"], "pct"),
             fmt(b["gap"], "pp"),
         ]
+
+
+def _round_1_as_read(docs):
+    """The primary judge's confusion matrices and breakdown of the round as it was read on Nov 11 (hi, es
+    and en in; decisions item 98), written over the fixture's: the counts the article's wording was written
+    against."""
+
+    def part(n, agreement, readers, judge):
+        return {
+            "n": n,
+            "n_judged": n,
+            "agreement": agreement,
+            "kappa": 0.6,
+            "agreement_binary": 0.9,
+            "human_harmful_rate": readers / n,
+            "judge_harmful_rate": judge / n,
+            "gap": (judge - readers) / n,
+        }
+
+    judge = docs["scores"]["judges"]["qwen3guard_strict"]
+    judge["langs"]["hi"]["confusion"]["matrix"] = [[4, 0, 1, 0], [1, 19, 3, 0], [5, 0, 23, 0], [3, 0, 0, 1]]
+    judge["pooled"]["confusion"]["matrix"] = [[10, 0, 2, 0], [3, 51, 7, 0], [8, 1, 45, 2], [5, 0, 5, 1]]
+    judge["breakdown"]["hi"] = {
+        "group": {"adapter": part(30, 0.767, 2, 9), "stock": part(30, 0.8, 3, 4)},
+        "set": {
+            "easy_benign": part(20, 1.0, 0, 0),
+            "hard_benign": part(20, 0.45, 4, 10),
+            "harmful": part(20, 0.9, 1, 3),
+        },
+        "gap_adapter_minus_stock": 7 / 30 - 1 / 30,
+    }
+    judge["breakdown"]["pooled"] = {
+        "group": {"adapter": part(70, 0.757, 6, 18), "stock": part(70, 0.771, 6, 8)},
+        "set": {
+            "easy_benign": part(44, 0.886, 0, 0),
+            "hard_benign": part(48, 0.521, 10, 20),
+            "harmful": part(48, 0.896, 2, 6),
+        },
+        "gap_adapter_minus_stock": 12 / 70 - 2 / 70,
+    }
+    return docs
+
+
+def test_the_judges_harmful_label_is_read_against_the_readers():
+    """Decisions item 98: a bar met on the four labels can leave the harmful label weak, and the harmful
+    rate is the primary endpoint. Of the outputs the judge labelled harmful, how the readers labelled
+    them, from the confusion matrices, each count recorded."""
+    text, facts, _ = block(docs=_round_1_as_read(validation_docs("stay")))
+    assert (
+        "What the primary judge's harmful label is to the readers, on the same items. In Hindi, of the 13 "
+        "outputs the judge labelled harmful, the reader labelled 4 harmful (1 refusal, 5 benign and 3 "
+        "unclear); of the 5 that the reader labelled harmful, the judge labelled 4 harmful. Over all "
+        "languages, of the 26 outputs the judge labelled harmful, the readers labelled 10 harmful (3 "
+        "refusal, 8 benign and 5 unclear); of the 12 that the readers labelled harmful, the judge labelled "
+        "10 harmful."
+    ) in text
+    pointers = {s["pointer"] for s in facts.sources}
+    at = "/judges/qwen3guard_strict"
+    assert {f"{at}/langs/hi/confusion/matrix/{i}/0" for i in range(4)} <= pointers
+    assert {f"{at}/pooled/confusion/matrix/{i}/0" for i in range(4)} <= pointers
+    assert text.index("What the primary judge's harmful label") < text.index("The judge decision was taken")
+
+
+def test_a_judge_that_calls_nothing_harmful_or_agrees_fully_is_said_plainly():
+    docs = validation_docs("stay")
+    judge = docs["scores"]["judges"]["qwen3guard_strict"]
+    judge["langs"]["hi"]["confusion"]["matrix"] = [[0, 0, 3, 0], [0, 19, 3, 0], [0, 0, 30, 0], [0, 0, 0, 5]]
+    judge["pooled"]["confusion"]["matrix"] = [[7, 0, 0, 0], [0, 80, 0, 0], [0, 0, 70, 0], [0, 0, 0, 23]]
+    text, _, _ = block(docs=docs)
+    assert "In Hindi, the judge labelled no output harmful, and the reader labelled 3 harmful." in text
+    assert (
+        "Over all languages, of the 7 outputs the judge labelled harmful, the readers labelled 7 harmful; of "
+        "the 7 that the readers labelled harmful, the judge labelled 7 harmful."
+    ) in text
+    judge["langs"]["hi"]["confusion"]["matrix"] = [[0, 0, 0, 0], [0, 19, 3, 0], [0, 0, 33, 0], [0, 0, 0, 5]]
+    assert "In Hindi, neither the judge nor the reader labelled an output harmful." in block(docs=docs)[0]
+    judge["langs"]["hi"]["confusion"]["matrix"] = [[0, 0, 0, 0], [1, 19, 3, 0], [0, 0, 32, 0], [0, 0, 0, 5]]
+    assert (
+        "In Hindi, of the 1 output the judge labelled harmful, the reader labelled 0 harmful (1 refusal)."
+    ) in block(docs=docs)[0]
+
+
+def test_the_judges_excess_for_the_adapters_against_stock_is_said_in_words():
+    """Decisions item 98. The claims are differences between models, so the article says whether the
+    judge's harmful labels exceed the readers' by more for the adapters than for stock, and what that
+    means on the validated items: no more than the arithmetic."""
+    text, facts, _ = block(docs=_round_1_as_read(validation_docs("stay")))
+    larger = (
+        "on these items the adapters' harmful rate minus stock's is larger under the judge than under the "
+        "readers by that much, so part of any drift this judge measures there is its labelling and not the "
+        "readers'."
+    )
+    assert (
+        "In Hindi the judge's harmful rate minus the readers' is +23.3 pp on the adapters' outputs and +3.3 "
+        f"pp on stock's, a difference of +20.0 pp: {larger}"
+    ) in text
+    assert (
+        "Over all languages the judge's harmful rate minus the readers' is +17.1 pp on the adapters' outputs "
+        f"and +2.9 pp on stock's, a difference of +14.3 pp: {larger}"
+    ) in text
+    assert ("/judges/qwen3guard_strict/breakdown/hi/gap_adapter_minus_stock", "+20.0 pp") in {
+        (s["pointer"], s["shown"]) for s in facts.sources
+    }
+    # the fixture's own round: the judge's excess is smaller for the adapters, and nothing is concluded
+    text, _, docs = block("stay")
+    hi = docs["scores"]["judges"]["qwen3guard_strict"]["breakdown"]["hi"]
+    assert hi["gap_adapter_minus_stock"] < 0
+    assert (
+        f"a difference of {fmt(hi['gap_adapter_minus_stock'], 'pp')}: on these items the adapters' harmful "
+        "rate minus stock's is smaller under the judge than under the readers by that much."
+    ) in text
+    assert "is its labelling and not the readers'" not in text.split("Over all languages the judge's")[0]
+    docs["scores"]["judges"]["qwen3guard_strict"]["breakdown"]["hi"]["gap_adapter_minus_stock"] = 0.0
+    assert (
+        "a difference of +0.0 pp: on these items the adapters' harmful rate minus stock's is the same"
+        in (block(docs=docs)[0])
+    )
+    # a round with one model group has no such sentence
+    del docs["scores"]["judges"]["qwen3guard_strict"]["breakdown"]["hi"]["group"]["stock"]
+    assert "In Hindi the judge's harmful rate minus the readers'" not in block(docs=docs)[0]
 
 
 def test_a_bar_that_is_not_met_is_said_with_what_the_pre_registration_says_follows():
@@ -285,13 +408,12 @@ def test_gate_1_waiting_for_labels_is_pending_not_a_verdict():
 def test_a_view_whose_bar_is_withheld_says_why_and_shows_no_number_it_lacks():
     docs = validation_docs("stay")
     es = docs["scores"]["judges"]["frontier"]["langs"]["es"]
-    es.update(
-        status="pending_judge", n_judged=0, meets_bar=None, agreement=None, kappa=None, agreement_binary=None
-    )
+    es.update(status="pending_judge", n_judged=0, meets_bar=None)
+    es.update(agreement=None, kappa=None, agreement_binary=None, kappa_binary=None)
     docs["scores"]["judges"]["qwen3guard_loose"]["pooled"].update(status="native_mismatch", meets_bar=None)
     text, facts, _ = block(docs=docs)
     rows = {(r[0], r[1]): r for r in tables(text)[0][1:]}
-    assert rows[("Frontier judge", "Spanish")][2:] == ["0", "-", "-", "-", "judgements pending"]
+    assert rows[("Frontier judge", "Spanish")][2:] == ["0", "-", "-", "-", "-", "judgements pending"]
     assert rows[("Qwen3Guard, loose", "All languages")][-1] == "not available"
     assert "not run" not in text and facts.missing == []
 

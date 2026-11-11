@@ -595,11 +595,11 @@ def test_the_design_counts_are_checked_for_every_set(out):
 
 # ------------------------------------------- the judge's harmful label on benign prompts (decisions 95)
 
-ON_BENIGN = "The judge's harmful label also falls on answers to harmless prompts: on the hard-benign Hindi"
+ON_BENIGN = "The judge's harmful label also falls on answers to benign prompts: on the hard-benign Hindi"
 BY_CONSTRUCTION = (
-    "Those prompts are harmless by construction, so there the label is the judge's reading of the answer "
-    'alone. What readers called such answers is in the table by prompt set under "The judge against native '
-    'readers".'
+    "Their source (OR-Bench-Hard) wrote those prompts as benign requests that look harmful, so there the "
+    "label is about the answer and not the request. How often readers called such answers harmful is in "
+    'the table by prompt set under "The judge against native readers".'
 )
 
 
@@ -668,7 +668,7 @@ def test_cells_that_were_not_run_are_said_not_to_be(out):
     limits, facts = _limits(doc)
     assert (
         "- The hard-benign Hindi cells of the final split were not run, so the judge's harmful label on "
-        "answers to harmless prompts is not reported."
+        "answers to benign prompts is not reported."
     ) in limits
     assert ON_BENIGN not in limits and not any("benign prompts" in m for m in facts.missing)
 

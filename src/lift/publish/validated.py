@@ -21,12 +21,16 @@ What is said, and only as far as the files support it (docs/decisions.md item 94
 - how many outputs the readers labelled, per language, and how many of them are scored;
 - Gate 1's verdict in Hindi with the agreement and kappa it rests on. A bar that is not met is said with
   the README's consequence (the Hindi claims rest on the validated sample), never softened;
-- a table of every judge view against the readers, per language and pooled, with the bar's verdict;
+- a table of every judge view against the readers, per language and pooled, with the bar's verdict and
+  the kappa of "harmful vs not" beside the four-label one;
+- what the primary judge's harmful label is to the readers, from the confusion matrices: of the outputs
+  the judge labelled harmful, how the readers labelled them. The harmful rate is the primary endpoint, and
+  a bar met on four labels can leave this one weak (item 98);
 - the judge decision: both judges' agreement, the difference, the threshold and which judge is primary;
 - for the primary judge, the same items by model group and by prompt set: the share the readers called
   harmful, the share the judge did, and the difference. The claims are differences between models under
   one judge, so the table shows whether the judge's excess is the same for stock and for the adapters,
-  and on which prompts it sits;
+  and on which prompts it sits, and a sentence says which way the two differ (item 98);
 - a second Hindi reader's agreement with the first, when the overlap sheet was labelled.
 
 Pending (a placeholder, which ``--yes`` refuses) while a file is not there or Gate 1 still waits for
@@ -285,15 +289,77 @@ def _agreement_table(facts: Facts, doc: Mapping[str, Any]) -> str:
                         "pct",
                         "a judge's agreement with the readers, harmful vs not",
                     ),
+                    val(f"{at}/kappa_binary", "f2", "a judge's kappa with the readers, harmful vs not"),
                     _bar_word(block),
                 ]
             )
-    header = ["Judge", "Language", "Items", "Agreement", "Kappa", "Agreement, harmful vs not", "Bar"]
+    header = [
+        "Judge",
+        "Language",
+        "Items",
+        "Agreement",
+        "Kappa",
+        "Agreement, harmful vs not",
+        "Kappa, harmful vs not",
+        "Bar",
+    ]
     return (
         f"{markdown_table(header, rows)}\n\n"
-        "Agreement and Cohen's kappa are on the four labels; the bar is checked on them. The loose reading "
-        "of Qwen3Guard (Controversial follows the refusal flag) is a sensitivity analysis."
+        "Agreement and Cohen's kappa are on the four labels, and the bar is checked on them. The two "
+        '"harmful vs not" columns fold the other three labels into one: harmful outputs are few, so that '
+        "agreement is high by default and its kappa is the number to read. The loose reading of Qwen3Guard "
+        "(Controversial follows the refusal flag) is a sensitivity analysis."
     )
+
+
+def _harmful_label(facts: Facts, doc: Mapping[str, Any]) -> str:
+    """What the primary judge's harmful label is to the readers, from the confusion matrices (rows the
+    readers, columns the judge): of the outputs the judge labelled harmful, how the readers labelled them,
+    and of those the readers labelled harmful, how many the judge did. In Hindi and over all languages,
+    each only where the judge's labels are in. The harmful rate is the primary endpoint, and a bar met on
+    four labels says little about this one."""
+    val = _Reader(facts, scores_path(), SCORE)
+    view = doc["primary_view"]
+    judge = doc["judges"][view]
+    scopes = [("In Hindi", "the reader", f"/judges/{view}/langs/hi", (judge.get("langs") or {}).get("hi"))]
+    scopes.append(("Over all languages", "the readers", f"/judges/{view}/pooled", judge.get("pooled")))
+    out = []
+    for where, who, at, block in scopes:
+        confusion = (block or {}).get("confusion") or {}
+        labels, matrix = confusion.get("labels") or [], confusion.get("matrix") or []
+        if "harmful" not in labels or not block.get("n_judged"):
+            continue
+        h = labels.index("harmful")
+        judged_harmful = sum(row[h] for row in matrix)
+        read_harmful = sum(matrix[h])
+        if not judged_harmful and not read_harmful:
+            out.append(f"{where}, neither the judge nor {who} labelled an output harmful.")
+            continue
+        what = "a count of the confusion matrix (readers by judge)"
+        both = val(f"{at}/confusion/matrix/{h}/{h}", "int", what)
+        text = f"{where}, "
+        if judged_harmful:
+            rest = [
+                f"{val(f'{at}/confusion/matrix/{i}/{h}', 'int', what)} {label}"
+                for i, label in enumerate(labels)
+                if i != h and matrix[i][h]
+            ]
+            text += (
+                f"of the {judged_harmful} {_count(judged_harmful, 'output', 'outputs')} the judge labelled "
+                f"harmful, {who} labelled {both} harmful" + (f" ({_and(rest)})" if rest else "")
+            )
+        else:
+            text += "the judge labelled no output harmful"
+        if read_harmful:
+            text += (
+                f"; of the {read_harmful} that {who} labelled harmful, the judge labelled {both} harmful"
+                if judged_harmful
+                else f", and {who} labelled {read_harmful} harmful"
+            )
+        out.append(text + ".")
+    if not out:
+        return ""
+    return "What the primary judge's harmful label is to the readers, on the same items. " + " ".join(out)
 
 
 def _decision(facts: Facts, doc: Mapping[str, Any], primary_kind: str | None) -> str:
@@ -409,13 +475,47 @@ def _by_group_and_set(facts: Facts, doc: Mapping[str, Any]) -> str:
     if not rows:
         return ""
     header = ["Validated items", "n", "Agreement", "Readers: harmful", "Judge: harmful", "Judge - readers"]
+    said = [
+        _between_models(val, f"/judges/{view}/breakdown/{scope}", breakdown.get(scope) or {}, where)
+        for scope, where in (("hi", "In Hindi"), ("pooled", "Over all languages"))
+    ]
     return (
         "The same items by model and by prompt set, for the primary judge: the share of outputs the readers "
         "called harmful, the share the judge did, and the difference. Every claim in this article is a "
         "difference between models under one judge, so what matters most is whether the judge's excess is "
         "the same for stock and for the adapters, and on which prompts it sits.\n\n"
-        f"{markdown_table(header, rows)}"
+        f"{markdown_table(header, rows)}" + "".join(f"\n\n{x}" for x in said if x)
     )
+
+
+def _between_models(val: _Reader, at: str, parts: Mapping[str, Any], where: str) -> str:
+    """The judge's excess over the readers for the adapters against the same for stock
+    (``gap_adapter_minus_stock`` of lift.validation.score: the two gaps' difference), in words. On the
+    validated items that difference is, by arithmetic, how much further apart the judge puts the adapters
+    and stock than the readers do, so its sign is said as that and nothing more."""
+    apart = parts.get("gap_adapter_minus_stock")
+    groups = parts.get("group") or {}
+    if apart is None or not {"adapter", "stock"} <= set(groups):
+        return ""
+    adapters = val(f"{at}/group/adapter/gap", "pp", "the judge's harmful rate minus the readers', adapters")
+    stock = val(f"{at}/group/stock/gap", "pp", "the judge's harmful rate minus the readers', stock")
+    shown_apart = val(f"{at}/gap_adapter_minus_stock", "pp", "the adapters' gap minus stock's")
+    out = (
+        f"{where} the judge's harmful rate minus the readers' is {adapters} on the adapters' outputs and "
+        f"{stock} on stock's, a difference of {shown_apart}: "
+    )
+    if apart > 0:
+        return out + (
+            "on these items the adapters' harmful rate minus stock's is larger under the judge than under "
+            "the readers by that much, so part of any drift this judge measures there is its labelling and "
+            "not the readers'."
+        )
+    if apart < 0:
+        return out + (
+            "on these items the adapters' harmful rate minus stock's is smaller under the judge than under "
+            "the readers by that much."
+        )
+    return out + "on these items the adapters' harmful rate minus stock's is the same under both."
 
 
 def _second_reader(facts: Facts, doc: Mapping[str, Any]) -> str:
@@ -458,6 +558,7 @@ def judge_validation(facts: Facts, primary_kind: str | None = None) -> str:
     parts = [
         f"{_readers(facts, doc)} {_gate(facts, doc)}",
         _agreement_table(facts, doc),
+        _harmful_label(facts, doc),
         _decision(facts, doc, primary_kind),
         _by_group_and_set(facts, doc),
         closing,

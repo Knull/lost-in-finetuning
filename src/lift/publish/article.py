@@ -635,14 +635,16 @@ UNPLACED = {"cells"}
 
 
 def judge_on_benign(facts: Facts) -> str:
-    """What the judge's harmful label does on harmless prompts (docs/decisions.md item 95), read from P07's
-    table of every final cell, which the article does not place: on the hard-benign Hindi prompts, the
-    share of stock's answers and of the comparison adapter's (seed 1) labelled harmful, with the share on
-    outputs that trip no unclear flag, against the same shares on the easy-benign ones. Those prompts are
-    harmless by construction, so the sentence says what the label is there and points at the readers'
-    labels of such answers. Only what the table holds is said: an adapter or a set without its cell is
-    left out, and with no hard-benign Hindi cell of stock the sentence says the cells were not run.
-    Pending while the report or its cells table is not there."""
+    """What the judge's harmful label does on benign prompts (docs/decisions.md items 95 and 98), read
+    from P07's table of every final cell, which the article does not place: on the hard-benign Hindi
+    prompts, the share of stock's answers and of the comparison adapter's (seed 1) labelled harmful, with
+    the share on outputs that trip no unclear flag, against the same shares on the easy-benign ones. Their
+    source wrote those prompts as benign requests, which says nothing of the answers (the readers of
+    validation round 1 called a fifth of the validated ones harmful), so the sentence says what the label
+    is about there and points at the readers' labels of such answers. Only what the table holds is said:
+    an adapter or a set without its cell is left out, and with no hard-benign Hindi cell of stock the
+    sentence says the cells were not run. Pending while the report or its cells table is not there.
+    """
     rows = facts.table_rows("cells")
     if rows is None:
         what = "the judge's harmful label on answers to benign prompts"
@@ -665,7 +667,7 @@ def judge_on_benign(facts: Facts) -> str:
     if stock_hard is None:
         return (
             "The hard-benign Hindi cells of the final split were not run, so the judge's harmful label on "
-            "answers to harmless prompts is not reported."
+            "answers to benign prompts is not reported."
         )
     with_adapter = adapter_hard is not None
 
@@ -678,7 +680,7 @@ def judge_on_benign(facts: Facts) -> str:
         return f"{stock} and {other}" if with_adapter else stock
 
     out = (
-        "The judge's harmful label also falls on answers to harmless prompts: on the hard-benign Hindi "
+        "The judge's harmful label also falls on answers to benign prompts: on the hard-benign Hindi "
         f"prompts of the final split it is on {stock_hard} of stock's answers"
     ) + (f" and {adapter_hard} of `{adapter}`'s" if with_adapter else "")
     intact = said(pair("hard_benign", "harmful_intact_rate"))
@@ -688,9 +690,9 @@ def judge_on_benign(facts: Facts) -> str:
     if easy:
         out += f", against {easy} on the easy-benign ones"
     return (
-        f"{out}. Those prompts are harmless by construction, so there the label is the judge's reading of "
-        'the answer alone. What readers called such answers is in the table by prompt set under "The judge '
-        'against native readers".'
+        f"{out}. Their source (OR-Bench-Hard) wrote those prompts as benign requests that look harmful, so "
+        "there the label is about the answer and not the request. How often readers called such answers "
+        'harmful is in the table by prompt set under "The judge against native readers".'
     )
 
 
