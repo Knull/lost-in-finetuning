@@ -2,6 +2,69 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 11, 2026 (late afternoon): round 1 complete, the judge decision, the second judge on whole cells
+
+Read at about 16:25 UK, before `decide-judge` was run for real, before `lift select` and before any
+freeze; no final-split output exists.
+
+The Chinese sheet. The reader's first pass used the translation spot-check's marks (ok, fixed, no)
+and graded quality; it was not imported. The same reader relabelled the sheet with the four labels
+from guidelines.md and says no AI was used; it was imported without a warning (refusal 16, benign
+20, unclear 4, harmful 0). Round 1 is complete: 180 items, none skipped.
+
+What `lift validate score --round 1` printed (agreement / kappa on the four labels):
+
+- Qwen3Guard strict: hi 0.783 / 0.666, zh 0.775 / 0.651, es 0.750 / 0.608, en 0.750 / 0.623,
+  pooled 0.767 / 0.641. The bar is met in every language and pooled, on kappa.
+- The frontier judge: hi 0.767 / 0.640, zh 0.900 / 0.837, es 0.625 / 0.429 (bar not met), en
+  0.800 / 0.692, pooled 0.772 / 0.645.
+- In Chinese the frontier judge agrees with the reader on 90% of items, against 63 to 80% in the
+  other languages, while Qwen3Guard's 77.5% is in line with its others. That is the pattern
+  labels made with an LLM's help would leave; an easy sheet would leave it too (no harmful
+  output, mostly plain refusals and benign answers), and 40 items cannot tell the two apart.
+  Nothing rests on it: without the Chinese sheet the frontier judge's margin is -2.9 points
+  (103 against 107 of 140), with it +0.6, both short of 5, and the Hindi bar does not use it.
+
+The decision (dry run): the frontier judge 139 of 180 right, Qwen3Guard 138, +0.56 points against
+the threshold of 5; McNemar p 1.0 on the 33 items exactly one judge got right; bootstrap -5.7 to
++6.7 points. By the reader's label: harmful -3.3, refusal -4.4, benign +5.0, unclear +3.3; without
+unclear -3.0; harmful against not harmful +7.8. Qwen3Guard stays primary under the pre-registered
+rule.
+
+The second judge, from the judge runs' logs: its provider declined to judge (API stop reason
+"refusal") 42 to 47 of the 108 to 134 harmful-set items of each model's 10% sample and validated
+items, and none or almost none on the benign sets; the labelling rules record each as unclear. On
+the three whole Hindi harmful dev cells (172 prompts each, `--sample 1.0`):
+
+| | harmful | refusal | benign | unclear | of which the judge declined |
+|---|---|---|---|---|---|
+| stock | 12 | 116 | 11 | 33 | 32 |
+| the stress adapter | 39 | 68 | 15 | 50 | 30 |
+| WiSE-FT 0.25 | 6 | 125 | 7 | 34 | 33 |
+
+Against Qwen3Guard's 24, 84 and 11 harmful and 132, 76 and 147 refusals on the same prompts. Under
+the second judge the adapter's harmful rate is still about three times stock's (22.7% against
+7.0%; 27.5% against 8.6% of the prompts it judged) and WiSE-FT 0.25 is still under stock's (3.5%),
+with the drift about half as large as under the primary judge (+16 points against +35). The
+declined prompts are about the same number for every model, so they follow the prompt, not the
+answer.
+
+99. **The second judge's failures are reported, and its reading is also given without them.**
+    Reporting only.
+    - Why. The second judge's provider declines to judge about one harmful prompt in five whatever
+      the model answered, and rule 3 records each as unclear: under its labels a harmful answer to
+      such a prompt is never counted, on either side. The final report gave the second judge's
+      drift and repair with no word of this.
+    - `lift stats`: each second-judge reading carries `judge_failures` per seed (the prompts it
+      failed on, per side and on either side, and the cell's size), and beside it a reading that
+      leaves the prompts it failed on, on either side, out of the paired comparison
+      (`second_judge_judged_effects`). The sensitivity table shows both rows and how many prompts
+      were left out; the article's limitation on the judge says so.
+    - Not changed: the labelling rules (a failure stays unclear in every stored label and in every
+      pre-registered number), the judge decision rule, which the frontier judge's failures count
+      against as written, the primary endpoint and every claim. The Chinese pattern above is
+      recorded here and not in the article.
+
 ## Nov 11, 2026 (afternoon): after round 1's scores for three languages were read
 
 `lift validate score --round 1` ran on the laptop at about 14:00 UK with the Hindi, Spanish and

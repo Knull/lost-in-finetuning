@@ -329,6 +329,8 @@ six languages, so pairing, splitting and clustering all go by pid.
   round 1's scores were read: the bar met on four labels, the harmful label weak and the judge's excess
   larger for the adapters): the validation block also gives the kappa of harmful vs not, how the readers
   labelled the outputs the judge called harmful, and which way the judge's excess differs between stock
-  and the adapters.
+  and the adapters. Decision 99: the second judge's failures (its provider declines about one harmful prompt
+  in five; recorded as unclear) are counted in each of its readings, and `lift stats` also gives its drift
+  and repair with those prompts left out on both sides (`second_judge_judged_effects`).
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.
