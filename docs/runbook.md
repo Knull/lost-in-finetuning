@@ -2,8 +2,14 @@
 
 Written Nov 10 (early morning), with `main` at the article reframing commit. It lists what a
 person runs, in order, from the end of the dev sweep to the Nov 13 submission. Times for steps
-that have never run on a GPU are estimates and say so. If this file and the README disagree, the
-README wins.
+that have never run on a GPU are estimates and say so. If this file and PREREGISTRATION.md
+disagree, PREREGISTRATION.md wins (it was the README until Nov 10, and "the README's" below still
+means it).
+
+Updated Nov 11: the organisers moved the deadline a day, to Nov 15 23:59 AoE, which is Mon Nov 16
+11:59 UK (decisions item 97). The first submission still goes in on Fri Nov 13; a later one
+replaces it, and the hard stop is Sun Nov 15 23:59 UK. The day goes to the judge decision's
+contingency, a complete round 1 and the first real uploads, in that order, not to new arms.
 
 Updated Nov 10 after the sweep was read (decisions items 87 and 88): step 5 moves in front of
 the freeze and takes the dev held-out lines with it, step 1 gains a count-only breakdown, and

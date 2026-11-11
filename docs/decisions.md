@@ -2,6 +2,29 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 11, 2026: the deadline moved a day
+
+The organisers' email of Nov 11 (pasted by the team at 12:11 UK): the Stage 1 deadline moves from
+Nov 14 to Nov 15, 23:59 AoE, which is Mon Nov 16 11:59 UK. A submission can be sent again and the
+latest counts. Every team can get 1:1 feedback from the organisers through a ticket in their
+Discord (#report_issues), and there are office hours every day from 8 to 9 PM IST (14:30 to 15:30
+UK). The email says content and approach count for more than polish.
+
+97. **The hard stop moves with the deadline; the first submission stays on Friday.** A schedule
+    change (item 13); no rule, setting or endpoint changes.
+    - First submission: still Fri Nov 13, as soon as the finals are reported. Later versions
+      replace it.
+    - Hard stop: Sun Nov 15 23:59 UK, the same 12 hours before the deadline that item 13 kept.
+    - What the day is for, in this order: the judge decision's contingency (if the frontier
+      judge becomes primary, the dev cells are judged again and the selection is rerun, about a
+      day); a complete validation round 1, so the Chinese and Spanish sheets are waited for
+      longer before `--allow-incomplete` is used; the publish steps, which have only run as dry
+      runs, started a day before they are needed; seeds 2 and 3 of the standard adapters, which
+      stay in.
+    - What it is not for: a new experimental arm (rule 5). If the organisers' feedback asks for
+      an experiment the pre-registration does not hold, it goes to the write-up's limitations,
+      or it runs labelled exploratory under its own entry here.
+
 ## Nov 10, 2026 (evening): what the organisers have said
 
 Read from the hackathon's Discord (messages of Nov 3 to Nov 10, pasted by the team at 19:03 UK) and

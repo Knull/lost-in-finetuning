@@ -57,9 +57,11 @@ ultracode: carry out prompts/P01_data.md
 
 ## Schedule (solo, from Nov 3)
 
-The official deadline is Nov 14 23:59 AoE (Nov 15 11:59 UK). We still aim for Nov 13, with Nov 14
-23:59 UK as the hard stop. GPU times assume a Colab A100 at roughly 5x a T4. Gate 0 measures the
-real figure.
+The official deadline is Nov 15 23:59 AoE (Mon Nov 16 11:59 UK); it was a day earlier until the
+organisers moved it on Nov 11 (docs/decisions.md item 97). The first submission still goes in on
+Nov 13, and Sun Nov 15 23:59 UK is the hard stop. The table is the plan as written on Nov 3, with
+its last rows moved; docs/runbook.md has where things stand. GPU times assume a Colab A100 at
+roughly 5x a T4. Gate 0 measures the real figure.
 
 | Day | Claude Code | GPU (Colab A100 unless noted) | You |
 | --- | --- | --- | --- |
@@ -71,8 +73,9 @@ real figure.
 | Sun Nov 8 to Tue Nov 10 | fixes; P08 drafts with placeholders | final evals of 13 variants (~3 to 4 h, primary endpoint first); second-judge sample (API) | validation round 2 (60 hi, 20 each zh/es/en); utility blind check (60 Hindi pairs) |
 | Wed Nov 11 | `lift stats`, `lift report` | stragglers only | Gate 4: results freeze |
 | Thu Nov 12 | P08, then R3 | | HF uploads (`--yes`), make the repo public, article read-through |
-| Fri Nov 13 | | | submit through the organisers' form |
-| Sat Nov 14 | | | buffer; hard stop 23:59 UK |
+| Fri Nov 13 | | | first submission through the organisers' form |
+| Sat Nov 14 | fixes from the read-through | | a later submission replaces the first |
+| Sun Nov 15 | | | buffer; hard stop 23:59 UK |
 
 **Compute.** The project needs roughly 40 T4-hours, which is about 8 to 10 A100-hours, or 45 to
 75 Colab compute units out of the 200 a month. Kaggle's free T4s are overflow. A T4 number can

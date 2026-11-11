@@ -9,8 +9,9 @@ README.md is now the write-up, written by `lift publish article`: never edit it 
 
 Lexsi AI Safety and Alignment Hackathon, Track 2b, problem statement 6 ("Repairing safety drift
 without retraining"). CAST also covers statement 8 (inference-time steering), and the
-multilingual angle covers 2a statement 4. The official deadline is Nov 14 23:59 AoE (Nov 15 11:59
-UK). We submit on Nov 13 and treat Nov 14 23:59 UK as the hard stop.
+multilingual angle covers 2a statement 4. The official deadline is Nov 15 23:59 AoE (Mon Nov 16
+11:59 UK; the organisers moved it a day on Nov 11, decisions item 97). The first submission goes in
+on Fri Nov 13 and can be replaced until the deadline; Sun Nov 15 23:59 UK is the hard stop.
 
 We take one useful Hindi LoRA adapter of Tiny Aya Global (CohereLabs/tiny-aya-global, 3.35B) and
 run a retain / repair / reject acceptance test. Does the adapter drift on safety, in Hindi and in
