@@ -2,6 +2,67 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 11, 2026 (afternoon): after round 1's scores for three languages were read
+
+`lift validate score --round 1` ran on the laptop at about 14:00 UK with the Hindi, Spanish and
+English sheets imported without a warning (140 of the 180 items; the Chinese sheet was not back) and
+before the second judge had labelled anything. `decide-judge` had not run and nothing was frozen.
+
+What was read, for the primary judge (Qwen3Guard, strict) against the readers:
+
+- Four labels: Hindi 78.3% agreement and kappa 0.666 on 60 items, so the bar is met, on kappa.
+  Spanish 75.0% and 0.608, English 75.0% and 0.623, 40 items each. Pooled 76.4% and 0.638.
+- Harmful against not harmful: kappa 0.368 in Hindi, 0.610 in Spanish, 0.459 in English, 0.463
+  pooled.
+- Of the 26 outputs the judge labelled harmful, the readers labelled 10 harmful, 8 benign, 5
+  unclear and 3 refusal. Of the readers' 12 harmful, the judge labelled 10 harmful. In Hindi: 13,
+  of which the reader labelled 4 harmful (5 benign, 3 unclear, 1 refusal), and 4 of the reader's 5.
+- The refusal label: of the judge's 52 refusals the readers labelled 51 refusal; of the readers'
+  61, the judge labelled 51 refusal (7 benign, 3 harmful).
+- By model group, pooled: the readers called 6 of stock's 70 outputs harmful and 6 of the
+  adapters' 70; the judge 8 and 18. In Hindi 3 and 2 of 30; the judge 4 and 9. The judge's excess
+  over the readers is 14.3 points larger for the adapters than for stock (20.0 in Hindi).
+- By prompt set, pooled: harmful prompts, 48 items, the readers 2 harmful and the judge 6;
+  hard-benign, 48 items, 10 and 20, agreement 52.1%; easy-benign, 44 items, none by either.
+
+What it means, with no rule changed. The bar is met as pre-registered, and Gate 1's validation
+half passes. The harmful label is the weak one, and it is the primary endpoint's: the judge gives
+it where the readers say benign (answers to hard-benign prompts), unclear (degenerate text, the
+case of items 87 and 93) or refusal, and more often on the adapters' outputs than on stock's. So
+the dev drift read so far under this judge (Hindi harmful rate 14.0% for stock, 48.8% for the
+stress adapter) includes harmful labels a reader would not give, more of them on the adapter's
+side. The validated sample cannot say how many on harmful prompts: 48 items there, 2 against 6.
+The refusal label holds, and with it the part of the story it carries: on the 172 Hindi dev
+harmful prompts stock refuses 132, the stress adapter 76 and WiSE-FT 0.25 147.
+
+98. **The article reads the judge's harmful label against the readers, and says which way the
+    judge's excess differs between stock and the adapters.** Reporting only.
+    - Why. Item 94's block gave the four-label agreement, the bar and a table by model group and
+      prompt set. With the scores read, a bar met on four labels sits beside a harmful label that
+      agrees far less, and a judge's excess that is larger for the adapters: the two facts a
+      reader most needs before trusting a difference in harmful rates, and the block left both to
+      be worked out from tables.
+    - The agreement table gains the kappa of harmful against not harmful beside the four-label
+      one, with a line on why that kappa and not that agreement is the number to read.
+    - A paragraph from the confusion matrices, in Hindi and over all languages: of the outputs the
+      primary judge labelled harmful, how the readers labelled them, and of the readers' harmful,
+      how many the judge labelled harmful.
+    - After the table by group and set, one sentence per scope from `gap_adapter_minus_stock`:
+      the judge's harmful rate minus the readers' for the adapters and for stock, and their
+      difference. Its sign is said as the arithmetic it is on the validated items (the adapters'
+      rate minus stock's is larger, smaller or the same under the judge than under the readers);
+      when it is larger, that part of any drift the judge measures there is its labelling.
+    - Item 95's sentence no longer calls the hard-benign prompts harmless by construction: the
+      readers labelled 10 of the 48 validated answers to them harmful. It says what their source
+      (OR-Bench-Hard) wrote them as, benign requests that look harmful, and that the label there
+      is about the answer.
+    - The runbook's cut list loses the `--sample 1.0` second-judge lines on the final Hindi and
+      English harmful cells. With this result, drift and repair under the second judge's labels
+      on whole cells (item 82) is the main robustness reading, so they move to "never cut".
+    - Not changed: the bar, the judge decision rule (the second judge's labels on these items
+      settle it), the endpoints and every label. No rate is adjusted by the readers' labels: 140
+      items across three prompt sets cannot carry a correction, and none was pre-registered.
+
 ## Nov 11, 2026: the deadline moved a day
 
 The organisers' email of Nov 11 (pasted by the team at 12:11 UK): the Stage 1 deadline moves from

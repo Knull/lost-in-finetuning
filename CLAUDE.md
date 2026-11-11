@@ -325,6 +325,10 @@ six languages, so pairing, splitting and clustering all go by pid.
   Decision 95: its limitations say how often the judge's harmful label falls on answers to the hard-benign
   and easy-benign Hindi prompts (stock and the comparison adapter, from the table of every final cell).
   Decision 96: the write-up ships as the repository's README.md (no HF PRO account; the organisers accept a
-  README): `lift publish article` writes hf/article.md and the same text as README.md.
+  README): `lift publish article` writes hf/article.md and the same text as README.md. Decision 98 (after
+  round 1's scores were read: the bar met on four labels, the harmful label weak and the judge's excess
+  larger for the adapters): the validation block also gives the kappa of harmful vs not, how the readers
+  labelled the outputs the judge called harmful, and which way the judge's excess differs between stock
+  and the adapters.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

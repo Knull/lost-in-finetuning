@@ -309,12 +309,14 @@ Resources panel for the real figure.
 1. Seeds 2 and 3 of aya and indicalign (step 5 and four lines of step 6). The report then pools
    over seed 1 and lists the other seeds as not run. Saves about 6 hours and 47 units.
 2. The Space. It is "if relevant" in the organisers' list.
-3. The `--sample 1.0` second-judge lines (the 10% sample still runs).
-4. The two non-winning families' finals. Not recommended: the comparison against adapter scaling
+3. The two non-winning families' finals. Not recommended: the comparison against adapter scaling
    is the third question of the study.
 
 Never cut: stock, the stress adapter and the overall winner on the final split, validation
-round 1, and the preflight.
+round 1, the preflight, and the three `--sample 1.0` second-judge lines of step 7 (decisions item
+98: round 1 showed the primary judge's harmful label exceeding the readers' by more on the
+adapters' outputs than on stock's, so drift and repair under the second judge's labels on whole
+cells is the main robustness reading).
 
 ## Sending me numbers
 
