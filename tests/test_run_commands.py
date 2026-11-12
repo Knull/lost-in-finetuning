@@ -1076,7 +1076,9 @@ def test_generate_skips_a_short_cell_lists_its_remedy_and_exits_3(tiny_model_dir
     argv = ["generate", "--variant", "stock", "--split", "final", "--sets", "easy_benign", "--langs", "zh",
             "en", "--device", "cpu", "--dtype", "bf16"]
     # The final split is closed until Gate 3's tag (lift.final's guard, tests/test_final.py): the line is
-    # refused before anything is read.
+    # refused before anything is read. The repo's own tags never reach the test (the recipe is frozen since
+    # Nov 12, so a checkout with tags lists recipe-frozen-20261112).
+    monkeypatch.setattr("lift.final.frozen_tags", lambda git=None: [])
     with pytest.raises(SystemExit, match="the final split is closed to stock: no recipe-frozen-"):
         main(argv)
     monkeypatch.setattr("lift.final.check_final", lambda variant, **kw: "recipe-frozen-20261107")

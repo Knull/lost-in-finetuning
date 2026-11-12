@@ -297,12 +297,16 @@ def test_the_secondary_selection_reads_the_gain_on_the_heldout_loss(registry):
     assert "frozen" not in doc and "freeze" not in doc
 
 
-def test_the_article_says_both_selections_from_the_files_lift_select_writes(registry):
+def test_the_article_says_both_selections_from_the_files_lift_select_writes(registry, monkeypatch):
     """P08's paragraph on the dev selection reads selection.json and selection_secondary.json as the real
     writers write them (not the publish tests' stand-ins): on the "ties" numbers the primary rule freezes
     WiSE-FT 0.50, which keeps a third of the held-out gain, and the secondary rule picks CAST."""
-    from lift.publish import article
+    from lift.publish import article, inputs
     from lift.publish.inputs import Facts
+
+    # The repo's own recipe-frozen-* tags never reach the test: a checkout with tags holds the real one
+    # (Nov 12), whose recipe is not this test's.
+    monkeypatch.setattr(inputs, "_git", lambda argv: "" if list(argv[:1]) == ["tag"] else None)
 
     nll = heldout_case(**{"wiseft-l0.50": -0.10, "cast-m1.0": -0.30})
     select.run(ADAPTER, reader=fake_reader(CASES["ties"]), date="20261110")
