@@ -1,0 +1,11 @@
+{
+  "adapter": "adapter-indicalign-stress-s1",
+  "frozen": {
+    "cast": "cast-m0.5-adapter-indicalign-stress-s1",
+    "resta": "resta-a0.10-adapter-indicalign-stress-s1",
+    "wiseft": "wiseft-l0.25-adapter-indicalign-stress-s1"
+  },
+  "overall_winner": "wiseft-l0.25-adapter-indicalign-stress-s1",
+  "selection_sha256": "0b396f5ff990a1b852a384660a38b76a4fb7abed98eddf7f946f1ae2c108e762",
+  "version": 1
+}
