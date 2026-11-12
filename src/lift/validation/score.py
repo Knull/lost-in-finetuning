@@ -805,9 +805,14 @@ def score(round_no: int | None = None, *, qwen3guard_judge: str | None = None,
             name for name, digest in decided.items()
             if name.endswith(".jsonl") and col.inputs.get(name, digest) != digest)
     recorded = recorded_decision()
+    drawn: dict[str, set[str]] = defaultdict(set)  # the variants each group was drawn from, every round
+    for r in col.rounds:
+        for group, names in (load_round(r).get("variants") or {}).items():
+            drawn[group].update(names)
     doc = {
         "round": round_no,
         "rounds": col.rounds,
+        "variants": {group: sorted(names) for group, names in sorted(drawn.items())},
         "primary_view": primary_view(),
         "decision": {"recorded": recorded, "config_primary": config_primary(),
                      "applied": recorded is None or recorded == config_primary()},

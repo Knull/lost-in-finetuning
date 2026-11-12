@@ -71,8 +71,22 @@ DECIDED_VIEW = {"qwen3guard": "qwen3guard_strict", "frontier": "frontier"}
 KIND_NAMES = {"qwen": "Qwen3Guard", "frontier": "the frontier judge"}
 LANGS = {"hi": "Hindi", "en": "English", "zh": "Chinese", "es": "Spanish"}
 GROUPS = {"stock": "stock", "adapter": "the adapters", "repaired": "the repaired models"}
-# Round 1 draws its adapters at seed 1 (lift.validation.sample.ROUNDS): how the lead names the groups.
-DRAWN = {**GROUPS, "adapter": "the seed-1 adapters"}
+# How a round's lead names a group when its scores do not name the variants (written before they did):
+# round 1 draws the standard recipe's seed-1 adapters unless others are named (lift.validation.sample).
+DRAWN = {
+    1: {**GROUPS, "adapter": "the standard recipe's seed-1 adapters"},
+    2: GROUPS,
+}
+# A group named with its variants: the word before the names, one variant and several.
+NAMED = {
+    "adapter": ("the adapter", "the adapters"),
+    "repaired": ("the repaired model", "the repaired models"),
+}
+SPLIT_WORDS = {
+    ("dev",): "on the dev split",
+    ("final",): "on the final split",
+    ("dev", "final"): "on dev and final",
+}
 SETS = {
     "harmful": "harmful prompts",
     "hard_benign": "hard-benign prompts",
@@ -89,10 +103,14 @@ WITHHELD = {
 NONE = "-"  # a cell with nothing to show (a view no judgement of which is in yet)
 
 
-def scores_path() -> Path:
+def scores_path(round_no: int = ROUND) -> Path:
     from lift.validation.store import metrics_dir
 
-    return metrics_dir() / f"round{ROUND}.json"
+    return metrics_dir() / f"round{round_no}.json"
+
+
+def _stage(round_no: int) -> str:
+    return f"P04 lift validate score --round {round_no}"
 
 
 def gate_path() -> Path:
@@ -127,32 +145,32 @@ class _Reader:
         return self.facts.value(self.path, pointer, kind, what=what, stage=self.stage)
 
 
-def _views(doc: Mapping[str, Any]) -> list[str]:
+def _views(doc: Mapping[str, Any], rnd: int = ROUND) -> list[str]:
     """The judge views the scores hold, the primary one first, then in the order of VIEW_NAMES."""
     primary = doc.get("primary_view")
     judges = doc.get("judges") or {}
     if primary not in judges:
-        raise PublishError(f"{shown(scores_path())}: no scores of its primary judge ({primary})")
+        raise PublishError(f"{shown(scores_path(rnd))}: no scores of its primary judge ({primary})")
     rest = [v for v in VIEW_NAMES if v in judges and v != primary]
     return [primary, *rest, *sorted(v for v in judges if v != primary and v not in VIEW_NAMES)]
 
 
-def _check_scores(doc: Mapping[str, Any]) -> None:
-    path = shown(scores_path())
-    if doc.get("round") != ROUND:
-        raise PublishError(f"{path} holds the scores of round {doc.get('round')}, not round {ROUND}")
+def _check_scores(doc: Mapping[str, Any], rnd: int = ROUND) -> None:
+    path = shown(scores_path(rnd))
+    if doc.get("round") != rnd:
+        raise PublishError(f"{path} holds the scores of round {doc.get('round')}, not round {rnd}")
     bar = dict(config.get("validation.bar"))
     if doc.get("bar") != bar:
         raise PublishError(
             f"{path} was scored under the bar {doc.get('bar')}, not configs/project.yaml's {bar}: run "
-            "`lift validate score --round 1` again"
+            f"`lift validate score --round {rnd}` again"
         )
     changed = (doc.get("checks") or {}).get("labels_changed_since_decision")
     if changed:
         raise PublishError(
             f"{path}: labels were imported again after the judge decision ({', '.join(changed)}): run "
             "`lift validate decide-judge` again (--force keeps the old decision in its history), then "
-            "`lift validate score --round 1`"
+            f"`lift validate score --round {rnd}`"
         )
 
 
@@ -171,9 +189,37 @@ def _same_labels(doc: Mapping[str, Any], other: Mapping[str, Any], other_path: P
         )
 
 
-def _readers(facts: Facts, doc: Mapping[str, Any]) -> str:
+def _drawn(doc: Mapping[str, Any], rnd: int) -> str:
+    """The round's model groups as the lead names them: each with its variants when the scores name them
+    (``variants``, written by lift.validation.score since Nov 12), and the splits the round's plan draws
+    each group from (lift.validation.sample.ROUNDS), groups on the same splits said together."""
+    from lift.validation.sample import ROUNDS
+
+    plan = ROUNDS.get(rnd)
+    order = [g.name for g in plan.groups] if plan else list(GROUPS)
+    splits = {g.name: tuple(g.splits) for g in plan.groups} if plan else {}
+    present = doc["judges"][doc["primary_view"]]["breakdown"]["pooled"]["group"]
+    groups = [g for g in order if g in present] + sorted(g for g in present if g not in order)
+    named = doc.get("variants") or {}
+    said: list[tuple[str, tuple[str, ...]]] = []
+    for g in groups:
+        names = named.get(g) or []
+        if g in NAMED and names:
+            one, many = NAMED[g]
+            label = f"{one if len(names) == 1 else many} " + _and([f"`{n}`" for n in names])
+        else:
+            label = DRAWN.get(rnd, GROUPS).get(g, g)
+        if said and said[-1][1] == splits.get(g, ()):
+            said[-1] = (f"{said[-1][0]} and {label}", said[-1][1])
+        else:
+            said.append((label, splits.get(g, ())))
+    clauses = [f"{label} {SPLIT_WORDS[where]}" if where in SPLIT_WORDS else label for label, where in said]
+    return "; ".join(clauses)
+
+
+def _readers(facts: Facts, doc: Mapping[str, Any], rnd: int = ROUND) -> str:
     """Who labelled what: the round's items per language, and how many of them are scored."""
-    val = _Reader(facts, scores_path(), SCORE)
+    val = _Reader(facts, scores_path(rnd), _stage(rnd))
     humans = doc["humans"]
     langs = [lang for lang in humans if lang != "pooled"]
     per_lang = _and(
@@ -183,14 +229,18 @@ def _readers(facts: Facts, doc: Mapping[str, Any]) -> str:
             for lang in langs
         ]
     )
-    total = val("/humans/pooled/items", "int", "the items of validation round 1")
-    drawn = doc["judges"][doc["primary_view"]]["breakdown"]["pooled"]["group"]
-    groups = [g for g in GROUPS if g in drawn] + sorted(g for g in drawn if g not in GROUPS)
-    who = _and([DRAWN.get(g, g) for g in groups])
-    out = (
-        f"Native readers were given {total} dev-split outputs of {who} ({per_lang}) and labelled each "
-        "harmful, refusal, benign or unclear, without seeing which model wrote it or what a judge said."
-    )
+    total = val("/humans/pooled/items", "int", f"the items of validation round {rnd}")
+    who = _drawn(doc, rnd)
+    if rnd == ROUND:
+        out = (
+            f"Native readers were given {total} outputs ({per_lang}) of {who}, and labelled each harmful, "
+            "refusal, benign or unclear, without seeing which model wrote it or what a judge said."
+        )
+    else:
+        out = (
+            f"**Round {rnd}.** The same readers, task and guidelines, on {total} other outputs ({per_lang}): "
+            f"{who}."
+        )
     pooled = humans["pooled"]
     if pooled.get("scored") != pooled.get("items"):
         scored = val("/humans/pooled/scored", "int", "the validation items scored")
@@ -263,13 +313,13 @@ def _bar_word(block: Mapping[str, Any]) -> str:
     return "met" if block["meets_bar"] else "not met"
 
 
-def _agreement_table(facts: Facts, doc: Mapping[str, Any]) -> str:
+def _agreement_table(facts: Facts, doc: Mapping[str, Any], rnd: int = ROUND) -> str:
     """Every judge view against the readers, per language and pooled."""
     from lift.publish.render import markdown_table
 
-    val = _Reader(facts, scores_path(), SCORE)
+    val = _Reader(facts, scores_path(rnd), _stage(rnd))
     rows = []
-    for view in _views(doc):
+    for view in _views(doc, rnd):
         judge = doc["judges"][view]
         name = VIEW_NAMES.get(view, view) + (" (primary)" if view == doc["primary_view"] else "")
         blocks = [
@@ -312,13 +362,13 @@ def _agreement_table(facts: Facts, doc: Mapping[str, Any]) -> str:
     )
 
 
-def _harmful_label(facts: Facts, doc: Mapping[str, Any]) -> str:
+def _harmful_label(facts: Facts, doc: Mapping[str, Any], rnd: int = ROUND) -> str:
     """What the primary judge's harmful label is to the readers, from the confusion matrices (rows the
     readers, columns the judge): of the outputs the judge labelled harmful, how the readers labelled them,
     and of those the readers labelled harmful, how many the judge did. In Hindi and over all languages,
     each only where the judge's labels are in. The harmful rate is the primary endpoint, and a bar met on
     four labels says little about this one."""
-    val = _Reader(facts, scores_path(), SCORE)
+    val = _Reader(facts, scores_path(rnd), _stage(rnd))
     view = doc["primary_view"]
     judge = doc["judges"][view]
     scopes = [("In Hindi", "the reader", f"/judges/{view}/langs/hi", (judge.get("langs") or {}).get("hi"))]
@@ -443,12 +493,12 @@ def _decision(facts: Facts, doc: Mapping[str, Any], primary_kind: str | None) ->
     return out
 
 
-def _by_group_and_set(facts: Facts, doc: Mapping[str, Any]) -> str:
+def _by_group_and_set(facts: Facts, doc: Mapping[str, Any], rnd: int = ROUND) -> str:
     """For the primary judge, the same items by model group and by prompt set: the readers' harmful rate,
     the judge's, and the difference, in Hindi and pooled."""
     from lift.publish.render import markdown_table
 
-    val = _Reader(facts, scores_path(), SCORE)
+    val = _Reader(facts, scores_path(rnd), _stage(rnd))
     view = doc["primary_view"]
     breakdown = doc["judges"][view].get("breakdown") or {}
     rows = []
@@ -476,16 +526,48 @@ def _by_group_and_set(facts: Facts, doc: Mapping[str, Any]) -> str:
         return ""
     header = ["Validated items", "n", "Agreement", "Readers: harmful", "Judge: harmful", "Judge - readers"]
     said = [
-        _between_models(val, f"/judges/{view}/breakdown/{scope}", breakdown.get(scope) or {}, where)
+        f(val, f"/judges/{view}/breakdown/{scope}", breakdown.get(scope) or {}, where)
         for scope, where in (("hi", "In Hindi"), ("pooled", "Over all languages"))
+        for f in (_between_models, _repair_side)
     ]
     return (
         "The same items by model and by prompt set, for the primary judge: the share of outputs the readers "
         "called harmful, the share the judge did, and the difference. Every claim in this article is a "
         "difference between models under one judge, so what matters most is whether the judge's excess is "
-        "the same for stock and for the adapters, and on which prompts it sits.\n\n"
+        "the same for the models compared, and on which prompts it sits.\n\n"
         f"{markdown_table(header, rows)}" + "".join(f"\n\n{x}" for x in said if x)
     )
+
+
+def _repair_side(val: _Reader, at: str, parts: Mapping[str, Any], where: str) -> str:
+    """The judge's excess over the readers on the repaired models' outputs against the same on the
+    adapters' (round 2), in words: both gaps from the scores, and which way they differ. The repair
+    comparison is repaired minus adapter, so a smaller excess on the repaired side means the judge makes
+    the repair look larger than the readers do, and a larger one smaller. No difference is shown as a
+    number: the scores hold the two gaps, not their difference."""
+    groups = parts.get("group") or {}
+    if not {"adapter", "repaired"} <= set(groups):
+        return ""
+    gap_repaired, gap_adapter = groups["repaired"].get("gap"), groups["adapter"].get("gap")
+    if gap_repaired is None or gap_adapter is None:
+        return ""
+    repaired = val(f"{at}/group/repaired/gap", "pp", "the judge's harmful rate minus the readers', repaired")
+    adapters = val(f"{at}/group/adapter/gap", "pp", "the judge's harmful rate minus the readers', adapters")
+    out = (
+        f"{where} the judge's harmful rate minus the readers' is {repaired} on the repaired models' outputs "
+        f"and {adapters} on the adapters': "
+    )
+    if gap_repaired < gap_adapter:
+        return out + (
+            "on these items the judge puts the repaired models further below the adapters than the readers "
+            "do, so part of any repair this judge measures there is its labelling."
+        )
+    if gap_repaired > gap_adapter:
+        return out + (
+            "on these items the judge puts the repaired models less far below the adapters than the readers "
+            "do, so this judge would understate a repair there."
+        )
+    return out + "on these items the judge and the readers put the two the same distance apart."
 
 
 def _between_models(val: _Reader, at: str, parts: Mapping[str, Any], where: str) -> str:
@@ -518,8 +600,8 @@ def _between_models(val: _Reader, at: str, parts: Mapping[str, Any], where: str)
     return out + "on these items the adapters' harmful rate minus stock's is the same under both."
 
 
-def _second_reader(facts: Facts, doc: Mapping[str, Any]) -> str:
-    val = _Reader(facts, scores_path(), SCORE)
+def _second_reader(facts: Facts, doc: Mapping[str, Any], rnd: int = ROUND) -> str:
+    val = _Reader(facts, scores_path(rnd), _stage(rnd))
     out = []
     for lang, block in (doc.get("inter_annotator") or {}).items():
         if not block.get("n"):
@@ -545,9 +627,60 @@ def _warnings(doc: Mapping[str, Any]) -> str:
     )
 
 
+def _uncovered(doc: Mapping[str, Any]) -> str:
+    """What round 1 holds no output of, said while no round 2 is scored (decisions.md 100): round 1 draws
+    stock and seed-1 adapters, so never a repaired model, and the stress adapter only when named."""
+    names = (doc.get("variants") or {}).get("adapter") or []
+    if any("-stress-" in n for n in names):
+        return (
+            "Round 1 holds no output of a repaired model, so the judge is not validated here on the repaired "
+            "side of the repair comparison."
+        )
+    return (
+        "Round 1 holds no output of the stress adapter or of a repaired model, so the judge is not validated "
+        "here on the outputs the repair comparison rests on."
+    )
+
+
+def _round_2(facts: Facts, first: Mapping[str, Any]) -> str:
+    """Round 2's scores (decisions.md 100), the same tables and paragraphs as round 1's without the bar's
+    verdict and the decision, which stay on round 1. Pending while the round is drawn and not scored; the
+    gap round 1 leaves is said while it is not drawn."""
+    from lift.validation.sample import existing_rounds
+
+    rnd = 2
+    path = scores_path(rnd)
+    doc = facts.doc(path)
+    if doc is None:
+        try:
+            drawn = rnd in existing_rounds()
+        except Exception:  # noqa: BLE001 - no validation tree here: nothing was drawn on this machine
+            drawn = False
+        if drawn:
+            what = f"the judges against the native readers (validation round {rnd})"
+            return f"_{facts._missing(what, path, _stage(rnd))}_"
+        return _uncovered(first)
+    _check_scores(doc, rnd)
+    if doc.get("primary_view") != first.get("primary_view"):
+        raise PublishError(
+            f"{shown(path)} was scored with {doc.get('primary_view')} as primary and "
+            f"{shown(scores_path())} with {first.get('primary_view')}: score both rounds under the same "
+            "configs/project.yaml"
+        )
+    closing = " ".join(x for x in (_second_reader(facts, doc, rnd), _warnings(doc)) if x)
+    parts = [
+        f"{_readers(facts, doc, rnd)} The judge decision and Gate 1 stay on round 1, as pre-registered.",
+        _agreement_table(facts, doc, rnd),
+        _harmful_label(facts, doc, rnd),
+        _by_group_and_set(facts, doc, rnd),
+        closing,
+    ]
+    return "\n\n".join(p for p in parts if p)
+
+
 def judge_validation(facts: Facts, primary_kind: str | None = None) -> str:
-    """The article's block on validation round 1 (module docstring). ``primary_kind`` is the kind of judge
-    behind final_report.json's judgements, None while the report is not there."""
+    """The article's block on validation rounds 1 and 2 (module docstring). ``primary_kind`` is the kind
+    of judge behind final_report.json's judgements, None while the report is not there."""
     path = scores_path()
     doc = facts.doc(path)
     if doc is None:
@@ -562,5 +695,6 @@ def judge_validation(facts: Facts, primary_kind: str | None = None) -> str:
         _decision(facts, doc, primary_kind),
         _by_group_and_set(facts, doc),
         closing,
+        _round_2(facts, doc),
     ]
     return "\n\n".join(p for p in parts if p)

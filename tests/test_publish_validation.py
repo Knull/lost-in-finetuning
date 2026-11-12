@@ -66,9 +66,9 @@ def test_the_block_says_who_labelled_what_the_bar_and_the_decision():
     text, facts, docs = block("stay")
     scores, gate, dec = docs["scores"], docs["gate"], docs["decision"]
     assert text.startswith(
-        "Native readers were given 180 dev-split outputs of stock and the seed-1 adapters (60 in Hindi, 40 "
-        "in Chinese, 40 in Spanish and 40 in English) and labelled each harmful, refusal, benign or unclear, "
-        "without seeing which model wrote it or what a judge said."
+        "Native readers were given 180 outputs (60 in Hindi, 40 in Chinese, 40 in Spanish and 40 in English) "
+        "of stock and the adapter `adapter-aya-std-s1` on the dev split, and labelled each harmful, refusal, "
+        "benign or unclear, without seeing which model wrote it or what a judge said."
     )
     assert gate["status"] == "pass" and gate["agreement"] < 0.85 <= gate["kappa"] + 0.25  # met on kappa
     assert (
@@ -91,6 +91,28 @@ def test_the_block_says_who_labelled_what_the_bar_and_the_decision():
         f"label on {fmt(overlap['agreement'], 'pct')} of them (kappa {fmt(overlap['kappa'], 'f2')})."
     ) in text
     assert PENDING not in text and facts.missing == []
+
+
+def test_scores_written_before_they_named_the_variants_get_the_plans_words():
+    docs = validation_docs("stay")
+    del docs["scores"]["variants"]
+    text, _, _ = block(docs=docs)
+    assert "of stock and the standard recipe's seed-1 adapters on the dev split, and labelled each" in text
+
+
+def test_what_round_1_does_not_cover_is_said_while_round_2_is_not_drawn():
+    """Decisions item 100: round 1 holds stock and seed-1 adapters, never a repaired model, and the stress
+    adapter only when it was named."""
+    text, _, docs = block("stay")
+    assert text.endswith(
+        "Round 1 holds no output of the stress adapter or of a repaired model, so the judge is not validated "
+        "here on the outputs the repair comparison rests on."
+    )
+    docs["scores"]["variants"]["adapter"] = ["adapter-indicalign-stress-s1"]
+    assert block(docs=docs)[0].endswith(
+        "Round 1 holds no output of a repaired model, so the judge is not validated here on the repaired "
+        "side of the repair comparison."
+    )
 
 
 def test_every_judge_view_is_set_against_the_readers_per_language_and_pooled():
@@ -145,9 +167,7 @@ def test_the_primary_judge_is_read_by_model_group_and_by_prompt_set():
     """The readers' harmful rate, the judge's and the difference on the same items: the claims are
     differences between models under one judge."""
     text, _, docs = block("stay")
-    assert (
-        "whether the judge's excess is the same for stock and for the adapters, and on which prompts" in text
-    )
+    assert "whether the judge's excess is the same for the models compared, and on which prompts" in text
     _, by = tables(text)
     assert by[0] == [
         "Validated items",
@@ -606,3 +626,99 @@ def test_a_decision_the_final_judgements_do_not_follow_stops_the_article(out):
     write_report(doc)
     text = article.build()[0].read_text(encoding="utf-8")
     assert "**the frontier judge became the primary judge**" in text
+
+
+# ------------------------------------------------------------------------------------- round 2 (item 100)
+
+
+def test_round_2_is_reported_beside_round_1_with_its_models_and_without_a_verdict():
+    """Decisions item 100: round 2 checks the judge on the models the claims are about. Its scores are
+    said in full, by the same code as round 1's, every number recorded from round2.json; the decision and
+    Gate 1 stay on round 1."""
+    text, facts, docs = block("two_rounds")
+    second = docs["scores2"]
+    assert second["round"] == 2 and second["variants"]["repaired"] == ["wiseft-l0.25-adapter-aya-std-s1"]
+    head, tail = text.split("**Round 2.**", 1)
+    assert "Round 1 holds no output" not in text
+    assert tail.startswith(
+        " The same readers, task and guidelines, on 120 other outputs (60 in Hindi, 20 in Chinese, 20 in "
+        "Spanish and 20 in English): the repaired model `wiseft-l0.25-adapter-aya-std-s1` on dev and final; "
+        "the adapter `adapter-aya-std-s1` and stock on the final split. The judge decision and Gate 1 stay "
+        "on round 1, as pre-registered."
+    )
+    assert "The judge decision was taken" in head and "The judge decision was taken" not in tail
+    assert len(tables(head)) == 2 and len(tables(tail)) == 2
+    agreement, by = tables(tail)
+    hindi = second["judges"]["qwen3guard_strict"]["langs"]["hi"]
+    assert agreement[1][:5] == [
+        "Qwen3Guard, strict (primary)",
+        "Hindi",
+        "60",
+        fmt(hindi["agreement"], "pct"),
+        fmt(hindi["kappa"], "f2"),
+    ]
+    assert [r[0] for r in by[1:4]] == ["Hindi, stock", "Hindi, the adapters", "Hindi, the repaired models"]
+    assert "What the primary judge's harmful label is to the readers" in tail
+    round2 = {s["pointer"] for s in facts.sources if s["file"] == "outputs/metrics/validation/round2.json"}
+    assert "/judges/qwen3guard_strict/langs/hi/kappa" in round2
+    assert "/judges/qwen3guard_strict/breakdown/hi/group/repaired/gap" in round2
+    assert facts.missing == []
+
+
+@pytest.mark.parametrize(
+    "repaired,adapter,says",
+    [
+        (
+            0.0,
+            0.2,
+            "the judge puts the repaired models further below the adapters than the readers do, so part",
+        ),
+        (0.2, 0.0, "the judge puts the repaired models less far below the adapters than the readers do"),
+        (0.1, 0.1, "the judge and the readers put the two the same distance apart."),
+    ],
+)
+def test_the_judges_excess_on_the_repaired_side_is_said_in_words(repaired, adapter, says):
+    docs = validation_docs("two_rounds")
+    groups = docs["scores2"]["judges"]["qwen3guard_strict"]["breakdown"]["hi"]["group"]
+    groups["repaired"]["gap"], groups["adapter"]["gap"] = repaired, adapter
+    text, _, _ = block(docs=docs)
+    tail = text.split("**Round 2.**", 1)[1]
+    assert (
+        f"In Hindi the judge's harmful rate minus the readers' is {fmt(repaired, 'pp')} on the repaired "
+        f"models' outputs and {fmt(adapter, 'pp')} on the adapters': on these items {says}"
+    ) in tail
+    assert "repaired models' outputs" not in text.split("**Round 2.**", 1)[0]  # round 1 has none
+
+
+def test_round_2_drawn_and_not_scored_is_pending(monkeypatch):
+    from lift.validation import sample
+
+    monkeypatch.setattr(sample, "existing_rounds", lambda: [1, 2])
+    text, facts, _ = block("stay")
+    assert text.endswith(
+        f"_{PENDING}: the judges against the native readers (validation round 2) from "
+        "outputs/metrics/validation/round2.json (P04 lift validate score --round 2)]_"
+    )
+    assert facts.missing == [
+        "the judges against the native readers (validation round 2) (outputs/metrics/validation/round2.json)"
+    ]
+
+
+@pytest.mark.parametrize(
+    "edit,says",
+    [
+        (lambda d: d.update(round=None), "holds the scores of round None, not round 2"),
+        (
+            lambda d: d.update(primary_view="frontier"),
+            "round2.json was scored with frontier as primary and outputs/metrics/validation/round1.json with "
+            "qwen3guard_strict",
+        ),
+    ],
+)
+def test_round_2_scores_that_do_not_fit_round_1_are_refused(edit, says):
+    docs = validation_docs("two_rounds")
+    edit(docs["scores2"])
+    write_validation(docs=docs)
+    with pytest.raises(PublishError) as e:
+        validated.judge_validation(Facts())
+    assert says in str(e.value)

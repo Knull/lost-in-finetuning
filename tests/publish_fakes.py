@@ -948,7 +948,11 @@ VALIDATION_CASES = {
     "switch": (slice(0, None, 5), slice(2, None, 7)),
     # both right on half the items: the bar is not met in Hindi, and Qwen3Guard stays
     "fail": (slice(0, None, 2), slice(1, None, 2)),
+    # round 1 as in "stay", then round 2 (decisions item 100): stock and the adapter on the final split,
+    # a repair on dev and final, Qwen3Guard wrong on a quarter of round 2's items
+    "two_rounds": (slice(0, None, 5), slice(2, None, 6)),
 }
+REPAIR_R2 = "wiseft-l0.25-adapter-aya-std-s1"  # the repaired model of the "two_rounds" case
 
 
 @functools.cache
@@ -962,14 +966,15 @@ def _validation_json(case: str) -> str:
     from lift.validation.store import metrics_dir
 
     qwen_wrong, frontier_wrong = VALIDATION_CASES[case]
+    two = case == "two_rounds"
     with tempfile.TemporaryDirectory() as tmp, pytest.MonkeyPatch.context() as mp:
         mp.setattr(manifest, "git_sha", lambda: "0" * 40)
         world = build_world(
             Path(tmp) / "world",
             n_dev=34,
-            n_final=0,
-            dev_variants=("stock", ADAPTER),
-            final_variants=(),
+            n_final=40 if two else 0,
+            dev_variants=("stock", ADAPTER, REPAIR_R2) if two else ("stock", ADAPTER),
+            final_variants=("stock", ADAPTER, REPAIR_R2) if two else (),
             judgements=False,
             utility=False,
         )
@@ -998,22 +1003,39 @@ def _validation_json(case: str) -> str:
             mp.setattr(config, "load", lambda name="project": swapped if name == "project" else load(name))
             score(1)
         files = {"scores": metrics_dir() / "round1.json", "gate": gate1_path(), "decision": decision_path()}
+        if two:
+            make_sheets(2)
+            second = load_round(2)
+            later = sorted(second["items"], key=lambda it: it["item_id"])
+            world.primary_flip |= {it["key"] for it in later[::4]}
+            write_judgements(world)
+            for name, info in second["sheets"].items():
+                values = {it["item_id"]: truth(it["key"]) for it in second["items"] if it["sheet"] == name}
+                sheet = world.validation / "sheets" / info["file"]
+                import_labels(2, info["lang"], fill_sheet(sheet, world.root / f"filled_{name}.csv", values))
+            score(2)
+            files["scores2"] = metrics_dir() / "round2.json"
         return json.dumps({name: json.loads(f.read_text(encoding="utf-8")) for name, f in files.items()})
 
 
 def validation_docs(case: str = "stay") -> dict[str, dict]:
-    """{"scores": round1.json, "gate": gate1.json, "decision": judge_decision.json} of ``case``, a fresh
-    copy each call (built once per case and process)."""
+    """{"scores": round1.json, "gate": gate1.json, "decision": judge_decision.json} of ``case``, and
+    "scores2" (round2.json) for "two_rounds"; a fresh copy each call (built once per case and process)."""
     return json.loads(_validation_json(case))
 
 
 def write_validation(case: str = "stay", docs: dict[str, dict | None] | None = None) -> dict:
-    """Write the three files where ``lift validate`` puts them (a file given as None is left out)."""
+    """Write the files where ``lift validate`` puts them (a file given as None, or absent, is left out)."""
     from lift.validation.score import decision_path, gate1_path
     from lift.validation.store import metrics_dir
 
     docs = validation_docs(case) if docs is None else docs
-    targets = {"scores": metrics_dir() / "round1.json", "gate": gate1_path(), "decision": decision_path()}
+    targets = {
+        "scores": metrics_dir() / "round1.json",
+        "gate": gate1_path(),
+        "decision": decision_path(),
+        "scores2": metrics_dir() / "round2.json",
+    }
     for name, path in targets.items():
         if docs.get(name) is not None:
             write_json(path, docs[name])
