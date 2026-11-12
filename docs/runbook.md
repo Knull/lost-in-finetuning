@@ -15,12 +15,14 @@ Updated Nov 10 after the sweep was read (decisions items 87 and 88): step 5 move
 the freeze and takes the dev held-out lines with it, step 1 gains a count-only breakdown, and
 step 3 says what `lift select` should print.
 
-Where things stand (Nov 12, 11:00 UK): steps 1 to 5 are done. Round 1 is labelled and scored and
+Where things stand (Nov 12, 21:45 UK): steps 1 to 6 are done. Round 1 is labelled and scored and
 Qwen3Guard stays the primary judge; the recipe is frozen (tag `recipe-frozen-20261112`, commit
-82c242e); GPU job 1 ran every stage of the five core variants (01:04 to 04:25, 3 h 21 min on the
-VM). The one gap is `easy_benign_zh_final`, skipped for every variant until the zh reader's
-verdicts on three prompts are applied ("Still open", below), and step 4b's draw needs those cells.
-Still to do: the zh verdicts, step 6 (whose last lines make the zh cells), step 4b, steps 7 and 8.
+82c242e). GPU job 1 ran the five core variants (01:04 to 04:25) and job 3 the six standard adapters
+(17:05 to 21:32), whose last lines made `easy_benign_zh_final` for all eleven once the zh reader's
+three verdicts were applied (all ok). The laptop half of the core finals ran twice at once and was
+rebuilt from the cache (decisions item 101), including the three `--sample 1.0` lines. Still to do:
+step 4b (draw, label, import), the rest of step 7 (`lift final --all --judge-only`, stats, report),
+step 8.
 
 Conventions: PowerShell at the repo root with the venv active (`.venv\Scripts\Activate.ps1`), one
 command per line (`&&` fails in Windows PowerShell 5.1, so the one-line freeze command that
@@ -404,13 +406,8 @@ not exist yet (held-out loss before step 4) just errors; go on.
 - Validation round 1 sheets: hi (60) and en (40) by you, zh and es by the readers.
 - The utility sheet: 60 blind stock-vs-adapter Hindi pairs (`lift validate utility-sheet`,
   `utility-import`, `utility-score`).
-- The zh failures sheet, `validation\sheets\spotcheck_zh_failures.csv`: rows zh-prb-test-0240,
-  zh-prb-test-0484 and zh-prb-test-0499 (short all-Han translations GlotLID read as Japanese)
-  need the zh reader's verdict, ok, fixed (with the corrected text) or bad, saved as UTF-8 CSV.
-  Then `lift data apply-spotchecks --file <sheet> --dry-run`, which lists any row it cannot read
-  (the sheet had four invalid verdict rows on Nov 10), the same line without `--dry-run`, and
-  `lift sync push`. Job 1 skipped `easy_benign_zh_final` for every variant without them, and step
-  4b's draw needs those cells, so this is no longer optional.
+- Done Nov 12, 17:09: the zh reader's verdicts on zh-prb-test-0240, 0484 and 0499 (all ok) are
+  applied, and job 3 made `easy_benign_zh_final` for every variant.
 - Validation round 2 is step 4b (decisions item 100). Once its keys exist, `lift publish datasets`
   refuses to stage the logs until every sheet of the round is imported and the second judge has
   covered its keys.
