@@ -331,6 +331,8 @@ six languages, so pairing, splitting and clustering all go by pid.
   labelled the outputs the judge called harmful, and which way the judge's excess differs between stock
   and the adapters. Decision 99: the second judge's failures (its provider declines about one harmful prompt
   in five; recorded as unclear) are counted in each of its readings, and `lift stats` also gives its drift
-  and repair with those prompts left out on both sides (`second_judge_judged_effects`).
+  and repair with those prompts left out on both sides (`second_judge_judged_effects`). Decision 100: validation
+  round 2 runs (runbook step 4b) on the five variants of the core finals, and the article reports it beside
+  round 1 from outputs/metrics/validation/round2.json; `lift validate score` now names the drawn variants.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

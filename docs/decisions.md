@@ -2,6 +2,66 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 12, 2026: an independent read of round 1, and round 2
+
+The team gave the same three outputs (round1.md, the judge runs' log, the decision's dry run) to
+another model (GPT) for a read made without seeing this log's, and pasted it at 00:39 UK. It
+agrees on the bar, the decision and the arithmetic, and it corrects three readings recorded in
+items 98 and 99:
+
+- The frontier judge's +7.8 points on harmful against not harmful (item 99) is not a better
+  harmful label. It found 4 of the 12 outputs the readers labelled harmful (Qwen3Guard 10), and
+  its 169 of 180 is close to the 168 a judge that never says harmful would get. The two judges err
+  in opposite directions: Qwen3Guard over-calls (10 of its 33 harmful labels confirmed with
+  Chinese in), the frontier judge under-calls (4 of 7 confirmed, 8 of the 12 missed: 5 called
+  benign, 3 unclear). Its drift on the whole Hindi dev cells (+16 points) is likely too low, as
+  Qwen3Guard's (+35) is likely too high.
+- Round 1 holds stock and the standard recipe's seed-1 adapters (46 Aya and 44 IndicAlign
+  outputs), not the stress adapter and no repaired model. Item 98's "includes harmful labels a
+  reader would not give, more of them on the adapter's side" carried a measurement on the
+  standard adapters over to the stress adapter, which carries the repair comparison. That is not
+  measured.
+- The second judge cannot confirm the drift alone: counting every prompt it declined as harmful
+  gives ranges that overlap (stock 7.0 to 26.2%, the stress adapter 22.7 to 51.7%, WiSE-FT 0.25
+  3.5 to 23.3%). That bound is loose (stock refuses most of those prompts under the primary
+  judge), but it is the honest limit of that judge's evidence.
+
+Also noted from the read, without change: the decision shows neither judge to be better (the
+bootstrap interval on the margin runs from -5.7 to +6.7 points); the Chinese harmful-vs-not kappa
+of 1 is the degenerate case of no harmful item on either side; the draw's warning that
+`spotcheck_zh_failures.csv` matched no prompts (so none were left out on that ground); and no
+inter-reader agreement, since round 1 has no Hindi overlap.
+
+What still stands is the refusal label: 51 of Qwen3Guard's 52 refusals on the first 140 items were
+refusals to the readers, and on the 172 Hindi harmful dev prompts both judges put stock, the
+stress adapter and WiSE-FT 0.25 at about the same refusal rates (76.7, 44.2 and 85.5% under
+Qwen3Guard; 82.9, 47.9 and 89.9% of the prompts the frontier judge judged).
+
+100. **Validation round 2 is run, on the models the claims are about.** A plan made binding, not a
+     new arm.
+     - Why. Round 2 is in the plan since Nov 3 (prompts/P04_validation.md; configs/project.yaml
+       budgets 120 Hindi items "in two rounds of 60") and the runbook kept it "if the first round
+       leaves time". With the readings above, it is the only check of the primary judge on the
+       stress adapter's and the repaired models' outputs, which every headline number is.
+     - How. Drawn after GPU job 1, from the five variants of the core finals named with
+       `--variants`: stock and the stress adapter on the final split, the three frozen repairs on
+       dev and final (round 2's groups in lift.validation.sample.ROUNDS). The default draw would
+       also take every sweep setting's dev outputs, CAST 2.0's among them, and the standard
+       adapters' finals once GPU job 3 has run: none of those is a claim. 60 Hindi, 20 each in
+       Chinese, Spanish and English, the same readers, the same guidelines, no Hindi overlap.
+     - Its scores are reported beside round 1's, by model group and prompt set, with the readers'
+       and the judge's harmful rates on the same items; the article says it. It decides nothing:
+       the judge decision and Gate 1 stay on round 1, as pre-registered.
+     - Code. `lift validate score` writes the variants each group was drawn from (`variants`), so
+       the article names them; a file scored before falls back to the plan's words (round 1: the
+       standard recipe's seed-1 adapters). The article's block (lift.publish.validated) gives round
+       2 the same tables and paragraphs as round 1 without the verdict and the decision, adds a
+       sentence on the judge's excess on the repaired models against the adapters (which way the
+       repair it measures differs from the readers'), is pending while round 2 is drawn and not
+       scored, refuses round 2 scores made with another primary judge than round 1's, and while
+       no round 2 is drawn says what round 1 does not cover.
+     - If a reader cannot finish, the round is reported with what was labelled and the gap said.
+
 ## Nov 11, 2026 (late afternoon): round 1 complete, the judge decision, the second judge on whole cells
 
 Read at about 16:25 UK, before `decide-judge` was run for real, before `lift select` and before any

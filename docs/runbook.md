@@ -34,6 +34,7 @@ pasted. A GPU job runs `main` as pushed, not your working tree, so push before `
 | 2 | Validation round 1 and the judge decision | you and the readers, then laptop | 2 h of labelling for hi and en | the freeze |
 | 3 | Gate 2 record, `lift select`, freeze | laptop | 15 min | every final |
 | 4 | Finals: stock, the stress adapter, the three frozen repairs | A100 | about 4 h (estimate) | the primary endpoint |
+| 4b | Validation round 2: the stress adapter and the frozen repairs | you and the readers, then laptop | 1 h 30 of labelling for hi and en | the article's validation section (decisions item 100) |
 | 5 | Train seeds 2 and 3 of aya and indicalign, with the dev held-out lines | A100 | about 3 h (training measured per seed) | pooled intervals for the standard adapters; the secondary selection |
 | 6 | Finals: aya and indicalign, seeds 1 to 3 | A100 | about 4 h 30 (estimate) | the three-adapter table |
 | 7 | Second judge, utility judge, `lift stats`, `lift report` | laptop, API | 1 to 2 h | the article's numbers |
@@ -204,6 +205,40 @@ lift remote --gpu A100 --max-hours 7 --job "lift sync pull; $dev; $core; $bt"
 - Each final is about 40 to 45 minutes by the dev timings (17 minutes for a dev variant with half
   the prompts), so five variants are about 4 hours. Each line pushes its outputs when it ends.
 
+## Step 4b. Validation round 2 (laptop, after GPU job 1)
+
+Decisions item 100: round 1 checked the judge on stock and the standard adapters only, so round 2
+checks it on the stress adapter and the frozen repairs. Draw it as soon as job 1 has pushed, so the
+readers have the evening. Replace `<WISEFT>`, `<RESTA>` and `<CAST>` as in step 4.
+
+```powershell
+lift sync pull
+$r2 = "stock", "adapter-indicalign-stress-s1", "<WISEFT>", "<RESTA>", "<CAST>"
+lift validate sample --round 2 --variants $r2 --no-hindi-overlap --check
+lift validate sample --round 2 --variants $r2 --no-hindi-overlap
+lift sync push
+```
+
+- `--check` writes nothing: it lists what each file holds and anything that would stop the draw.
+  Send it to me if it stops.
+- The sheets are `validation\sheets\validation_round2_{hi,en,zh,es}.csv`: 60 Hindi and 20 English
+  for you, 20 each for the Chinese and Spanish readers, the same task and guidelines as round 1.
+  Send the readers the blank sheets privately.
+- When the labels are back:
+
+```powershell
+lift validate import --round 2 --lang hi --file "<filled hi csv>"
+lift validate import --round 2 --lang en --file "<filled en csv>"
+lift validate import --round 2 --lang zh --file "<filled zh csv>"
+lift validate import --round 2 --lang es --file "<filled es csv>"
+lift validate second-judge-sample
+```
+
+- `second-judge-sample` rewrites the key lists with round 2's items. Run the lines it prints for
+  the five variants of `$r2` (dev and final), not the other sweep settings. Then
+  `lift validate score --round 2` and send me `outputs\metrics\validation\round2.md`. The judge
+  decision and Gate 1 stay on round 1: do not run `decide-judge` again.
+
 ## Step 5. GPU job 2: the dev held-out scores, then seeds 2 and 3 of the standard adapters
 
 Nothing here needs the freeze, so it can run while steps 1 to 3 happen on the laptop.
@@ -353,7 +388,7 @@ not exist yet (held-out loss before step 4) just errors; go on.
 - The zh spot-check sheet has four invalid verdict rows. Fix them, then
   `lift data apply-spotchecks --file <sheet>` and regenerate the short zh cell, or accept that
   the zh easy-benign cell is reported as not run.
-- Validation round 2, if the first round leaves time. Draw it only if it will be finished: once a
-  round's keys exist, `lift publish datasets` refuses to stage the logs until every sheet of that
-  round is imported, and the second judge has covered its keys.
+- Validation round 2 is step 4b (decisions item 100). Once its keys exist, `lift publish datasets`
+  refuses to stage the logs until every sheet of the round is imported and the second judge has
+  covered its keys.
 - Team names, annotators' consent to be named, full citations, the two upstream issues.
