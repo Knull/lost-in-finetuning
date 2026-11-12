@@ -63,6 +63,7 @@ configs/        project.yaml (models, langs, sizes, judges), train.yaml, repairs
                 variants.yaml (registry), rubrics/ (frozen judge prompts)
 data/splits/    committed split files {set}.json   (everything else in data/ is gitignored)
 src/lift/       config io paths schemas cachekey splits selection manifest cli   <- implemented
+                proclock (one process per judge cache, decisions item 101)
                 prompts (prompt records, mixed samples) gate0 remote              <- P02
   commands/     one CLI module per stage, each with register(subparsers)
   data/         polyrefuse translate sources sft build                            <- P01
@@ -261,7 +262,9 @@ six languages, so pairing, splitting and clustering all go by pid.
     pre-fill (`prefill_safety`, `prefill_pairwise`; batch state in
     outputs/judge_cache/frontier/*.batches.jsonl; a batch a person knows was deleted is abandoned with
     `LIFT_ABANDON_BATCHES=<id,...>`). `lift judge --judge second` pre-fills the whole run in one batch;
-    a batch still running exits 3 (rerun the line to collect).
+    a batch still running exits 3 (rerun the line to collect). One lift process at a time judges with
+    one call cache: a judge on a real provider holds `lift.proclock`'s lock beside it, and a second
+    process is refused (FrontierBusy; decisions item 101).
   - `lift utility` (lift.utility: both orders, UtilityVerdicts in outputs/utility/, win rate,
     Hindi fidelity, `audit.record_utility`; `--generate-only` on the GPU, which checks both sides'
     answers against the registry and records it in outputs/utility/checked/, then `--judge-only` on the

@@ -116,6 +116,11 @@ Rules, and why:
   truncated), so a new row is never glued to it. Each request is paid for once: identical pairs in
   one call share one judgement, and a per-key lock keeps concurrent callers from both calling the
   API (and caching different replies) for the same request.
+- One lift process at a time judges with one call cache on one machine (decisions item 101): a judge on a
+  real provider holds ``lift.proclock``'s lock beside its cache ({cache file}.lock) for as long as it
+  lives, and a second process building one on the same cache is refused (FrontierBusy) before it reads
+  or writes anything. Two at once would append the same judgements to the same files twice, send the
+  same batch twice and interleave appends to the cache.
 - LIFT_JUDGE_MAX_USD caps one lift process (one judge object): a call starts only if its worst case
   (input estimated from UTF-8 bytes, output at max_tokens) fits under the cap together with
   everything this process already spent or has in flight (a batch: all its requests at once). Spend
@@ -137,6 +142,7 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
@@ -146,7 +152,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
-from lift import config
+from lift import config, proclock
 from lift.io import append_jsonl, sha256_obj
 from lift.paths import REPO_ROOT, output_dir
 
@@ -298,6 +304,11 @@ class FrontierUnavailable(RuntimeError):
     with None for every item left unjudged."""
 
     partial: list[dict | None] | None = None
+
+
+class FrontierBusy(FrontierConfigError):
+    """Another lift process on this machine holds the lock of this judge's call cache: it is judging with the
+    same cache now. Nothing was read or written; run the line again once that one has ended."""
 
 
 class FrontierBatchPending(RuntimeError):
@@ -1255,6 +1266,20 @@ def _cache_path(provider: str, model: str, configured: Any) -> Path:
     return output_dir() / "judge_cache" / "frontier" / f"{provider}__{safe_model}.jsonl"
 
 
+def _hold(cache_path: Path) -> Path:
+    """Take this process's hold of the lock beside ``cache_path`` (``lift.proclock``): its path, or
+    FrontierBusy naming the process that holds it."""
+    path = cache_path.with_name(cache_path.name + ".lock")
+    try:
+        proclock.acquire(path)
+    except proclock.Busy as busy:
+        raise FrontierBusy(
+            f"{cache_path} is in use by {busy.holder} on this machine. Run one lift line that judges "
+            "with it at a time (two at once write the same judgements twice and send the same batch "
+            "twice): let that one finish, then run this line again. Nothing was read or written") from None
+    return path
+
+
 def _settings_tag(temperature: float | None, effort: str | None, thinking: Mapping[str, Any] | None,
                   max_tokens: int) -> str:
     parts = ["provider-default" if temperature is None else f"t{temperature:g}"]
@@ -1568,6 +1593,10 @@ class FrontierJudge:
             self._provider = AnthropicProvider(client)
         self.api_version = str(getattr(self._provider, "api_version", "") or type(self._provider).__name__)
         self.cache_path = _cache_path(provider, model, settings["cache_path"])
+        self.lock_path: Path | None = None
+        if not isinstance(client, FakeProvider):        # a test's fake: no other process shares its files
+            self.lock_path = _hold(self.cache_path)
+            weakref.finalize(self, proclock.release, self.lock_path)
         self.batch_state_path = _batch_state_path(self.cache_path)
         self._cache = _CallCache(self.cache_path)
         self._tag = _settings_tag(self.temperature, self.effort, self.thinking, self.max_tokens)

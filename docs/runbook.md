@@ -26,6 +26,9 @@ Conventions: PowerShell at the repo root with the venv active (`.venv\Scripts\Ac
 command per line (`&&` fails in Windows PowerShell 5.1, so the one-line freeze command that
 `lift select` prints is split below). Secrets are set by hidden prompt in your own window, never
 pasted. A GPU job runs `main` as pushed, not your working tree, so push before `lift remote`.
+On the laptop, run one lift line at a time, whatever the number of windows: `lift remote` following
+a job is the only thing that may run beside it. Two judging lines at once wrote every judgement
+twice on Nov 12 (decisions item 101); the frontier judge now refuses the second one.
 
 ## Critical path
 

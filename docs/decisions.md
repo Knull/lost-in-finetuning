@@ -2,6 +2,45 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 12, 2026 (afternoon): the laptop half of the core finals ran twice at once
+
+From 11:25 UK the team ran `lift validate second-judge-sample`, `lift final --variant V --judge-only` for
+the five core variants and the three `--sample 1.0` lines in two PowerShell windows at once, the second a
+minute and a half behind the first. Both processes judged the same cells:
+
+- 73 of the 90 second-judge files of the final split hold records twice (both processes appended the
+  same keys). Every reader refuses such a file, and the `--sample 1.0` lines stopped on them.
+- Three Message Batches went twice: the stress adapter's utility pairs, and WiSE-FT 0.25's and CAST
+  0.5's second-judge samples (about 1.40 USD more). For those requests the call cache holds two answers.
+  Every other batch was submitted by one process and collected by both, which then wrote the same
+  answers.
+- One line of the utility call cache cannot be read, as two appends at once leave it. The cache skips
+  it, and asks its requests again when they are needed.
+- A utility verdict file is written whole, so each holds one process's verdicts, while its metrics may
+  have been written by the other process.
+
+The windows' logs printed each cell's label counts; the remedy below does not depend on them, and no
+second-judge or utility result of the final split had been read when it was chosen.
+
+101. **Rebuilt from the call cache, one answer per request, picked by the order it was written.** A
+     process fix; no locked decision changes.
+     - `lift restart --judge second` on every final cell of the five variants (each file copied to
+       outputs/.aside/ and emptied), then the same lines again in one process. Every judgement comes
+       from the call cache, and where it holds two answers to one request the cache keeps the first one
+       written (`_CallCache` loads the first row of a key). Each label is one call's answer, picked
+       without looking at it.
+     - `lift utility --variant adapter-indicalign-stress-s1 --split final --judge-only --rejudge`: the
+       one verdict file whose two processes had different answers, rebuilt under the same rule. The
+       other three hold answers both processes shared (one batch each, or, for CAST, the adapter's
+       cached answers to the same pairs); `lift final --judge-only` rewrites their metrics and AuditKIT
+       records from them.
+     - The frontier judge now holds a lock beside its call cache for as long as it lives
+       (`lift.proclock`; the lock file is `{cache}.lock`, never synced). A second process that builds a
+       judge on the same cache is refused (FrontierBusy) before it reads or writes anything, and is told
+       which command holds it. Judges on test fakes take none.
+     - Reason: the duplicated files cannot be read, and running the same lines again in one process is
+       the one code path. No output or judge text was looked at or edited by hand.
+
 ## Nov 12, 2026 (00:55 UK): the judge decision, Gates 1 and 2 and the selection, as run
 
 Run on the laptop and read before the freeze. Every number matches what the runbook (step 3) said
