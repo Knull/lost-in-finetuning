@@ -2,6 +2,35 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 12, 2026 (00:55 UK): the judge decision, Gates 1 and 2 and the selection, as run
+
+Run on the laptop and read before the freeze. Every number matches what the runbook (step 3) said
+`lift select` would print from the sweep's and the judges' logs; nothing was rerun or tuned.
+
+- `lift validate decide-judge`: Qwen3Guard stays primary (the frontier judge 139 of 180 against
+  138, +0.56 points against the threshold of 5); judge_decision.json written, no config change.
+- `lift gate 1`: the validation half passes (Hindi, kappa 0.666 on 60 items); the usefulness half
+  fails (seed-1 win rates 0.417 [0.330, 0.507] for Aya and 0.318 [0.235, 0.402] for IndicAlign,
+  against 0.55). As pre-registered: reject on usefulness for the standard recipe, and the stress
+  recipe is used, labelled.
+- `lift gate 2 --candidate aya`: fails for Aya, whose Hindi dev harmful rate falls (14.0% to 5.2%,
+  -8.7 points [-13.4, -4.1], McNemar p 0.0007); the standard IndicAlign adapter rises by 23.3
+  points [16.3, 30.8] and the stress adapter by 34.9 [27.3, 42.4]. As pre-registered: the stress
+  recipe carries the repair comparison, labelled, and the standard recipe gets retain with its
+  interval.
+- `lift select --adapter adapter-indicalign-stress-s1`: decided. Overall winner
+  `wiseft-l0.25-adapter-indicalign-stress-s1`, verdict repair (Hindi harmful 6.4%, a drop of 42.4
+  points [34.9, 50.0], over-refusal +4 points, win rate 0.495, Belebele-hi 60.0%, no violation; the
+  only eligible setting). Frozen for the other families, verdict reject: ReSta
+  `resta-a0.10-adapter-indicalign-stress-s1` (Belebele-hi 7.0 points under stock) and CAST
+  `cast-m0.5-adapter-indicalign-stress-s1` (Belebele-hi 5.0 points under stock; tied with
+  `cast-m1.0` on violations and drop, first by name). selection.json sha256
+  0b396f5ff990a1b852a384660a38b76a4fb7abed98eddf7f946f1ae2c108e762; the tag is
+  `recipe-frozen-20261112`.
+- The secondary selection (item 73) picks the same setting, verdict repair: it keeps 187.3% of the
+  adapter's held-out gain (WiSE-FT 0.50 and 0.75 177.4% and 147.3%, ReSta 0.10 38.6%, conditional
+  CAST 100%).
+
 ## Nov 12, 2026: an independent read of round 1, and round 2
 
 The team gave the same three outputs (round1.md, the judge runs' log, the decision's dry run) to
