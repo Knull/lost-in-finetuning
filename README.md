@@ -50,8 +50,10 @@ final split was touched once, to score the frozen variants.
   our report for upstream is `hf/safetune_issue.md` in the repository.
 - **AuditKIT** is the evaluation record. Every reported rate is also an AuditKIT metric over the
   same labels, checked for exact equality, and the redacted records are in the logs dataset. We
-  did not use its `paired_bootstrap`, which resamples uncentred differences and returns no
-  intervals; our paired statistics are in `lift.stats`. The upstream issue: [PENDING: the upstream AuditKIT issue url (file hf/auditkit_issue.md) from configs/publish.yaml auditkit_issue_url (a person)].
+  did not use its `paired_bootstrap`: in the release we pin it resamples the paired differences
+  without centring them on zero, so it never reports a small p-value however large the effect,
+  and it gives no interval. Later releases centre them, still without an interval. Our paired
+  statistics are in `lift.stats`.
 
 ## 3. Models and licences
 
@@ -84,7 +86,7 @@ Everything derived from Tiny Aya (the adapters and the repaired model) is non-co
 Counts are per language. The final counts evaluated match this design in the results tables (harmful, easy and hard benign prompts per language, utility pairs, Belebele items). Prompt ids are shared across languages and split
 identically in every language. Languages: English and Hindi (primary), Chinese and Spanish (transfer, checked by
 native readers), Arabic and Thai (exploratory). The translations we made are public:
-https://huggingface.co/datasets/YOUR-HF-ORG/lift-multilingual-safety-prompts.
+https://huggingface.co/datasets/racetracklexsi/lift-multilingual-safety-prompts.
 
 ## 5. Metrics and why
 
@@ -506,7 +508,23 @@ make no commercial claims.
 - Benchmarks and data: OR-Bench (Cui et al., 2024); Belebele (Bandarkar et al., 2023); the Aya
   Red-teaming dataset (Aakanksha et al., 2024); PolyRefuse; Tiny Aya (Cohere Labs).
 
-[PENDING: full citations for the build plan's references from configs/publish.yaml references (a person)]
+References:
+
+- Aakanksha et al. (2024). The Multilingual Alignment Prism: Aligning Global and Local Preferences to Reduce Harm. [arXiv:2406.18682](https://arxiv.org/abs/2406.18682)
+- R. Aziz, I. A. Hanif and F. Koto (2026). Low-Resource Safety Failures Are Action Failures, Not Representation Failures. [arXiv:2606.01196](https://arxiv.org/abs/2606.01196)
+- L. Bandarkar et al. (2023). The Belebele Benchmark: a Parallel Reading Comprehension Dataset in 122 Language Variants. [arXiv:2308.16884](https://arxiv.org/abs/2308.16884)
+- S. Banerjee, S. Layek, P. Chatterjee, A. Mukherjee and R. Hazra (2025). Soteria: Language-Specific Functional Parameter Steering for Multilingual Safety Alignment. [arXiv:2502.11244](https://arxiv.org/abs/2502.11244)
+- R. Bhardwaj, D. D. Anh and S. Poria (2024). Language Models are Homer Simpson! Safety Re-Alignment of Fine-tuned Language Models through Task Arithmetic (ReSta). [arXiv:2402.11746](https://arxiv.org/abs/2402.11746)
+- J. Cui, W.-L. Chiang, I. Stoica and C.-J. Hsieh (2024). OR-Bench: An Over-Refusal Benchmark for Large Language Models. [arXiv:2405.20947](https://arxiv.org/abs/2405.20947)
+- W. Hawkins et al. (2026). The Heterogeneous Safety Impacts of Benign Multilingual Fine-Tuning. [arXiv:2606.28843](https://arxiv.org/abs/2606.28843)
+- C. Ifebi, B. Kong and A. Mehrotra (2026). Minionese: Comprehensive Benchmark and Mechanistic Study of Multilingual LLM Safety. TAIGR workshop at ICML 2026. [arXiv:2607.10112](https://arxiv.org/abs/2607.10112)
+- B. W. Lee et al. (2024). Programming Refusal with Conditional Activation Steering (CAST). [arXiv:2409.05907](https://arxiv.org/abs/2409.05907)
+- Lexsi Labs (2026). [The Lexsi Alignment and Safety Stack: correcting Gemma-4-31B for multilingual and cybersecurity safety, in the weights](https://lexsi.ai/resources/articles/the-lexsi-alignment-and-safety-stack-correcting-gemma-4-31b-for-multilingual-and-cybersecurity-safety-in-the-weights-copy). Oct 8, 2026.
+- X. Qi et al. (2023). Fine-tuning Aligned Language Models Compromises Safety, Even When Users Do Not Intend To! [arXiv:2310.03693](https://arxiv.org/abs/2310.03693)
+- A. R. Salamanca et al., Cohere Labs (2026). Tiny Aya: Bridging Scale and Multilingual Depth. [arXiv:2603.11510](https://arxiv.org/abs/2603.11510)
+- E. V. Stein, D. Meier, T. Ruas, J. P. Wahle and B. Gipp (2026). BabelSteering: Multilingual Safety Alignment via English Steering Vectors. [arXiv:2608.16577](https://arxiv.org/abs/2608.16577)
+- X. Wang, M. Wang, Y. Liu, H. Schütze and B. Plank (2025). Refusal Direction is Universal Across Safety-Aligned Languages (PolyRefuse). [arXiv:2505.17306](https://arxiv.org/abs/2505.17306)
+- M. Wortsman et al. (2022). Robust fine-tuning of zero-shot models (WiSE-FT). [arXiv:2109.01903](https://arxiv.org/abs/2109.01903)
 
 ## 9. What we would do with more credits
 
@@ -522,10 +540,9 @@ make no commercial claims.
 - Data collection: [PENDING: the data collection url from outputs/publish/collections.json (lift publish collections --yes)]
 - Code: https://github.com/Knull/lost-in-finetuning
 - Notebook: https://github.com/Knull/lost-in-finetuning/blob/main/notebooks/acceptance_test.ipynb
-- Space: https://huggingface.co/spaces/YOUR-HF-ORG/lift-acceptance-test
+- Space: https://huggingface.co/spaces/racetracklexsi/lift-acceptance-test
 
 ## 11. Team
 
-[PENDING: teammates' names and HF usernames from configs/publish.yaml team (a person)]
-
-[PENDING: thanks to the annotators who agreed to be named from configs/publish.yaml annotators (a person)]
+- Arnav Mahajan ([@Knu-ll](https://huggingface.co/Knu-ll))
+- Manolo Chow ([@mano-cw](https://huggingface.co/mano-cw))
