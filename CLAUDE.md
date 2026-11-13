@@ -209,8 +209,9 @@ six languages, so pairing, splitting and clustering all go by pid.
 - **AuditKIT 1.1.3.** `auditkit.evaluate(dataset: list[Sample], model, scorers=[...],
   config=RunConfig(...), tags=[...])`; `lift.audit` uses the precomputed path with custom metrics
   and patches out its disk cache (docs/toolkit-notes.md). Its WinRate/Elo metrics are reference-
-  or overlap-based, not judge-based. Never use its `paired_bootstrap`: it resamples uncentred
-  differences and returns no intervals. `lift.stats` replaces it.
+  or overlap-based, not judge-based. Never use its `paired_bootstrap`: in 1.1.3 it resamples
+  uncentred differences and returns no intervals (1.1.4 centres them, still with no interval;
+  decisions item 102). `lift.stats` replaces it.
 
 ## PolyRefuse (mainlp/Multilingual-Refusal)
 

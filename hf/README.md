@@ -45,9 +45,10 @@ Run `lift sync pull` before every publish command, on every machine: the public-
 logs' completeness checks and the preflight read this machine's `outputs/` and `validation/`, and
 refuse to run without them. Every dry run runs the public-text scan too and exits 1 on a finding.
 
-1. Set `LIFT_HF_NAMESPACE` to the team's HF organisation (not a secret), fill `team`,
-   `annotators`, `references` and, once filed, `auditkit_issue_url` in `configs/publish.yaml`
-   (`safetune_issue_url` is optional: without it the article points at `hf/safetune_issue.md`).
+1. `configs/publish.yaml` holds the namespace (`racetracklexsi`; `LIFT_HF_NAMESPACE` overrides
+   it), `team`, `annotators` and `references` (`safetune_issue_url` is optional: without it the
+   article points at `hf/safetune_issue.md`). The AuditKIT issue is not filed (decisions item
+   102).
    Set `HF_TOKEN` (a write token) with a hidden prompt.
 2. After Gate 4 and once every human and second-judge label is final: `lift sync pull`, then
    P07's `lift stats` and `lift report`, which write `outputs/metrics/final_report.json`.

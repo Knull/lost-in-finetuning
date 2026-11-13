@@ -1,8 +1,9 @@
 # `paired_bootstrap` tests the wrong null hypothesis: p is about 0.5 or 1.0 even for a large, consistent improvement
 
-<!-- For a person to file upstream on the AuditKIT repository (submission checklist). Checked
-against auditkit 1.1.3 (`src/auditkit/_bootstrap.py`, unchanged at commit 71316da). After filing,
-put the issue url in configs/publish.yaml `auditkit_issue_url` so the article links it. -->
+<!-- Not filed: auditkit 1.1.4 already centres the differences (checked Nov 13 against the 1.1.4
+and 1.1.11 wheels' source; neither returns an interval). Kept as the reproduction against 1.1.3
+(`src/auditkit/_bootstrap.py`, unchanged at commit 71316da), the version we pin and the one the
+article describes (docs/decisions.md item 102). -->
 
 **Version:** auditkit 1.1.3 (PyPI), Python 3.12.
 

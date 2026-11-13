@@ -69,7 +69,6 @@ def test_full_inputs_leave_no_placeholder(out, monkeypatch):
         team=[{"name": "A", "hf": "a-user"}],
         annotators=[],
         references="- Full citations.",
-        auditkit_issue_url="https://example.org/issue/1",
         github_repo="https://github.com/o/r",
     )
     path, facts = article.build()
@@ -81,6 +80,9 @@ def test_full_inputs_leave_no_placeholder(out, monkeypatch):
     nb = json.loads((out / "acceptance_test.ipynb").read_text())
     assert any('REPO_URL = "https://github.com/o/r"' in line for c in nb["cells"] for line in c["source"])
     assert "  - user: a-user" in text
+    # annotators: [] thanks nobody, so the article ends on its team list
+    assert "We thank" not in text and text.endswith("- A ([@a-user](https://huggingface.co/a-user))\n")
+    assert "Later releases centre them" in text
     sources = json.loads((out / "article.sources.json").read_text())
     assert sources["pending"] == []
     assert any(
@@ -93,7 +95,7 @@ def test_annotators_are_named_only_when_listed(monkeypatch):
     _publish_cfg(monkeypatch, annotators=None)
     assert PENDING in article._thanks(settings.load())
     _publish_cfg(monkeypatch, annotators=[])
-    assert "native readers" in article._thanks(settings.load())
+    assert article._thanks(settings.load()) == ""  # [] thanks nobody: no line at all
     _publish_cfg(monkeypatch, annotators=["R. Reader"])
     assert "R. Reader" in article._thanks(settings.load())
 

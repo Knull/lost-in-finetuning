@@ -53,7 +53,9 @@ def unpinned_revisions(monkeypatch):
     with its stock entries only: the adapters and repairs a run registers are the project's state,
     not a fixture, and tests register their own under the same names. A test that needs a pin sets it
     itself: it mutates this view (one copy per test, like the real cached load) or monkeypatches
-    lift.config.load or lift.config.get. test_configs_and_cli checks the committed registry itself."""
+    lift.config.load or lift.config.get. test_configs_and_cli checks the committed registry itself.
+    configs/publish.yaml comes with the team's own fields (namespace, team, annotators, references)
+    unset, the state the publishing tests start from; a test that needs one sets it."""
     real = lift_config.load
     views: dict[str, dict] = {}
 
@@ -62,6 +64,12 @@ def unpinned_revisions(monkeypatch):
             if name not in views:
                 data = copy.deepcopy(real(name))
                 data["variants"] = [e for e in data.get("variants") or [] if e.get("method") == "stock"]
+                views[name] = data
+            return views[name]
+        if name == "publish":
+            if name not in views:
+                data = copy.deepcopy(real(name))
+                data.update(namespace=None, team=[], annotators=None, references=None)
                 views[name] = data
             return views[name]
         if name != "project":

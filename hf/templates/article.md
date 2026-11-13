@@ -56,8 +56,10 @@ final split was touched once, to score the frozen variants.
   {{ safetune_issue }}.
 - **AuditKIT** is the evaluation record. Every reported rate is also an AuditKIT metric over the
   same labels, checked for exact equality, and the redacted records are in the logs dataset. We
-  did not use its `paired_bootstrap`, which resamples uncentred differences and returns no
-  intervals; our paired statistics are in `lift.stats`. The upstream issue: {{ auditkit_issue }}.
+  did not use its `paired_bootstrap`: in the release we pin it resamples the paired differences
+  without centring them on zero, so it never reports a small p-value however large the effect,
+  and it gives no interval. Later releases centre them, still without an interval. Our paired
+  statistics are in `lift.stats`.
 
 ## 3. Models and licences
 

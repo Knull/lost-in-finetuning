@@ -2,6 +2,24 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 13, 2026 (22:00 UK): the article's AuditKIT note, team and references
+
+102. **No AuditKIT issue is filed; the article says what the pinned release does.** Publishing only; no
+     locked decision, number or analysis changes.
+     - AuditKIT 1.1.4 and every later release on PyPI up to 1.1.11 centre the paired differences
+       before resampling (each wheel's `auditkit/_bootstrap.py` read on Nov 13); none returns an
+       interval. Our draft issue reports a bug fixed after the 1.1.3 we pin, so it is not filed, and
+       the R3 checklist's "the AuditKIT issue has been filed" is dropped.
+     - The article links no issue (`auditkit_issue_url` is gone). It says the pinned release resamples
+       uncentred differences, so it never reports a small p-value, and gives no interval; that later
+       releases centre them, still without an interval; and that our paired statistics are in
+       `lift.stats`. We stay on 1.1.3 and still never call it. `hf/auditkit_issue.md` keeps the 1.1.3
+       reproduction.
+     - configs/publish.yaml holds the namespace (`racetracklexsi`), the team (Arnav Mahajan, Knu-ll;
+       Manolo Chow, mano-cw) and `annotators: []`, which now gives no thanks line at all (it gave an
+       unnamed one): the team asked that nobody be thanked. `references` holds the related work's full
+       citations, each checked on Nov 13; Devkar et al. (2026) is not among them yet.
+
 ## Nov 12, 2026 (afternoon): the laptop half of the core finals ran twice at once
 
 From 11:25 UK the team ran `lift validate second-judge-sample`, `lift final --variant V --judge-only` for

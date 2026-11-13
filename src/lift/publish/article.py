@@ -148,8 +148,8 @@ def _thanks(cfg: dict) -> str:
         return pending(
             "thanks to the annotators who agreed to be named", "configs/publish.yaml annotators", PERSON
         )
-    if not annotators:
-        return "We thank the native readers who labelled the validation samples."
+    if not annotators:  # [] thanks nobody: no line at all
+        return ""
     return f"We thank {', '.join(str(a) for a in annotators)}, who labelled the validation samples."
 
 
@@ -1027,12 +1027,6 @@ def context(facts: Facts) -> dict[str, str]:
         if gh
         else pending("the notebook url", "configs/publish.yaml github_repo", PERSON),
         "space": settings.repo("space").url,
-        "auditkit_issue": cfg.get("auditkit_issue_url")
-        or pending(
-            "the upstream AuditKIT issue url (file hf/auditkit_issue.md)",
-            "configs/publish.yaml auditkit_issue_url",
-            PERSON,
-        ),
         # Optional: while nobody has filed it, the article points at the draft in the repo.
         "safetune_issue": cfg.get("safetune_issue_url")
         or "our report for upstream is `hf/safetune_issue.md` in the repository",
@@ -1084,7 +1078,8 @@ def build(facts: Facts | None = None, *, readme: bool = False) -> tuple[Path, Fa
     from lift.publish import acceptance
 
     facts = facts or Facts()
-    text = render.fill(render.template("article.md"), context(facts))
+    # rstrip: with nobody thanked the article ends on its team list, with no trailing blank lines
+    text = render.fill(render.template("article.md"), context(facts)).rstrip() + "\n"
     mark = blocked_line(facts)
     if mark:  # right under the title
         head, sep, rest = text.partition("\n# ")

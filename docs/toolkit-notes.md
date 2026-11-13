@@ -196,7 +196,9 @@ metrics=...)` form written here before raises `TypeError` (there is no `prompts=
   1.1.3). It resamples the uncentred paired differences: p is 1.0 when every difference is equal
   and about 0.5 when they vary but are all positive, and it returns no intervals.
   `RunComparison.significance()` and the other `significance()` methods use it too.
-  - File an issue upstream with a minimal repro; it's on the submission checklist.
+  - Fixed upstream in 1.1.4, which centres the differences (still no interval); checked Nov 13
+    against the 1.1.4 and 1.1.11 wheels' source. We stay on 1.1.3 and never call it, so no issue
+    was filed (decisions item 102); `hf/auditkit_issue.md` keeps the 1.1.3 reproduction.
   - `lift.stats.paired_bootstrap` is the replacement, with a regression test for this case.
 
 ## Harness dependencies (verified Nov 3 for P02)
