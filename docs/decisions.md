@@ -4,6 +4,16 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 13, 2026 (22:00 UK): the article's AuditKIT note, team and references
 
+106. **The first Chinese round-2 labels were not a human reader's; they are replaced.** At 23:20 UK the
+     Chinese reader told the team that the round-2 sheet imported at 22:37 was labelled with an AI tool.
+     Validation labels must be a native reader's, so those 20 labels are void. The reader labelled the same
+     20 items again, and that sheet replaces them (`lift validate import`, which records the replacement).
+     - The void labels' scores were read: `lift validate score --round 2` at 22:39 gave the primary judge
+       95.0% agreement and kappa 0.92 on them. Nothing public used them: commit eb64780's README (private
+       repo, superseded) is the only place they appeared. No published number comes from them.
+     - Round 1's Chinese labels and the Chinese spot-check verdicts are the reader's own (confirmed the
+       same evening). Nothing else changes: the items, keys and second-judge labels stay as drawn.
+
 102. **No AuditKIT issue is filed; the article says what the pinned release does.** Publishing only; no
      locked decision, number or analysis changes.
      - AuditKIT 1.1.4 and every later release on PyPI up to 1.1.11 centre the paired differences
