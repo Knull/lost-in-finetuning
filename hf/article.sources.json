@@ -1,10 +1,5 @@
 {
  "pending": [
-  "the figure adapters_by_language.png (outputs/figures/adapters_by_language.png)",
-  "the figure forest_primary.png (outputs/figures/forest_primary.png)",
-  "the figure heatmap_harmful.png (outputs/figures/heatmap_harmful.png)",
-  "the figure heatmap_overrefusal.png (outputs/figures/heatmap_overrefusal.png)",
-  "the figure tradeoff_dev.png (outputs/figures/tradeoff_dev.png)",
   "the judges against the native readers (validation round 2) (outputs/metrics/validation/round2.json)"
  ],
  "values": [
@@ -611,8 +606,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/0/heldout",
-   "shown": "-0.163 [-0.233, -0.110] (seeds 1)",
-   "value": "-0.163 [-0.233, -0.110] (seeds 1)"
+   "shown": "-0.163 [-0.233, -0.110] (seed 1)",
+   "value": "-0.163 [-0.233, -0.110] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -2805,8 +2800,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/0/heldout_kept",
-   "shown": "194.8% [165.1, 244.3] (seeds 1)",
-   "value": "194.8% [165.1, 244.3] (seeds 1)"
+   "shown": "194.8% [165.1, 244.3] (seed 1)",
+   "value": "194.8% [165.1, 244.3] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -2893,8 +2888,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/1/heldout_kept",
-   "shown": "25.9% [-13.1, 49.6] (seeds 1)",
-   "value": "25.9% [-13.1, 49.6] (seeds 1)"
+   "shown": "25.9% [-13.1, 49.6] (seed 1)",
+   "value": "25.9% [-13.1, 49.6] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -2981,8 +2976,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/2/heldout_kept",
-   "shown": "96.7% [88.8, 100.0] (seeds 1)",
-   "value": "96.7% [88.8, 100.0] (seeds 1)"
+   "shown": "96.7% [88.8, 100.0] (seed 1)",
+   "value": "96.7% [88.8, 100.0] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4151,8 +4146,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/utility/rows/0/gain_kept",
-   "shown": "100.0% [100.0, 100.0] (its own gain)",
-   "value": "100.0% [100.0, 100.0] (its own gain)"
+   "shown": "undefined: the adapter shows no utility gain over parity",
+   "value": "undefined: the adapter shows no utility gain over parity"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4607,8 +4602,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/1/vs_stock",
-   "shown": "-0.163 [-0.233, -0.110] (seeds 1)",
-   "value": "-0.163 [-0.233, -0.110] (seeds 1)"
+   "shown": "-0.163 [-0.233, -0.110] (seed 1)",
+   "value": "-0.163 [-0.233, -0.110] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4637,8 +4632,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/2/vs_stock",
-   "shown": "-0.306 [-0.375, -0.251] (seeds 1)",
-   "value": "-0.306 [-0.375, -0.251] (seeds 1)"
+   "shown": "-0.306 [-0.375, -0.251] (seed 1)",
+   "value": "-0.306 [-0.375, -0.251] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4667,8 +4662,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/3/vs_stock",
-   "shown": "-0.308 [-0.378, -0.253] (seeds 1)",
-   "value": "-0.308 [-0.378, -0.253] (seeds 1)"
+   "shown": "-0.308 [-0.378, -0.253] (seed 2)",
+   "value": "-0.308 [-0.378, -0.253] (seed 2)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4697,8 +4692,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/4/vs_stock",
-   "shown": "-0.309 [-0.378, -0.254] (seeds 1)",
-   "value": "-0.309 [-0.378, -0.254] (seeds 1)"
+   "shown": "-0.309 [-0.378, -0.254] (seed 3)",
+   "value": "-0.309 [-0.378, -0.254] (seed 3)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4727,8 +4722,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/5/vs_stock",
-   "shown": "-0.318 [-0.389, -0.263] (seeds 1)",
-   "value": "-0.318 [-0.389, -0.263] (seeds 1)"
+   "shown": "-0.318 [-0.389, -0.263] (seed 1)",
+   "value": "-0.318 [-0.389, -0.263] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4739,8 +4734,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/5/gain_kept",
-   "shown": "194.8% [165.1, 244.3] (seeds 1)",
-   "value": "194.8% [165.1, 244.3] (seeds 1)"
+   "shown": "194.8% [165.1, 244.3] (seed 1)",
+   "value": "194.8% [165.1, 244.3] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4757,8 +4752,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/6/vs_stock",
-   "shown": "-0.042 [-0.114, +0.014] (seeds 1)",
-   "value": "-0.042 [-0.114, +0.014] (seeds 1)"
+   "shown": "-0.042 [-0.114, +0.014] (seed 1)",
+   "value": "-0.042 [-0.114, +0.014] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4769,8 +4764,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/6/gain_kept",
-   "shown": "25.9% [-13.1, 49.6] (seeds 1)",
-   "value": "25.9% [-13.1, 49.6] (seeds 1)"
+   "shown": "25.9% [-13.1, 49.6] (seed 1)",
+   "value": "25.9% [-13.1, 49.6] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4787,8 +4782,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/7/vs_stock",
-   "shown": "-0.158 [-0.228, -0.105] (seeds 1)",
-   "value": "-0.158 [-0.228, -0.105] (seeds 1)"
+   "shown": "-0.158 [-0.228, -0.105] (seed 1)",
+   "value": "-0.158 [-0.228, -0.105] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4799,8 +4794,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/7/gain_kept",
-   "shown": "96.7% [88.8, 100.0] (seeds 1)",
-   "value": "96.7% [88.8, 100.0] (seeds 1)"
+   "shown": "96.7% [88.8, 100.0] (seed 1)",
+   "value": "96.7% [88.8, 100.0] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4817,8 +4812,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/8/vs_stock",
-   "shown": "-0.308 [-0.380, -0.250] (seeds 1)",
-   "value": "-0.308 [-0.380, -0.250] (seeds 1)"
+   "shown": "-0.308 [-0.380, -0.250] (seed 1)",
+   "value": "-0.308 [-0.380, -0.250] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4847,8 +4842,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/9/vs_stock",
-   "shown": "-0.307 [-0.380, -0.250] (seeds 1)",
-   "value": "-0.307 [-0.380, -0.250] (seeds 1)"
+   "shown": "-0.307 [-0.380, -0.250] (seed 2)",
+   "value": "-0.307 [-0.380, -0.250] (seed 2)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -4877,8 +4872,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/10/vs_stock",
-   "shown": "-0.306 [-0.379, -0.249] (seeds 1)",
-   "value": "-0.306 [-0.379, -0.249] (seeds 1)"
+   "shown": "-0.306 [-0.379, -0.249] (seed 3)",
+   "value": "-0.306 [-0.379, -0.249] (seed 3)"
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -7649,10 +7644,40 @@
    "value": 0.02666666666666667
   },
   {
+   "file": "outputs/figures/adapters_by_language.png",
+   "pointer": "",
+   "shown": "figures/adapters_by_language.png",
+   "value": "5ad33b7cc3b27126b171cc97ddd61539bfb6566c337a8e0b8e5653c2570731ef"
+  },
+  {
+   "file": "outputs/figures/forest_primary.png",
+   "pointer": "",
+   "shown": "figures/forest_primary.png",
+   "value": "48af17319b132f967f58edb53cddc8f608f2cd096ab12cfb89cfa16fd835e707"
+  },
+  {
+   "file": "outputs/figures/tradeoff_dev.png",
+   "pointer": "",
+   "shown": "figures/tradeoff_dev.png",
+   "value": "5382adc9d779d4d97a3725f8d0db749979990aa32a6673fbbefe9b634ff92536"
+  },
+  {
    "file": "outputs/figures/tradeoff_dev_heldout.png",
    "pointer": "",
-   "shown": "not drawn",
-   "value": null
+   "shown": "figures/tradeoff_dev_heldout.png",
+   "value": "42c9278a33b4335fb1a96a3104b594c4e43d2e629f454dd5808ed1d2369d3d0e"
+  },
+  {
+   "file": "outputs/figures/heatmap_harmful.png",
+   "pointer": "",
+   "shown": "figures/heatmap_harmful.png",
+   "value": "12f905fe20361c4a3f6e29942052d2610d8e8268e3e499d494ecc06613574337"
+  },
+  {
+   "file": "outputs/figures/heatmap_overrefusal.png",
+   "pointer": "",
+   "shown": "figures/heatmap_overrefusal.png",
+   "value": "9e6df8033bb6b894ae96aaa0a92b936e322d7e5545024e3c27e513862e17a9ce"
   }
  ]
 }
