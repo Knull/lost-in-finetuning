@@ -20,6 +20,14 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
        unnamed one): the team asked that nobody be thanked. `references` holds the related work's full
        citations, each checked on Nov 13; Devkar et al. (2026) is not among them yet.
 
+103. **The article says in words where the primary judge misses the bar on round 2.** Added after round
+     2's scores were read (22:40 UK): Qwen3Guard (strict) misses the bar in Spanish on round 2 (70.0%
+     agreement, kappa 0.57, 20 items; round 1 met it there, 75.0% and 0.61 on 40 items) and meets it in
+     Hindi, Chinese, English and pooled. Round 1 says the bar's verdict in prose (Gate 1, Hindi); round 2
+     said it only in the table's last column. A sentence under the table now names every language where
+     the primary judge misses the bar on round 2, with the numbers and round 1's for the same language,
+     and says where it meets it. No number, rule or verdict changes: it says a miss more plainly.
+
 ## Nov 12, 2026 (afternoon): the laptop half of the core finals ran twice at once
 
 From 11:25 UK the team ran `lift validate second-judge-sample`, `lift final --variant V --judge-only` for

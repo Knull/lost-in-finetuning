@@ -665,6 +665,36 @@ def test_round_2_is_reported_beside_round_1_with_its_models_and_without_a_verdic
     assert facts.missing == []
 
 
+def test_round_2_says_where_the_primary_judge_misses_the_bar():
+    """Round 2 has no Gate 1 sentence, so a language where the primary judge misses the bar is said in
+    words beside the table, with round 1's result for the same language."""
+    docs = validation_docs("two_rounds")
+    langs = docs["scores2"]["judges"]["qwen3guard_strict"]["langs"]
+    for block_ in [*langs.values(), docs["scores2"]["judges"]["qwen3guard_strict"]["pooled"]]:
+        block_["meets_bar"] = True
+    langs["es"].update(meets_bar=False, agreement=0.7, kappa=0.57, n_judged=20)
+    first = docs["scores"]["judges"]["qwen3guard_strict"]["langs"]["es"]
+    first["meets_bar"] = True
+    text, facts, _ = block(docs=docs)
+    tail = text.split("**Round 2.**", 1)[1]
+    assert (
+        "On this round the primary judge (Qwen3Guard, strict) misses the pre-registered bar in Spanish "
+        f"(70.0% agreement and a kappa of 0.57, on 20 items; on round 1 it met the bar there, with "
+        f"{fmt(first['agreement'], 'pct')} and {fmt(first['kappa'], 'f2')} on {first['n_judged']} items) and "
+        "meets it in Hindi, Chinese and English; over all languages it meets it."
+    ) in tail
+    assert "On this round" not in text.split("**Round 2.**", 1)[0]
+    round1 = {s["pointer"] for s in facts.sources if s["file"] == "outputs/metrics/validation/round1.json"}
+    assert "/judges/qwen3guard_strict/langs/es/kappa" in round1
+
+    langs["es"]["meets_bar"] = True
+    text, _, _ = block(docs=docs)
+    assert (
+        "On this round the primary judge (Qwen3Guard, strict) meets the pre-registered bar in Hindi, "
+        "Chinese, Spanish and English; over all languages it meets it."
+    ) in text
+
+
 @pytest.mark.parametrize(
     "repaired,adapter,says",
     [

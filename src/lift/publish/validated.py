@@ -642,6 +642,61 @@ def _uncovered(doc: Mapping[str, Any]) -> str:
     )
 
 
+def _primary_bar(facts: Facts, doc: Mapping[str, Any], first: Mapping[str, Any], rnd: int) -> str:
+    """Round ``rnd``'s bar for the primary judge in words: where it is missed (with its numbers, and round
+    1's for the same language), where it is met, and pooled. The table says the same per cell; round 2 has
+    no Gate 1 sentence, so a miss would otherwise be said only there."""
+    view = doc["primary_view"]
+    judge = doc["judges"][view]
+    val = _Reader(facts, scores_path(rnd), _stage(rnd))
+    one = _Reader(facts, scores_path(), SCORE)
+    earlier = ((first.get("judges") or {}).get(view) or {}).get("langs") or {}
+
+    def numbers(read: _Reader, at: str) -> tuple[str, str, str]:
+        return (
+            read(f"{at}/agreement", "pct", "a judge's agreement with the readers"),
+            read(f"{at}/kappa", "f2", "a judge's kappa with the readers"),
+            read(f"{at}/n_judged", "int", "the items a judge view is scored on"),
+        )
+
+    met, missed, unchecked = [], [], []
+    for lang, block in judge["langs"].items():
+        name = LANGS.get(lang, lang)
+        if block.get("meets_bar") is None:
+            unchecked.append(name)
+        elif block["meets_bar"]:
+            met.append(name)
+        else:
+            agreement, kappa, n = numbers(val, f"/judges/{view}/langs/{lang}")
+            text = f"{name} ({agreement} agreement and a kappa of {kappa}, on {n} items"
+            before = earlier.get(lang) or {}
+            if rnd != ROUND and before.get("meets_bar") is not None:
+                a1, k1, n1 = numbers(one, f"/judges/{view}/langs/{lang}")
+                text += (
+                    f"; on round 1 it {'met' if before['meets_bar'] else 'missed'} the bar there, with "
+                    f"{a1} and {k1} on {n1} items"
+                )
+            missed.append(text + ")")
+    who = f"the primary judge ({VIEW_WORDS.get(str(view), str(view))})"
+    if missed:
+        out = f"On this round {who} misses the pre-registered bar in {_and(missed)}"
+        out += f" and meets it in {_and(met)}" if met else ""
+    elif met:
+        out = f"On this round {who} meets the pre-registered bar in {_and(met)}"
+    else:
+        out = f"On this round {who} could not be checked against the bar in any language"
+    pooled = judge.get("pooled") or {}
+    if pooled.get("meets_bar") is True:
+        out += "; over all languages it meets it"
+    elif pooled.get("meets_bar") is False:
+        agreement, kappa, n = numbers(val, f"/judges/{view}/pooled")
+        out += f"; over all languages it misses it ({agreement} agreement and a kappa of {kappa}, on {n} "
+        out += "items)"
+    if unchecked and (met or missed):
+        out += f"; it could not be checked in {_and(unchecked)}"
+    return out + "."
+
+
 def _round_2(facts: Facts, first: Mapping[str, Any]) -> str:
     """Round 2's scores (decisions.md 100), the same tables and paragraphs as round 1's without the bar's
     verdict and the decision, which stay on round 1. Pending while the round is drawn and not scored; the
@@ -671,6 +726,7 @@ def _round_2(facts: Facts, first: Mapping[str, Any]) -> str:
     parts = [
         f"{_readers(facts, doc, rnd)} The judge decision and Gate 1 stay on round 1, as pre-registered.",
         _agreement_table(facts, doc, rnd),
+        _primary_bar(facts, doc, first, rnd),
         _harmful_label(facts, doc, rnd),
         _by_group_and_set(facts, doc, rnd),
         closing,
