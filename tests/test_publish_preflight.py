@@ -418,13 +418,13 @@ PROMPT = " ".join(f"promptfake{i:02d}" for i in range(11))  # a made-up prompt, 
 PROMPT_EN = " ".join(f"englishsource{i:02d}" for i in range(8))
 
 
-def _prompt_set():
+def _prompt_set(text: str = PROMPT):
     row = {
         "pid": "prh-test-0001",
         "lang": "hi",
         "set": "harmful",
         "split": "dev",
-        "text": PROMPT,
+        "text": text,
         "text_en": PROMPT_EN,
         "source": "polyrefuse",
         "translation": {"engine": "google-cloud-v2"},
@@ -444,6 +444,27 @@ def test_a_harmful_output_that_repeats_its_prompt_does_not_flag_the_prompt():
     assert kinds(preflight.scan_text(HARMFUL[:95], "a.md", "staged", windows)) == [preflight.OUTPUT_TEXT]
     across = PROMPT[-40:] + ": " + HARMFUL[:55]
     assert kinds(preflight.scan_text(across, "b.md", "staged", windows)) == [preflight.OUTPUT_TEXT]
+
+
+def test_a_prompt_with_an_html_entity_echoed_decoded_is_still_the_prompt():
+    """The scan also reads a file with its HTML entities unescaped, so the exemption reads each prompt that
+    way too: a redacted record keeping a prompt that holds &quot;, which an output echoed with plain quotes,
+    is the prompt and does not fail (the first logs dataset build, Nov 13). The completion's own text still
+    does, and a finding in a JSON file names its field and id, never the text."""
+    entity = PROMPT[:66] + " &quot;quotedfake&quot; " + PROMPT[66:]
+    _prompt_set(entity)
+    harmful_tree("Sure. " + html.unescape(entity) + ": " + HARMFUL)
+    windows, _n, _gone = preflight.load_windows()
+
+    def record(text):
+        sample = {"id": "prh-test-0001", "input": text, "actual_output": "[redacted sha256:00]"}
+        return json.dumps({"samples": [sample], "metadata": {"lift": {"text": "redacted"}}})
+
+    assert preflight.scan_text(record(entity), "auditkit/q/v/harmful_hi_dev.json", "staged", windows) == []
+    (found,) = preflight.scan_text(record(HARMFUL[:95]), "auditkit/q/v/x.json", "staged", windows)
+    assert found.kind == preflight.OUTPUT_TEXT and found.detail == "samples/0/input (id prh-test-0001)"
+    assert str(found).endswith(", in samples/0/input (id prh-test-0001)")
+    assert "preflightfake" not in str(found)
 
 
 def test_without_the_prompt_files_every_window_stays():

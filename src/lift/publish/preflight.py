@@ -285,10 +285,11 @@ class Finding:
     path: str
     line: int
     kind: str
+    detail: str = ""  # where in a JSON file a model-output window is (field path and id), never the text
 
     def __str__(self) -> str:
         loc = f"{self.path}:{self.line}" if self.line else self.path
-        return f"{self.kind}: {loc} ({self.where})"
+        return f"{self.kind}: {loc} ({self.where})" + (f", in {self.detail}" if self.detail else "")
 
 
 # Zero-width characters that stand for a space (they may replace one, or sit inside a word).
@@ -357,15 +358,21 @@ def windows_in_texts(texts: Iterable[str], windows: set[str]) -> set[str]:
 
 
 def prompt_texts() -> Iterator[str]:
-    """Every prompt text on this machine (``data/prompts/*.jsonl``: the text and its English source)."""
+    """Every prompt text on this machine (``data/prompts/*.jsonl``: the text and its English source), and
+    each with its HTML entities unescaped where that changes it: the scan also reads a file that way
+    (``_bodies``), so a prompt holding an entity (``&quot;``, or ``&not`` inside a word) that an output
+    echoes decoded is still the prompt, not the output's own text."""
     from lift.io import read_jsonl
 
     src = paths.prompts_dir()
     for f in sorted(src.glob("*.jsonl")) if src.is_dir() else []:
         for row in read_jsonl(f):
             for field in ("text", "text_en"):
-                if isinstance(row.get(field), str):
-                    yield row[field]
+                text = row.get(field)
+                if isinstance(text, str):
+                    yield text
+                    if "&" in text and (unescaped := html.unescape(text)) != text:
+                        yield unescaped
 
 
 def _in_flat(flat: str, windows: set[str] | frozenset) -> bool:
@@ -581,9 +588,40 @@ def scan_text(
         decoded = decoded_text(text, path)
         for body in _bodies(text, decoded):
             if windows_in(body, windows):
-                found.append(Finding(where, path, 0, OUTPUT_TEXT))
+                found.append(Finding(where, path, 0, OUTPUT_TEXT, _json_where(text, path, windows)))
                 break
     return found
+
+
+def _json_where(text: str, path: str, windows: set[str] | frozenset) -> str:
+    """For a JSON file, the string values that hold a model-output window, as field paths with the id of
+    the object holding each (an AuditKIT sample's pid): names and ids only, never the text. "" for another
+    file, or when no single value holds one (a window across two values)."""
+    if not path.endswith(".json"):
+        return ""
+    try:
+        doc = json.loads(text)
+    except (json.JSONDecodeError, RecursionError):
+        return ""
+    hits: list[str] = []
+
+    def walk(value: object, at: str, owner: object) -> None:
+        if isinstance(value, str):
+            if any(windows_in(b, windows) for b in _bodies(value, None)):
+                oid = owner.get("id") if isinstance(owner, dict) else None
+                hits.append(at + (f" (id {oid})" if isinstance(oid, str) and len(oid) <= 80 else ""))
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                walk(v, f"{at}/{k}" if at else str(k), value)
+        elif isinstance(value, list):
+            for i, v in enumerate(value):
+                walk(v, f"{at}/{i}", owner)
+
+    walk(doc, "", None)
+    if not hits:
+        return ""
+    more = len(hits) - 3
+    return ", ".join(hits[:3]) + (f" and {more} more" if more > 0 else "")
 
 
 def _bodies(text: str, decoded: str | None) -> Iterator[str]:

@@ -4,6 +4,19 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 13, 2026 (22:00 UK): the article's AuditKIT note, team and references
 
+107. **The public-text scan reads each prompt the way it reads a file.** Found when the first logs dataset
+     build (Nov 13, 23:2x UK) failed the scan in at least 50 redacted AuditKIT records (the list was cut at
+     50). The same cells failed for every standard adapter and seed, so the matched text sat in what those
+     records share, the prompt, not in any output.
+     - Why: the scan also reads a staged file with its HTML entities unescaped, but the exemption for runs
+       of a prompt read each prompt only as stored. A prompt holding an entity (`&quot;`, or `&not` inside a
+       word) that an output echoed with the character decoded left that echo as an output window, and the
+       record that keeps the prompt then matched it. A test reproduces this.
+     - Fix: the exemption also takes each prompt with its entities unescaped. It still exempts only runs of
+       prompt text; a window that reaches into a completion's own text stays. A finding in a JSON file now
+       names the field and the id it sits in (never the text), and the failure says how many places failed.
+     - Nothing was published: the failed build stopped before any upload.
+
 106. **The first Chinese round-2 labels were not a human reader's; they are replaced.** At 23:20 UK the
      Chinese reader told the team that the round-2 sheet imported at 22:37 was labelled with an AI tool.
      Validation labels must be a native reader's, so those 20 labels are void. The reader labelled the same

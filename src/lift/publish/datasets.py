@@ -800,9 +800,10 @@ def build_logs(facts: Facts | None = None) -> Upload:
     checked = check_public(folder, windows)
     scan = preflight.scan_folder(folder, windows)
     if scan:
+        more = f"\n  ... and {len(scan) - 50} more" if len(scan) > 50 else ""
         raise PublishError(
-            "the staged logs dataset failed the public-text scan (matched text is never shown), nothing was "
-            "published:\n  " + "\n  ".join(str(x) for x in scan[:50])
+            f"the staged logs dataset failed the public-text scan in {len(scan)} places (matched text is "
+            "never shown), nothing was published:\n  " + "\n  ".join(str(x) for x in scan[:50]) + more
         )
     notes = [
         f"{counts.get('rows', 0)} labelled rows ({checked} checked: ids, labels, flags and hashes only), "
