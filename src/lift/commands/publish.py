@@ -112,7 +112,10 @@ def _article(args: argparse.Namespace) -> int:
     if block:
         print(f"lift publish: BLOCKED, a draft not for posting: {block}", file=sys.stderr)
         return 1
-    print("Commit README.md and hf/article.md: the README is the write-up the submission links to.")
+    print(
+        "Commit README.md, figures/ and hf/article.md (with hf/article.sources.json): the README is the "
+        "write-up the submission links to."
+    )
     return 0
 
 

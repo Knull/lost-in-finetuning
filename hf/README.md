@@ -59,7 +59,8 @@ refuse to run without them. Every dry run runs the public-text scan too and exit
 4. On the laptop, after `lift sync pull`: `lift publish datasets`, then `--yes`;
    `lift publish space`, then `--yes`; `lift publish collections`, then `--yes` (it checks every
    repo is on the Hub before creating anything, so run it after the uploads).
-5. `lift publish article` (no placeholder left), then commit `hf/article.md` and `README.md`. The
+5. `lift publish article` (no placeholder left), then commit `hf/article.md`, `README.md` and the
+   figures it copies into `figures/` beside it, which the README links. The
    README is the write-up the submission form links to (docs/decisions.md item 96: an HF community
    article needs a PRO account, and the organisers accept a README in the GitHub repo).
 6. `lift sync pull`, then `lift publish preflight` (without `--no-fetch` or `--no-history`), then

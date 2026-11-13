@@ -18,6 +18,7 @@ judgements, after the pre-registered decide-judge rule); an id that is neither e
 from __future__ import annotations
 
 import re
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -79,8 +80,12 @@ def sources_path() -> Path:
 def readme_path() -> Path:
     """The repository's README, which is the write-up the judges read (docs/decisions.md item 96: HF
     articles need a PRO account, and the organisers accept a README). ``lift publish article`` writes the
-    article's text there too, without its HF front matter (``readme_text``)."""
+    article's text there too (``readme_text``), and the figures it shows beside it (``readme_figures``)."""
     return paths.REPO_ROOT / "README.md"
+
+
+# A figure's link in the article: the PNG in the logs dataset ({logs}/resolve/main/figures/{name}.png).
+FIGURE_LINK = re.compile(r"\]\(https?://[^)\s]*?/resolve/main/(figures/[^)\s/]+\.png)\)")
 
 
 def seeds_label(seeds: object) -> str:
@@ -95,12 +100,32 @@ def _seeds_word(text: str) -> str:
 
 
 def readme_text(text: str) -> str:
-    """The article as the README: the same text without the YAML front matter an HF article opens with,
-    which GitHub would render as a table above the title."""
-    if not text.startswith("---\n"):
-        return text
-    end = text.find("\n---\n", 4)
-    return text if end < 0 else text[end + 5 :].lstrip("\n")
+    """The article as the README: the same text without the YAML front matter an HF article opens with
+    (GitHub would render it as a table above the title), and with each figure linked from figures/ beside
+    the README (``readme_figures``) rather than from the logs dataset, which goes up only once every
+    label is final (hf/README.md)."""
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end >= 0:
+            text = text[end + 5 :].lstrip("\n")
+    return FIGURE_LINK.sub(r"](\1)", text)
+
+
+def readme_figures() -> list[Path]:
+    """Copy each figure P07 drew (outputs/figures/) into figures/ beside the README, which links them
+    there: charts of aggregates, no output text. A figure that is not drawn has no link, and a copy an
+    earlier run left of it is removed. The copies written."""
+    folder = readme_path().parent / "figures"
+    written = []
+    for name in FIGURES:
+        src, dst = paths.figures_dir() / f"{name}.png", folder / f"{name}.png"
+        if src.is_file() and src.stat().st_size > 0:
+            folder.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+            written.append(dst)
+        elif dst.exists():
+            dst.unlink()
+    return written
 
 
 def _team(cfg: dict) -> tuple[str, str]:
@@ -1055,7 +1080,7 @@ def blocked_line(facts: Facts) -> str:
 
 def build(facts: Facts | None = None, *, readme: bool = False) -> tuple[Path, Facts]:
     """Write the article, its sources and the notebook's stamp; with ``readme`` (the command), the same
-    text as the repository's README.md too."""
+    text as the repository's README.md too, with its figures beside it."""
     from lift.publish import acceptance
 
     facts = facts or Facts()
@@ -1074,6 +1099,7 @@ def build(facts: Facts | None = None, *, readme: bool = False) -> tuple[Path, Fa
     render.write_text(article_path(), text)
     if readme:
         render.write_text(readme_path(), readme_text(text))
+        readme_figures()
     facts.write_sources(sources_path())
     if preflight.relativise_file(sources_path())[1]:
         raise PublishError(f"{sources_path().name} would name an absolute local path outside the repo")

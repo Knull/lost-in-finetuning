@@ -128,6 +128,29 @@ def test_the_readme_is_written_only_when_asked(out):
     assert article.readme_path().parent != article.paths.REPO_ROOT
 
 
+def test_the_readme_shows_the_figures_from_copies_beside_it(out):
+    """Nov 13: the article links each figure in the logs dataset, which goes up only once every label is
+    final, so on GitHub the README showed broken images. The README links copies kept beside it in the
+    repository's figures/ folder instead; hf/article.md keeps the dataset's links."""
+    from lift import paths
+
+    write_inputs()
+    path, _ = article.build(readme=True)
+    text = path.read_text(encoding="utf-8")
+    readme = article.readme_path().read_text(encoding="utf-8")
+    folder = article.readme_path().parent / "figures"
+    assert "/resolve/main/figures/adapters_by_language.png)" in text
+    assert "](figures/adapters_by_language.png)" in readme and "/resolve/main/figures/" not in readme
+    for name in article.FIGURES:
+        drawn = paths.figures_dir() / f"{name}.png"
+        assert (folder / f"{name}.png").read_bytes() == drawn.read_bytes()
+    # A figure no longer drawn loses its copy, and the README its link.
+    (paths.figures_dir() / "tradeoff_dev_heldout.png").unlink()
+    article.build(readme=True)
+    assert not (folder / "tradeoff_dev_heldout.png").exists()
+    assert "figures/tradeoff_dev_heldout.png" not in article.readme_path().read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------- judges from final_report.json (R1-15)
 
 
