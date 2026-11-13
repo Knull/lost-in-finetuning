@@ -302,8 +302,8 @@ def test_job_runs_lines_in_order_with_checkpoints_and_one_final_push(job, tmp_pa
     # The secrets file was gone before the first subprocess, and the started marker is there.
     assert vm.secrets_file_at_first_call is False
     assert not (root / ".lift_secrets.json").exists() and (root / "lift_job.started").exists()
-    assert vm.keys()[:8] == ["nvidia-smi", "git init", "git remote", "git fetch", "git checkout",
-                             "git rev-parse", "pip install", "pip uninstall"]
+    assert vm.keys()[:9] == ["nvidia-smi", "git init", "git remote", "git fetch", "git checkout",
+                             "git rev-parse", "git fetch", "pip install", "pip uninstall"]
     # A checkpoint push after each line except sync lines and the last; the trailing push is the final one.
     assert vm.keys("lift ") == ["lift sync pull", "lift smoke", "lift sync push",
                                 "lift run-dev --variant stock", "lift sync push"]
@@ -316,9 +316,13 @@ def test_job_runs_lines_in_order_with_checkpoints_and_one_final_push(job, tmp_pa
     assert all(c["cwd"] == repo for c in vm.calls if c["key"].startswith("lift "))
 
     # The token reaches git only as an extraheader, and no raw secret is in any argv.
-    fetch = next(c for c in vm.calls if c["key"] == "git fetch")
+    fetch, tags = [c for c in vm.calls if c["key"] == "git fetch"]
     assert fetch["argv"][1:3] == ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {BASIC}"]
     assert fetch["argv"][-2:] == ["origin", "main"]
+    # Then the freeze tags the --depth 1 fetch leaves out (lift publish reads the recipe a tag froze).
+    assert tags["argv"][1:3] == fetch["argv"][1:3]
+    refspec = "+refs/tags/recipe-frozen-*:refs/tags/recipe-frozen-*"
+    assert tags["argv"][-3:] == ["--no-tags", "origin", refspec]
     for call in vm.calls:
         assert not any(secret in arg for arg in call["argv"] for secret in SECRETS.values())
     # Secrets reach lift only: never git or pip, which also get no terminal prompt.
@@ -435,6 +439,18 @@ def test_job_setup_failure_runs_no_line_and_no_push(job, tmp_path):
     log = log_bytes(root)
     assert b"git fetch failed (rc 128)" in log and GH.encode() not in log and BASIC.encode() not in log
     assert last_marker(root) == status
+
+
+def test_a_repo_without_freeze_tags_still_runs_its_lines(job, tmp_path):
+    """The tags fetch fails when no recipe-frozen-* tag exists yet (a glob that matches nothing): noted,
+    not fatal, since only a line that needs a tag can say whether it matters."""
+    root = tmp_path / "content"
+    root.mkdir()
+    status, vm, _ = run_job(job, root, ["lift info"], vm=FakeVM(root, rcs={"git fetch": [0, 1]}))
+    assert status["rc"] == 0 and status["failed_step"] is None and status["installed"] is True
+    assert vm.keys("git fetch") == ["git fetch", "git fetch"]
+    assert vm.keys("lift ") == ["lift info", "lift sync push"]  # the line, then the final push
+    assert b"no recipe-frozen-* tag fetched (rc 1)" in log_bytes(root)
 
 
 # Review #62: JobFailed's default code was 2, the code that means "lift remote refused to start".

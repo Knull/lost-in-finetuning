@@ -34,6 +34,15 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
      before any experimental run. The team found the earlier dates an unneeded detail. Entries of this
      log and code comments that say "locked Oct 28" keep their wording.
 
+105. **Two fixes from the first model upload (Colab, 23:04 UK).** Process only; nothing reported changes.
+     - The GPU job's `--depth 1` fetch of its ref brought no tags, so `lift publish model --yes` found no
+       `recipe-frozen-*` tag and refused (lift final falls back to `git ls-remote`; publishing reads the
+       recipe from the tag's own commit). colab/job.py now also fetches the freeze tags, depth 1, with the
+       same token header; a repo with none is noted, not fatal.
+     - The parameters repo waited for seed-2 and seed-3 entries of every frozen setting. The stress recipe
+       trains seed 1 only (item 82), so its frozen settings exist on seed 1 alone, as the final eval ran
+       them: `lift.publish.inputs.frozen_variants` now takes each adapter's own seeds (`lift.final.seeds_of`).
+
 ## Nov 12, 2026 (afternoon): the laptop half of the core finals ran twice at once
 
 From 11:25 UK the team ran `lift validate second-judge-sample`, `lift final --variant V --judge-only` for

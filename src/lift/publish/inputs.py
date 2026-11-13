@@ -730,9 +730,16 @@ def frozen_family_winners(facts: Facts) -> dict[str, str]:
 
 
 def frozen_variants(facts: Facts) -> list[str]:
-    """Every frozen variant: each family's frozen setting on seeds 1-3 (the final eval's 9 repaired
-    variants), in family then seed order."""
-    out = [seed_variant(name, seed) for name in frozen_family_winners(facts).values() for seed in SEEDS]
+    """Every frozen variant: each family's frozen setting on its adapter's seeds (``lift.final.seeds_of``,
+    configs/train.yaml: 1-3 for a standard adapter, seed 1 for the stress one, docs/decisions.md 82), the
+    final eval's repaired variants, in family then seed order."""
+    from lift.final import seeds_of
+
+    out = []
+    for name in frozen_family_winners(facts).values():
+        m = _SETTING_NAME.match(name)  # a name outside the scheme: seed_variant says so
+        seeds = seeds_of(f"{m.group('stem')}{m.group('seed')}") if m else SEEDS
+        out += [seed_variant(name, seed) for seed in seeds]
     return list(dict.fromkeys(out))
 
 

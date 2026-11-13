@@ -13,7 +13,8 @@ the tests run it on fakes.
 
 Order: take the secrets file that `lift remote` uploaded and delete it first thing; refuse a second
 run on the same VM; check Python >= 3.12; fetch repo@ref with the GitHub token only in an http
-extraheader given through `git -c`; install ".[gpu,data,eval]" with the ref's constraints.txt and the
+extraheader given through `git -c`, then the recipe-frozen-* tags that fetch leaves out (not fatal:
+a repo may have none); install ".[gpu,data,eval]" with the ref's constraints.txt and the
 kernel's own python, and uninstall torchao; check that the ref has `lift sync` (`lift sync --help`),
 without which nothing could be pulled or pushed; run each line as `python -m lift ...`, stopping at
 the first failure, with a `lift sync push` checkpoint after every line except sync lines and the last
@@ -74,6 +75,9 @@ LOG_FILE = "lift_job.log"
 STATUS_FILE = "lift_job.status.json"
 REPO_DIR = "lift"
 CONSTRAINTS_FILE = "constraints.txt"  # in the ref: the exact versions every GPU runtime installs
+# The freeze tags (Gate 3): lift publish reads the recipe a tag froze from the tag's own commit, which a
+# --depth 1 fetch of the ref does not bring.
+FREEZE_TAGS = "refs/tags/recipe-frozen-*"
 DONE_MARKER = "@@LIFT_DONE "
 MIN_PYTHON = (3, 12)
 HEARTBEAT_SECONDS = 300
@@ -431,6 +435,14 @@ class Job:
                 raise JobFailed("fetch", f"{what} failed (rc {rc}){self._why()}", rc or 1)
         sink = []
         self._stream(["git", "-C", self.repo, "rev-parse", "HEAD"], env=env, sink=sink)
+        tags = ["git", *auth, "-C", self.repo, "fetch", "-q", "--depth", "1", "--no-tags", "origin",
+                f"+{FREEZE_TAGS}:{FREEZE_TAGS}"]
+        rc = self._stream(tags, env=env)
+        if self.killed:
+            raise JobFailed("fetch", f"fetching the recipe-frozen-* tags failed (rc {rc}){self._why()}",
+                            rc or 1)
+        if rc != 0:
+            self.note(f"no recipe-frozen-* tag fetched (rc {rc}): a line that needs one says so")
         return b"".join(sink).decode("ascii", "replace").strip() or None
 
     def _install(self, extras):

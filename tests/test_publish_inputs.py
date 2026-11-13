@@ -146,6 +146,24 @@ def test_selection_is_read_in_p05s_shape():
     assert "resta-a0.25-adapter-aya-std-s3" in names and "cast-m1.0-adapter-aya-std-s2" in names
 
 
+def test_a_stress_adapters_frozen_settings_are_on_its_one_seed():
+    """The stress recipe trains seed 1 only (docs/decisions.md 82), so its frozen settings exist on seed 1
+    alone, as the final eval ran them: the parameters repo waits for no seed-2 or seed-3 entry."""
+    from publish_fakes import selection
+
+    from lift.publish.inputs import frozen_variants
+
+    doc = selection()
+    doc["frozen"] = {
+        f: n.replace("adapter-aya-std-s1", "adapter-indicalign-stress-s1") for f, n in doc["frozen"].items()
+    }
+    doc["overall"]["winner"] = doc["overall"]["winner"].replace(
+        "adapter-aya-std-s1", "adapter-indicalign-stress-s1"
+    )
+    write_inputs(selection_doc=doc)
+    assert frozen_variants(Facts()) == list(doc["frozen"].values())
+
+
 def test_incomplete_selection_freezes_nothing():
     from publish_fakes import selection
 
