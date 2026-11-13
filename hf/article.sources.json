@@ -1,7 +1,5 @@
 {
- "pending": [
-  "the judges against the native readers (validation round 2) (outputs/metrics/validation/round2.json)"
- ],
+ "pending": [],
  "values": [
   {
    "file": "configs/project.yaml",
@@ -7606,6 +7604,954 @@
    "pointer": "/judges/qwen3guard_strict/breakdown/pooled/gap_adapter_minus_stock",
    "shown": "+12.2 pp",
    "value": 0.1222222222222222
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/humans/hi/items",
+   "shown": "60",
+   "value": 60
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/humans/zh/items",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/humans/es/items",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/humans/en/items",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/humans/pooled/items",
+   "shown": "120",
+   "value": 120
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/hi/n_judged",
+   "shown": "60",
+   "value": 60
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/hi/agreement",
+   "shown": "78.3%",
+   "value": 0.7833333333333333
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/hi/kappa",
+   "shown": "0.69",
+   "value": 0.6897374701670644
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/hi/agreement_binary",
+   "shown": "81.7%",
+   "value": 0.8166666666666667
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/hi/kappa_binary",
+   "shown": "0.47",
+   "value": 0.47115384615384615
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/zh/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/zh/agreement",
+   "shown": "95.0%",
+   "value": 0.95
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/zh/kappa",
+   "shown": "0.92",
+   "value": 0.9186991869918699
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/zh/agreement_binary",
+   "shown": "95.0%",
+   "value": 0.95
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/zh/kappa_binary",
+   "shown": "0.83",
+   "value": 0.8275862068965517
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/es/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/es/agreement",
+   "shown": "70.0%",
+   "value": 0.7
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/es/kappa",
+   "shown": "0.57",
+   "value": 0.5698924731182796
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/es/agreement_binary",
+   "shown": "85.0%",
+   "value": 0.85
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/es/kappa_binary",
+   "shown": "0.63",
+   "value": 0.6341463414634146
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/en/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/en/agreement",
+   "shown": "95.0%",
+   "value": 0.95
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/en/kappa",
+   "shown": "0.92",
+   "value": 0.9206349206349206
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/en/agreement_binary",
+   "shown": "95.0%",
+   "value": 0.95
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/en/kappa_binary",
+   "shown": "0.83",
+   "value": 0.8275862068965517
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/n_judged",
+   "shown": "120",
+   "value": 120
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/agreement",
+   "shown": "82.5%",
+   "value": 0.825
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/kappa",
+   "shown": "0.74",
+   "value": 0.7423839705581681
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/agreement_binary",
+   "shown": "86.7%",
+   "value": 0.8666666666666667
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/kappa_binary",
+   "shown": "0.61",
+   "value": 0.6063960639606396
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/hi/n_judged",
+   "shown": "60",
+   "value": 60
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/hi/agreement",
+   "shown": "86.7%",
+   "value": 0.8666666666666667
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/hi/kappa",
+   "shown": "0.80",
+   "value": 0.7994987468671679
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/hi/agreement_binary",
+   "shown": "91.7%",
+   "value": 0.9166666666666666
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/hi/kappa_binary",
+   "shown": "0.69",
+   "value": 0.691358024691358
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/zh/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/zh/agreement",
+   "shown": "95.0%",
+   "value": 0.95
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/zh/kappa",
+   "shown": "0.92",
+   "value": 0.9186991869918699
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/zh/agreement_binary",
+   "shown": "95.0%",
+   "value": 0.95
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/zh/kappa_binary",
+   "shown": "0.83",
+   "value": 0.8275862068965517
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/es/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/es/agreement",
+   "shown": "75.0%",
+   "value": 0.75
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/es/kappa",
+   "shown": "0.64",
+   "value": 0.6376811594202898
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/es/agreement_binary",
+   "shown": "90.0%",
+   "value": 0.9
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/es/kappa_binary",
+   "shown": "0.74",
+   "value": 0.7368421052631579
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/en/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/en/agreement",
+   "shown": "90.0%",
+   "value": 0.9
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/en/kappa",
+   "shown": "0.84",
+   "value": 0.8373983739837398
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/en/agreement_binary",
+   "shown": "90.0%",
+   "value": 0.9
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/langs/en/kappa_binary",
+   "shown": "0.61",
+   "value": 0.6078431372549019
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/pooled/n_judged",
+   "shown": "120",
+   "value": 120
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/pooled/agreement",
+   "shown": "86.7%",
+   "value": 0.8666666666666667
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/pooled/kappa",
+   "shown": "0.80",
+   "value": 0.7982133473462953
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/pooled/agreement_binary",
+   "shown": "91.7%",
+   "value": 0.9166666666666666
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_loose/pooled/kappa_binary",
+   "shown": "0.71",
+   "value": 0.7136038186157518
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/hi/n_judged",
+   "shown": "60",
+   "value": 60
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/hi/agreement",
+   "shown": "83.3%",
+   "value": 0.8333333333333334
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/hi/kappa",
+   "shown": "0.74",
+   "value": 0.7435897435897436
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/hi/agreement_binary",
+   "shown": "93.3%",
+   "value": 0.9333333333333333
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/hi/kappa_binary",
+   "shown": "0.57",
+   "value": 0.5698924731182796
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/zh/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/zh/agreement",
+   "shown": "85.0%",
+   "value": 0.85
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/zh/kappa",
+   "shown": "0.75",
+   "value": 0.7478991596638656
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/zh/agreement_binary",
+   "shown": "85.0%",
+   "value": 0.85
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/zh/kappa_binary",
+   "shown": "0.32",
+   "value": 0.3181818181818182
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/es/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/es/agreement",
+   "shown": "70.0%",
+   "value": 0.7
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/es/kappa",
+   "shown": "0.57",
+   "value": 0.5652173913043478
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/es/agreement_binary",
+   "shown": "95.0%",
+   "value": 0.95
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/es/kappa_binary",
+   "shown": "0.83",
+   "value": 0.8275862068965517
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/en/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/en/agreement",
+   "shown": "80.0%",
+   "value": 0.8
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/en/kappa",
+   "shown": "0.68",
+   "value": 0.6774193548387096
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/en/agreement_binary",
+   "shown": "85.0%",
+   "value": 0.85
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/langs/en/kappa_binary",
+   "shown": "0.32",
+   "value": 0.3181818181818182
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/pooled/n_judged",
+   "shown": "120",
+   "value": 120
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/pooled/agreement",
+   "shown": "80.8%",
+   "value": 0.8083333333333333
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/pooled/kappa",
+   "shown": "0.71",
+   "value": 0.7060702875399361
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/pooled/agreement_binary",
+   "shown": "90.8%",
+   "value": 0.9083333333333333
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/frontier/pooled/kappa_binary",
+   "shown": "0.54",
+   "value": 0.5448275862068965
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/hi/confusion/matrix/0/0",
+   "shown": "7",
+   "value": 7
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/hi/confusion/matrix/1/0",
+   "shown": "2",
+   "value": 2
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/hi/confusion/matrix/2/0",
+   "shown": "8",
+   "value": 8
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/langs/hi/confusion/matrix/3/0",
+   "shown": "1",
+   "value": 1
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/0/0",
+   "shown": "17",
+   "value": 17
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/1/0",
+   "shown": "3",
+   "value": 3
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/2/0",
+   "shown": "11",
+   "value": 11
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/3/0",
+   "shown": "2",
+   "value": 2
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/stock/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/stock/agreement",
+   "shown": "80.0%",
+   "value": 0.8
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/stock/human_harmful_rate",
+   "shown": "15.0%",
+   "value": 0.15
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/stock/judge_harmful_rate",
+   "shown": "30.0%",
+   "value": 0.3
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/stock/gap",
+   "shown": "+15.0 pp",
+   "value": 0.15
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/adapter/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/adapter/agreement",
+   "shown": "80.0%",
+   "value": 0.8
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/adapter/human_harmful_rate",
+   "shown": "20.0%",
+   "value": 0.2
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/adapter/judge_harmful_rate",
+   "shown": "40.0%",
+   "value": 0.4
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/adapter/gap",
+   "shown": "+20.0 pp",
+   "value": 0.2
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/repaired/n_judged",
+   "shown": "20",
+   "value": 20
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/repaired/agreement",
+   "shown": "75.0%",
+   "value": 0.75
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/repaired/human_harmful_rate",
+   "shown": "0.0%",
+   "value": 0.0
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/repaired/judge_harmful_rate",
+   "shown": "20.0%",
+   "value": 0.2
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/repaired/gap",
+   "shown": "+20.0 pp",
+   "value": 0.2
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/harmful/n_judged",
+   "shown": "21",
+   "value": 21
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/harmful/agreement",
+   "shown": "85.7%",
+   "value": 0.8571428571428571
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/harmful/human_harmful_rate",
+   "shown": "14.3%",
+   "value": 0.14285714285714285
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/harmful/judge_harmful_rate",
+   "shown": "23.8%",
+   "value": 0.23809523809523808
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/harmful/gap",
+   "shown": "+9.5 pp",
+   "value": 0.09523809523809523
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/hard_benign/n_judged",
+   "shown": "21",
+   "value": 21
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/hard_benign/agreement",
+   "shown": "61.9%",
+   "value": 0.6190476190476191
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/hard_benign/human_harmful_rate",
+   "shown": "19.0%",
+   "value": 0.19047619047619047
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/hard_benign/judge_harmful_rate",
+   "shown": "57.1%",
+   "value": 0.5714285714285714
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/hard_benign/gap",
+   "shown": "+38.1 pp",
+   "value": 0.38095238095238093
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/easy_benign/n_judged",
+   "shown": "18",
+   "value": 18
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/easy_benign/agreement",
+   "shown": "88.9%",
+   "value": 0.8888888888888888
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/easy_benign/human_harmful_rate",
+   "shown": "0.0%",
+   "value": 0.0
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/easy_benign/judge_harmful_rate",
+   "shown": "5.6%",
+   "value": 0.05555555555555555
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/set/easy_benign/gap",
+   "shown": "+5.6 pp",
+   "value": 0.05555555555555555
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/stock/n_judged",
+   "shown": "38",
+   "value": 38
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/stock/agreement",
+   "shown": "81.6%",
+   "value": 0.8157894736842105
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/stock/human_harmful_rate",
+   "shown": "13.2%",
+   "value": 0.13157894736842105
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/stock/judge_harmful_rate",
+   "shown": "23.7%",
+   "value": 0.23684210526315788
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/stock/gap",
+   "shown": "+10.5 pp",
+   "value": 0.10526315789473684
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/adapter/n_judged",
+   "shown": "41",
+   "value": 41
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/adapter/agreement",
+   "shown": "85.4%",
+   "value": 0.8536585365853658
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/adapter/human_harmful_rate",
+   "shown": "24.4%",
+   "value": 0.24390243902439024
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/adapter/judge_harmful_rate",
+   "shown": "39.0%",
+   "value": 0.3902439024390244
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/adapter/gap",
+   "shown": "+14.6 pp",
+   "value": 0.14634146341463417
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/repaired/n_judged",
+   "shown": "41",
+   "value": 41
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/repaired/agreement",
+   "shown": "80.5%",
+   "value": 0.8048780487804879
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/repaired/human_harmful_rate",
+   "shown": "4.9%",
+   "value": 0.04878048780487805
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/repaired/judge_harmful_rate",
+   "shown": "19.5%",
+   "value": 0.1951219512195122
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/repaired/gap",
+   "shown": "+14.6 pp",
+   "value": 0.14634146341463417
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/harmful/n_judged",
+   "shown": "45",
+   "value": 45
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/harmful/agreement",
+   "shown": "91.1%",
+   "value": 0.9111111111111111
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/harmful/human_harmful_rate",
+   "shown": "15.6%",
+   "value": 0.15555555555555556
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/harmful/judge_harmful_rate",
+   "shown": "22.2%",
+   "value": 0.2222222222222222
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/harmful/gap",
+   "shown": "+6.7 pp",
+   "value": 0.06666666666666665
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/hard_benign/n_judged",
+   "shown": "39",
+   "value": 39
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/hard_benign/agreement",
+   "shown": "64.1%",
+   "value": 0.6410256410256411
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/hard_benign/human_harmful_rate",
+   "shown": "25.6%",
+   "value": 0.2564102564102564
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/hard_benign/judge_harmful_rate",
+   "shown": "56.4%",
+   "value": 0.5641025641025641
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/hard_benign/gap",
+   "shown": "+30.8 pp",
+   "value": 0.3076923076923077
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/easy_benign/n_judged",
+   "shown": "36",
+   "value": 36
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/easy_benign/agreement",
+   "shown": "91.7%",
+   "value": 0.9166666666666666
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/easy_benign/human_harmful_rate",
+   "shown": "0.0%",
+   "value": 0.0
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/easy_benign/judge_harmful_rate",
+   "shown": "2.8%",
+   "value": 0.027777777777777776
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/set/easy_benign/gap",
+   "shown": "+2.8 pp",
+   "value": 0.027777777777777776
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/adapter/gap",
+   "shown": "+20.0 pp",
+   "value": 0.2
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/stock/gap",
+   "shown": "+15.0 pp",
+   "value": 0.15
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/gap_adapter_minus_stock",
+   "shown": "+5.0 pp",
+   "value": 0.05000000000000002
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/repaired/gap",
+   "shown": "+20.0 pp",
+   "value": 0.2
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/hi/group/adapter/gap",
+   "shown": "+20.0 pp",
+   "value": 0.2
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/adapter/gap",
+   "shown": "+14.6 pp",
+   "value": 0.14634146341463417
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/stock/gap",
+   "shown": "+10.5 pp",
+   "value": 0.10526315789473684
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/gap_adapter_minus_stock",
+   "shown": "+4.1 pp",
+   "value": 0.04107830551989733
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/repaired/gap",
+   "shown": "+14.6 pp",
+   "value": 0.14634146341463417
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/breakdown/pooled/group/adapter/gap",
+   "shown": "+14.6 pp",
+   "value": 0.14634146341463417
   },
   {
    "file": "outputs/metrics/final_report.json",

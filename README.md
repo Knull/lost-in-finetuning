@@ -397,7 +397,54 @@ In Hindi the judge's harmful rate minus the readers' is +23.3 pp on the adapters
 
 Over all languages the judge's harmful rate minus the readers' is +17.8 pp on the adapters' outputs and +5.6 pp on stock's, a difference of +12.2 pp: on these items the adapters' harmful rate minus stock's is larger under the judge than under the readers by that much, so part of any drift this judge measures there is its labelling and not the readers'.
 
-_[PENDING: the judges against the native readers (validation round 2) from outputs/metrics/validation/round2.json (P04 lift validate score --round 2)]_
+**Round 2.** The same readers, task and guidelines, on 120 other outputs (60 in Hindi, 20 in Chinese, 20 in Spanish and 20 in English): the repaired models `cast-m0.5-adapter-indicalign-stress-s1`, `resta-a0.10-adapter-indicalign-stress-s1` and `wiseft-l0.25-adapter-indicalign-stress-s1` on dev and final; the adapter `adapter-indicalign-stress-s1` and stock on the final split. The judge decision and Gate 1 stay on round 1, as pre-registered.
+
+| Judge | Language | Items | Agreement | Kappa | Agreement, harmful vs not | Kappa, harmful vs not | Bar |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Qwen3Guard, strict (primary) | Hindi | 60 | 78.3% | 0.69 | 81.7% | 0.47 | met |
+| Qwen3Guard, strict (primary) | Chinese | 20 | 95.0% | 0.92 | 95.0% | 0.83 | met |
+| Qwen3Guard, strict (primary) | Spanish | 20 | 70.0% | 0.57 | 85.0% | 0.63 | not met |
+| Qwen3Guard, strict (primary) | English | 20 | 95.0% | 0.92 | 95.0% | 0.83 | met |
+| Qwen3Guard, strict (primary) | All languages | 120 | 82.5% | 0.74 | 86.7% | 0.61 | met |
+| Qwen3Guard, loose | Hindi | 60 | 86.7% | 0.80 | 91.7% | 0.69 | met |
+| Qwen3Guard, loose | Chinese | 20 | 95.0% | 0.92 | 95.0% | 0.83 | met |
+| Qwen3Guard, loose | Spanish | 20 | 75.0% | 0.64 | 90.0% | 0.74 | met |
+| Qwen3Guard, loose | English | 20 | 90.0% | 0.84 | 90.0% | 0.61 | met |
+| Qwen3Guard, loose | All languages | 120 | 86.7% | 0.80 | 91.7% | 0.71 | met |
+| Frontier judge | Hindi | 60 | 83.3% | 0.74 | 93.3% | 0.57 | met |
+| Frontier judge | Chinese | 20 | 85.0% | 0.75 | 85.0% | 0.32 | met |
+| Frontier judge | Spanish | 20 | 70.0% | 0.57 | 95.0% | 0.83 | not met |
+| Frontier judge | English | 20 | 80.0% | 0.68 | 85.0% | 0.32 | met |
+| Frontier judge | All languages | 120 | 80.8% | 0.71 | 90.8% | 0.54 | met |
+
+Agreement and Cohen's kappa are on the four labels, and the bar is checked on them. The two "harmful vs not" columns fold the other three labels into one: harmful outputs are few, so that agreement is high by default and its kappa is the number to read. The loose reading of Qwen3Guard (Controversial follows the refusal flag) is a sensitivity analysis.
+
+What the primary judge's harmful label is to the readers, on the same items. In Hindi, of the 18 outputs the judge labelled harmful, the reader labelled 7 harmful (2 refusal, 8 benign and 1 unclear); of the 7 that the reader labelled harmful, the judge labelled 7 harmful. Over all languages, of the 33 outputs the judge labelled harmful, the readers labelled 17 harmful (3 refusal, 11 benign and 2 unclear); of the 17 that the readers labelled harmful, the judge labelled 17 harmful.
+
+The same items by model and by prompt set, for the primary judge: the share of outputs the readers called harmful, the share the judge did, and the difference. Every claim in this article is a difference between models under one judge, so what matters most is whether the judge's excess is the same for the models compared, and on which prompts it sits.
+
+| Validated items | n | Agreement | Readers: harmful | Judge: harmful | Judge - readers |
+| --- | --- | --- | --- | --- | --- |
+| Hindi, stock | 20 | 80.0% | 15.0% | 30.0% | +15.0 pp |
+| Hindi, the adapters | 20 | 80.0% | 20.0% | 40.0% | +20.0 pp |
+| Hindi, the repaired models | 20 | 75.0% | 0.0% | 20.0% | +20.0 pp |
+| Hindi, harmful prompts | 21 | 85.7% | 14.3% | 23.8% | +9.5 pp |
+| Hindi, hard-benign prompts | 21 | 61.9% | 19.0% | 57.1% | +38.1 pp |
+| Hindi, easy-benign prompts | 18 | 88.9% | 0.0% | 5.6% | +5.6 pp |
+| All languages, stock | 38 | 81.6% | 13.2% | 23.7% | +10.5 pp |
+| All languages, the adapters | 41 | 85.4% | 24.4% | 39.0% | +14.6 pp |
+| All languages, the repaired models | 41 | 80.5% | 4.9% | 19.5% | +14.6 pp |
+| All languages, harmful prompts | 45 | 91.1% | 15.6% | 22.2% | +6.7 pp |
+| All languages, hard-benign prompts | 39 | 64.1% | 25.6% | 56.4% | +30.8 pp |
+| All languages, easy-benign prompts | 36 | 91.7% | 0.0% | 2.8% | +2.8 pp |
+
+In Hindi the judge's harmful rate minus the readers' is +20.0 pp on the adapters' outputs and +15.0 pp on stock's, a difference of +5.0 pp: on these items the adapters' harmful rate minus stock's is larger under the judge than under the readers by that much, so part of any drift this judge measures there is its labelling and not the readers'.
+
+In Hindi the judge's harmful rate minus the readers' is +20.0 pp on the repaired models' outputs and +20.0 pp on the adapters': on these items the judge and the readers put the two the same distance apart.
+
+Over all languages the judge's harmful rate minus the readers' is +14.6 pp on the adapters' outputs and +10.5 pp on stock's, a difference of +4.1 pp: on these items the adapters' harmful rate minus stock's is larger under the judge than under the readers by that much, so part of any drift this judge measures there is its labelling and not the readers'.
+
+Over all languages the judge's harmful rate minus the readers' is +14.6 pp on the repaired models' outputs and +14.6 pp on the adapters': on these items the judge and the readers put the two the same distance apart.
 
 ### Judge sensitivity
 
