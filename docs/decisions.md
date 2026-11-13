@@ -28,6 +28,12 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
      the primary judge misses the bar on round 2, with the numbers and round 1's for the same language,
      and says where it meets it. No number, rule or verdict changes: it says a miss more plainly.
 
+104. **The pre-registration's opening drops the team plan's dates.** Wording only: no decision in it
+     changes. It said the team plan locked the decisions on Oct 28 and moved the target language to
+     Hindi on Oct 29; it now says only what the repository shows, that they were committed on Nov 3,
+     before any experimental run. The team found the earlier dates an unneeded detail. Entries of this
+     log and code comments that say "locked Oct 28" keep their wording.
+
 ## Nov 12, 2026 (afternoon): the laptop half of the core finals ran twice at once
 
 From 11:25 UK the team ran `lift validate second-judge-sample`, `lift final --variant V --judge-only` for

@@ -18,8 +18,7 @@ Status: in progress. Nothing below is a result yet.
 
 ## Pre-registration
 
-The team plan locked these decisions on Oct 28, 2026; the target language changed to Hindi on
-Oct 29. They were committed here on Nov 3, 2026, before any experimental run. Any later change
+These decisions were committed here on Nov 3, 2026, before any experimental run. Any later change
 is logged in `docs/decisions.md` with its date and reason.
 
 **Model.** Tiny Aya Global (CohereLabs/tiny-aya-global, 3.35B). Tiny Aya Base appears only as the
