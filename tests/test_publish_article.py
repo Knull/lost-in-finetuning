@@ -80,6 +80,13 @@ def test_full_inputs_leave_no_placeholder(out, monkeypatch):
     nb = json.loads((out / "acceptance_test.ipynb").read_text())
     assert any('REPO_URL = "https://github.com/o/r"' in line for c in nb["cells"] for line in c["source"])
     assert "  - user: a-user" in text
+    # the lead: drift, the frozen repair and its verdict, the other families, before section 1
+    lead = text.split("## 1. Problem and approach", 1)[0]
+    assert "**In short.**" in lead and "+16.0 pp [+11.0, +21.0]" in lead and "verdict **repair**" in lead
+    assert (
+        "**The other repairs.** Their frozen settings: `cast-m1.0-adapter-aya-std-s1` (**repair**), "
+        "`resta-a0.25-adapter-aya-std-s1` (**repair**)."
+    ) in lead
     # annotators: [] thanks nobody, so the article ends on its team list
     assert "We thank" not in text and text.endswith("- A ([@a-user](https://huggingface.co/a-user))\n")
     assert "Later releases centre them" in text

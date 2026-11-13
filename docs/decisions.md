@@ -4,6 +4,10 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 13, 2026 (22:00 UK): the article's AuditKIT note, team and references
 
+108. **The article opens with an "In short" lead.** Reporting only: the drift, the frozen repair with
+     its verdict and the other families' frozen settings, from the same values section 6 gives in full,
+     before section 1. Added so a reader who stops after a minute still gets the result.
+
 107. **The public-text scan reads each prompt the way it reads a file.** Found when the first logs dataset
      build (Nov 13, 23:2x UK) failed the scan in at least 50 redacted AuditKIT records (the list was cut at
      50). The same cells failed for every standard adapter and seed, so the matched text sat in what those

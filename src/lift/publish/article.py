@@ -1058,7 +1058,50 @@ def context(facts: Facts) -> dict[str, str]:
     logs = settings.repo("logs").url
     for name in FIGURES:  # the PNGs travel in the logs dataset (datasets.build_logs), linked from there
         ctx[f"figure_{name}"] = facts.figure(name, base=f"{logs}/resolve/main/")
+    ctx["in_short"] = in_short(facts, ctx)
     return ctx
+
+
+METHOD_WORDS = {
+    "wiseft": "WiSE-FT, the adapter scaled back toward stock",
+    "resta": "ReSta-A, adding back the safety difference between Global and Base",
+    "cast": "CAST, conditional activation steering",
+    "castalways": "activation steering with the gate always on",
+}
+
+
+def _method(name: str) -> str:
+    family = name.split("-", 1)[0]
+    return METHOD_WORDS.get(family, family)
+
+
+def in_short(facts: Facts, ctx: Mapping[str, str]) -> str:
+    """The lead a reader sees first: the drift, the frozen repair and its verdict, the other families'
+    frozen settings, each from the values the sections below say in full (the same slots, so the same
+    sources). Pending while the selection is not decided."""
+    sel = _decided(facts)
+    if sel is None:
+        return pending("the summary (the frozen repair)", shown(selection_path()), P05)
+    winner = str(sel["overall"]["winner"])
+    verdict = sel["overall"].get("verdict") or "not decided"
+    lines = [
+        f"- **Drift.** {ctx['comparison_adapter']} changed the Hindi harmful rate by {ctx['drift']} against "
+        f"stock on the final split ({ctx['drift_p']}).",
+        f"- **Repair.** The frozen repair, `{winner}` ({_method(winner)}), changed it by {ctx['repair']} "
+        f"against the adapter ({ctx['repair_p']}): verdict **{verdict}**.",
+    ]
+    others = [
+        f"`{fam.get('winner')}` (**{fam.get('verdict')}**)"
+        for _family, fam in sorted((sel.get("families") or {}).items())
+        if isinstance(fam, Mapping) and fam.get("winner") and fam.get("winner") != winner
+    ]
+    if others:
+        lines.append(f"- **The other repairs.** Their frozen settings: {', '.join(others)}.")
+    lines.append(
+        "- Each adapter's verdict, its usefulness and every interval are in section 6; every number's "
+        "source is in `hf/article.sources.json`."
+    )
+    return "**In short.**\n\n" + "\n".join(lines)
 
 
 def blocked_line(facts: Facts) -> str:
