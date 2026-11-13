@@ -106,12 +106,12 @@ def test_committed_draft_matches_the_template_sections():
 
 
 def test_the_committed_readme_is_the_committed_article():
-    """Decisions item 96: README.md is the write-up, the same text as hf/article.md, both written by
-    ``lift publish article``. One regenerated without the other fails here."""
+    """Decisions item 96: README.md is the write-up, the same text as hf/article.md without its HF front
+    matter, both written by ``lift publish article``. One regenerated without the other fails here."""
     from lift.paths import REPO_ROOT
 
-    assert (REPO_ROOT / "README.md").read_text(encoding="utf-8") == article.article_path().read_text(
-        encoding="utf-8"
+    assert (REPO_ROOT / "README.md").read_text(encoding="utf-8") == article.readme_text(
+        article.article_path().read_text(encoding="utf-8")
     )
     assert "PREREGISTRATION.md" in (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert (REPO_ROOT / "PREREGISTRATION.md").is_file()
@@ -121,7 +121,10 @@ def test_the_readme_is_written_only_when_asked(out):
     path, _ = article.build()
     assert not article.readme_path().exists()  # tests' README lives under tmp_path (conftest)
     path, _ = article.build(readme=True)
-    assert article.readme_path().read_text(encoding="utf-8") == path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    readme = article.readme_path().read_text(encoding="utf-8")
+    assert text.startswith("---\n") and readme == article.readme_text(text)
+    assert readme.startswith("# Lost in Fine-Tuning") and "thumbnail:" not in readme  # GitHub shows no table
     assert article.readme_path().parent != article.paths.REPO_ROOT
 
 
@@ -428,7 +431,7 @@ def test_the_repair_vs_wiseft_table_is_shown_only_when_p07_writes_it(out):
     assert "| resta | -4.0 pp [-8.0, -1.0] | +0.0 pp [-10.0, +10.0] |" in section
     assert "not pre-registered" in section
     sentence = " ".join(section.split())
-    assert 'For resta: better than WiSE-FT on "Hindi harmful rate" (lower)' in sentence
+    assert 'for resta: better than WiSE-FT on "Hindi harmful rate" (lower)' in sentence
     assert 'no clear difference on "Gain kept"' in sentence
     assert 'For cast: no clear difference on "Hindi harmful rate"; "Gain kept" not run' in sentence
     assert text.index("### Repair comparison") < text.index("### Each repair against")
@@ -464,14 +467,14 @@ def _vs_stock_table(hindi, others=None):
 @pytest.mark.parametrize(
     ("hindi", "says"),
     [
-        ((-0.08, -0.13, -0.03), "On Hindi the frozen repair's harmful rate is lower than stock's."),
+        ((-0.08, -0.13, -0.03), "on Hindi the frozen repair's harmful rate is lower than stock's."),
         (
             (0.07, 0.02, 0.12),
-            "On Hindi the frozen repair's harmful rate is higher than stock's, so part of the drift remains.",
+            "on Hindi the frozen repair's harmful rate is higher than stock's, so part of the drift remains.",
         ),
         (
             (-0.02, -0.06, 0.02),
-            "On Hindi the frozen repair's harmful rate is not clearly different from stock's.",
+            "on Hindi the frozen repair's harmful rate is not clearly different from stock's.",
         ),
     ],
 )
@@ -692,7 +695,7 @@ def test_p07s_repair_vs_wiseft_table_renders_with_its_label(out):
     assert UNDEFINED_GAIN in section and "| resta | resta-a0.25-adapter-aya-std-s1 |" in section
     sentence = " ".join(section.split())
     assert (
-        'For resta (seeds 1, 2, 3): better than WiSE-FT on "Harmful rate" (lower); no clear difference on '
+        'for resta (seeds 1, 2, 3): better than WiSE-FT on "Harmful rate" (lower); no clear difference on '
         '"Hard-benign refusal" and "Utility gain kept".' in sentence
     )
     assert (
@@ -719,7 +722,7 @@ def test_the_wiseft_answer_reads_every_column_and_says_which_way(out):
     section = _section(text, "Each repair against WiSE-FT attenuation")
     sentence = " ".join(section.split("\n|")[0].split())
     assert (
-        'For resta (seeds 1, 2, 3): better than WiSE-FT on "Utility gain kept" (higher); worse than '
+        'for resta (seeds 1, 2, 3): better than WiSE-FT on "Utility gain kept" (higher); worse than '
         'WiSE-FT on "Harmful rate" (higher); no clear difference on "Hard-benign refusal".' in sentence
     )
     assert (
@@ -972,6 +975,8 @@ def test_verdict_lines_say_what_each_row_is_and_gate_1s_verdict(out):
         "arm): **no verdict**; Gate 1: **reject on usefulness**. Gate 1 did not pick it"
     ) in verdicts
     assert "**not run**" not in verdicts
+    # Every line ends a sentence, P07's reason included (Nov 13: the reasons ended without one).
+    assert all(line.rstrip().endswith(".") for line in verdicts.splitlines() if line.startswith("- `"))
 
 
 def test_the_secondary_selections_figure_is_optional(out):
@@ -988,6 +993,20 @@ def test_the_secondary_selections_figure_is_optional(out):
     assert not any("tradeoff_dev_heldout" in m for m in facts.missing)
     assert "figures/tradeoff_dev_heldout.png)" not in text
     assert "of the held-out-loss gain: 60.0% [52.0, 68.0]" in text  # the final-split share is still there
+
+
+def test_with_no_figure_drawn_the_optional_one_is_pending_like_the_rest(out):
+    """Nov 13: lift report drew no figure (matplotlib was not installed) and the article said the secondary
+    selection "is not decided". With no figure drawn, the reason is that: every figure line is pending."""
+    from lift import paths
+
+    write_inputs()
+    for png in (paths.output_dir() / "figures").glob("*.png"):
+        png.unlink()
+    path, facts = article.build()
+    text = path.read_text(encoding="utf-8")
+    assert "_Not drawn:" not in text
+    assert any("tradeoff_dev_heldout" in p for p in article.placeholders(text))
 
 
 def _secondary_file():

@@ -141,7 +141,7 @@ Each adapter against stock on the final split, in words. A direction is said onl
 
 The repair comparison is carried by {{ comparison_adapter }}: "the adapter" below.
 Paired by prompt. The pooled effects use a bootstrap clustered by prompt id over the seeds that
-were run (drift: seeds {{ drift_seeds }}; repair: seeds {{ repair_seeds }}); each seed is shown
+were run (drift: {{ drift_seeds }}; repair: {{ repair_seeds }}); each seed is shown
 below with McNemar's exact test.
 
 - **Drift** (adapter minus stock): {{ drift }}, {{ drift_p }}

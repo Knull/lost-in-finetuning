@@ -922,7 +922,8 @@ def verdict_lines(facts: Facts) -> str:
             else ""
         )
         who = f"{recipe} recipe" + (f", {role}" if role else "")
-        lines.append(f"- `{adapter}` ({who}): **{verdict}**{useful}. {reason}".rstrip())
+        end = "" if not reason or reason.endswith((".", "!", "?", "_")) else "."
+        lines.append(f"- `{adapter}` ({who}): **{verdict}**{useful}. {reason}{end}".rstrip())
     return "\n".join(lines)
 
 

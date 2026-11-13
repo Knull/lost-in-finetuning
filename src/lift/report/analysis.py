@@ -63,6 +63,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -684,6 +685,12 @@ def _nll_change(
     return {k: res[k] for k in ("est", "lo", "hi", "n", "n_clusters")} | {"seeds": seeds}
 
 
+def _seed_of(name: str) -> int:
+    """The training seed in a variant's name (adapter-aya-std-s2 and its repairs: 2), 1 when it names none."""
+    m = re.search(r"-s(\d+)$", name)
+    return int(m.group(1)) if m else 1
+
+
 def heldout_block(source: Source, r: Mapping[str, Any]) -> dict[str, Any]:
     """Held-out loss on the final split (decisions.md 73 and 82): per variant the mean per-token NLL of the
     final utility references and its change against stock, and per frozen family the share of the
@@ -711,7 +718,7 @@ def heldout_block(source: Source, r: Mapping[str, Any]) -> dict[str, Any]:
                 "mean_nll": math.fsum(s for s, _ in mine.values()) / tokens,
                 "n": len(mine),
                 "n_tokens": tokens,
-                "vs_stock": None if name == "stock" else _nll_change(scores, {1: name}),
+                "vs_stock": None if name == "stock" else _nll_change(scores, {_seed_of(name): name}),
             }
         )
     retained: dict[str, Any] = {}

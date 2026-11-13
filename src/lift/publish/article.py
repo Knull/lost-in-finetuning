@@ -79,8 +79,28 @@ def sources_path() -> Path:
 def readme_path() -> Path:
     """The repository's README, which is the write-up the judges read (docs/decisions.md item 96: HF
     articles need a PRO account, and the organisers accept a README). ``lift publish article`` writes the
-    article's text there too, unchanged."""
+    article's text there too, without its HF front matter (``readme_text``)."""
     return paths.REPO_ROOT / "README.md"
+
+
+def seeds_label(seeds: object) -> str:
+    """ "seed 1" for one seed, "seeds 1, 2, 3" for more (as lift.report.tables writes them)."""
+    text = ", ".join(str(s) for s in seeds) if isinstance(seeds, (list, tuple)) else str(seeds)
+    return f"seeds {text}" if "," in text else f"seed {text}"
+
+
+def _seeds_word(text: str) -> str:
+    """ "seed 1" or "seeds 1, 2" before the seeds a value pools; a pending line as it is."""
+    return text if text.startswith(("[", "_")) else seeds_label(text)
+
+
+def readme_text(text: str) -> str:
+    """The article as the README: the same text without the YAML front matter an HF article opens with,
+    which GitHub would render as a table above the title."""
+    if not text.startswith("---\n"):
+        return text
+    end = text.find("\n---\n", 4)
+    return text if end < 0 else text[end + 5 :].lstrip("\n")
 
 
 def _team(cfg: dict) -> tuple[str, str]:
@@ -805,8 +825,8 @@ def vs_wiseft_sentence(name: str, spec: dict) -> str:
             f"{_and(groups['undefined'])} undefined" if "undefined" in groups else "",
         ]
         seeds = row.get(seeds_col["key"]) if seeds_col else None
-        family = str(row.get(who["key"])) + (f" (seeds {seeds})" if seeds not in (None, "") else "")
-        sentences.append(f"For {family}: {'; '.join(p for p in parts if p)}.")
+        family = str(row.get(who["key"])) + (f" ({seeds_label(seeds)})" if seeds not in (None, "") else "")
+        sentences.append(f"{'for' if not sentences else 'For'} {family}: {'; '.join(p for p in parts if p)}.")
     return (
         "Does any repair beat simply scaling the adapter down? Descriptively (paired, unadjusted, not "
         "pre-registered; each column of the table below is the repair minus WiSE-FT, and a difference counts "
@@ -854,7 +874,7 @@ def vs_stock_sentence(name: str, spec: dict) -> str:
     }
     parts = []
     if hindi is not None:
-        parts.append(f"On Hindi the frozen repair's harmful rate is {said[hindi]}.")
+        parts.append(f"on Hindi the frozen repair's harmful rate is {said[hindi]}.")
     others = [
         f"lower than stock's on {_and(groups['lower'])}" if "lower" in groups else "",
         f"higher on {_and(groups['higher'])}" if "higher" in groups else "",
@@ -863,7 +883,7 @@ def vs_stock_sentence(name: str, spec: dict) -> str:
     ]
     others = [x for x in others if x]
     if others:
-        parts.append(f"On the other rows it is {'; '.join(others)}.")
+        parts.append(f"{'On' if parts else 'on'} the other rows it is {'; '.join(others)}.")
     return (
         "Is safety restored? Descriptively (paired by prompt, unadjusted, not pre-registered; a difference "
         "counts only where its 95% interval excludes zero): " + " ".join(parts) + "\n\n"
@@ -952,8 +972,12 @@ def context(facts: Facts) -> dict[str, str]:
         "drift_p": rv("/primary/drift/pooled/p", "p_stmt", what="the drift p-value"),
         "repair": rv("/primary/repair/pooled", "pp_ci", what="the pooled Hindi repair effect"),
         "repair_p": rv("/primary/repair/pooled/p", "p_stmt", what="the repair p-value"),
-        "drift_seeds": rv("/primary/drift/pooled/seeds", "list", what="the seeds pooled for drift"),
-        "repair_seeds": rv("/primary/repair/pooled/seeds", "list", what="the seeds pooled for repair"),
+        "drift_seeds": _seeds_word(
+            rv("/primary/drift/pooled/seeds", "list", what="the seeds pooled for drift")
+        ),
+        "repair_seeds": _seeds_word(
+            rv("/primary/repair/pooled/seeds", "list", what="the seeds pooled for repair")
+        ),
         "table_per_seed": facts.per_seed_table(PRIMARY_EFFECTS),
         "redteam_drift": rv(
             "/primary/redteam_drift/pooled", "pp_ci", what="the Aya Red-teaming drift effect"
@@ -1049,7 +1073,7 @@ def build(facts: Facts | None = None, *, readme: bool = False) -> tuple[Path, Fa
         )
     render.write_text(article_path(), text)
     if readme:
-        render.write_text(readme_path(), text)
+        render.write_text(readme_path(), readme_text(text))
     facts.write_sources(sources_path())
     if preflight.relativise_file(sources_path())[1]:
         raise PublishError(f"{sources_path().name} would name an absolute local path outside the repo")

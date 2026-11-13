@@ -114,7 +114,7 @@ def test_the_article_reads_the_report_p07_writes(real_report):
     # "Restores safety" is read against stock (decisions.md 90): P07's table arrives with its sentence.
     restored = " ".join(_section(text, "The frozen repair against stock per language").split())
     assert "Is safety restored? Descriptively (paired by prompt" in restored
-    assert "On Hindi the frozen repair's harmful rate is " in restored and "| Hindi |" in restored
+    assert "on Hindi the frozen repair's harmful rate is " in restored and "| Hindi |" in restored
     assert text.index("### The frozen repair against stock") < text.index("### Each repair against WiSE-FT")
     assert f"- of the win-rate gain: {analysis.UNDEFINED_GAIN}" in text
     assert re.search(r"- of the held-out-loss gain: \d+\.\d% \[", text)

@@ -419,7 +419,10 @@ class Facts:
         OPTIONAL_FIGURES once the report exists). The image is the file: no number is typed."""
         path = paths.figures_dir() / f"{name}.png"
         if not path.is_file() or path.stat().st_size == 0:
-            if name in OPTIONAL_FIGURES and self.report() is not None:
+            # "Not drawn" only once lift report drew its figures: with none drawn (no matplotlib, say) the
+            # reason is that, and the line stays pending like the others.
+            drew = any((paths.figures_dir() / f"{other}.png").is_file() for other in FIGURES)
+            if name in OPTIONAL_FIGURES and self.report() is not None and drew:
                 self.sources.append({"shown": "not drawn", "file": shown(path), "pointer": "", "value": None})
                 return f"_Not drawn: {OPTIONAL_FIGURES[name]}._"
             return f"_{self._missing(f'the figure {name}.png', path, P07_FIGURES)}_"

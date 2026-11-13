@@ -198,6 +198,12 @@ def _seeds(e: Mapping[str, Any] | None) -> str | None:
     return None if not isinstance(e, Mapping) else ", ".join(str(s) for s in e.get("seeds", []))
 
 
+def seeds_label(seeds: Any) -> str:
+    """ "seed 1" for one seed, "seeds 1, 2, 3" for more, from a list or the text ``_seeds`` gives."""
+    text = ", ".join(str(s) for s in seeds) if isinstance(seeds, (list, tuple)) else str(seeds)
+    return f"seeds {text}" if "," in text else f"seed {text}"
+
+
 def _shown(value: Any, kind: str) -> str | None:
     """A pooled interval as text with the seeds it pools, a text value (an undefined share, say) as it is,
     None (not run) as None: for a column whose rows may hold either (format "text")."""
@@ -205,7 +211,7 @@ def _shown(value: Any, kind: str) -> str | None:
         return value
     text = fmt(value, kind)
     seeds = _seeds(value)
-    return f"{text} (seeds {seeds})" if seeds else text
+    return f"{text} ({seeds_label(seeds)})" if seeds else text
 
 
 def _n_title(rows: Sequence[Mapping[str, Any]], unit: str) -> str:
@@ -434,7 +440,7 @@ def _nll(value: Any) -> str | None:
         return value
     text = f"{value['est']:+.3f} [{value['lo']:+.3f}, {value['hi']:+.3f}]"
     seeds = _seeds(value)
-    return f"{text} (seeds {seeds})" if seeds else text
+    return f"{text} ({seeds_label(seeds)})" if seeds else text
 
 
 def _yes_no(value: Any) -> str | None:
@@ -764,11 +770,15 @@ def utility(stats: Mapping[str, Any]) -> dict[str, Any]:
     roles = stats["roles"]
     rows = []
     arms = [("adapter", roles["adapter"])] + list(roles["families"].items())
+    # An adapter at or under parity has no gain to keep: its row says so as the repairs' rows do.
+    no_gain = next((v for v in u["retained"].values() if isinstance(v, str)), None)
     for arm, by_seed in arms:
         for seed, name in sorted(by_seed.items(), key=lambda kv: int(kv[0])):
             r = by_variant.get(name, {})
             ok = r.get("status") == "ok"
-            if arm == "adapter":
+            if arm == "adapter" and no_gain:
+                kept = no_gain if ok else None
+            elif arm == "adapter":
                 kept = fmt({"est": 1.0, "lo": 1.0, "hi": 1.0}, "pct_ci") + " (its own gain)" if ok else None
             else:
                 kept = _shown(u["retained"].get(arm), "pct_ci")

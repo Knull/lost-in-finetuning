@@ -1258,6 +1258,10 @@ def test_heldout_loss_and_the_share_of_the_gain_each_repair_keeps(one_candidate)
     assert rows["stock"]["mean_nll"] == pytest.approx(2.0) and rows["stock"]["vs_stock"] is None
     assert rows[STRESS.format(1)]["vs_stock"]["est"] == pytest.approx(-0.40)
     assert STRESS.format(2) not in rows  # the stress recipe trains seed 1 only
+    # Each variant's row is its own seed: a seed-2 adapter is not labelled seed 1 (the Nov 13 report did).
+    for seed in (1, 2, 3):
+        assert rows[OTHER.format(seed)]["vs_stock"]["seeds"] == [seed]
+    assert analysis._seed_of("wiseft-l0.25-adapter-aya-std-s3") == 3 and analysis._seed_of("stock") == 1
     source.no_heldout = {OTHER.format(3)}
     partial = analysis.compute(source, sel, use_file=False)
     missing = {r["variant"]: r for r in partial["heldout"]["rows"]}[OTHER.format(3)]
@@ -1285,9 +1289,13 @@ def test_heldout_loss_and_the_share_of_the_gain_each_repair_keeps(one_candidate)
     assert table[STRESS.format(1)]["gain_kept"] == "its own fit"
     assert (
         table[ThreeAdapters.WIN.format(1)]["gain_kept"].startswith("50.0% [")
-        and "(seeds 1)" in table[ThreeAdapters.WIN.format(1)]["gain_kept"]
+        and "(seed 1)" in table[ThreeAdapters.WIN.format(1)]["gain_kept"]
     )
     assert table[OTHER.format(1)]["gain_kept"] == "its own fit"
+    assert table[OTHER.format(2)]["vs_stock"].endswith("(seed 2)")
+    # An adapter under parity has no win-rate gain to keep, its own included (not "100% of its own gain").
+    utility = {r["variant"]: r for r in doc["tables"]["utility"]["rows"]}
+    assert utility[STRESS.format(1)]["gain_kept"] == analysis.UNDEFINED_GAIN
     comparison = doc["tables"]["repair_comparison"]["rows"][0]
     assert comparison["gain_kept"] == analysis.UNDEFINED_GAIN
     assert comparison["heldout_kept"].startswith("50.0% [")
