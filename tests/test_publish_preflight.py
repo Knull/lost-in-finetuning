@@ -11,6 +11,7 @@ import subprocess
 import unicodedata
 
 import pytest
+import yaml
 
 from lift import cli, paths
 from lift.io import sha256_text, write_jsonl
@@ -602,3 +603,74 @@ def test_a_tokenizers_own_files_are_not_read_for_output_windows(tmp_path):
         ("README.md", preflight.OUTPUT_TEXT),
         ("sub/tokenizer_config.json", preflight.OUTPUT_TEXT),
     }
+
+
+# ------------------------------------------------------------------------- item 115: reviewed history blobs
+
+# A stand-in for our own code (prose, so this file shares no run with a real output's web page).
+PAGE = (
+    "the head and style of the first static page, written out by hand for the acceptance test and read "
+    "by a person before its blob was listed"
+)
+
+
+def _blob(repo, path):
+    out = subprocess.run(["git", "rev-parse", f"HEAD:{path}"], cwd=repo, capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def _commit(repo, files, message):
+    for name, text in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", message)
+
+
+def test_a_listed_history_blob_of_our_own_code_passes_and_says_so(repo):
+    """Our own page code that shares a run with a model's web page passes in the history once its path and
+    blob are listed in configs/preflight_allow.yaml, and the run says so (item 115)."""
+    windows = preflight.windows_of([PAGE])
+    _commit(repo, {"app.py": f'CSS = """{PAGE}"""\n'}, "page")
+    blob = _blob(repo, "app.py")
+    _commit(repo, {"app.py": 'CSS = "body{margin:0}"\n'}, "compact")
+    assert kinds(preflight.run(repo, windows=windows)) == [preflight.OUTPUT_TEXT]
+    allow = {"history": [{"path": "app.py", "blob": blob, "reason": "our own page code"}]}
+    _commit(repo, {preflight.ALLOW_FILE: yaml.safe_dump(allow)}, "allow")
+    said = []
+    assert preflight.run(repo, windows=windows, log=said.append) == []
+    assert len(said) == 1 and said[0].startswith("allowed (configs/preflight_allow.yaml): text of a model")
+    assert "app.py:1" in said[0] and "our own page code" in said[0]
+
+
+@pytest.mark.parametrize("case", ["other path", "other blob", "tree", "secret"])
+def test_the_allow_list_covers_only_its_blobs_history_and_output_windows(repo, case):
+    """A listed blob passes only at its own path, only in the history and only for an output window: the
+    same text in another blob or in the tree, or a secret in the listed blob, still fails (item 115)."""
+    windows = preflight.windows_of([PAGE])
+    text = f'CSS = """{PAGE}"""\n' + (f'KEY = "{FAKE_HF}"\n' if case == "secret" else "")
+    _commit(repo, {"app.py": text}, "page")
+    blob = _blob(repo, "app.py")
+    if case == "other blob":
+        _commit(repo, {"app.py": text + "# edited\n"}, "edit")
+    if case != "tree":
+        _commit(repo, {"app.py": 'CSS = "body{margin:0}"\n'}, "compact")
+    path = "other.py" if case == "other path" else "app.py"
+    allow = {"history": [{"path": path, "blob": blob, "reason": "our own page code"}]}
+    _commit(repo, {preflight.ALLOW_FILE: yaml.safe_dump(allow)}, "allow")
+    found = preflight.run(repo, windows=windows)
+    want = {"secret": ["Hugging Face token"]}.get(case, [preflight.OUTPUT_TEXT])
+    assert kinds(found) == want
+
+
+def test_the_repo_allow_list_names_only_our_own_code():
+    """Each entry of the committed list is a full blob sha of a source, test or docs file (never data,
+    outputs or a page we staged) with the reason a person gave (item 115)."""
+    entries = yaml.safe_load((paths.REPO_ROOT / preflight.ALLOW_FILE).read_text(encoding="utf-8"))["history"]
+    assert entries
+    for e in entries:
+        assert set(e) == {"path", "blob", "reason"} and len(e["reason"]) > 20
+        assert len(e["blob"]) == 40 and all(c in "0123456789abcdef" for c in e["blob"])
+        assert e["path"].endswith(".py") or e["path"].startswith("docs/")
+        assert not e["path"].startswith(("outputs/", "data/", "validation/"))
+    assert preflight.allowed_history() == {(e["path"], e["blob"]): e["reason"] for e in entries}

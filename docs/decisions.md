@@ -2,13 +2,32 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 14, 2026 (evening): preflight before the repo goes public
+
+115. **Preflight passes four history blobs of our own code that share runs with web pages models write.**
+     Items 113 and 114 (commits fd2c55a and fb3064f) put formatted web boilerplate in the git history: the
+     first static page's head, CSS and filter script in hf/space/app.py, the model-style page the Space
+     test checks against, and item 114 quoting the viewport meta tag in full. Item 114 found that tag to
+     be the same 60-character run as answers that write a web page, and the history goes public with the
+     repo, so `lift publish preflight` would refuse those blobs.
+     - configs/preflight_allow.yaml lists each blob by path and sha with what it holds. A model-output
+       window in a listed blob passes and the run prints it. The list covers no tree file, no upload and
+       no other kind of finding: a secret in a listed blob still fails. The four are every history blob
+       that holds the tag, the CSS reset or an event listener; each is our own code or prose.
+     - The tree no longer holds such runs: the Space's CSS is written compact in the source (the served
+       page is byte for byte the same), the test's model page is stored with a middle dot for each space
+       and a pilcrow for each line end, and item 114's quote of the tag is cut. A test checks app.py,
+       space.py and the test file against the model page at every alignment of the scan's stride.
+     - Rewriting the history would remove the blobs, but other people have clones of it; the list keeps
+       the history as it is and says what it passes.
+     No output text was involved.
+
 ## Nov 14, 2026 (morning): the logs dataset's scan
 
 114. **The static page's own code shares no run with a web page a model writes.** The first upload of
      the static Space failed the scan on index.html. Its examples passed as `examples.json`, so the match
-     was the page's own code: a formatted head (`<meta name="viewport" content="width=device-width,
-     initial-scale=1">`), CSS reset and filter script are the same 60-character runs as the HTML some
-     outputs hold (answers to prompts that ask for a web page). The head, CSS and script are now written
+     was the page's own code: a formatted head (the viewport meta tag, with a space after its comma), CSS
+     reset and filter script are the same 60-character runs as the HTML some outputs hold (answers to prompts that ask for a web page). The head, CSS and script are now written
      compactly, and a test checks the page against such a model-written page at every alignment of the
      scan's stride. A finding in a text file now names its line, and the page puts each block and table
      row on its own line. No output text was involved and nothing was uploaded.

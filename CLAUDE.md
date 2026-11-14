@@ -339,5 +339,8 @@ six languages, so pairing, splitting and clustering all go by pid.
   and repair with those prompts left out on both sides (`second_judge_judged_effects`). Decision 100: validation
   round 2 runs (runbook step 4b) on the five variants of the core finals, and the article reports it beside
   round 1 from outputs/metrics/validation/round2.json; `lift validate score` now names the drawn variants.
+  Decision 115: `lift publish preflight` passes model-output windows only in the history blobs listed
+  by path and sha in configs/preflight_allow.yaml (our own page code and prose, read by a person), and
+  prints each; keep page code compact so no new blob needs listing.
 - **Everything else is a stub.** `prompts/README.md` has the run order, the schedule and what
   each prompt delivers.

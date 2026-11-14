@@ -134,7 +134,7 @@ def _preflight(args: argparse.Namespace) -> int:
             f"note: {n_gone} judged outputs are no longer on this machine (regenerated): "
             "their text cannot be looked for"
         )
-    findings = preflight.run(history=not args.no_history, windows=windows)
+    findings = preflight.run(history=not args.no_history, windows=windows, log=print)
     if findings:
         print(f"preflight FAILED: {len(findings)} finding(s) (matched text is never shown):")
         for f in findings[:200]:
@@ -144,7 +144,9 @@ def _preflight(args: argparse.Namespace) -> int:
         if any(f.where.startswith("history") for f in findings):
             print(
                 "A finding in the history stays public even after the file is fixed: rewrite the history "
-                "(git filter-repo) or publish a fresh repo, and revoke any secret found."
+                "(git filter-repo) or publish a fresh repo, and revoke any secret found. Model-output text "
+                "found in our own code (a person read the blob) can instead be listed in "
+                f"{preflight.ALLOW_FILE} with a decisions.md entry."
             )
         return 1
     print(

@@ -319,40 +319,44 @@ def test_space_formats_cells_like_the_article(app):
 
 
 # A web page as a model writes one when asked (formatted head, CSS reset, a filter script): the Space's own
-# code must share no 60-character run with it, or the public-text scan refuses the page (Nov 14).
-MODEL_PAGE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Results</title>
-    <style>
-        :root { --bg: #ffffff; --fg: #1f2328; }
-        * { box-sizing: border-box; }
-        body { margin: 0; background: var(--bg); color: var(--fg);
-               font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-        main { max-width: 1060px; margin: 0 auto; padding: 28px 16px 56px; }
-        table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
-        th, td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left;
-                 vertical-align: top; }
-        .wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
-        @media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --fg: #e6edf3; } }
-    </style>
-</head>
-<body>
-    <label for="lang">Language</label><select id="lang"><option value="">all</option></select>
-    <script>
-        document.getElementById("lang").addEventListener("change", function (e) {
-            var v = e.target.value;
-            document.querySelectorAll("#examples tbody tr").forEach(function (tr) {
-                tr.hidden = v !== "" && tr.getAttribute("data-lang") !== v;
-            });
-        });
-    </script>
-</body>
-</html>
-"""
+# code must share no 60-character run with it, or the public-text scan refuses the page (Nov 14). Stored with
+# every space as a middle dot and every line end as a pilcrow, so this file shares no run with such an output
+# either: the scan reads the tests too (decisions item 115).
+_MODEL_PAGE_STORED = (
+    "<!DOCTYPE·html>¶"
+    '<html·lang="en">¶'
+    "<head>¶"
+    '····<meta·charset="UTF-8">¶'
+    '····<meta·name="viewport"·content="width=device-width,·initial-scale=1.0">¶'
+    '····<meta·name="viewport"·content="width=device-width,·initial-scale=1">¶'
+    "····<title>Results</title>¶"
+    "····<style>¶"
+    "········:root·{·--bg:·#ffffff;·--fg:·#1f2328;·}¶"
+    "········*·{·box-sizing:·border-box;·}¶"
+    "········body·{·margin:·0;·background:·var(--bg);·color:·var(--fg);¶"
+    '···············font-family:·system-ui,·-apple-system,·"Segoe·UI",·Roboto,·sans-serif;·}¶'
+    "········main·{·max-width:·1060px;·margin:·0·auto;·padding:·28px·16px·56px;·}¶"
+    "········table·{·border-collapse:·collapse;·width:·100%;·font-variant-numeric:·tabular-nums;·}¶"
+    "········th,·td·{·padding:·6px·10px;·border-bottom:·1px·solid·var(--line);·text-align:·left;¶"
+    "·················vertical-align:·top;·}¶"
+    "········.wrap·{·overflow-x:·auto;·border:·1px·solid·var(--line);·border-radius:·8px;·}¶"
+    "········@media·(prefers-color-scheme:·dark)·{·:root·{·--bg:·#0d1117;·--fg:·#e6edf3;·}·}¶"
+    "····</style>¶"
+    "</head>¶"
+    "<body>¶"
+    '····<label·for="lang">Language</label><select·id="lang"><option·value="">all</option></select>¶'
+    "····<script>¶"
+    '········document.getElementById("lang").addEventListener("change",·function·(e)·{¶'
+    "············var·v·=·e.target.value;¶"
+    '············document.querySelectorAll("#examples·tbody·tr").forEach(function·(tr)·{¶'
+    '················tr.hidden·=·v·!==·""·&&·tr.getAttribute("data-lang")·!==·v;¶'
+    "············});¶"
+    "········});¶"
+    "····</script>¶"
+    "</body>¶"
+    "</html>¶"
+)
+MODEL_PAGE = _MODEL_PAGE_STORED.replace("\u00b7", " ").replace("\u00b6", "\n")
 
 
 def test_the_static_page_shares_no_run_with_a_page_a_model_writes(app):
@@ -362,6 +366,10 @@ def test_the_static_page_shares_no_run_with_a_page_a_model_writes(app):
     windows = preflight.windows_of([("x" * k) + MODEL_PAGE for k in range(30)])
     page = app.render_html(app.load_data(), {"Aggregate logs dataset": "https://example.org/logs"})
     assert not preflight.has_window(page, windows)
+    # nor do the tracked files that write it or hold the model's page: preflight reads them (item 115)
+    for f in ("hf/space/app.py", "src/lift/publish/space.py", "tests/test_publish_space_notebook.py"):
+        assert not preflight.has_window((paths.REPO_ROOT / f).read_text(encoding="utf-8"), windows), f
+    assert app._tight(app._CSS) == app._CSS
 
 
 def test_space_requirements_are_pinned():

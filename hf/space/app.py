@@ -270,36 +270,29 @@ def build_ui(data: dict[str, Any] | None = None):
 
 # One hue, light to dark, for the heatmap cells (the value is printed in each cell as well).
 _RAMP = ("#fff5f0", "#fee0d2", "#fcbba1", "#fc9272", "#fb6a4a", "#de2d26", "#a50f15")
-_CSS = """
-:root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --line: #d1d9e0; --card: #f6f8fa; --link: #0b57d0; }
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --line: #3d444d; --card: #151b23; --link: #8ab4f8; }
-}
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg);
-  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-main { max-width: 1060px; margin: 0 auto; padding: 28px 16px 56px; }
-h1 { font-size: 28px; line-height: 1.2; margin: 0 0 6px; }
-h2 { font-size: 19px; margin: 36px 0 8px; }
-p { margin: 8px 0; }
-a { color: var(--link); }
-.sub, .note { color: var(--muted); }
-.note { font-size: 13px; }
-nav { margin: 12px 0 4px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
-ul.verdicts { padding-left: 20px; }
-ul.verdicts li { margin: 8px 0; }
-.wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; }
-table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
-th, td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-tr:last-child td { border-bottom: 0; }
-th { background: var(--card); font-weight: 600; white-space: nowrap; }
-td.num { text-align: right; white-space: nowrap; }
-td.heat { text-align: right; white-space: nowrap; color: #1f2328; }
-td.heat.dark { color: #ffffff; }
-td.na { text-align: right; color: var(--muted); }
-label { font-weight: 600; }
-select { font: inherit; padding: 3px 8px; margin-left: 6px; }
-"""
+# Written compact, as the page serves it: formatted CSS (a space after each colon, around each brace) shares
+# 60-character runs with the pages models write, and the public-text scan reads this file too (items 114-115).
+_CSS = (
+    ":root{--bg:#ffffff;--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--card:#f6f8fa;--link:#0b57d0;}"
+    "@media (prefers-color-scheme:dark){"
+    ":root{--bg:#0d1117;--fg:#e6edf3;--muted:#9198a1;--line:#3d444d;--card:#151b23;--link:#8ab4f8;}}"
+    "*{box-sizing:border-box;}"
+    'body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,"Segoe UI",'
+    "Roboto,sans-serif;}"
+    "main{max-width:1060px;margin:0 auto;padding:28px 16px 56px;}"
+    "h1{font-size:28px;line-height:1.2;margin:0 0 6px;}h2{font-size:19px;margin:36px 0 8px;}"
+    "p{margin:8px 0;}a{color:var(--link);}.sub,.note{color:var(--muted);}.note{font-size:13px;}"
+    "nav{margin:12px 0 4px;display:flex;flex-wrap:wrap;gap:6px 18px;}ul.verdicts{padding-left:20px;}"
+    "ul.verdicts li{margin:8px 0;}"
+    ".wrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;margin:8px 0;}"
+    "table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;}"
+    "th,td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;}"
+    "tr:last-child td{border-bottom:0;}th{background:var(--card);font-weight:600;white-space:nowrap;}"
+    "td.num{text-align:right;white-space:nowrap;}"
+    "td.heat{text-align:right;white-space:nowrap;color:#1f2328;}td.heat.dark{color:#ffffff;}"
+    "td.na{text-align:right;color:var(--muted);}label{font-weight:600;}"
+    "select{font:inherit;padding:3px 8px;margin-left:6px;}"
+)
 _FILTER = (
     'var s=document.getElementById("lang");s.onchange=function(){'
     'var r=document.getElementById("examples").tBodies[0].rows,i;'
@@ -310,6 +303,7 @@ _FILTER = (
 # The page's own code is written compactly (no spaces around punctuation), unlike the formatted HTML, CSS
 # and JS a model writes when asked for a web page: the public-text scan reads every 60-character run of the
 # page, and a formatted head or CSS reset is the same run as such an output's (the first upload, Nov 14).
+# _tight keeps the served page compact if an edit adds spaces; the source stays compact too (item 115).
 _TIGHT = re.compile(r"\s*([{};:,>])\s*")
 
 

@@ -34,7 +34,11 @@ the local ones: the CLI fetches them all first (``fetch_public_refs``), and the 
 must still read by hand (PR and issue text, Actions logs).
 
 A finding names the file, line and kind, never the matched text. A line holding ``preflight: allow``
-is skipped (for a documented fake in a test). When it passes it prints the steps to make the repo public.
+is skipped (for a documented fake in a test). A model-output window in a history blob listed by path and
+blob sha in configs/preflight_allow.yaml passes, and the run prints each one: our own code that shares a
+run with an output (the formatted web boilerplate of the first static Space, Nov 14), read by a person
+(decisions item 115). The list covers no tree file, no upload and no other kind of finding. When it
+passes it prints the steps to make the repo public.
 
 Absolute local paths (review XB2-04). A staged public file must name no home dir (``/home/<user>``,
 ``/Users/<user>``, ``/root``), temp dir (``/tmp``, ``/var/folders``...), GPU VM dir (``/content``,
@@ -58,7 +62,7 @@ import subprocess
 import sys
 import threading
 import unicodedata
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
@@ -835,10 +839,33 @@ def fetch_public_refs(repo: Path | None = None, remote: str = "origin") -> bool:
     return True
 
 
-def run(repo: Path | None = None, *, history: bool = True, windows: set[str] | None = None) -> list[Finding]:
+ALLOW_FILE = "configs/preflight_allow.yaml"
+
+
+def allowed_history(repo: Path | None = None) -> dict[tuple[str, str], str]:
+    """(path, blob sha) -> reason, from configs/preflight_allow.yaml: history blobs of our own code a person
+    read, whose "text of a model output" finding passes (item 115). Empty when the file is absent."""
+    import yaml
+
+    f = Path(repo or paths.REPO_ROOT) / ALLOW_FILE
+    if not f.is_file():
+        return {}
+    entries = (yaml.safe_load(f.read_text(encoding="utf-8")) or {}).get("history") or []
+    return {(str(e["path"]), str(e["blob"])): str(e.get("reason", "")) for e in entries}
+
+
+def run(
+    repo: Path | None = None,
+    *,
+    history: bool = True,
+    windows: set[str] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> list[Finding]:
     """Every finding in the tracked files (and the history of every ref). ``windows`` None loads them with
-    ``load_windows``, which refuses a machine that does not hold the outputs to check against."""
+    ``load_windows``, which refuses a machine that does not hold the outputs to check against. A model-output
+    window in a history blob listed in configs/preflight_allow.yaml passes, and ``log`` says so."""
     repo = Path(repo or paths.REPO_ROOT)
+    passed = allowed_history(repo)
     windows = load_windows()[0] if windows is None else windows
     found: list[Finding] = []
     allowed: set[str] = set()
@@ -864,6 +891,10 @@ def run(repo: Path | None = None, *, history: bool = True, windows: set[str] | N
             if text is None:
                 continue
             for x in scan_text(text, blobs[sha], f"history {sha[:10]}", windows, allowed):
+                if x.kind == OUTPUT_TEXT and (path, sha) in passed:
+                    if log:
+                        log(f"allowed ({ALLOW_FILE}): {x}: {passed[path, sha]}")
+                    continue
                 if (x.path, x.kind) not in seen:
                     found.append(x)
     return found
