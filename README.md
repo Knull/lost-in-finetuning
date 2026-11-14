@@ -596,7 +596,7 @@ References:
 - Data collection: [PENDING: the data collection url from outputs/publish/collections.json (lift publish collections --yes)]
 - Code: https://github.com/Knull/lost-in-finetuning
 - Notebook: https://github.com/Knull/lost-in-finetuning/blob/main/notebooks/acceptance_test.ipynb
-- Space: https://huggingface.co/spaces/racetracklexsi/lift-acceptance-test
+- Space: https://huggingface.co/spaces/Knu-ll/lift-acceptance-test
 
 ## 11. Team
 
