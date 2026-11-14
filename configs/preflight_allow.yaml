@@ -6,18 +6,18 @@ history:
   - path: hf/space/app.py
     blob: 4fc4c71babeda1b75c81d9e5d595a0c0090479a3
     reason: >-
-      the first static page (commit fd2c55a), its head with the viewport meta tag, CSS and filter script
+      the first static page (commit cfe2f48), its head with the viewport meta tag, CSS and filter script
       formatted like the web pages some outputs hold
   - path: hf/space/app.py
     blob: fc17ebe5858bac48c921c66857f345a105fc2f6b
     reason: >-
-      the same page code with its CSS still formatted in the source, though served compact (commit fb3064f)
+      the same page code with its CSS still formatted in the source, though served compact (commit fa4caf4)
   - path: tests/test_publish_space_notebook.py
     blob: fb1cae7363758e29e24bd09e4c38b493acba7930
     reason: >-
       MODEL_PAGE, a web page written here in the style a model writes one, the fixture the Space is
-      checked against (commit fb3064f)
+      checked against (commit fa4caf4)
   - path: docs/decisions.md
     blob: e952004b5c64b924d1483da0494a0beb449b2985
     reason: >-
-      item 114 quoting the first page's viewport meta tag in full (commit fb3064f)
+      item 114 quoting the first page's viewport meta tag in full (commit fa4caf4)

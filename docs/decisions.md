@@ -4,8 +4,17 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 14, 2026 (evening): preflight before the repo goes public
 
+116. **Commits made from Claude's workspace are re-attributed to Knull.** 97 commits, from the Nov 3
+     scaffold on, were authored under the workspace's default identity (Claude) instead of Arnav's account;
+     Arnav asked for every commit to be under his. The history of main, every branch and the recipe tag was
+     rewritten with git filter-repo (a mailmap from that identity to Knull) and force-pushed. Every file is
+     identical: the tree of each branch and of `recipe-frozen-20261112` is unchanged, so the frozen-recipe
+     guard, the preflight list of item 115 (blob shas) and every result stand. Commit ids changed:
+     docs/commit-map.tsv maps each old id to its new one, since run manifests, gate files and adapter
+     records made before today name the old ids. GitHub keeps PRs #1-8 on their old commits.
+
 115. **Preflight passes four history blobs of our own code that share runs with web pages models write.**
-     Items 113 and 114 (commits fd2c55a and fb3064f) put formatted web boilerplate in the git history: the
+     Items 113 and 114 (commits cfe2f48 and fa4caf4) put formatted web boilerplate in the git history: the
      first static page's head, CSS and filter script in hf/space/app.py, the model-style page the Space
      test checks against, and item 114 quoting the viewport meta tag in full. Item 114 found that tag to
      be the same 60-character run as answers that write a web page, and the history goes public with the
