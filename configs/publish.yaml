@@ -43,6 +43,7 @@ github_repo: null
 team:
   - {name: Arnav Mahajan, hf: Knu-ll}
   - {name: Manolo Chow, hf: mano-cw}
+  - {name: Kendrick}                 # no HF account
 annotators: []
 
 # The SafeTune fit-memory issue, once a person has filed hf/safetune_issue.md upstream. Optional: while
