@@ -1,8 +1,8 @@
 # Lost in Fine-Tuning: raw completions (gated)
 
 Every output the evaluation generated, with its judgements, including outputs judged harmful.
-It is gated with manual approval and meant only for safety research that needs the text, such
-as checking our labels. The labels, without any output text, are public: {{ logs_repo }}.
+It is gated (access is granted on accepting the terms) and meant only for safety research that
+needs the text, such as checking our labels. The labels, without any output text, are public: {{ logs_repo }}.
 
 ## What is here
 

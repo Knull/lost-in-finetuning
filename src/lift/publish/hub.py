@@ -6,7 +6,7 @@ is sent) while the namespace is the placeholder, while something is not built, w
 (it names the repaired model or its numbers and the recipe is not frozen at a ``recipe-frozen-*`` tag:
 ``lift.publish.inputs.recipe_block``; ``allow_pending`` does not lift it), while a gated repo's card
 lacks its terms, while a staged text still holds a ``[PENDING`` placeholder (unless ``allow_pending``),
-and while any file of an upload that is not gated with manual approval fails the public-text scan
+and while any file of an upload other than a gated outputs repo (``OUTPUT_KINDS``) fails the public-text scan
 (``lift.publish.preflight.scan_folder``: secrets, raw completion records, notebooks with outputs, any run
 of any model output on this machine, whatever its label, unredacted AuditKIT records). That scan needs
 this machine's outputs: without them (``lift sync pull``) nothing public is uploaded.
@@ -89,10 +89,17 @@ def pending_files(uploads: Sequence[Upload]) -> list[str]:
     return out
 
 
+OUTPUT_KINDS = frozenset({"raw"})  # the repos that hold model outputs by design
+
+
 def scanned(u: Upload) -> bool:
-    """Whether an upload goes through the public-text scan: everything but a repo gated with manual
-    approval (the raw completions, harmful by design). Auto-approved gates are as good as public."""
-    return u.repo.gated != "manual"
+    """Whether an upload goes through the public-text scan: everything but a gated repo that holds the
+    outputs by design (``OUTPUT_KINDS``: the raw completions, harmful ones included; automatic approval
+    since Nov 14, docs/decisions.md 110) and any repo gated with manual approval. Every other repo with
+    automatic approval is scanned as if public, and an outputs repo made public is scanned, so it fails."""
+    if u.repo.gated == "manual":
+        return False
+    return not (u.repo.kind in OUTPUT_KINDS and u.repo.gated)
 
 
 def check_ready(

@@ -4,6 +4,19 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 14, 2026 (morning): the logs dataset's scan
 
+110. **The raw completions are gated with automatic approval, not manual.** Changes item 85's access for
+     `repos.raw` (and CLAUDE.md rule 6). Decided by the team on Nov 14, after the datasets went up.
+     - Why: the organisers said on Nov 9 that gated repos with manual approval, or private ones, "might
+       be treated as missing artifacts". The team would rather not risk the raw completions counting as
+       missing. Automatic approval still puts the full completions, harmful ones included, behind the
+       terms prompt and an HF login, off the open web, as the adapters and the repaired model already are.
+       Fully public was not chosen: rule 6 keeps output text out of public view.
+     - The scan's exemption now follows the repo's role, not its gate: the raw repo (the only repo meant
+       to hold outputs) is not scanned while it is gated, auto or manual; every other repo with automatic
+       approval is still scanned as if public, and the raw repo made public would be scanned and fail.
+     - The raw and logs cards drop "manual approval"; the upload resets the gate on the existing repo
+       (private first, gate, read back, upload, public). No number, label or analysis changes.
+
 109. **The model-output scan reads a JSON file value by value; item 107's guess was wrong.** The rerun
      with item 107's fix failed the same way, in 116 places, and no finding named a field: the matched
      window sat inside no single string value, so the entity explanation could not be it.

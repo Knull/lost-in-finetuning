@@ -5,6 +5,7 @@ that fails the public-text scan. huggingface_hub is never reached."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -96,8 +97,13 @@ def outputs():
 
 
 def _staged(name: str, text: str = "# card\n", gated: str | None = None) -> Upload:
-    kind = {None: "logs", "manual": "raw", "auto": "adapter"}[gated]
+    """A staged upload: public (the logs), gated with automatic approval (an adapter, scanned as if public),
+    "raw" (the raw completions: automatic approval, not scanned, item 110) or "manual" (the raw repo
+    gated with manual approval, as it was until Nov 14: the code still supports one)."""
+    kind = {None: "logs", "manual": "raw", "auto": "adapter", "raw": "raw"}[gated]
     repo = settings.repo(kind, adapter="adapter-aya-std-s1")
+    if gated == "manual":
+        repo = dataclasses.replace(repo, access="gated-manual")
     folder = paths.output_dir() / "publish" / name
     render.write_text(folder / "README.md", text)
     return Upload(repo=repo, folder=folder, title=name)
@@ -219,11 +225,25 @@ def test_an_unredacted_auditkit_record_is_refused(namespace, outputs):
         hub.execute([up], message="m", api_factory=FakeApi)
 
 
-def test_the_raw_completions_are_not_scanned(namespace, outputs):
+@pytest.mark.parametrize("gated", ["raw", "manual"])
+def test_the_raw_completions_are_not_scanned(namespace, outputs, gated):
+    """The raw completions hold the outputs by design: gated with automatic approval since Nov 14
+    (decisions item 110), with manual approval before. Either way they are not scanned."""
     api = HubApi()
-    up = _staged("raw", f"---\nextra_gated_prompt: terms\n---\n{HARMFUL}\n", gated="manual")
+    up = _staged("raw", f"---\nextra_gated_prompt: terms\n---\n{HARMFUL}\n", gated=gated)
     hub.execute([up], message="m", api_factory=lambda: api, log=lambda _: None)
     assert "upload_folder" in api.names()
+    assert api.repos["test-org/lift-raw-completions"]["gated"] == ("auto" if gated == "raw" else "manual")
+
+
+def test_only_the_outputs_repo_may_hold_output_text_behind_an_automatic_gate(namespace, outputs):
+    """An adapter repo gated with automatic approval is scanned as if public, and the raw repo made
+    public is scanned too: only a gated outputs repo holds output text (decisions item 110)."""
+    adapter = _staged("a", f"---\nextra_gated_prompt: terms\n---\n{HARMFUL}\n", gated="auto")
+    with pytest.raises(PublishError, match="text of a model output"):
+        hub.execute([adapter], message="m", api_factory=FakeApi, log=lambda _: None)
+    public_raw = dataclasses.replace(_staged("r", f"# raw\n{HARMFUL}\n", gated="raw").repo, access="public")
+    assert hub.scanned(Upload(repo=public_raw, folder=adapter.folder, title="r"))
 
 
 def test_nothing_public_goes_up_from_a_machine_without_outputs(namespace):

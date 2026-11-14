@@ -21,8 +21,9 @@ repos:
   # Prompt ids, labels, flags, output hashes, metadata and aggregate tables: no output text, no judge
   # text (docs/decisions.md item 62).
   logs: {name: lift-eval-logs, type: dataset, access: public}
-  # Every generation and judgement, harmful ones included: gated with manual approval.
-  raw: {name: lift-raw-completions, type: dataset, access: gated-manual}
+  # Every generation and judgement, harmful ones included: gated with automatic approval (manual
+  # until Nov 14; the organisers may treat a manually gated repo as missing, docs/decisions.md 110).
+  raw: {name: lift-raw-completions, type: dataset, access: gated-auto}
   # The translations we made (Hindi PolyRefuse, Chinese harmless, OR-Bench-Hard in 5 languages).
   prompts: {name: lift-multilingual-safety-prompts, type: dataset, access: public}
   space: {name: lift-acceptance-test, type: space, access: public, sdk: gradio}

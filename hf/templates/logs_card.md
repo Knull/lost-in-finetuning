@@ -45,7 +45,7 @@ Drawn by `lift report` from the aggregate tables and the selection; the PNGs are
 No model output is in this dataset, whatever its label. Most outputs carry only one automatic
 judge's label, so no text is published because of its label: the publishing code writes ids, labels,
 flags and hashes only, and refuses to upload any file that holds a run of any output's text. The
-full completions, harmful ones included, are in a gated dataset with manual approval:
+full completions, harmful ones included, are in a gated dataset:
 {{ raw_repo }}.
 
 ## Licence

@@ -14,7 +14,7 @@ from publish_fakes import no_committed_recipe, report, write_inputs, write_json,
 
 from lift import paths
 from lift.io import read_jsonl, sha256_obj, sha256_text, write_jsonl
-from lift.publish import PublishError, datasets, preflight
+from lift.publish import PublishError, datasets, hub, preflight
 
 VARIANT = "adapter-aya-std-s1"
 CELL = "harmful_hi_dev"
@@ -542,9 +542,9 @@ def test_verdict_reason_is_recorded_in_the_sources(outputs):
 # ----------------------------------------------------------------------------------- raw and prompts
 
 
-def test_raw_is_gated_manual_and_keeps_everything(outputs):
+def test_raw_is_gated_and_keeps_everything(outputs):
     up = datasets.build_raw()
-    assert up.repo.gated == "manual"
+    assert up.repo.gated == "auto" and not hub.scanned(up)  # decisions item 110
     assert (up.folder / "generations" / VARIANT / f"{CELL}.jsonl").is_file()
     assert (up.folder / "auditkit" / outputs / VARIANT / f"{CELL}.full.json").is_file()
     assert not (up.folder / "validation").exists()

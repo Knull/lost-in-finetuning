@@ -74,7 +74,8 @@ def public_contents(item: str) -> str | None:
 
 # R1-14: the public logs dataset listed "refusal texts". A refusal label is Qwen3Guard's alone for about
 # 90% of outputs, so a harmful completion it called a refusal would have been published. No public
-# artifact holds output text; every judged output goes to the gated, manual-approval repo.
+# artifact holds output text; every judged output goes to the gated raw repo (automatic approval
+# since Nov 14, decisions item 110).
 def test_hf_readme_public_artifacts_hold_no_output_text():
     rows = artifact_rows()
     assert {"Logs dataset", "Raw completions", "Space"} <= set(rows), "hf/README.md's table was not parsed"
@@ -89,7 +90,7 @@ def test_hf_readme_public_artifacts_hold_no_output_text():
     assert keeps_judge_text_out(logs), "hf/README.md's logs dataset does not keep JUDGE_TEXT out"
     assert FAILURE_KIND.search(flat(logs)), "hf/README.md's logs dataset does not keep a failure's kind alone"
     access, contents = rows["Raw completions"]
-    assert "gated" in access and "manual approval" in access
+    assert "gated" in access and "automatic approval" in access
     assert "every judged output" in contents.lower() and "refusals" in contents
     space = rows["Space"][1]  # examples only as a cut of about 10 words, whatever their label
     assert "about 10 words" in space and "[redacted]" in space and ANY_LABEL.search(space)

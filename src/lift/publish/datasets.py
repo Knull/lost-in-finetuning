@@ -38,10 +38,10 @@ Belebele and held-out-loss scores (``scores/``), P07's back-translation verdicts
 known fields only, a failure as its kind) and the run manifests behind the cost numbers
 (``manifests/``). The utility verdicts quote both answers, so they are in the gated raw completions.
 
-Raw completions (gated, manual approval). Every generations, judgements and utility-verdict file, and
-the full AuditKIT records, as they are in ``outputs/``: every judged output, refusals and benign answers
-included, and the judges' raw replies, reasons and failure messages. Human labels (with annotator ids)
-stay private.
+Raw completions (gated, automatic approval; manual until Nov 14, docs/decisions.md 110). Every
+generations, judgements and utility-verdict file, and the full AuditKIT records, as they are in
+``outputs/``: every judged output, refusals and benign answers included, and the judges' raw replies,
+reasons and failure messages. Human labels (with annotator ids) stay private.
 
 Translated prompt sets (public). Every prompt record we translated (TranslationInfo.engine one of
 ``lift.data.translate.ENGINE_NAMES``), with its English source and the native spot-check fields
@@ -972,7 +972,7 @@ def build_raw(facts: Facts | None = None) -> Upload:
     return Upload(
         repo=repo,
         folder=folder,
-        title="raw completions (gated, manual approval)",
+        title="raw completions (gated, automatic approval)",
         notes=[f"{n} files from outputs/{{{','.join(RAW_TREES)}}} and the full AuditKIT records"],
     )
 

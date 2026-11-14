@@ -44,8 +44,9 @@ not over-refusing? Every repair is measured against simply scaling the adapter d
    and unrepaired adapters live only in `outputs/` (gitignored) and the private HF runs repo
    (`LIFT_RUNS_REPO`). At submission the rules require every artifact to be hosted on HF, so
    adapters and the repaired model go up as gated repos, and every output and judge log as a
-   gated repo with manual approval; everything else is public and holds no output text, whatever
-   the output's label (decisions items 14, 62, 84, 85). Never put a harmful completion in a
+   gated repo (automatic approval since Nov 14: a manually gated repo may count as missing,
+   decisions item 110); everything else is public and holds no output text, whatever the output's
+   label (decisions items 14, 62, 84, 85). Never put a harmful completion in a
    commit, PR, issue, printed log or summary. Quote at most ~10 words, then `[redacted]`.
 7. **Tests run offline on CPU.** `pytest` (which skips the `gpu` and `net` markers by default)
    passes on every commit. Model code is tested on a tiny randomly initialised cohere2 model
