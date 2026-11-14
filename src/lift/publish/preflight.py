@@ -619,9 +619,25 @@ def scan_text(
         bodies = _bodies(text, None) if values is None else (b for v in long for b in _bodies(v, None))
         for body in bodies:
             if windows_in(body, windows):
-                found.append(Finding(where, path, 0, OUTPUT_TEXT, _json_where(text, path, windows)))
+                line = _first_line(text, windows) if values is None else 0
+                found.append(Finding(where, path, line, OUTPUT_TEXT, _json_where(text, path, windows)))
                 break
     return found
+
+
+def _first_line(text: str, windows: set[str] | frozenset) -> int:
+    """For a text file (not JSON), the first line where a model-output window starts, the window running
+    onto the next line at most: a line number, never the text. 0 when only a longer stretch holds one."""
+
+    def holds(s: str) -> bool:
+        return any(windows_in(b, windows) for b in _bodies(s, None))
+
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if holds(line) or (nxt and holds(f"{line}\n{nxt}") and not holds(nxt)):
+            return i + 1
+    return 0
 
 
 def _json_where(text: str, path: str, windows: set[str] | frozenset) -> str:

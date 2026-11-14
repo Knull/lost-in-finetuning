@@ -4,6 +4,15 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 14, 2026 (morning): the logs dataset's scan
 
+114. **The static page's own code shares no run with a web page a model writes.** The first upload of
+     the static Space failed the scan on index.html. Its examples passed as `examples.json`, so the match
+     was the page's own code: a formatted head (`<meta name="viewport" content="width=device-width,
+     initial-scale=1">`), CSS reset and filter script are the same 60-character runs as the HTML some
+     outputs hold (answers to prompts that ask for a web page). The head, CSS and script are now written
+     compactly, and a test checks the page against such a model-written page at every alignment of the
+     scan's stride. A finding in a text file now names its line, and the page puts each block and table
+     row on its own line. No output text was involved and nothing was uploaded.
+
 113. **The Space is a static page under the organisation; item 112 is undone.** With a token that can
      write to Knu-ll, HF refused the Gradio Space there too: "hosting Gradio and Docker Spaces on free
      cpu-basic requires a PRO subscription". Static Spaces are free for everyone, organisations included.

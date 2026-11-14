@@ -487,6 +487,20 @@ def test_an_output_that_quotes_its_prompt_does_not_flag_the_record_that_keeps_th
     ]
 
 
+def test_a_finding_in_a_text_file_names_its_line():
+    """A text file's finding says the line its window starts on (the line number, never the text), so a
+    long generated page says where to look (the static Space, Nov 14)."""
+    harmful_tree(HARMFUL)
+    windows, _n, _gone = preflight.load_windows()
+    text = "line one\nline two\nquoting " + HARMFUL[:95] + "\nline four\n"
+    (found,) = preflight.scan_text(text, "page.html", "staged", windows)
+    assert (
+        found.kind == preflight.OUTPUT_TEXT
+        and found.line == 3
+        and str(found).startswith("text of a model output: page.html:3 (staged)")
+    )
+
+
 def test_without_the_prompt_files_every_window_stays():
     harmful_tree("Sure. " + PROMPT + ": " + HARMFUL)
     windows, _n, _gone = preflight.load_windows()

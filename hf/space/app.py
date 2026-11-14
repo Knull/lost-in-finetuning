@@ -300,14 +300,21 @@ td.na { text-align: right; color: var(--muted); }
 label { font-weight: 600; }
 select { font: inherit; padding: 3px 8px; margin-left: 6px; }
 """
-_FILTER = """
-document.getElementById("lang").addEventListener("change", function (e) {
-  var v = e.target.value;
-  document.querySelectorAll("#examples tbody tr").forEach(function (tr) {
-    tr.hidden = v !== "" && tr.getAttribute("data-lang") !== v;
-  });
-});
-"""
+_FILTER = (
+    'var s=document.getElementById("lang");s.onchange=function(){'
+    'var r=document.getElementById("examples").tBodies[0].rows,i;'
+    'for(i=0;i<r.length;i++)r[i].hidden=s.value!==""&&r[i].dataset.lang!==s.value}'
+)
+
+
+# The page's own code is written compactly (no spaces around punctuation), unlike the formatted HTML, CSS
+# and JS a model writes when asked for a web page: the public-text scan reads every 60-character run of the
+# page, and a formatted head or CSS reset is the same run as such an output's (the first upload, Nov 14).
+_TIGHT = re.compile(r"\s*([{};:,>])\s*")
+
+
+def _tight(code: str) -> str:
+    return _TIGHT.sub(r"\1", " ".join(code.split()))
 
 
 def _e(value: Any) -> str:
@@ -323,7 +330,7 @@ def verdict_html(report: dict | None) -> str:
         gate = v.get("usefulness_verdict")
         useful = f"; Gate 1: <strong>{_e(gate)}</strong>" if gate else ""
         items.append(
-            f"<li><strong>{_e(v.get('adapter'))}</strong> ({_e(v.get('recipe', 'standard'))} recipe): "
+            f"\n<li><strong>{_e(v.get('adapter'))}</strong> ({_e(v.get('recipe', 'standard'))} recipe): "
             f"<strong>{_e(v.get('verdict') or 'no verdict')}</strong>{useful}. {_e(v.get('reason', ''))}</li>"
         )
     out = f'<ul class="verdicts">{"".join(items)}</ul>' if items else "<p>No verdicts in the report.</p>"
@@ -351,7 +358,7 @@ def heatmap_html(report: dict | None, kind: str = "harmful") -> str:
             step = min(len(_RAMP) - 1, max(0, round(float(v) / top * (len(_RAMP) - 1))))
             dark = " dark" if step >= len(_RAMP) - 2 else ""
             cells.append(f'<td class="heat{dark}" style="background:{_RAMP[step]}">{_e(fmt(v, "pct"))}</td>')
-        rows.append(f"<tr><th>{_e(name)}</th>{''.join(cells)}</tr>")
+        rows.append(f"\n<tr><th>{_e(name)}</th>{''.join(cells)}</tr>")
     return (
         f'<div class="wrap"><table><thead><tr><th></th>{head}</tr></thead>'
         f"<tbody>{''.join(rows)}</tbody></table></div>"
@@ -364,7 +371,7 @@ def table_html(report: dict | None, name: str) -> str:
     if not head:
         return "<p>Not published yet.</p>"
     th = "".join(f"<th>{_e(h)}</th>" for h in head)
-    body = "".join("<tr>" + "".join(f"<td>{_e(c)}</td>" for c in row) + "</tr>" for row in rows)
+    body = "".join("\n<tr>" + "".join(f"<td>{_e(c)}</td>" for c in row) + "</tr>" for row in rows)
     return f'<div class="wrap"><table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
@@ -377,12 +384,12 @@ def examples_html(examples: list[dict]) -> str:
     options = "".join(f'<option value="{_e(lang)}">{_e(lang)}</option>' for lang in langs)
     head = "".join(f"<th>{h}</th>" for h in ("variant", "lang", "set", "pid", "label", "text"))
     body = "".join(
-        f'<tr data-lang="{_e(r[1])}">' + "".join(f"<td>{_e(c)}</td>" for c in r) + "</tr>" for r in rows
+        f'\n<tr data-lang="{_e(r[1])}">' + "".join(f"<td>{_e(c)}</td>" for c in r) + "</tr>" for r in rows
     )
     return (
-        f'<p><label for="lang">Language</label><select id="lang"><option value="">all</option>{options}'
+        f'<p><label for=lang>Language</label> <select id=lang><option value="">all</option>{options}'
         "</select></p>"
-        f'<div class="wrap"><table id="examples"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+        f'<div class="wrap"><table id=examples><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
         f"</div><script>{_FILTER}</script>"
     )
 
@@ -394,25 +401,25 @@ def render_html(data: dict[str, Any] | None = None, links: dict[str, str] | None
     report, examples = data.get("report"), data.get("examples") or []
     nav = "".join(f'<a href="{_e(url)}">{_e(label)}</a>' for label, url in (links or {}).items() if url)
     return (
-        '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>Lost in Fine-Tuning</title><style>{_CSS}</style></head><body><main>"
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f"<title>Lost in Fine-Tuning</title>\n<style>{_tight(_CSS)}</style>\n</head><body><main>\n"
         "<h1>Lost in Fine-Tuning</h1>"
         '<p class="sub">Retain, repair or reject a Hindi LoRA adapter of Tiny Aya Global: does it drift on '
         "safety, in Hindi and in other languages, and which cheap repair restores safety without losing the "
         "adapter's gain?</p>"
-        f"<nav>{nav}</nav>"
-        f"<h2>Verdicts</h2>{verdict_html(report)}"
-        f"<h2>Harmful rate</h2>{heatmap_html(report, 'harmful')}"
-        f"<h2>Over-refusal</h2>{heatmap_html(report, 'overrefusal')}"
-        f"<h2>Utility retained</h2>{table_html(report, 'utility')}"
-        "<h2>Examples (cut)</h2>"
+        f"<nav>{nav}</nav>\n"
+        f"<h2>Verdicts</h2>\n{verdict_html(report)}\n"
+        f"<h2>Harmful rate</h2>\n{heatmap_html(report, 'harmful')}\n"
+        f"<h2>Over-refusal</h2>\n{heatmap_html(report, 'overrefusal')}\n"
+        f"<h2>Utility retained</h2>\n{table_html(report, 'utility')}\n"
+        "<h2>Examples (cut)</h2>\n"
         f'<p class="note">The first words of a few outputs, each cut to at most {MAX_WORDS} words and marked '
         f"{_e(MARK)}, whatever its label. The full outputs are in the gated dataset only.</p>"
-        f"{examples_html(examples)}"
+        f"{examples_html(examples)}\n"
         '<p class="note">A static page built from the public aggregate logs dataset '
         "(aggregates/final_report.json). It loads no model and generates nothing.</p>"
-        "</main></body></html>\n"
+        "\n</main></body></html>\n"
     )
 
 
