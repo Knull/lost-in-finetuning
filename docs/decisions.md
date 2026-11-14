@@ -2,6 +2,22 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 14, 2026 (morning): the logs dataset's scan
+
+109. **The model-output scan reads a JSON file value by value; item 107's guess was wrong.** The rerun
+     with item 107's fix failed the same way, in 116 places, and no finding named a field: the matched
+     window sat inside no single string value, so the entity explanation could not be it.
+     - Cause, reproduced in a test: the scan read a JSON file's raw text first. An output that quotes its
+       prompt (`"..."` in its own text) holds a window of the opening quote and the prompt's start, and a
+       redacted record's raw JSON holds the same around the prompt's value. That window is not a run of
+       the prompt, so the exemption kept it. Every variant's record of a cell keeps the same prompts, which
+       is why the same cells failed for every adapter and seed. Joining the values with line breaks had
+       the same kind of edge, at the space between two values.
+     - Fix: a JSON, JSONL, notebook or CSV file is scanned one string value (or key) at a time, so a
+       window must lie inside one value; a file that does not parse is still scanned as raw text. A quoted
+       prompt also counts as the prompt, for text files that quote one. Output text in a value or a key
+       still fails, and a finding now names its field. Nothing was published by either failed build.
+
 ## Nov 13, 2026 (22:00 UK): the article's AuditKIT note, team and references
 
 108. **The article opens with an "In short" lead.** Reporting only: the drift, the frozen repair with

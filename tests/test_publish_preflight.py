@@ -467,6 +467,26 @@ def test_a_prompt_with_an_html_entity_echoed_decoded_is_still_the_prompt():
     assert "preflightfake" not in str(found)
 
 
+def test_an_output_that_quotes_its_prompt_does_not_flag_the_record_that_keeps_the_prompt():
+    """An output that quotes its prompt holds a window of the opening quote and the prompt, and the raw JSON
+    of a record holds the same around the prompt's value: the logs build failed in 116 records that way
+    (Nov 14). The scan reads a JSON file value by value, and a quoted prompt is still the prompt, so the
+    record passes; output text in a value, in a key, or in a file that is not JSON still fails."""
+    _prompt_set()
+    quoted = '"' + PROMPT + '" is not something I will help with. '
+    harmful_tree(quoted + HARMFUL)
+    windows, _n, _gone = preflight.load_windows()
+    sample = {"sample_id": "prh-test-0001", "prompt": PROMPT, "raw_output": "[redacted sha256:00]"}
+    record = json.dumps({"predictions": [sample], "metadata": {"lift": {"text": "redacted"}}}, indent=2)
+    assert preflight.scan_text(record, "auditkit/q/v/harmful_hi_dev.json", "staged", windows) == []
+    assert preflight.scan_text(f'A prompt: "{PROMPT}".', "notes.md", "staged", windows) == []
+    (keyed,) = preflight.scan_text(json.dumps({HARMFUL[:95]: 1}), "x.json", "staged", windows)
+    assert keyed.kind == preflight.OUTPUT_TEXT and keyed.detail == "a key of the top level"
+    assert kinds(preflight.scan_text(quoted + HARMFUL[:95], "notes.md", "staged", windows)) == [
+        preflight.OUTPUT_TEXT
+    ]
+
+
 def test_without_the_prompt_files_every_window_stays():
     harmful_tree("Sure. " + PROMPT + ": " + HARMFUL)
     windows, _n, _gone = preflight.load_windows()

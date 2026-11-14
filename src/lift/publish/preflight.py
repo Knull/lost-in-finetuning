@@ -370,9 +370,9 @@ def prompt_texts() -> Iterator[str]:
             for field in ("text", "text_en"):
                 text = row.get(field)
                 if isinstance(text, str):
-                    yield text
-                    if "&" in text and (unescaped := html.unescape(text)) != text:
-                        yield unescaped
+                    for form in (text, html.unescape(text)) if "&" in text else (text,):
+                        yield form
+                        yield f'"{form}"'  # quoted, as an output that quotes its prompt holds it
 
 
 def _in_flat(flat: str, windows: set[str] | frozenset) -> bool:
@@ -465,16 +465,44 @@ def allowed_lines(text: str) -> set[str]:
     return out
 
 
-def _strings(value: object) -> Iterator[str]:
-    """Every string value in a decoded JSON document (keys left out)."""
+def _strings(value: object, *, keys: bool = False) -> Iterator[str]:
+    """Every string value in a decoded JSON document (its keys too with ``keys``)."""
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
-        for v in value.values():
-            yield from _strings(v)
+        for k, v in value.items():
+            if keys and isinstance(k, str):
+                yield k
+            yield from _strings(v, keys=keys)
     elif isinstance(value, list):
         for v in value:
-            yield from _strings(v)
+            yield from _strings(v, keys=keys)
+
+
+def decoded_values(text: str, path: str) -> list[str] | None:
+    """A JSON, JSONL or notebook file's strings, each value and each key on its own (a CSV file's cells; a
+    JSONL line that does not parse, as it is), for the model-output scan: a window is looked for inside
+    one value, never across the file's syntax or two values. None for other files, or a file that does
+    not parse. Reading the raw text of a JSON file instead made a quoted prompt match: an output that
+    quotes its prompt ("..." in its own text) holds a window of the quote and the prompt, and the raw
+    file holds the same around the prompt's value (decisions item 109)."""
+    try:
+        if path.endswith((".json", ".ipynb")):
+            return list(_strings(json.loads(text), keys=True))
+        if path.endswith(".jsonl"):
+            out = []
+            for line in text.splitlines():
+                if line.strip():
+                    try:
+                        out.extend(_strings(json.loads(line), keys=True))
+                    except json.JSONDecodeError:
+                        out.append(line)
+            return out
+        if path.endswith(".csv"):
+            return [cell for row in csv.reader(io.StringIO(text)) for cell in row]
+    except (json.JSONDecodeError, csv.Error, RecursionError):
+        return None
+    return None
 
 
 def decoded_text(text: str, path: str) -> str | None:
@@ -585,8 +613,11 @@ def scan_text(
     if path.endswith(".ipynb") and notebook_has_outputs(text):
         found.append(Finding(where, path, 0, NOTEBOOK_OUTPUTS))
     if windows:
-        decoded = decoded_text(text, path)
-        for body in _bodies(text, decoded):
+        values = decoded_values(text, path)
+        # an ASCII string shorter than a window cannot hold one (_norm never lengthens ASCII): ids, labels
+        long = (v for v in values or () if len(v) >= WINDOW or not v.isascii())
+        bodies = _bodies(text, None) if values is None else (b for v in long for b in _bodies(v, None))
+        for body in bodies:
             if windows_in(body, windows):
                 found.append(Finding(where, path, 0, OUTPUT_TEXT, _json_where(text, path, windows)))
                 break
@@ -612,6 +643,8 @@ def _json_where(text: str, path: str, windows: set[str] | frozenset) -> str:
                 hits.append(at + (f" (id {oid})" if isinstance(oid, str) and len(oid) <= 80 else ""))
         elif isinstance(value, dict):
             for k, v in value.items():
+                if isinstance(k, str) and any(windows_in(b, windows) for b in _bodies(k, None)):
+                    hits.append(f"a key of {at or 'the top level'}")
                 walk(v, f"{at}/{k}" if at else str(k), value)
         elif isinstance(value, list):
             for i, v in enumerate(value):
