@@ -592,8 +592,8 @@ References:
 
 ## 10. Links
 
-- Model collection: [PENDING: the model collection url from outputs/publish/collections.json (lift publish collections --yes)]
-- Data collection: [PENDING: the data collection url from outputs/publish/collections.json (lift publish collections --yes)]
+- Model collection: https://huggingface.co/collections/racetracklexsi/lost-in-fine-tuning-models-6af8ac21037f3d7eaf42fb39
+- Data collection: https://huggingface.co/collections/racetracklexsi/lost-in-fine-tuning-data-6af8ac23120d5e7caecf7d91
 - Code: https://github.com/Knull/lost-in-finetuning
 - Notebook: https://github.com/Knull/lost-in-finetuning/blob/main/notebooks/acceptance_test.ipynb
 - Space: https://huggingface.co/spaces/racetracklexsi/lift-acceptance-test
