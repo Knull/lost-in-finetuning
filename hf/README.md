@@ -16,7 +16,7 @@ repair parameters are public, so the public deploy is met.
 | Collections | public | One for model artifacts, one for data artifacts, both linked from the article. |
 | Article | public | The organisers' sections (prompts/P08_publish.md), from the metrics files only. |
 | Notebook | public, in the repo | `notebooks/acceptance_test.ipynb`: run the check on any Tiny Aya adapter. |
-| Space | public, if time allows | Gradio over the aggregate dataset: verdict, heatmaps, utility retained, and a few examples, each cut to about 10 words plus `[redacted]` whatever its label. No other output text, and no live generation. |
+| Space | public | A static page drawn from the aggregate dataset (decisions item 113): verdict, heatmaps, utility retained, and a few examples, each cut to about 10 words plus `[redacted]` whatever its label. No other output text, and no live generation. |
 
 The team lead's HF username must match the registration form. The HF account must also have the
 registration email on it to redeem the hackathon credits.
@@ -34,7 +34,7 @@ a dry run unless given `--yes`.
 | --- | --- | --- |
 | `lift publish model [--variant V] [--build --device cuda:0] [--yes]` | repaired model (gated), repair parameters, gated adapters; writes outputs/publish/model.sources.json (every value on the model card with its file and pointer) | `selection.json`, `final_report.json`, configs/variants.yaml, outputs/adapters, outputs/artifacts/cast |
 | `lift publish datasets [--only logs raw prompts] [--yes]` | logs (public: ids, labels, flags and hashes, no output or judge text), raw completions (gated, automatic approval), translated prompts (public) | outputs/judgements, generations, utility, metrics (the gate, selection and validation reports, auditkit), validation keys and labels, data/prompts |
-| `lift publish space [--yes]` | the Gradio Space (`hf/space/`) with `examples.json`: two outputs per variant, language and set of the final split, each cut to at most 10 words plus `[redacted]` whatever its label | outputs/generations and the primary judgements (for the cuts); the Space itself reads the logs dataset |
+| `lift publish space [--yes]` | the static Space (`index.html`, drawn by `hf/space/app.py`) with `examples.json`: two outputs per variant, language and set of the final split, each cut to at most 10 words plus `[redacted]` whatever its label | outputs/generations and the primary judgements (for the cuts); the Space itself reads the logs dataset |
 | `lift publish collections [--yes]` | the two collections; writes outputs/publish/collections.json | the repo ids above |
 | `lift publish article` | `hf/article.md`, the same text as the repository's `README.md`, and `hf/article.sources.json` (every value with its file and JSON pointer) | `final_report.json`, `selection.json`, the validation files (`validation/round1.json`, `validation/gate1.json`, `judge_decision.json`), configs, collections.json, configs/publish.yaml |
 | `lift publish preflight [--no-history] [--no-fetch]` | nothing; fetches every branch, tag and pull-request ref of origin first (`--no-fetch` skips it: local refs only, not enough to go public), then fails on a secret, token, raw completion, notebook output, forbidden path or a run of any model output's text in the tracked files or the git history | the git repo, and every generation in this machine's `outputs/`, whatever its label (it refuses a machine that has none) |

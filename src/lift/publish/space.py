@@ -21,7 +21,8 @@ from lift.io import read_jsonl, sha256_text
 from lift.publish import preflight, render, settings
 from lift.publish.hub import Upload
 
-FILES = ("app.py", "README.md", "requirements.txt")
+FILES = ("README.md",)  # the card; the page, index.html, is drawn by app.py's render_html (item 113)
+INDEX = "index.html"
 EXAMPLES = "examples.json"
 EXAMPLES_PER_CELL = 2
 SPLIT = "final"
@@ -103,7 +104,22 @@ def examples() -> list[dict]:
     return out
 
 
+def _app():
+    """hf/space/app.py as a module: the static page is drawn by the functions its Gradio preview uses."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("lift_space_app", source_dir() / "app.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def build() -> Upload:
+    """The Space as a static page (HF hosts a Gradio Space on free CPU only for PRO, item 113): index.html
+    drawn from final_report.json (what the logs dataset carries as aggregates/final_report.json) and the
+    cut examples, the card, and the examples as data."""
+    from lift.publish.inputs import Facts
+
     folder = paths.output_dir() / "publish" / "space"
     if folder.exists():
         shutil.rmtree(folder)
@@ -111,15 +127,17 @@ def build() -> Upload:
     for name in FILES:
         shutil.copyfile(source_dir() / name, folder / name)
     logs = settings.repo("logs")
-    render.write_text(folder / "space_config.json", json.dumps({"logs_dataset": logs.repo_id}, indent=1))
     rows = examples()
     render.write_text(folder / EXAMPLES, json.dumps(rows, indent=1, ensure_ascii=False))
+    links = {"Write-up and code": settings.github_repo(), "Aggregate logs dataset": logs.url}
+    page = _app().render_html({"report": Facts().report(), "examples": rows}, links)
+    render.write_text(folder / INDEX, page)
     return Upload(
         repo=settings.repo("space"),
         folder=folder,
-        title="Space (Gradio, no model loading)",
+        title="Space (static page, no model loading)",
         notes=[
-            f"reads only {logs.url}",
+            f"drawn from {logs.url} (aggregates/final_report.json)",
             f"{len(rows)} examples of the {SPLIT} split, each cut to at most {MAX_WORDS} words and "
             f"{MAX_CHARS} characters plus {MARK}, whatever its label",
             *preflight.relativised_note(preflight.relativise_folder(folder)),

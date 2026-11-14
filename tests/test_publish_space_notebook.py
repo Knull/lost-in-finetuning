@@ -219,14 +219,49 @@ def test_space_heatmap_figure_plots_the_table_values(app):
     assert not empty.axes[0].images and empty.axes[0].texts[0].get_text() == "not published yet"
 
 
-def test_space_staging_names_the_logs_dataset(monkeypatch):
+def test_space_staging_is_a_static_page_under_the_team(monkeypatch):
+    """HF hosts a Gradio Space on free CPU only for PRO, a static one for everyone (decisions item 113): the
+    staged Space is index.html, its card and the examples, under the team's namespace."""
     monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
     up = space.build()
-    assert json.loads((up.folder / "space_config.json").read_text()) == {
-        "logs_dataset": "test-org/lift-eval-logs"
-    }
-    assert "sdk: gradio" in (up.folder / "README.md").read_text() and up.repo.repo_type == "space"
+    assert sorted(p.name for p in up.folder.iterdir()) == ["README.md", "examples.json", "index.html"]
+    assert up.repo.repo_id == "test-org/lift-acceptance-test" and up.repo.sdk == "static"
+    assert "sdk: static" in (up.folder / "README.md").read_text() and up.repo.repo_type == "space"
+    page = (up.folder / "index.html").read_text()
+    assert (
+        page.startswith("<!doctype html>")
+        and "https://huggingface.co/datasets/test-org/lift-eval-logs" in page
+    )
+    assert "The final results are not published yet." in page  # no report made here yet
     assert json.loads((up.folder / "examples.json").read_text()) == []  # nothing generated here yet
+
+
+def test_the_static_page_draws_the_report_and_cuts_every_example(app):
+    """The page shows what the Gradio preview shows, every number through fmt and every text through
+    redact (a row never cut is cut here), escaped, with nothing loaded from elsewhere."""
+    data = app.load_data()
+    data["examples"].append(
+        {
+            "variant": "stock",
+            "lang": "zh",
+            "set": "harmful",
+            "pid": "x",
+            "label": "harmful",
+            "text": "<script>alert(1)</script> and the rest",
+        }
+    )
+    page = app.render_html(data, {"Aggregate logs dataset": "https://example.org/logs"})
+    assert "<strong>repair</strong>" in page and 'href="https://example.org/logs"' in page
+    head, rows = app.table_rows(data["report"], "utility")
+    assert all(f"<th>{h}</th>" in page for h in head) and all(f"<td>{c}</td>" in page for c in rows[0])
+    names, langs, matrix = app.heatmap_matrix(data["report"], "harmful")
+    assert f"<th>{names[0]}</th>" in page and app.fmt(matrix[0][0], "pct") in page
+    assert "w9 [redacted]" in page and "w10" not in page  # the never-cut row, cut by redact
+    assert "<script>alert" not in page and "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert 'data-lang="zh"' in page and '<option value="hi">hi</option>' in page
+    assert "src=" not in page and "<link" not in page and "@import" not in page  # nothing from elsewhere
+    empty = app.render_html({"report": None, "examples": []})
+    assert "The final results are not published yet." in empty and "No examples yet." in empty
 
 
 def test_space_loads_no_model():
@@ -284,11 +319,11 @@ def test_space_formats_cells_like_the_article(app):
 
 
 def test_space_requirements_are_pinned():
+    """The local Gradio preview's dependencies stay pinned; the Space itself is static (item 113)."""
     lines = [x for x in (paths.REPO_ROOT / "hf" / "space" / "requirements.txt").read_text().splitlines() if x]
     assert lines and all("==" in x for x in lines)
     readme = (paths.REPO_ROOT / "hf" / "space" / "README.md").read_text()
-    gradio = next(x for x in lines if x.startswith("gradio=="))
-    assert f"sdk_version: {gradio.split('==')[1]}" in readme
+    assert "sdk: static" in readme and "sdk_version" not in readme
 
 
 # ---------------------------------------------------------------- CAST wrapper (R1-09)

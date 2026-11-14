@@ -4,6 +4,18 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 14, 2026 (morning): the logs dataset's scan
 
+113. **The Space is a static page under the organisation; item 112 is undone.** With a token that can
+     write to Knu-ll, HF refused the Gradio Space there too: "hosting Gradio and Docker Spaces on free
+     cpu-basic requires a PRO subscription". Static Spaces are free for everyone, organisations included.
+     - `lift publish space` now draws the Space as one static page, `index.html`, with `render_html` in
+       hf/space/app.py: the same verdicts, harmful-rate and over-refusal heatmaps (tables on a one-hue
+       ramp, each value printed), utility table and cut examples (with a language filter) as the Gradio
+       view, from the same functions, every number through the app's copy of fmt and every text through
+       redact. It loads nothing from elsewhere. The report is final_report.json, what the logs dataset
+       carries as aggregates/final_report.json; `examples.json` ships beside it as data.
+     - `repos.space` is back under racetracklexsi with `sdk: static`. The Gradio UI stays in app.py as a
+       local preview. Nothing reported changes.
+
 112. **The Space goes under Arnav's HF account (Knu-ll), not the organisation.** HF refused to create it
      under racetracklexsi with 402 Payment Required: "hosting Gradio and Docker Spaces on free cpu-basic
      requires a Team or Enterprise plan for organization racetracklexsi" (static Spaces stay free). A user
