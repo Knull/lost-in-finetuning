@@ -602,3 +602,4 @@ References:
 
 - Arnav Mahajan ([@Knu-ll](https://huggingface.co/Knu-ll))
 - Manolo Chow ([@mano-cw](https://huggingface.co/mano-cw))
+- Kendrick
