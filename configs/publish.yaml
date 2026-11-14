@@ -26,7 +26,9 @@ repos:
   raw: {name: lift-raw-completions, type: dataset, access: gated-auto}
   # The translations we made (Hindi PolyRefuse, Chinese harmless, OR-Bench-Hard in 5 languages).
   prompts: {name: lift-multilingual-safety-prompts, type: dataset, access: public}
-  space: {name: lift-acceptance-test, type: space, access: public, sdk: gradio}
+  # Under a team member's account: HF hosts a Gradio Space on free CPU for a user, while an organisation on
+  # the free plan gets 402 Payment Required (Nov 14, docs/decisions.md 112). The collections still list it.
+  space: {name: lift-acceptance-test, type: space, access: public, sdk: gradio, namespace: Knu-ll}
 
 collections:
   models: {title: "Lost in Fine-Tuning: models", description: "Tiny Aya Global, a Hindi LoRA adapter tested for safety drift, and its frozen post-hoc repair (Lexsi hackathon, Track 2b-6)."}

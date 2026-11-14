@@ -4,6 +4,13 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 14, 2026 (morning): the logs dataset's scan
 
+112. **The Space goes under Arnav's HF account (Knu-ll), not the organisation.** HF refused to create it
+     under racetracklexsi with 402 Payment Required: "hosting Gradio and Docker Spaces on free cpu-basic
+     requires a Team or Enterprise plan for organization racetracklexsi" (static Spaces stay free). A user
+     account hosts a Gradio Space on free CPU, so `repos.space` names its own owner (`namespace: Knu-ll`);
+     every other repo stays the organisation's, and the organisation's collection lists the Space. The
+     Space is unchanged: it loads no model and reads only the public logs dataset.
+
 111. **Two more publishing fixes: the Space's cut, and a test fake in the history.** Nothing reported changes.
      - The Space upload failed the scan in 11 examples. A cut could be 59 characters ending on a word, and
        the cut plus the space before `[redacted]` was exactly the output's first 60-character window (the

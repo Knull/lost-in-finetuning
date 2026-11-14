@@ -109,6 +109,18 @@ def _staged(name: str, text: str = "# card\n", gated: str | None = None) -> Uplo
     return Upload(repo=repo, folder=folder, title=name)
 
 
+def test_a_repo_can_name_its_own_owner(namespace, monkeypatch):
+    """HF hosts a Gradio Space on free CPU only under a user (an organisation on the free plan gets 402), so
+    the Space's entry names its owner; every other repo stays the team's (decisions item 112)."""
+    monkeypatch.setitem(settings.load()["repos"]["space"], "namespace", "a-user")
+    assert settings.repo("space").repo_id == "a-user/lift-acceptance-test"
+    assert settings.repo("space").url == "https://huggingface.co/spaces/a-user/lift-acceptance-test"
+    assert settings.repo("logs").repo_id == "test-org/lift-eval-logs"
+    monkeypatch.setitem(settings.load()["repos"]["space"], "namespace", "not a name")
+    with pytest.raises(PublishError, match="repos.space.namespace"):
+        settings.repo("space")
+
+
 def test_gated_repo_is_gated_before_upload_and_public_after(namespace):
     api = HubApi()
     up = _staged("raw", "---\nextra_gated_prompt: terms\n---\n# raw\n", gated="manual")

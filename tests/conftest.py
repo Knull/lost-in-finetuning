@@ -54,8 +54,9 @@ def unpinned_revisions(monkeypatch):
     not a fixture, and tests register their own under the same names. A test that needs a pin sets it
     itself: it mutates this view (one copy per test, like the real cached load) or monkeypatches
     lift.config.load or lift.config.get. test_configs_and_cli checks the committed registry itself.
-    configs/publish.yaml comes with the team's own fields (namespace, team, annotators, references)
-    unset, the state the publishing tests start from; a test that needs one sets it."""
+    configs/publish.yaml comes with the team's own fields (namespace, a repo's own owner, team,
+    annotators, references) unset, the state the publishing tests start from; a test that needs one
+    sets it."""
     real = lift_config.load
     views: dict[str, dict] = {}
 
@@ -70,6 +71,8 @@ def unpinned_revisions(monkeypatch):
             if name not in views:
                 data = copy.deepcopy(real(name))
                 data.update(namespace=None, team=[], annotators=None, references=None)
+                for entry in data["repos"].values():  # a repo's own owner (the Space's) is the team's too
+                    entry.pop("namespace", None)
                 views[name] = data
             return views[name]
         if name != "project":

@@ -57,13 +57,18 @@ def namespace_is_set() -> bool:
 
 
 def repo(kind: str, **fields: str) -> RepoSpec:
+    """A repo's id, type and access. Its owner is the team's namespace unless its entry names another
+    (``namespace``: the Space, which HF hosts free only under a user, decisions item 112)."""
     entry = load()["repos"][kind]
     if entry["access"] not in ACCESS:
         raise PublishError(f"configs/publish.yaml repos.{kind}.access must be one of {sorted(ACCESS)}")
+    owner = entry.get("namespace") or namespace()
+    if not _NAMESPACE.match(str(owner)):
+        raise PublishError(f"configs/publish.yaml repos.{kind}.namespace is not a valid HF user or org name")
     name = entry["name"].format(**fields)
     return RepoSpec(
         kind=kind,
-        repo_id=f"{namespace()}/{name}",
+        repo_id=f"{owner}/{name}",
         repo_type=entry["type"],
         access=entry["access"],
         sdk=entry.get("sdk"),
