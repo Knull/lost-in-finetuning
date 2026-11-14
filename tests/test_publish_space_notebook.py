@@ -89,6 +89,9 @@ CUT_SAMPLES = [
     "mixed 中文和 English words 在一起 for a while longer than ten words in total",
     "",
     "w0 w1 w2 [redacted]",
+    # six words filling 59 characters, then more: cut at 59, the cut and the space before its mark were the
+    # output's first window, and the Space upload failed the scan (Nov 14)
+    " ".join(["abcdefghi"] * 6) + " next words follow here",
 ]
 
 

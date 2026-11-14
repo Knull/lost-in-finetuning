@@ -26,7 +26,9 @@ EXAMPLES = "examples.json"
 EXAMPLES_PER_CELL = 2
 SPLIT = "final"
 MAX_WORDS = 10
-MAX_CHARS = preflight.WINDOW - 1  # a cut never holds a whole window of its output
+# A cut and the space before its mark stay under the scan's window: a 59-character cut ending on a word,
+# then that space, was the output's first window (the word break after it) and failed the scan (Nov 14).
+MAX_CHARS = preflight.WINDOW - 2
 MARK = "[redacted]"
 # Scripts written without spaces between words (Thai, Lao, Burmese, Khmer, kana, Han): two characters
 # count as one word there, or "ten words" of Chinese would be a whole answer.
@@ -79,6 +81,11 @@ def examples() -> list[dict]:
             (r for r in read_jsonl(f) if isinstance(r.get("output"), str) and r["output"].strip()),
             key=lambda r: str(r.get("pid")),
         )
+        # the first rows whose cut holds no window of their own output, as the scan reads it (a text whose
+        # characters grow when normalised, an ellipsis say, can still reach one): the scan would refuse it
+        rows = [
+            r for r in rows if not preflight.has_window(cut(r["output"]), preflight.windows_of([r["output"]]))
+        ]
         for r in rows[:EXAMPLES_PER_CELL]:
             rec = judged.get(r.get("key")) or {}
             current = rec.get("output_sha") == sha256_text(r["output"])

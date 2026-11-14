@@ -23,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 REPORT = "aggregates/final_report.json"
 EXAMPLES = "examples.json"
 MAX_WORDS = 10
-MAX_CHARS = 59
+MAX_CHARS = 58
 MARK = "[redacted]"
 NOT_RUN = "not run"
 # Scripts written without spaces between words: two characters count as one word there.

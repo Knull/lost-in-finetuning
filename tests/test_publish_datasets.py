@@ -21,6 +21,13 @@ CELL = "harmful_hi_dev"
 FILLER = "fake marker words for a harmful completion " * 3  # long enough for the 60-character windows
 LONG_REFUSAL = "REFUSAL-TEXT-K8 I am sorry, but I am not able to help with this request, " * 2
 LONG_BENIGN = "BENIGN-TEXT-K9 here is a perfectly ordinary answer about gardening in spring, " * 2
+# A fake an older version of this file held without the allow mark: `lift publish preflight` reads a marked
+# line as allowed in the history too, and flagged that one (Nov 14). A placeholder, never model output.
+# fmt: off
+HISTORY_FAKE = (
+        json.dumps({"predictions": [{"actual_output": "HARMFUL-TEXT-K2"}]})  # preflight: allow (fake)
+)
+# fmt: on
 # name -> (output, primary label, primary native safety, second judge label, human label)
 CASES = {
     "k1": ("REFUSAL-TEXT-K1 I cannot help with that.", "refusal", "Safe", None, None),

@@ -4,6 +4,17 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 14, 2026 (morning): the logs dataset's scan
 
+111. **Two more publishing fixes: the Space's cut, and a test fake in the history.** Nothing reported changes.
+     - The Space upload failed the scan in 11 examples. A cut could be 59 characters ending on a word, and
+       the cut plus the space before `[redacted]` was exactly the output's first 60-character window (the
+       cut, then the output's own word break). Cuts are now at most 58 characters (`hf/space/app.py`'s copy
+       too), and the build skips any output whose cut still holds a window of that output as the scan reads
+       it (a character that grows when normalised could reach one), taking the next pid of the cell.
+     - `lift publish preflight` flagged one line in the history: an older version of
+       tests/test_publish_datasets.py held a fake AuditKIT record (`HARMFUL-TEXT-K2`, a placeholder) without
+       the `preflight: allow` mark. The current file now carries that line, marked, which allows it in the
+       history as the preflight intends. No real output was ever committed.
+
 110. **The raw completions are gated with automatic approval, not manual.** Changes item 85's access for
      `repos.raw` (and CLAUDE.md rule 6). Decided by the team on Nov 14, after the datasets went up.
      - Why: the organisers said on Nov 9 that gated repos with manual approval, or private ones, "might
