@@ -4,6 +4,22 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 15, 2026: fixes from the adversarial review of the submission
 
+138. **The article sets negative numbers with a real minus sign, the lead gives two intervals, and the
+     three Hindi harmful rates are bold.** Readability only, at Arnav's request after checkpoint 3.
+     - Every negative number the article prints, in prose, tables and the report's text cells, is set
+       with a real minus sign (U+2212) instead of a hyphen, and so is the shown text in
+       hf/article.sources.json. The recorded values stay the parsed numbers, and
+       scripts/verify_numbers.py compares those, never the shown text. Ids, ranges, dates, licences,
+       code, comments, links and URLs keep their hyphens. The model and dataset cards, the Space and
+       the notebook share the number formatting but keep the hyphen.
+     - The lead gives the 95% interval of the primary drift and of the repair against the adapter
+       only; every other number of the lead is its point estimate. Each clause is still chosen by its
+       interval, read and recorded as before, and every interval left out of the lead is printed in
+       section 7 or the appendix, as the lead's last line says.
+     - The lead sets the three Hindi harmful rates in bold: stock's, the stress adapter's and the
+       frozen repair's.
+     No number, label or analysis changes.
+
 137. **The offline tests pass on Windows, and the Reproduce section says so.** Tests and reporting
      only (review F21). The section on running the offline tests said that on Windows a few tests
      were known to fail for reasons of portability. Each cause was in a test, not in the code it

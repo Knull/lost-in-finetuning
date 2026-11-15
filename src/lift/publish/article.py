@@ -52,6 +52,12 @@ The limitations report the cap-hit rate the pre-registration promises, with its 
 (``cap_hits``, item 132); an extra before "Reproduce" says how to run the test on another adapter with the
 acceptance-test notebook, and the Space is named a results explorer (``run_it``, item 133); and the judge
 summary says how far the readers share the judge's refusal label (``validated.summary``, item 134).
+
+Every negative number the article prints, tables and P07's text included, has a real minus sign (U+2212,
+``inputs.minus_signs``, applied once to the whole text and to the shown text of its sources); the lead
+gives the 95% interval of the drift and of the repair only, and every other number of it as its point
+estimate (each clause still chosen by its interval, which section 7 or the appendix prints), with the three
+Hindi harmful rates in bold.
 """
 
 from __future__ import annotations
@@ -79,6 +85,7 @@ from lift.publish.inputs import (
     _interval,
     fmt,
     frozen_winner,
+    minus_signs,
     pending,
     recipe_block,
     report_path,
@@ -4357,26 +4364,28 @@ def _signed(number: str) -> str:
     return f"+{number}" if number[:1].isdigit() else number
 
 
-def _nats(facts: Facts, pointer: str, what: str, *, unit: bool = True) -> str:
+def _nats(facts: Facts, pointer: str, what: str, *, unit: bool = True, bounds: bool = True) -> str:
     """A held-out-loss difference with its interval, "-0.163 nats/token [-0.233, -0.110]": the estimate and
     each bound read through ``facts``, so each is recorded. Without ``unit``, where a table's row names
-    it: "-0.163 [-0.233, -0.110]"."""
-    est, lo, hi = (
-        _signed(facts.report_value(f"{pointer}/{key}", "f3", what=f"{what} ({key})"))
-        for key in ("est", "lo", "hi")
+    it: "-0.163 [-0.233, -0.110]". Without ``bounds`` (the lead), the estimate alone: "-0.163 nats/token"."""
+    keys = ("est", "lo", "hi") if bounds else ("est",)
+    est, *rest = (
+        _signed(facts.report_value(f"{pointer}/{key}", "f3", what=f"{what} ({key})")) for key in keys
     )
-    return f"{est}{' nats/token' if unit else ''} [{lo}, {hi}]"
+    interval = f" [{rest[0]}, {rest[1]}]" if bounds else ""
+    return f"{est}{' nats/token' if unit else ''}{interval}"
 
 
 def _hindi_level(facts: Facts, key: str) -> str | None:
     """The Hindi harmful rate of stock, the adapter or the frozen repair (``key``: the column of P07's
-    per-language table), or None when the table gives none (an arm not run, a seed missing)."""
+    per-language table), in bold (the lead's three rates), or None when the table gives none (an arm not
+    run, a seed missing)."""
     rows = facts.table_rows("per_language") or []
     i = next((i for i, r in enumerate(rows) if r.get("lang") == "Hindi"), None)
     if i is None or rows[i].get(key) is None:
         return None
     what = f"the Hindi harmful rate, final split ({key})"
-    return facts.report_value(f"/tables/per_language/rows/{i}/{key}", "pct", what=what)
+    return f"**{facts.report_value(f'/tables/per_language/rows/{i}/{key}', 'pct', what=what)}**"
 
 
 def _data_set(name: object) -> str:
@@ -4448,13 +4457,13 @@ def _lead_recipes(facts: Facts, rows: list[dict]) -> str:
             sentences.append(f"{who}: the Hindi harmful rate was not run.")
             continue
         change = facts.report_value(
-            f"/verdicts/{i}/axes/drift", "pp_ci", what="an adapter's Hindi harmful rate against stock"
+            f"/verdicts/{i}/axes/drift", "pp_est", what="an adapter's Hindi harmful rate against stock"
         )
         refused = _refused_more(axes)
         aside = ""
         if way == "higher" and intact is not None:
             what = "the same difference counting only outputs that trip no unclear flag"
-            without = facts.report_value(f"/verdicts/{i}/axes/drift_intact", "pp_ci", what=what)
+            without = facts.report_value(f"/verdicts/{i}/axes/drift_intact", "pp_est", what=what)
             aside = {
                 "same": f", but not clearly {SET_ASIDE} ({without})",
                 "lower": f", and lowered it {SET_ASIDE} ({without})",
@@ -4508,7 +4517,8 @@ def _lead_recipes(facts: Facts, rows: list[dict]) -> str:
 def _lead_drift(facts: Facts, rows: list[dict], ctx: Mapping[str, str]) -> str:
     """The lead's third bullet: the adapter of the repair comparison against stock. Its held-out loss (the
     check a team runs before shipping), its Hindi harmful rate with the two levels, its refusals of the
-    same harmful prompts, and the human-written check, each said the way its interval points. "Drifts"
+    same harmful prompts, and the human-written check, each said the way its interval points (the drift
+    with its interval and p-value, the others as point estimates: their intervals are in section 7). "Drifts"
     heads the bullet only for a rise that Gate 2's bar counts, and "the usual pre-ship check misses it"
     only when the held-out loss is better than stock's as well."""
     head = rows[0]
@@ -4517,7 +4527,8 @@ def _lead_drift(facts: Facts, rows: list[dict], ctx: Mapping[str, str]) -> str:
     loss = _way(axes.get("heldout"))
     first = ""
     if loss is not None:
-        nats = _nats(facts, "/verdicts/0/axes/heldout", "the adapter's held-out loss against stock")
+        what = "the adapter's held-out loss against stock"
+        nats = _nats(facts, "/verdicts/0/axes/heldout", what, bounds=False)
         first = {
             "lower": f"Its held-out loss beats stock's ({nats})",
             "higher": f"Its held-out loss is worse than stock's ({nats})",
@@ -4539,7 +4550,7 @@ def _lead_drift(facts: Facts, rows: list[dict], ctx: Mapping[str, str]) -> str:
         refusals = _way(axes.get("refusal_harmful"))
         if refusals is not None:
             what = "the adapter's refusals of Hindi harmful prompts against stock"
-            change = facts.report_value("/verdicts/0/axes/refusal_harmful", "pp_ci", what=what)
+            change = facts.report_value("/verdicts/0/axes/refusal_harmful", "pp_est", what=what)
             said += {
                 "lower": f" and it refuses fewer harmful prompts ({change})",
                 "higher": f" and it refuses more harmful prompts ({change})",
@@ -4552,13 +4563,16 @@ def _lead_drift(facts: Facts, rows: list[dict], ctx: Mapping[str, str]) -> str:
         else:
             sentences.append(cap(said) + ".")
         human = _way(facts.raw(report_path(), "/primary/redteam_drift/pooled"))
+        if human is not None:
+            what = "the Aya Red-teaming drift effect"
+            red = facts.report_value("/primary/redteam_drift/pooled", "pp_est", what=what)
         if human is not None and human == way:
             agree = "agree" if way != "same" else "show no clear change either"
-            sentences.append(f"Human-written Hindi red-teaming prompts {agree} ({ctx['redteam_drift']}).")
+            sentences.append(f"Human-written Hindi red-teaming prompts {agree} ({red}).")
         elif human is not None:
             sentences.append(
                 f"Human-written Hindi red-teaming prompts do not show the same: {RISE_OR_FALL[human]} "
-                f"({ctx['redteam_drift']})."
+                f"({red})."
             )
     drift = axes.get("drift")
     counted = drift.get("meaningful") if isinstance(drift, Mapping) else None
@@ -4577,19 +4591,20 @@ def _lead_drift(facts: Facts, rows: list[dict], ctx: Mapping[str, str]) -> str:
     return f"- **{title}** " + " ".join(sentences)
 
 
-def _repair_costs(facts: Facts, ctx: Mapping[str, str]) -> list[str]:
+def _repair_costs(facts: Facts) -> list[str]:
     """What the frozen repair costs against stock and keeps of the adapter, as the lead's clauses: its
     hard-benign refusals and its Hindi reading comprehension (the report's headline intervals, each said
     the way it points, "no clear change" for one that includes zero), then the share of the adapter's
     held-out-loss gain it keeps: "a better held-out fit than the full adapter" only when the whole
-    interval of that share lies over 100%. A value not run or undefined gives no clause."""
+    interval of that share lies over 100%. A value not run or undefined gives no clause. Each is given as
+    its point estimate; the intervals are in section 7 and the appendix."""
     rv = facts.report_value
     refusals = _way(facts.raw(report_path(), "/headline/overrefusal_hard_hi_change"))
     reading = _way(facts.raw(report_path(), "/headline/belebele_hi_change"))
     what = "the repair's hard-benign refusals against stock"
-    refused = rv("/headline/overrefusal_hard_hi_change", "pp_ci", what=what) if refusals else ""
+    refused = rv("/headline/overrefusal_hard_hi_change", "pp_est", what=what) if refusals else ""
     what = "the repair's Belebele-hi accuracy against stock"
-    read = rv("/headline/belebele_hi_change", "pp_ci", what=what) if reading else ""
+    read = rv("/headline/belebele_hi_change", "pp_est", what=what) if reading else ""
     costs = []
     if refusals == "same" and reading == "same":
         costs.append(
@@ -4611,7 +4626,8 @@ def _repair_costs(facts: Facts, ctx: Mapping[str, str]) -> list[str]:
             costs.append(" and ".join(parts))
     kept = facts.raw(report_path(), "/headline/heldout_retained")
     if isinstance(kept, Mapping):
-        share = ctx["heldout_retained"]
+        what = "the share of the adapter's held-out-loss gain the frozen repair keeps"
+        share = rv("/headline/heldout_retained", "pct_est", what=what)
         if _is_number(kept.get("lo")) and kept["lo"] > 1:
             costs.append(f"a better held-out fit than the full adapter ({share} of its gain)")
         else:
@@ -4688,7 +4704,7 @@ def _lead_repair(facts: Facts, sel: Mapping[str, Any], rows: list[dict], ctx: Ma
             said = "raises the Hindi harmful rate" + (f" to {rate}" if rate else "")
         else:
             said = "leaves the Hindi harmful rate" + (f" at {rate}" if rate else "") + " with no clear change"
-        costs = _repair_costs(facts, ctx)
+        costs = _repair_costs(facts)
         costs = ", with " + ", and ".join(costs) if costs else ""
         sentences.append(f"{how} {said} {against}{costs}.")
     families = sel.get("families") if isinstance(sel.get("families"), Mapping) else {}
@@ -4763,7 +4779,7 @@ def _second_judge_drift(facts: Facts) -> str:
     if way is None or other is None:
         return ""
     what = "the Hindi drift under the second judge's labels"
-    change = facts.report_value(f"/tables/sensitivity_effects/rows/{i}/effect", "pp_ci", what=what)
+    change = facts.report_value(f"/tables/sensitivity_effects/rows/{i}/effect", "pp_est", what=what)
     if other == "same":
         return f"under a second judge the drift is not clear ({change})"
     if way == "same":
@@ -4795,7 +4811,7 @@ def _lead_care(facts: Facts, rows: list[dict], ctx: Mapping[str, str]) -> str:
         wins = [_way(_axes(v).get("final_win_rate"), PARITY) for v in rows]
         if wins[0] is not None:
             what = "the adapter's final win rate against stock"
-            rate = facts.report_value("/verdicts/0/axes/final_win_rate", "pct_ci", what=what)
+            rate = facts.report_value("/verdicts/0/axes/final_win_rate", "pct_est", what=what)
             kept = facts.raw(report_path(), "/headline/utility_retained")
             if None not in wins and "higher" not in wins:
                 text = f"No adapter beat stock in pairwise judging ({name}: {rate})"
@@ -4804,7 +4820,9 @@ def _lead_care(facts: Facts, rows: list[dict], ctx: Mapping[str, str]) -> str:
             elif wins[0] == "higher":
                 text = f"{cap(name)}'s answers were preferred to stock's in pairwise judging ({rate})"
                 if isinstance(kept, Mapping):
-                    text += f", and the frozen repair keeps {ctx['utility_retained']} of that gain"
+                    what = "the share of the adapter's win-rate gain the frozen repair keeps"
+                    share = facts.report_value("/headline/utility_retained", "pct_est", what=what)
+                    text += f", and the frozen repair keeps {share} of that gain"
             elif wins[0] == "lower":
                 text = f"Stock's answers were preferred to {name}'s in pairwise judging ({rate})"
             else:
@@ -4831,8 +4849,11 @@ def in_short(facts: Facts, ctx: Mapping[str, str]) -> str:
     the other families (``_lead_repair``); what to read with care (``_lead_care``). Every number is read
     through ``facts`` (through the slots of the sections below where they exist, so the same sources), and
     every clause that depends on the results is chosen by them: a direction is said only where the 95%
-    interval excludes no change, and a clause whose numbers are not there is left out. Pending while the
-    selection is not decided; with a selection and no report yet, the results are one pending line."""
+    interval excludes no change, and a clause whose numbers are not there is left out. Only the drift and the
+    repair are printed with their intervals; every other number is its point estimate (its clause still read
+    from the interval, which section 7 or the appendix prints), and the Hindi harmful rates of stock, the
+    adapter and the frozen repair are in bold. Pending while the selection is not decided; with a selection
+    and no report yet, the results are one pending line."""
     sel = _decided(facts)
     if sel is None:
         return pending("the summary (the frozen repair)", shown(selection_path()), P05)
@@ -4878,6 +4899,10 @@ def build(facts: Facts | None = None, *, readme: bool = False) -> tuple[Path, Fa
             f"the article would name {len(unresolved)} absolute local path(s) outside the repo and any "
             "outputs/ tree (from the inputs it reads); nothing was written"
         )
+    text = minus_signs(text)  # and what each source says it showed, the same way
+    for source in facts.sources:
+        if isinstance(source.get("shown"), str):
+            source["shown"] = minus_signs(source["shown"])
     broken = broken_links(text)
     if broken:
         raise PublishError(

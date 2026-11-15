@@ -232,6 +232,12 @@ def fmt(value: Any, kind: str) -> str:
     if kind == "pp_ci":
         est, lo, hi = _interval(value)
         return f"{est * 100:+.1f} pp [{lo * 100:+.1f}, {hi * 100:+.1f}]"
+    # An interval's estimate alone, where the text prints the interval elsewhere (the article's lead): the
+    # whole interval is still what is read and recorded.
+    if kind == "pct_est":
+        return f"{_interval(value)[0] * 100:.1f}%"
+    if kind == "pp_est":
+        return f"{_interval(value)[0] * 100:+.1f} pp"
     if kind == "points":
         return f"{_num(value) * 100:g} points"
     if kind == "p":
@@ -258,6 +264,29 @@ def fmt(value: Any, kind: str) -> str:
             raise ValueError(f"not a list: {value!r}")
         return ", ".join(str(x) for x in value) or NOT_RUN
     raise ValueError(f"unknown format {kind!r}")
+
+
+MINUS = "−"
+# A hyphen that is the sign of a printed number: followed by a digit, and not after a letter, digit, dot,
+# slash or dash ("s-1", "seeds 1-3", a date, "CC-BY-4.0", a path, "--flag").
+_SIGN = re.compile(r"(?<![\w.\-/−–])-(?=\d)")
+# What keeps its hyphens: fenced and inline code, HTML comments, link targets and URLs.
+_VERBATIM = re.compile(
+    r"```.*?```|`[^`\n]*`|<!--.*?-->|\]\([^)\s]*\)|<https?://[^>\s]*>|https?://[^\s)>\]]+", re.S
+)
+
+
+def minus_signs(text: str) -> str:
+    """Public text with the sign of each negative number a real minus (U+2212), not a hyphen: "−8.7 pp
+    [−12.2, −5.2]". The article's typography only (``lift.publish.article.build``, on the text and the
+    shown text of its sources); ``fmt`` and the other artifacts keep the hyphen. Code, comments, links and
+    URLs are left as they are, and a hyphen inside a word, id, range or date is not a sign."""
+    out, last = [], 0
+    for m in _VERBATIM.finditer(text):
+        out += [_SIGN.sub(MINUS, text[last : m.start()]), m.group()]
+        last = m.end()
+    out.append(_SIGN.sub(MINUS, text[last:]))
+    return "".join(out)
 
 
 def resolve(doc: Any, pointer: str) -> Any:

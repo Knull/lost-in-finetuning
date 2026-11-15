@@ -248,28 +248,34 @@ def test_full_inputs_leave_no_placeholder(out, monkeypatch):
     assert (
         "- **The adapters.** The pre-registered pick (Aya Dataset, three seeds) is the adapter the repairs "
         "are tested on. The other data set (IndicAlign) lowered the Hindi harmful rate on translated "
-        "prompts (-5.0 pp [-9.0, -1.0]) and refused more prompts, benign ones included."
+        "prompts (\u22125.0 pp) and refused more prompts, benign ones included."
     ) in lead
+    # only the drift and the repair carry their intervals in the lead; the three Hindi rates are bold
     assert (
         "- **The Aya adapter drifts, and the usual pre-ship check misses it.** Its held-out loss beats "
-        "stock's (-0.330 nats/token [-0.360, -0.300]), yet its Hindi harmful rate rises from 5.0% to 21.0% "
-        "(+16.0 pp [+11.0, +21.0], p < 0.001) and it refuses fewer harmful prompts (-15.0 pp [-20.0, "
-        "-10.0]). Human-written Hindi red-teaming prompts agree (+10.0 pp [+3.0, +17.0])."
+        "stock's (\u22120.330 nats/token), yet its Hindi harmful rate rises from **5.0%** to **21.0%** "
+        "(+16.0 pp [+11.0, +21.0], p < 0.001) and it refuses fewer harmful prompts (\u221215.0 pp). "
+        "Human-written Hindi red-teaming prompts agree (+10.0 pp)."
     ) in lead
     assert (
         "- **The simplest repair wins.** Keeping half of the adapter's weight change (WiSE-FT, \u03bb = "
-        "0.50) brings the Hindi harmful rate to 7.0% (-14.0 pp [-19.0, -9.0] against the adapter), with no "
-        "clear change from stock in hard-benign over-refusal (+2.0 pp [+0.0, +4.0]) or Hindi reading "
-        "comprehension (-1.0 pp [-3.0, +1.0]), and 60.0% [52.0, 68.0] of the adapter's held-out-loss gain "
-        "kept. The other frozen settings that met the rule on dev: ReSta at \u03b1 = 0.25 and CAST at "
-        "strength 1.0."
+        "0.50) brings the Hindi harmful rate to **7.0%** (\u221214.0 pp [\u221219.0, \u22129.0] against the "
+        "adapter), with no clear change from stock in hard-benign over-refusal (+2.0 pp) or Hindi reading "
+        "comprehension (\u22121.0 pp), and 60.0% of the adapter's held-out-loss gain kept. The other frozen "
+        "settings that met the rule on dev: ReSta at \u03b1 = 0.25 and CAST at strength 1.0."
     ) in lead
     assert (
         "- **Read with care.** One adapter, three seeds. The Aya adapter's answers were preferred to stock's "
-        "in pairwise judging (62.0% [55.0, 69.0]), and the frozen repair keeps 80.0% [60.0, 100.0] of that "
+        "in pairwise judging (62.0%), and the frozen repair keeps 80.0% of that "
         "gain. Every interval is in section 7 or the appendix; every number's source is in "
         "`hf/article.sources.json`."
     ) in lead
+    # two intervals in the whole lead, the drift's and the repair's
+    assert re.findall(r"\[[+\u2212]?[0-9.]+, [+\u2212]?[0-9.]+\]", lead) == [
+        "[+11.0, +21.0]",
+        "[\u221219.0, \u22129.0]",
+    ]
+    assert re.findall(r"\*\*[0-9.]+%\*\*", lead) == ["**5.0%**", "**21.0%**", "**7.0%**"]
     assert "`adapter-" not in lead and "`wiseft-" not in lead and "rejected" not in lead
     # annotators: [] thanks nobody, so the teammates section is its list and nothing else
     assert "We thank" not in text
@@ -1370,7 +1376,7 @@ def test_the_repair_vs_wiseft_table_is_shown_only_when_p07_writes_it(out):
     assert sentence.endswith(f"Table: [each repair against WiSE-FT](#{article.anchor(title)}).")
     # the table itself is in the appendix, whole and with its note, and nowhere above it
     table = _appendix(text, title)
-    assert "| resta | -4.0 pp [-8.0, -1.0] | +0.0 pp [-10.0, +10.0] |" in table
+    assert "| resta | \u22124.0 pp [\u22128.0, \u22121.0] | +0.0 pp [\u221210.0, +10.0] |" in table
     assert "Paired by prompt; unadjusted intervals; not pre-registered." in table
     assert "| resta |" not in _main(text)
     assert "### Each repair against WiSE-FT" not in text
@@ -1840,25 +1846,34 @@ def test_each_adapter_is_described_by_what_each_check_said(out):
         "The Aya adapter (carries the repair comparison; seeds 1, 2, 3)",
         "The IndicAlign adapter (not picked, exploratory; seeds 1, 2, 3)",
     ]
-    assert table[HELD_OUT] == ["better: -0.330 [-0.360, -0.300]", "better: -0.300 [-0.330, -0.270]"]
+    assert table[HELD_OUT] == [
+        "better: \u22120.330 [\u22120.360, \u22120.300]",
+        "better: \u22120.300 [\u22120.330, \u22120.270]",
+    ]
     assert table["Pairwise win rate against stock"] == [
         "adapter preferred: 62.0% [55.0, 69.0]",
         "stock preferred: 40.0% [33.0, 47.0]",
     ]
     assert table["Hindi harmful rate - stock"] == [
         "higher: +16.0 pp [+11.0, +21.0]",
-        "lower: -5.0 pp [-9.0, -1.0]",
+        "lower: \u22125.0 pp [\u22129.0, \u22121.0]",
     ]
-    assert table[INTACT_ROW] == ["higher: +12.0 pp [+7.0, +17.0]", "lower: -4.0 pp [-7.0, -1.0]"]
+    assert table[INTACT_ROW] == [
+        "higher: +12.0 pp [+7.0, +17.0]",
+        "lower: \u22124.0 pp [\u22127.0, \u22121.0]",
+    ]
     assert table["Refusals of Hindi harmful prompts - stock"] == [
-        "fewer: -15.0 pp [-20.0, -10.0]",
+        "fewer: \u221215.0 pp [\u221220.0, \u221210.0]",
         "more: +6.0 pp [+2.0, +10.0]",
     ]
     assert table["Hard-benign refusals - stock"] == [
-        "no clear change: +1.0 pp [-2.0, +4.0]",
+        "no clear change: +1.0 pp [\u22122.0, +4.0]",
         "more: +10.0 pp [+4.0, +16.0]",
     ]
-    assert table["Belebele-hi accuracy - stock"] == ["no clear change: -1.0 pp [-3.0, +1.0]", "not run"]
+    assert table["Belebele-hi accuracy - stock"] == [
+        "no clear change: \u22121.0 pp [\u22123.0, +1.0]",
+        "not run",
+    ]
     assert table[VERDICT_ROW] == [
         "**repair**; useful enough to ship (Gate 1)",
         "**retain** (no drift); not useful enough to ship (Gate 1)",
@@ -1898,15 +1913,15 @@ def test_every_number_of_the_checks_table_is_recorded(out):
     _, facts = article.build()
     said = {(s["pointer"], s["shown"]) for s in facts.sources if s["file"].endswith("final_report.json")}
     for pointer, shown in (
-        ("/verdicts/0/axes/heldout/est", "-0.330"),
-        ("/verdicts/0/axes/heldout/lo", "-0.360"),
-        ("/verdicts/1/axes/heldout/hi", "-0.270"),
+        ("/verdicts/0/axes/heldout/est", "\u22120.330"),
+        ("/verdicts/0/axes/heldout/lo", "\u22120.360"),
+        ("/verdicts/1/axes/heldout/hi", "\u22120.270"),
         ("/verdicts/0/axes/final_win_rate", "62.0% [55.0, 69.0]"),
-        ("/verdicts/1/axes/drift", "-5.0 pp [-9.0, -1.0]"),
-        ("/verdicts/1/axes/drift_intact", "-4.0 pp [-7.0, -1.0]"),
-        ("/verdicts/0/axes/refusal_harmful", "-15.0 pp [-20.0, -10.0]"),
+        ("/verdicts/1/axes/drift", "\u22125.0 pp [\u22129.0, \u22121.0]"),
+        ("/verdicts/1/axes/drift_intact", "\u22124.0 pp [\u22127.0, \u22121.0]"),
+        ("/verdicts/0/axes/refusal_harmful", "\u221215.0 pp [\u221220.0, \u221210.0]"),
         ("/verdicts/1/axes/overrefusal_hard_hi", "+10.0 pp [+4.0, +16.0]"),
-        ("/verdicts/0/axes/belebele_hi", "-1.0 pp [-3.0, +1.0]"),
+        ("/verdicts/0/axes/belebele_hi", "\u22121.0 pp [\u22123.0, +1.0]"),
         ("/verdicts/0/axes/drift/seeds", "seeds 1, 2, 3"),
         ("/verdicts/0/verdict", "repair"),
         ("/verdicts/1/usefulness_verdict", "not useful enough to ship (Gate 1)"),
@@ -1926,10 +1941,10 @@ def test_a_direction_is_said_only_where_the_interval_excludes_no_change(out):
     doc["verdicts"][0]["axes"] = axes
     section, _ = _checks(doc)
     table = _rows_of(section)
-    assert table[HELD_OUT][0] == "no clear change: -0.010 [-0.030, +0.010]"
+    assert table[HELD_OUT][0] == "no clear change: \u22120.010 [\u22120.030, +0.010]"
     assert table["Pairwise win rate against stock"][0] == "no clear preference: 52.0% [45.0, 59.0]"
-    assert table["Hindi harmful rate - stock"][0] == "no clear change: +3.0 pp [-1.0, +7.0]"
-    assert table[INTACT_ROW][0] == "no clear change: +2.0 pp [-2.0, +6.0]"
+    assert table["Hindi harmful rate - stock"][0] == "no clear change: +3.0 pp [\u22121.0, +7.0]"
+    assert table[INTACT_ROW][0] == "no clear change: +2.0 pp [\u22122.0, +6.0]"
     # nothing is concluded for an adapter whose intervals show nothing: no "in one line", and the loss
     # passed the other adapter alone
     summary = _summary(section)
@@ -1972,7 +1987,7 @@ def test_a_rise_the_intact_reading_does_not_show_is_said_apart(out):
     section, _ = _checks(_with_intact(candidate=(0.06, -0.01, 0.13)))
     table = _rows_of(section)
     assert table["Hindi harmful rate - stock"][1] == "higher: +23.0 pp [+17.0, +29.0]"
-    assert table[INTACT_ROW][1] == "no clear change: +6.0 pp [-1.0, +13.0]"
+    assert table[INTACT_ROW][1] == "no clear change: +6.0 pp [\u22121.0, +13.0]"
     summary = _summary(section)
     # the adapter whose rise holds on both readings is the one the safety test failed, alone
     assert summary.startswith(
@@ -2027,7 +2042,7 @@ def test_a_rise_that_holds_on_both_readings_is_said_once(out):
 
 def test_a_rise_that_is_a_fall_on_the_intact_reading_says_so(out):
     section, _ = _checks(_with_intact(adapter=(-0.04, -0.07, -0.01), candidate=(0.06, -0.01, 0.13)))
-    assert _rows_of(section)[INTACT_ROW][0] == "lower: -4.0 pp [-7.0, -1.0]"
+    assert _rows_of(section)[INTACT_ROW][0] == "lower: \u22124.0 pp [\u22127.0, \u22121.0]"
     summary = _summary(section)
     assert summary.startswith("The check teams already run, held-out loss, passed both adapters. ")
     assert (
@@ -2066,8 +2081,10 @@ def test_an_axis_that_pools_other_seeds_than_its_column_says_which(out):
     section, _ = _checks(doc)
     table = _rows_of(section)
     assert table[""][0] == "The Aya adapter (carries the repair comparison; seeds 1, 2, 3)"
-    assert table["Belebele-hi accuracy - stock"][0] == "no clear change: -1.0 pp [-3.0, +1.0] (seed 1)"
-    assert table[HELD_OUT][0] == "better: -0.330 [-0.360, -0.300]"
+    assert table["Belebele-hi accuracy - stock"][0] == (
+        "no clear change: \u22121.0 pp [\u22123.0, +1.0] (seed 1)"
+    )
+    assert table[HELD_OUT][0] == "better: \u22120.330 [\u22120.360, \u22120.300]"
 
 
 def test_the_checks_are_pending_until_the_report_carries_each_adapters_axes(out):
@@ -2242,8 +2259,8 @@ def test_the_dev_selection_is_said_in_words_from_selection_json(out):
         "its Hindi harmful rate was 12.0%, against the adapter's 30.0% and stock's 10.0%. On dev: no more "
         "hard-benign refusals than stock, and Belebele-hi not under stock's. On the final split its "
         "hard-benign refusals and its Belebele-hi accuracy do not differ clearly from stock's (+2.0 pp "
-        "[+0.0, +4.0] and -1.0 pp [-3.0, +1.0]). The condition that decided the comparison was a lower "
-        "harmful rate than the adapter's, which 7 of the 10 settings missed."
+        "[+0.0, +4.0] and \u22121.0 pp [\u22123.0, +1.0]). The condition that decided the comparison was a "
+        "lower harmful rate than the adapter's, which 7 of the 10 settings missed."
     )
     # one line over the bullets: only the frozen repair's effect against the adapter is pre-registered
     assert parts[2] == (
@@ -2343,8 +2360,8 @@ def test_no_setting_or_another_family_as_the_pick_is_said_as_that(out):
     assert bullets["WiSE-FT."].startswith(
         f"- **WiSE-FT.** Its frozen setting, WiSE-FT at {LAMBDA} = 0.50, met every condition on dev too; the "
         "rule picked CAST at strength 1.0 over it (the largest drop, ties to the cheaper repair). On the "
-        f"final split WiSE-FT at {LAMBDA} = 0.50 cut the Hindi harmful rate (-14.0 pp [-19.0, -9.0] against "
-        "the adapter, to 7.0%)."
+        f"final split WiSE-FT at {LAMBDA} = 0.50 cut the Hindi harmful rate (\u221214.0 pp [\u221219.0, "
+        "\u22129.0] against the adapter, to 7.0%)."
     )
     assert list(bullets) == ["WiSE-FT.", "ReSta", "Usefulness."]
 
@@ -2391,16 +2408,16 @@ def test_the_final_split_is_said_of_the_two_side_conditions_by_their_intervals(o
 
     text, _ = _study()
     assert (
-        "On the final split its hard-benign refusals and its Belebele-hi accuracy do not differ clearly from "
-        "stock's (+3.5 pp [-0.5, +8.0] and -0.3 pp [-2.0, +1.3]), though the interval for hard-benign "
-        "refusals does not exclude an increase over the 5 points."
+        "On the final split its hard-benign refusals and its Belebele-hi accuracy do not differ clearly "
+        "from stock's (+3.5 pp [\u22120.5, +8.0] and \u22120.3 pp [\u22122.0, +1.3]), though the interval "
+        "for hard-benign refusals does not exclude an increase over the 5 points."
     ) in _comparison(text)
 
     def inside(doc):
         doc["headline"].update(overrefusal_hard_hi_change=interval(0.01, -0.02, 0.04))
 
     text, _ = _study(inside)
-    assert "stock's (+1.0 pp [-2.0, +4.0] and -0.3 pp [-2.0, +1.3]). " in _comparison(text)
+    assert "stock's (+1.0 pp [\u22122.0, +4.0] and \u22120.3 pp [\u22122.0, +1.3]). " in _comparison(text)
     assert "does not exclude" not in _comparison(text)
 
     def costly(doc):
@@ -2412,9 +2429,9 @@ def test_the_final_split_is_said_of_the_two_side_conditions_by_their_intervals(o
     text, _ = _study(costly)
     assert (
         "On the final split its hard-benign refusals are more than stock's (+9.0 pp [+4.0, +14.0]) and its "
-        "Belebele-hi accuracy is under stock's (-5.0 pp [-8.0, -2.0]); the interval for hard-benign refusals "
-        "does not exclude an increase over the 5 points and the interval for Belebele-hi does not exclude a "
-        "drop over the 3 points."
+        "Belebele-hi accuracy is under stock's (\u22125.0 pp [\u22128.0, \u22122.0]); the interval for "
+        "hard-benign refusals does not exclude an increase over the 5 points and the interval for "
+        "Belebele-hi does not exclude a drop over the 3 points."
     ) in _comparison(text)
 
 
@@ -2458,8 +2475,8 @@ def test_the_condition_that_decided_the_comparison_is_named_only_when_one_did(ou
     parts, _, facts = _ours()
     assert parts[1].endswith(
         "The condition that decided the comparison was Belebele-hi, which 9 of the 10 settings missed: the "
-        "adapter itself loses Hindi reading comprehension (-4.0 pp [-7.0, -1.0] against stock on the final "
-        "split), and on dev only scaling it back toward stock met that condition."
+        "adapter itself loses Hindi reading comprehension (\u22124.0 pp [\u22127.0, \u22121.0] against "
+        "stock on the final split), and on dev only scaling it back toward stock met that condition."
     )
     assert ("outputs/metrics/final_report.json", "/verdicts/0/axes/belebele_hi") in {
         (v["file"], v["pointer"]) for v in facts.sources
@@ -2579,13 +2596,14 @@ def test_another_familys_final_split_is_said_from_its_row(out):
     _, bullets, _ = _ours()
     assert bullets["ReSta"] == (
         "- **ReSta** missed the Belebele-hi condition at every setting on dev. On the final split ReSta at "
-        f"{ALPHA} = 0.10 cut the Hindi harmful rate (-9.0 pp [-13.0, -5.0] against the adapter, to 35.0%, "
-        "still over stock's), with fewer hard-benign refusals than stock and Belebele-hi under stock's."
+        f"{ALPHA} = 0.10 cut the Hindi harmful rate (\u22129.0 pp [\u221213.0, \u22125.0] against the "
+        "adapter, to 35.0%, still over stock's), with fewer hard-benign refusals than stock and Belebele-hi "
+        "under stock's."
     )
     assert bullets["CAST could not pass by construction."].endswith(
-        "On the final split CAST at strength 0.5 cut the Hindi harmful rate (-18.0 pp [-22.0, -14.0] against "
-        "the adapter, to 26.0%, still over stock's), with fewer hard-benign refusals than stock and "
-        "Belebele-hi under stock's: a partial steering result, not a repair."
+        "On the final split CAST at strength 0.5 cut the Hindi harmful rate (\u221218.0 pp [\u221222.0, "
+        "\u221214.0] against the adapter, to 26.0%, still over stock's), with fewer hard-benign refusals "
+        "than stock and Belebele-hi under stock's: a partial steering result, not a repair."
     )
 
     def contrast(doc):  # P07's contrast with WiSE-FT, on this study's frozen settings
@@ -2595,7 +2613,7 @@ def test_another_familys_final_split_is_said_from_its_row(out):
         rows[1].update(variant=f"cast-m0.5-{STRESS}", reference=winner, harmful=interval(0.02, -0.02, 0.06))
 
     _, bullets, _ = _ours(change=contrast)
-    less = f"ReSta at {ALPHA} = 0.10 cut the Hindi harmful rate by less than WiSE-FT (-9.0 pp"
+    less = f"ReSta at {ALPHA} = 0.10 cut the Hindi harmful rate by less than WiSE-FT (\u22129.0 pp"
     assert less in bullets["ReSta"]
     assert "by less than" not in bullets["CAST could not pass by construction."]
 
@@ -2607,12 +2625,12 @@ def test_another_familys_final_split_is_said_from_its_row(out):
     _, bullets, _ = _ours(change=at_stock)
     assert "partial steering result" not in "".join(bullets.values())
     assert bullets["CAST could not pass by construction."].endswith(
-        "cut the Hindi harmful rate (-18.0 pp [-22.0, -14.0] against the adapter, to 26.0%), with fewer "
-        "hard-benign refusals than stock and Belebele-hi under stock's."
+        "cut the Hindi harmful rate (\u221218.0 pp [\u221222.0, \u221214.0] against the adapter, to 26.0%), "
+        "with fewer hard-benign refusals than stock and Belebele-hi under stock's."
     )
     assert (
-        f"ReSta at {ALPHA} = 0.10 did not clearly change the Hindi harmful rate (-2.0 pp [-6.0, +2.0] "
-        "against the adapter, to 35.0%), with"
+        f"ReSta at {ALPHA} = 0.10 did not clearly change the Hindi harmful rate (\u22122.0 pp [\u22126.0, "
+        "+2.0] against the adapter, to 35.0%), with"
     ) in bullets["ReSta"]
 
 
@@ -2709,24 +2727,24 @@ def test_the_human_written_prompts_are_said_beside_the_translated_ones(out):
     text, facts = against_stock((0.004, -0.015, 0.024))
     assert (
         "- **Human-written prompts.** On the Aya Red-teaming Hindi prompts the frozen repair's harmful rate "
-        "is not clearly different from stock's (+0.4 pp [-1.5, +2.4]), where on the translated prompts it "
-        "is below stock's (-7.0 pp [-11.0, -4.0])."
+        "is not clearly different from stock's (+0.4 pp [\u22121.5, +2.4]), where on the translated prompts "
+        "it is below stock's (\u22127.0 pp [\u221211.0, \u22124.0])."
     ) in _comparison(text)
     assert any(s["pointer"] == "/tables/repair_vs_stock/rows/1/change" for s in facts.sources)
     assert "stock's level" not in _comparison(text)
     text, _ = against_stock((0.004, -0.09, 0.10))  # a wide interval is no more "at stock's level"
     assert (
-        "the frozen repair's harmful rate is not clearly different from stock's (+0.4 pp [-9.0, +10.0])"
+        "the frozen repair's harmful rate is not clearly different from stock's (+0.4 pp [\u22129.0, +10.0])"
     ) in _comparison(text)
     text, _ = against_stock((-0.05, -0.08, -0.02))
     assert (
-        "the frozen repair's harmful rate is below stock's, as on the translated prompts (-5.0 pp [-8.0, "
-        "-2.0]; translated prompts: -7.0 pp [-11.0, -4.0])."
+        "the frozen repair's harmful rate is below stock's, as on the translated prompts (\u22125.0 pp "
+        "[\u22128.0, \u22122.0]; translated prompts: \u22127.0 pp [\u221211.0, \u22124.0])."
     ) in _comparison(text)
     text, _ = against_stock((0.05, 0.02, 0.08), hindi=(0.01, -0.02, 0.04))
     assert (
         "the frozen repair's harmful rate is above stock's (+5.0 pp [+2.0, +8.0]), where on the translated "
-        "prompts it is not clearly different from stock's (+1.0 pp [-2.0, +4.0])."
+        "prompts it is not clearly different from stock's (+1.0 pp [\u22122.0, +4.0])."
     ) in _comparison(text)
     text, _ = _study()  # the report holds no table of the repair against stock
     assert "Human-written prompts." not in _comparison(text)
@@ -2926,37 +2944,58 @@ def test_the_lead_tells_the_study_in_five_bullets_each_from_its_numbers(out):
     # decided it, not from the final-split numbers before it; the flag links its definition
     assert bullets[1] == (
         "- **The standard recipe gave no clean drift case.** The pre-registered pick (Aya Dataset, three "
-        "seeds) answered fewer translated Hindi harmful prompts harmfully than stock (-9.0 pp [-12.0, "
-        "-5.0]) and refused more prompts, benign ones included. The other data set (IndicAlign) raised the "
-        "rate (+22.0 pp [+17.0, +26.0]), but not clearly once outputs that trip [an unclear flag]"
-        "(#metrics-and-why) are set aside (+3.0 pp [-0.3, +7.0]). On dev the pick did not meet the bar for "
-        "drift and neither standard adapter passed Gate 1, so, as pre-registered, a harsher **stress "
-        "recipe** (twice the learning rate, one more epoch, undeduplicated rows) carries the repair test."
+        "seeds) answered fewer translated Hindi harmful prompts harmfully than stock (\u22129.0 pp) and "
+        "refused more prompts, benign ones included. The other data set (IndicAlign) raised the rate (+22.0 "
+        "pp), but not clearly once outputs that trip [an unclear flag](#metrics-and-why) are set aside "
+        "(+3.0 pp). On dev the pick did not meet the bar for drift and neither standard adapter passed Gate "
+        "1, so, as pre-registered, a harsher **stress recipe** (twice the learning rate, one more epoch, "
+        "undeduplicated rows) carries the repair test."
     )
+    # the drift and the repair with their intervals, every other number as its point estimate (its clause
+    # still read from its interval), and the three Hindi harmful rates in bold
     assert bullets[2] == (
         "- **The stress adapter drifts, and the usual pre-ship check misses it.** Its held-out loss beats "
-        "stock's (-0.160 nats/token [-0.230, -0.110]), yet its Hindi harmful rate rises from 14.0% to 44.0% "
-        "(+30.0 pp [+25.0, +35.0], p < 0.001) and it refuses fewer harmful prompts (-29.0 pp [-34.0, "
-        "-24.0]). Human-written Hindi red-teaming prompts agree (+36.0 pp [+33.0, +39.0])."
+        "stock's (\u22120.160 nats/token), yet its Hindi harmful rate rises from **14.0%** to **44.0%** "
+        "(+30.0 pp [+25.0, +35.0], p < 0.001) and it refuses fewer harmful prompts (\u221229.0 pp). "
+        "Human-written Hindi red-teaming prompts agree (+36.0 pp)."
     )
     assert bullets[3] == (
         "- **The simplest repair wins.** Keeping a quarter of the adapter's weight change (WiSE-FT, "
-        f"{LAMBDA} = 0.25) brings the Hindi harmful rate to 7.0% (-37.0 pp [-42.0, -32.0] against the "
-        "adapter), with no clear change from stock in hard-benign over-refusal (+3.5 pp [-0.5, +8.0]) or "
-        "Hindi reading comprehension (-0.3 pp [-2.0, +1.3]), and a better held-out fit than the full "
-        "adapter (190.0% [160.0, 240.0] of its gain). Safety-vector addition (ReSta) and conditional "
-        "activation steering (CAST) are rejected: neither undoes the adapter's loss in Hindi reading "
-        "comprehension, and both leave part of the drift (Hindi harmful rates of 35.0% and 26.0%)."
+        f"{LAMBDA} = 0.25) brings the Hindi harmful rate to **7.0%** (\u221237.0 pp [\u221242.0, \u221232.0] "
+        "against the adapter), with no clear change from stock in hard-benign over-refusal (+3.5 pp) or "
+        "Hindi reading comprehension (\u22120.3 pp), and a better held-out fit than the full adapter "
+        "(190.0% of its gain). Safety-vector addition (ReSta) and conditional activation steering (CAST) "
+        "are rejected: neither undoes the adapter's loss in Hindi reading comprehension, and both leave "
+        "part of the drift (Hindi harmful rates of 35.0% and 26.0%)."
     )
     assert bullets[4] == (
         "- **Read with care.** One stress adapter, one seed. No adapter beat stock in pairwise judging (the "
-        'stress adapter: 39.0% [33.0, 45.0]), so "keeping its gain" is read on held-out loss. The '
-        "automatic judge over-calls harm against native readers, and a second judge sees a smaller drift "
-        "(+10.0 pp [+6.0, +14.0]), in the same direction. Every interval is in section 7 or the appendix; "
-        "every number's source is in `hf/article.sources.json`."
+        'stress adapter: 39.0%), so "keeping its gain" is read on held-out loss. The automatic judge '
+        "over-calls harm against native readers, and a second judge sees a smaller drift (+10.0 pp), in the "
+        "same direction. Every interval is in section 7 or the appendix; every number's source is in "
+        "`hf/article.sources.json`."
     )
-    # plain names: no variant id on the first screen, and the outputs set aside are named by their flag
     lead = _lead(text)
+    interval = r"\[[+\u2212]?[0-9.]+, [+\u2212]?[0-9.]+\]"
+    assert re.findall(interval, lead) == ["[+25.0, +35.0]", "[\u221242.0, \u221232.0]"]
+    assert re.findall(r"\*\*[0-9.]+%\*\*", lead) == ["**14.0%**", "**44.0%**", "**7.0%**"]
+    # each interval the lead leaves out is printed below it, in section 7 or the appendix
+    body = text.split("## 1. Problem statement and approach", 1)[1]
+    for printed in (
+        "\u22129.0 pp [\u221212.0, \u22125.0]",
+        "+22.0 pp [+17.0, +26.0]",
+        "+3.0 pp [\u22120.3, +7.0]",
+        "\u22120.160 [\u22120.230, \u22120.110]",
+        "\u221229.0 pp [\u221234.0, \u221224.0]",
+        "+36.0 pp [+33.0, +39.0]",
+        "+3.5 pp [\u22120.5, +8.0]",
+        "\u22120.3 pp [\u22122.0, +1.3]",
+        "190.0% [160.0, 240.0]",
+        "39.0% [33.0, 45.0]",
+        "+10.0 pp [+6.0, +14.0]",
+    ):
+        assert printed in body, printed
+    # plain names: no variant id on the first screen, and the outputs set aside are named by their flag
     assert "`adapter-" not in lead and "`wiseft-" not in lead and "degenerate" not in lead
     recorded = {(s["file"], s["pointer"]) for s in facts.sources}
     for pointer in (
@@ -2996,6 +3035,45 @@ def test_the_lead_tells_the_study_in_five_bullets_each_from_its_numbers(out):
     assert said[("configs/train.yaml", "/stress/dedup")] == ("undeduplicated rows", False)
 
 
+def test_every_negative_number_of_the_article_has_a_real_minus_sign(out):
+    """The article, its tables and P07's text cells print a negative number with U+2212 and a positive one
+    with "+", and the sources record the shown text the article prints beside the parsed value; ids,
+    ranges, links and code keep their hyphens."""
+    write_inputs()
+    path, facts = article.build()
+    text = path.read_text(encoding="utf-8")
+    prose = re.sub(r"```.*?```|`[^`\n]*`|\]\([^)]*\)", "", text, flags=re.S)  # code and link targets aside
+    assert re.findall(r"(?<![\w.\-/])-\d", prose) == []
+    assert "(\u221214.0 pp [\u221219.0, \u22129.0] against the adapter)" in _lead(text)
+    assert "(+16.0 pp [+11.0, +21.0], p < 0.001)" in _lead(text)
+    assert "| \u22120.330 [\u22120.360, \u22120.300] |" in text  # a text cell P07 formatted with hyphens
+    assert "| adapter-aya-std-s1 |" in text  # an id keeps its hyphens
+    said = {s["pointer"]: (s["shown"], s["value"]) for s in facts.sources}
+    shown, value = said["/primary/repair/pooled"]
+    assert shown == "\u221214.0 pp [\u221219.0, \u22129.0]" and value["est"] == pytest.approx(-0.14)
+    numbers = [s["shown"] for s in facts.sources if type(s["value"]) in (int, float, dict)]
+    assert numbers and not [s for s in numbers if str(s).startswith("-")]
+
+
+def test_a_point_estimate_in_the_lead_is_still_said_by_its_interval(out):
+    """The lead prints most numbers without their intervals, yet each clause is still chosen by the
+    interval, which is what the sources record: an estimate that points one way with an interval that
+    includes zero is "no clear change", never "more" or "fewer"."""
+    from publish_fakes import interval
+
+    def wide(doc):
+        doc["headline"]["overrefusal_hard_hi_change"] = interval(0.06, -0.01, 0.13)
+        doc["verdicts"][0]["axes"]["refusal_harmful"] = {**interval(-0.04, -0.09, 0.01), "seeds": [1]}
+
+    text, facts = _study(wide)
+    lead = _lead(text)
+    assert "with no clear change from stock in hard-benign over-refusal (+6.0 pp) or Hindi reading" in lead
+    assert ", with no clear change in its refusals of harmful prompts (\u22124.0 pp)." in lead
+    assert "more hard-benign refusals" not in lead and "refuses fewer" not in lead
+    said = {(s["pointer"], s["shown"]): s["value"] for s in facts.sources}
+    assert said[("/headline/overrefusal_hard_hi_change", "+6.0 pp")] == interval(0.06, -0.01, 0.13)
+
+
 def test_the_lead_is_pending_until_its_inputs_are_there(out):
     text = article.build()[0].read_text(encoding="utf-8")
     assert _lead(text).lstrip().startswith(f"{PENDING}: the summary (the frozen repair) from ")
@@ -3028,8 +3106,8 @@ def test_a_report_without_the_adapters_axes_still_gives_a_lead(out):
         "- **The adapters.** The pre-registered pick (Aya Dataset) is the adapter the repairs are tested on."
     )
     assert _bullets(text)[2] == (
-        "- **The Aya adapter drifts.** Its Hindi harmful rate rises from 5.0% to 21.0% (+16.0 pp [+11.0, "
-        "+21.0], p < 0.001). Human-written Hindi red-teaming prompts agree (+10.0 pp [+3.0, +17.0])."
+        "- **The Aya adapter drifts.** Its Hindi harmful rate rises from **5.0%** to **21.0%** (+16.0 pp "
+        "[+11.0, +21.0], p < 0.001). Human-written Hindi red-teaming prompts agree (+10.0 pp)."
     )
     assert _bullet(text, "Read with care.").startswith("- **Read with care.** Every interval is in ")
 
@@ -3054,17 +3132,15 @@ def test_a_stress_adapter_that_does_not_drift_is_not_said_to(out):
     text, _ = _study(lambda doc: _stress_drift(doc, 0.03, -0.02, 0.08, 0.2, False))
     bullet = _bullet(text, "The stress adapter")
     assert bullet.startswith(
-        "- **The stress adapter shows no clear drift.** Its held-out loss beats stock's (-0.160 nats/token "
-        "[-0.230, -0.110]), and its Hindi harmful rate shows no clear change (+3.0 pp [-2.0, +8.0], p = "
+        "- **The stress adapter shows no clear drift.** Its held-out loss beats stock's (\u22120.160 "
+        "nats/token), and its Hindi harmful rate shows no clear change (+3.0 pp [\u22122.0, +8.0], p = "
         "0.200) and it refuses fewer harmful prompts"
     )
-    assert bullet.endswith(
-        "Human-written Hindi red-teaming prompts do not show the same: a rise (+36.0 pp [+33.0, +39.0])."
-    )
+    assert bullet.endswith("Human-written Hindi red-teaming prompts do not show the same: a rise (+36.0 pp).")
     assert "drifts" not in _lead(text) and "misses it" not in _lead(text) and ", yet " not in bullet
     # the second judge's rise is then set against a primary judge that sees none
     assert (
-        "a second judge sees a rise (+10.0 pp [+6.0, +14.0]) where the primary judge sees none."
+        "a second judge sees a rise (+10.0 pp) where the primary judge sees none."
     ) in _bullet(text, "Read with care.")
 
 
@@ -3074,12 +3150,14 @@ def test_a_stress_adapter_that_does_not_drift_is_not_said_to(out):
         (
             (-0.06, -0.10, -0.02, 0.004, False),
             "The stress adapter does not drift.",
-            "and its Hindi harmful rate falls from 14.0% to 8.0% (-6.0 pp [-10.0, -2.0], p = 0.004)",
+            "and its Hindi harmful rate falls from **14.0%** to **8.0%** (\u22126.0 pp [\u221210.0, "
+            "\u22122.0], p = 0.004)",
         ),
         (
             (0.05, 0.01, 0.09, 0.02, False),
             "The stress adapter's Hindi harmful rate rises, under the pre-registered bar for drift.",
-            ", yet its Hindi harmful rate rises from 14.0% to 19.0% (+5.0 pp [+1.0, +9.0], p = 0.020)",
+            ", yet its Hindi harmful rate rises from **14.0%** to **19.0%** (+5.0 pp [+1.0, +9.0], p = "
+            "0.020)",
         ),
     ],
 )
@@ -3098,8 +3176,8 @@ def test_the_usual_check_is_said_to_miss_the_drift_only_when_the_loss_is_better(
 
     text, _ = _study(flat_loss)
     assert _bullet(text, "The stress adapter").startswith(
-        "- **The stress adapter drifts.** Its held-out loss is not clearly different from stock's (-0.020 "
-        "nats/token [-0.080, +0.040]), and its Hindi harmful rate rises from 14.0% to 44.0%"
+        "- **The stress adapter drifts.** Its held-out loss is not clearly different from stock's "
+        "(\u22120.020 nats/token), and its Hindi harmful rate rises from **14.0%** to **44.0%**"
     )
     assert "misses it" not in _lead(text) and ", yet " not in _lead(text)
 
@@ -3114,8 +3192,8 @@ def test_no_clean_drift_case_is_said_only_when_no_standard_adapters_rise_holds_o
     bullet = _bullet(text, "The standard recipe")
     assert bullet.startswith("- **The standard recipe.** The pre-registered pick (Aya Dataset, three seeds)")
     assert (
-        "The other data set (IndicAlign) raised the rate (+22.0 pp [+17.0, +26.0]), and also once outputs "
-        "that trip [an unclear flag](#metrics-and-why) are set aside (+15.0 pp [+10.0, +20.0])."
+        "The other data set (IndicAlign) raised the rate (+22.0 pp), and also once outputs "
+        "that trip [an unclear flag](#metrics-and-why) are set aside (+15.0 pp)."
     ) in bullet
     # the stress recipe is tied to the dev gates the report records, whatever the final split shows
     assert bullet.endswith(
@@ -3157,9 +3235,9 @@ def test_the_second_bullet_follows_each_standard_adapters_interval(out):
     assert bullet.startswith(
         "- **The standard recipe gave no clean drift case.** The pre-registered pick (Aya Dataset, three "
         "seeds) did not clearly change the share of translated Hindi harmful prompts it answered harmfully "
-        "(-1.0 pp [-4.0, +2.0]). The other data set (IndicAlign) raised the rate (+22.0 pp [+17.0, +26.0]), "
-        "and lowered it once outputs that trip [an unclear flag](#metrics-and-why) are set aside (-5.0 pp "
-        "[-8.0, -2.0]). On dev the pick did not meet the bar for drift and neither standard adapter passed "
+        "(\u22121.0 pp). The other data set (IndicAlign) raised the rate (+22.0 pp), and lowered it once "
+        "outputs that trip [an unclear flag](#metrics-and-why) are set aside (\u22125.0 pp). On dev the pick "
+        "did not meet the bar for drift and neither standard adapter passed "
         "Gate 1, so, as pre-registered, a harsher **stress recipe**"
     )
     assert "refused more" not in bullet  # said only beside a lower harmful rate
@@ -3178,7 +3256,7 @@ def test_refusals_of_benign_prompts_are_never_said_to_lower_the_harmful_rate(out
     text, _ = _study(fewer_refusals)
     bullet = _bullet(text, "The standard recipe")
     assert (
-        "answered fewer translated Hindi harmful prompts harmfully than stock (-9.0 pp [-12.0, -5.0]) and "
+        "answered fewer translated Hindi harmful prompts harmfully than stock (\u22129.0 pp) and "
         "refused more benign prompts."
     ) in bullet
     assert "partly by refusing" not in text and "benign ones included" not in bullet
@@ -3194,7 +3272,7 @@ def test_refusals_of_benign_prompts_are_never_said_to_lower_the_harmful_rate(out
 
     text, _ = _study(no_benign)
     bullet = _bullet(text, "The standard recipe")
-    assert "than stock (-9.0 pp [-12.0, -5.0]) and refused more harmful prompts." in bullet
+    assert "than stock (\u22129.0 pp) and refused more harmful prompts." in bullet
     assert "benign" not in _summary(_section(text, "What each check said"))
 
 
@@ -3254,9 +3332,9 @@ def test_the_repairs_costs_are_said_the_way_their_intervals_point(out):
 
     text, _ = _study(costly)
     assert (
-        "brings the Hindi harmful rate to 7.0% (-37.0 pp [-42.0, -32.0] against the adapter), with more "
-        "hard-benign refusals than stock (+9.0 pp [+4.0, +14.0]) and lower Hindi reading comprehension than "
-        "stock (-5.0 pp [-8.0, -2.0]), and 60.0% [50.0, 70.0] of the adapter's held-out-loss gain kept."
+        "brings the Hindi harmful rate to **7.0%** (\u221237.0 pp [\u221242.0, \u221232.0] against the "
+        "adapter), with more hard-benign refusals than stock (+9.0 pp) and lower Hindi reading "
+        "comprehension than stock (\u22125.0 pp), and 60.0% of the adapter's held-out-loss gain kept."
     ) in _bullet(text, "The simplest repair wins.")
     assert "better held-out fit" not in _lead(text)
 
@@ -3267,8 +3345,9 @@ def test_the_repairs_costs_are_said_the_way_their_intervals_point(out):
 
     text, _ = _study(no_effect)
     assert (
-        f"(WiSE-FT, {LAMBDA} = 0.25) leaves the Hindi harmful rate at 7.0% with no clear change (-3.0 pp "
-        "[-8.0, +2.0] against the adapter), with no clear change from stock in hard-benign over-refusal"
+        f"(WiSE-FT, {LAMBDA} = 0.25) leaves the Hindi harmful rate at **7.0%** with no clear change "
+        "(\u22123.0 pp [\u22128.0, +2.0] against the adapter), with no clear change from stock in "
+        "hard-benign over-refusal"
     ) in _bullet(text, "The simplest repair wins.")
 
 
@@ -3282,7 +3361,7 @@ def test_no_adapter_beat_stock_is_said_only_when_none_did(out):
     care = _bullet(text, "Read with care.")
     assert "No adapter beat stock" not in care and "keeping its gain" not in care
     assert (
-        "Stock's answers were preferred to the stress adapter's in pairwise judging (39.0% [33.0, 45.0])."
+        "Stock's answers were preferred to the stress adapter's in pairwise judging (39.0%)."
     ) in care
 
     def not_run(doc):  # one adapter's final utility was not run: "no adapter" cannot be said
@@ -3298,36 +3377,36 @@ def test_no_adapter_beat_stock_is_said_only_when_none_did(out):
         (
             "even",  # the judge and the reader label as many Hindi outputs harmful
             (0.10, 0.06, 0.14),
-            "The size of the drift depends on the judge: a second judge sees a smaller drift (+10.0 pp "
-            "[+6.0, +14.0]), in the same direction.",
+            "The size of the drift depends on the judge: a second judge sees a smaller drift (+10.0 pp), in "
+            "the same direction.",
             "over-calls",
         ),
         (
             "barely over",  # more harmful labels than the reader's, 6 to 1 discordant: McNemar p 0.125
             (0.10, 0.06, 0.14),
-            "The size of the drift depends on the judge: a second judge sees a smaller drift (+10.0 pp "
-            "[+6.0, +14.0]), in the same direction.",
+            "The size of the drift depends on the judge: a second judge sees a smaller drift (+10.0 pp), in "
+            "the same direction.",
             "over-calls",
         ),
         ("one over", None, "is read on held-out loss. Every interval is in section 7", "over-calls"),
         (
             None,  # no validation round scored: nothing is said of the readers
             (0.22, 0.17, 0.27),  # an interval that overlaps the primary judge's: no "smaller"
-            "The size of the drift depends on the judge: a second judge sees a drift (+22.0 pp [+17.0, "
-            "+27.0]), in the same direction.",
+            "The size of the drift depends on the judge: a second judge sees a drift (+22.0 pp), in the same "
+            "direction.",
             "over-calls",
         ),
         (
             "over-calls",
             (0.02, -0.02, 0.06),
             "The automatic judge over-calls harm against native readers, and under a second judge the "
-            "drift is not clear (+2.0 pp [-2.0, +6.0]).",
+            "drift is not clear (+2.0 pp).",
             "same direction",
         ),
         (
             "over-calls",
             (-0.08, -0.12, -0.04),
-            "and a second judge sees the opposite, a fall (-8.0 pp [-12.0, -4.0]).",
+            "and a second judge sees the opposite, a fall (\u22128.0 pp).",
             "same direction",
         ),
         (
@@ -3974,9 +4053,12 @@ def test_the_main_text_shows_the_per_language_table_without_its_upper_bounds(out
         "| Language | Prompts | Stock | Adapter | Frozen repair | Drift (adapter - stock) | Repair (repair - "
         "adapter) |"
     ) in section
-    hindi = "| Hindi | 400 | 5.0% | 21.0% | 7.0% | +16.0 pp [+11.0, +21.0] | -14.0 pp [-19.0, -9.0] |"
+    hindi = (
+        "| Hindi | 400 | 5.0% | 21.0% | 7.0% | +16.0 pp [+11.0, +21.0] | \u221214.0 pp [\u221219.0, "
+        "\u22129.0] |"
+    )
     assert hindi in section
-    assert "| Thai | 400 | 7.0% | 9.0% | not run | +2.0 pp [-3.0, +7.0] | not run |" in section
+    assert "| Thai | 400 | 7.0% | 9.0% | not run | +2.0 pp [\u22123.0, +7.0] | not run |" in section
     assert (
         "With the upper bound that counts unclear outputs as harmful: [Harmful rate per language with its "
         "upper bound](#harmful-rate-per-language-with-its-upper-bound)."
@@ -4006,7 +4088,8 @@ def test_every_frozen_setting_is_in_the_appendix_and_the_comparison_links_it(out
     full = _appendix(text, "Every frozen setting on the final split")
     assert "| Family | Frozen setting (its seed-1 id) | Role | Harmful rate |" in full
     assert f"| wiseft | wiseft-l0.25-{STRESS} | winner | 7.0% |" in full and full.count(UNDEFINED_GAIN) == 3
-    assert "| -7.0 pp [-11.0, -4.0] |" in full and "| +3.5 pp [-0.5, +8.0] | -0.3 pp [-2.0, +1.3] |" in full
+    assert "| \u22127.0 pp [\u221211.0, \u22124.0] |" in full
+    assert "| +3.5 pp [\u22120.5, +8.0] | \u22120.3 pp [\u22122.0, +1.3] |" in full
     recorded = {(s["pointer"], json.dumps(s["value"], sort_keys=True)) for s in facts.sources}
     assert ("/tables/repair_comparison/rows/0/variant", json.dumps(f"wiseft-l0.25-{STRESS}")) in recorded
     # a share that is defined is shown in its column like any other, and nothing is said to be left out
@@ -4558,12 +4641,12 @@ def test_judge_sensitivity_keeps_one_small_table_of_drift_and_repair_under_each_
     assert lines == [
         "| Reading | Drift (adapter - stock) | Repair (repair - adapter) |",
         "| --- | --- | --- |",
-        "| Harmful rate under the second judge's labels, Hindi | +10.0 pp [+6.0, +14.0] | -15.0 pp [-19.0, "
-        "-11.0] |",
+        "| Harmful rate under the second judge's labels, Hindi | +10.0 pp [+6.0, +14.0] | \u221215.0 pp "
+        "[\u221219.0, \u221211.0] |",
         "| Harmful rate under the second judge's labels, Hindi, prompts it judged on both sides | +12.0 pp "
         "[+7.0, +17.0] | - |",
-        "| Harmful rate under the second judge's labels, English | +7.0 pp [+4.0, +11.0] | -10.0 pp [-14.0, "
-        "-7.0] |",
+        "| Harmful rate under the second judge's labels, English | +7.0 pp [+4.0, +11.0] | \u221210.0 pp "
+        "[\u221214.0, \u22127.0] |",
     ]
     assert section.split("\n\n")[1] == (
         "Drift and repair under other readings of the same outputs. These are sensitivity analyses, not "
@@ -4766,7 +4849,9 @@ def test_the_human_written_prompts_are_a_limitation_said_from_the_intervals(out)
     text = article.build()[0].read_text(encoding="utf-8")
     limits = _limitations(text)
     assert f'("Judge sensitivity"). - {ON_HUMAN_WRITTEN} the large effects replicate' in limits
-    assert "is not clearly different from stock's there (+0.4 pp [-1.5, +2.4]). - A few adapters" in limits
+    assert (
+        "is not clearly different from stock's there (+0.4 pp [\u22121.5, +2.4]). - A few adapters"
+    ) in limits
 
     def not_larger(doc):  # an effect that does not replicate is the largest of all: no "large" and "smaller"
         _per_adapter(doc, {ADAPTER: ((-0.45, -0.50, -0.40), (0.03, 0.01, 0.05)), CANDIDATE: other})
@@ -4960,9 +5045,9 @@ def test_each_item_of_more_credits_names_the_claim_it_would_firm_up(out):
     assert _part(text, "8. With more credits").strip().split("\n") == [
         CREDITS,
         "",
-        "- **More seeds of the stress recipe.** The repair's effect (-37.0 pp [-42.0, -32.0]) is measured on "
-        "one seed of one adapter, so its interval is over prompts, not over training runs. More seeds would "
-        "give it over runs.",
+        "- **More seeds of the stress recipe.** The repair's effect (\u221237.0 pp [\u221242.0, "
+        "\u221232.0]) is measured on one seed of one adapter, so its interval is over prompts, not over "
+        "training runs. More seeds would give it over runs.",
         "- **The second judge on every final output.** Under the second judge's labels the Hindi drift is "
         "+10.0 pp, against +30.0 pp under the primary judge's, and it judged whole cells in Hindi and "
         "English only. Judging every output twice would give that range for every language and every effect.",

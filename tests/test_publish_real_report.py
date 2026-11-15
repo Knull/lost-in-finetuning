@@ -95,8 +95,9 @@ def test_the_article_reads_the_report_p07_writes(real_report):
     # aya: +20 points of hard-benign refusals on ten prompts, an interval that reaches zero
     assert table["Hard-benign refusals - stock"][0].startswith("no clear change: ")
     loss = table["Held-out loss - stock, nats/token (the usual pre-ship check)"]
-    assert all(cell.startswith("better: -") for cell in loss)
-    assert all(re.fullmatch(r"\w[\w ]*: [+-]\d+\.\d pp \[[+-]\d+\.\d, [+-]\d+\.\d\]", cell) for cell in rate)
+    assert all(cell.startswith("better: \u2212") for cell in loss)  # the article's minus sign
+    signed = r"[+\u2212]\d+\.\d"
+    assert all(re.fullmatch(rf"\w[\w ]*: {signed} pp \[{signed}, {signed}\]", cell) for cell in rate)
     assert table["Verdict (pre-registered)"] == [
         "**retain** (no drift); not useful enough to ship (Gate 1)",
         "no verdict (exploratory arm); not useful enough to ship (Gate 1)",

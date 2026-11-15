@@ -7,10 +7,10 @@ is in hf/article.sources.json. -->
 **In short.**
 
 - **What we tested.** Whether a Hindi LoRA adapter of Tiny Aya Global becomes less safe, and whether a cheap repair with no gradient step can fix it without losing what the adapter learned. The design was pre-registered; repairs were chosen on dev prompts and scored once on a held-out final split.
-- **The standard recipe gave no clean drift case.** The pre-registered pick (Aya Dataset, three seeds) answered fewer translated Hindi harmful prompts harmfully than stock (-8.7 pp [-12.2, -5.2]) and refused more prompts, benign ones included. The other data set (IndicAlign) raised the rate (+21.6 pp [+17.2, +26.1]), but not clearly once outputs that trip [an unclear flag](#metrics-and-why) are set aside (+3.4 pp [-0.3, +7.2]). On dev the pick did not meet the bar for drift and neither standard adapter passed Gate 1, so, as pre-registered, a harsher **stress recipe** (twice the learning rate, one more epoch, undeduplicated rows) carries the repair test.
-- **The stress adapter drifts, and the usual pre-ship check misses it.** Its held-out loss beats stock's (-0.163 nats/token [-0.233, -0.110]), yet its Hindi harmful rate rises from 14.2% to 45.8% (+31.5 pp [+26.2, +37.0], p < 0.001) and it refuses fewer harmful prompts (-30.5 pp [-35.8, -25.5]). Human-written Hindi red-teaming prompts agree (+38.7 pp [+35.4, +42.1]).
-- **The simplest repair wins.** Keeping a quarter of the adapter's weight change (WiSE-FT, λ = 0.25) brings the Hindi harmful rate to 6.5% (-39.2 pp [-44.5, -34.2] against the adapter), with no clear change from stock in hard-benign over-refusal (+3.5 pp [-0.5, +8.0]) or Hindi reading comprehension (-0.3 pp [-2.0, +1.3]), and a better held-out fit than the full adapter (194.8% [165.1, 244.3] of its gain). Safety-vector addition (ReSta) and conditional activation steering (CAST) are rejected: neither undoes the adapter's loss in Hindi reading comprehension, and both leave part of the drift (Hindi harmful rates of 35.2% and 25.8%).
-- **Read with care.** One stress adapter, one seed. No adapter beat stock in pairwise judging (the stress adapter: 39.4% [33.4, 45.4]), so "keeping its gain" is read on held-out loss. The automatic judge over-calls harm against native readers, and a second judge sees a smaller drift (+10.2 pp [+6.0, +14.5]), in the same direction. Every interval is in section 7 or the appendix; every number's source is in `hf/article.sources.json`.
+- **The standard recipe gave no clean drift case.** The pre-registered pick (Aya Dataset, three seeds) answered fewer translated Hindi harmful prompts harmfully than stock (−8.7 pp) and refused more prompts, benign ones included. The other data set (IndicAlign) raised the rate (+21.6 pp), but not clearly once outputs that trip [an unclear flag](#metrics-and-why) are set aside (+3.4 pp). On dev the pick did not meet the bar for drift and neither standard adapter passed Gate 1, so, as pre-registered, a harsher **stress recipe** (twice the learning rate, one more epoch, undeduplicated rows) carries the repair test.
+- **The stress adapter drifts, and the usual pre-ship check misses it.** Its held-out loss beats stock's (−0.163 nats/token), yet its Hindi harmful rate rises from **14.2%** to **45.8%** (+31.5 pp [+26.2, +37.0], p < 0.001) and it refuses fewer harmful prompts (−30.5 pp). Human-written Hindi red-teaming prompts agree (+38.7 pp).
+- **The simplest repair wins.** Keeping a quarter of the adapter's weight change (WiSE-FT, λ = 0.25) brings the Hindi harmful rate to **6.5%** (−39.2 pp [−44.5, −34.2] against the adapter), with no clear change from stock in hard-benign over-refusal (+3.5 pp) or Hindi reading comprehension (−0.3 pp), and a better held-out fit than the full adapter (194.8% of its gain). Safety-vector addition (ReSta) and conditional activation steering (CAST) are rejected: neither undoes the adapter's loss in Hindi reading comprehension, and both leave part of the drift (Hindi harmful rates of 35.2% and 25.8%).
+- **Read with care.** One stress adapter, one seed. No adapter beat stock in pairwise judging (the stress adapter: 39.4%), so "keeping its gain" is read on held-out loss. The automatic judge over-calls harm against native readers, and a second judge sees a smaller drift (+10.2 pp), in the same direction. Every interval is in section 7 or the appendix; every number's source is in `hf/article.sources.json`.
 
 *pp = percentage points. Every interval in this write-up is a 95% interval, and every difference is computed before rounding.*
 
@@ -210,13 +210,13 @@ excludes no change (for the win rate, parity).
 
 |  | The Aya adapter (the pre-registered pick; seeds 1, 2, 3) | The IndicAlign adapter (not picked, exploratory; seeds 1, 2, 3) | The stress adapter (carries the repair comparison; seed 1) |
 | --- | --- | --- | --- |
-| Held-out loss - stock, nats/token (the usual pre-ship check) | better: -0.308 [-0.377, -0.253] | better: -0.307 [-0.380, -0.249] | better: -0.163 [-0.233, -0.110] |
+| Held-out loss - stock, nats/token (the usual pre-ship check) | better: −0.308 [−0.377, −0.253] | better: −0.307 [−0.380, −0.249] | better: −0.163 [−0.233, −0.110] |
 | Pairwise win rate against stock | no clear preference: 47.2% [41.8, 52.7] | stock preferred: 34.6% [29.2, 40.0] | stock preferred: 39.4% [33.4, 45.4] |
-| Hindi harmful rate - stock | lower: -8.7 pp [-12.2, -5.2] | higher: +21.6 pp [+17.2, +26.1] | higher: +31.5 pp [+26.2, +37.0] |
-| ... counting only outputs that trip no unclear flag | lower: -9.2 pp [-12.8, -5.8] | no clear change: +3.4 pp [-0.3, +7.2] | higher: +21.5 pp [+16.2, +27.0] |
-| Refusals of Hindi harmful prompts - stock | more: +12.8 pp [+9.1, +16.5] | fewer: -19.2 pp [-23.5, -14.9] | fewer: -30.5 pp [-35.8, -25.5] |
-| Hard-benign refusals - stock | more: +10.2 pp [+5.3, +15.0] | fewer: -17.8 pp [-23.3, -12.7] | fewer: -23.0 pp [-29.0, -17.5] |
-| Belebele-hi accuracy - stock | no clear change: -0.5 pp [-2.0, +1.0] | no clear change: -0.7 pp [-2.9, +1.5] | lower: -4.0 pp [-6.9, -1.1] |
+| Hindi harmful rate - stock | lower: −8.7 pp [−12.2, −5.2] | higher: +21.6 pp [+17.2, +26.1] | higher: +31.5 pp [+26.2, +37.0] |
+| ... counting only outputs that trip no unclear flag | lower: −9.2 pp [−12.8, −5.8] | no clear change: +3.4 pp [−0.3, +7.2] | higher: +21.5 pp [+16.2, +27.0] |
+| Refusals of Hindi harmful prompts - stock | more: +12.8 pp [+9.1, +16.5] | fewer: −19.2 pp [−23.5, −14.9] | fewer: −30.5 pp [−35.8, −25.5] |
+| Hard-benign refusals - stock | more: +10.2 pp [+5.3, +15.0] | fewer: −17.8 pp [−23.3, −12.7] | fewer: −23.0 pp [−29.0, −17.5] |
+| Belebele-hi accuracy - stock | no clear change: −0.5 pp [−2.0, +1.0] | no clear change: −0.7 pp [−2.9, +1.5] | lower: −4.0 pp [−6.9, −1.1] |
 | Verdict (pre-registered) | **retain** (no drift); not useful enough to ship (Gate 1) | no verdict (exploratory arm); not useful enough to ship (Gate 1) | **repair**; not useful enough to ship (Gate 1) |
 
 **In one line: the check teams already run, held-out loss, passed all three adapters; the safety test failed the stress adapter on every harmful-prompt row above.** The IndicAlign adapter's harmful rate rose on the pre-registered reading only: its refusals fell clearly, but these labels do not settle how much of that rise is harmful content and how much is output that trips an unclear flag (very short, repetitive or in no confident language) and that the judge called unsafe. For the IndicAlign adapter and the stress adapter, the two readings of usefulness disagree: a better held-out fit, and answers the pairwise judge preferred less often than stock's. The Aya adapter's lower harmful rate comes with more refusals of benign prompts: part of that safety is refusing more.
@@ -230,8 +230,8 @@ paired by prompt, with a bootstrap clustered by prompt id (drift: seed 1; repair
 seed 1).
 
 - **Drift** (adapter minus stock): +31.5 pp [+26.2, +37.0], p < 0.001
-- **Repair** (frozen repair minus adapter): -39.2 pp [-44.5, -34.2], p < 0.001
-- **Aya Red-teaming check** (human-written Hindi prompts), drift: +38.7 pp [+35.4, +42.1]; repair: -38.2 pp [-41.5, -35.0]
+- **Repair** (frozen repair minus adapter): −39.2 pp [−44.5, −34.2], p < 0.001
+- **Aya Red-teaming check** (human-written Hindi prompts), drift: +38.7 pp [+35.4, +42.1]; repair: −38.2 pp [−41.5, −35.0]
 
 Each seed, with McNemar's exact test, and the effects as a figure: [Primary endpoint, seed by seed](#primary-endpoint-seed-by-seed).
 
@@ -247,13 +247,13 @@ is run on its adapter's seeds).
 
 | Language | Prompts | Stock | Adapter | Frozen repair | Drift (adapter - stock) | Repair (repair - adapter) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Hindi | 400 | 14.2% | 45.8% | 6.5% | +31.5 pp [+26.2, +37.0] | -39.2 pp [-44.5, -34.2] |
-| English | 400 | 7.0% | 25.0% | 3.5% | +18.0 pp [+14.0, +22.2] | -21.5 pp [-25.8, -17.5] |
-| Chinese | 400 | 10.0% | 33.2% | 7.8% | +23.2 pp [+18.8, +27.8] | -25.5 pp [-30.0, -21.0] |
-| Spanish | 400 | 11.8% | 28.2% | 5.2% | +16.5 pp [+12.2, +21.0] | -23.0 pp [-27.3, -18.8] |
-| Arabic | 400 | 13.8% | 32.8% | 9.5% | +19.0 pp [+14.5, +23.5] | -23.2 pp [-28.0, -18.8] |
-| Thai | 400 | 5.0% | 32.0% | 3.0% | +27.0 pp [+22.5, +31.5] | -29.0 pp [-33.5, -24.5] |
-| Hindi (Aya Red-teaming) | 913 | 13.3% | 51.9% | 13.7% | +38.7 pp [+35.4, +42.1] | -38.2 pp [-41.5, -35.0] |
+| Hindi | 400 | 14.2% | 45.8% | 6.5% | +31.5 pp [+26.2, +37.0] | −39.2 pp [−44.5, −34.2] |
+| English | 400 | 7.0% | 25.0% | 3.5% | +18.0 pp [+14.0, +22.2] | −21.5 pp [−25.8, −17.5] |
+| Chinese | 400 | 10.0% | 33.2% | 7.8% | +23.2 pp [+18.8, +27.8] | −25.5 pp [−30.0, −21.0] |
+| Spanish | 400 | 11.8% | 28.2% | 5.2% | +16.5 pp [+12.2, +21.0] | −23.0 pp [−27.3, −18.8] |
+| Arabic | 400 | 13.8% | 32.8% | 9.5% | +19.0 pp [+14.5, +23.5] | −23.2 pp [−28.0, −18.8] |
+| Thai | 400 | 5.0% | 32.0% | 3.0% | +27.0 pp [+22.5, +31.5] | −29.0 pp [−33.5, −24.5] |
+| Hindi (Aya Red-teaming) | 913 | 13.3% | 51.9% | 13.7% | +38.7 pp [+35.4, +42.1] | −38.2 pp [−41.5, −35.0] |
 
 Harmful rate H/N, with intervals clustered by prompt id. With the upper bound that counts unclear outputs as harmful: [Harmful rate per language with its upper bound](#harmful-rate-per-language-with-its-upper-bound).
 
@@ -265,14 +265,14 @@ Every adapter against stock, language by language (descriptive outside the repai
 
 Ten settings were tried on seed-1 dev prompts, of three families: WiSE-FT (the baseline), ReSta and CAST; the selection rule is under "Metrics and why".
 
-**One of the 10 settings met every condition: WiSE-FT at λ = 0.25, which keeps a quarter of the adapter's weight change** (verdict **repair**). On dev its Hindi harmful rate was 6.4%, against the adapter's 48.8% and stock's 14.0%. It met the over-refusal and Belebele conditions by a narrow margin: hard-benign refusals 4 points over stock's where the rule allows 5 points, and Belebele-hi 2.5 points under stock's where the rule allows 3 points. On the final split its hard-benign refusals and its Belebele-hi accuracy do not differ clearly from stock's (+3.5 pp [-0.5, +8.0] and -0.3 pp [-2.0, +1.3]), though the interval for hard-benign refusals does not exclude an increase over the 5 points. The condition that decided the comparison was Belebele-hi, which 9 of the 10 settings missed: the adapter itself loses Hindi reading comprehension (-4.0 pp [-6.9, -1.1] against stock on the final split), and on dev only scaling it back toward stock met that condition.
+**One of the 10 settings met every condition: WiSE-FT at λ = 0.25, which keeps a quarter of the adapter's weight change** (verdict **repair**). On dev its Hindi harmful rate was 6.4%, against the adapter's 48.8% and stock's 14.0%. It met the over-refusal and Belebele conditions by a narrow margin: hard-benign refusals 4 points over stock's where the rule allows 5 points, and Belebele-hi 2.5 points under stock's where the rule allows 3 points. On the final split its hard-benign refusals and its Belebele-hi accuracy do not differ clearly from stock's (+3.5 pp [−0.5, +8.0] and −0.3 pp [−2.0, +1.3]), though the interval for hard-benign refusals does not exclude an increase over the 5 points. The condition that decided the comparison was Belebele-hi, which 9 of the 10 settings missed: the adapter itself loses Hindi reading comprehension (−4.0 pp [−6.9, −1.1] against stock on the final split), and on dev only scaling it back toward stock met that condition.
 
 What the points below say of the final split is descriptive, not a pre-registered claim: the primary endpoint is the frozen repair's effect against the adapter.
 
-- **ReSta** missed the Belebele-hi condition at every setting on dev. On the final split ReSta at α = 0.10 cut the Hindi harmful rate by less than WiSE-FT (-10.5 pp [-14.5, -6.5] against the adapter, to 35.2%, still over stock's), with fewer hard-benign refusals than stock and Belebele-hi under stock's.
-- **CAST could not pass by construction, and only its weakest strength was usable.** First, its gate does not open on prompts that do not look harmful, so they run on the unrepaired adapter: every conditional CAST setting (3) has the adapter's own Belebele-hi accuracy (57.5% on dev, outside the rule's margin). Second, only the weakest of its three strengths lowered the harmful rate with the output intact (at strength 1.0, 82 of the 172 dev outputs were unclear; at strength 2.0 the harmful rate was 88.4%, above the unrepaired adapter's). The steering vector is added at five layers at once (SafeTune's default band), so the pre-registered strengths were in effect too large; none was added after the sweep was read. On the final split CAST at strength 0.5 cut the Hindi harmful rate by less than WiSE-FT (-20.0 pp [-24.0, -16.0] against the adapter, to 25.8%, still over stock's), with fewer hard-benign refusals than stock and Belebele-hi under stock's: a partial steering result, not a repair.
+- **ReSta** missed the Belebele-hi condition at every setting on dev. On the final split ReSta at α = 0.10 cut the Hindi harmful rate by less than WiSE-FT (−10.5 pp [−14.5, −6.5] against the adapter, to 35.2%, still over stock's), with fewer hard-benign refusals than stock and Belebele-hi under stock's.
+- **CAST could not pass by construction, and only its weakest strength was usable.** First, its gate does not open on prompts that do not look harmful, so they run on the unrepaired adapter: every conditional CAST setting (3) has the adapter's own Belebele-hi accuracy (57.5% on dev, outside the rule's margin). Second, only the weakest of its three strengths lowered the harmful rate with the output intact (at strength 1.0, 82 of the 172 dev outputs were unclear; at strength 2.0 the harmful rate was 88.4%, above the unrepaired adapter's). The steering vector is added at five layers at once (SafeTune's default band), so the pre-registered strengths were in effect too large; none was added after the sweep was read. On the final split CAST at strength 0.5 cut the Hindi harmful rate by less than WiSE-FT (−20.0 pp [−24.0, −16.0] against the adapter, to 25.8%, still over stock's), with fewer hard-benign refusals than stock and Belebele-hi under stock's: a partial steering result, not a repair.
 - **Usefulness.** The stress adapter's dev win rate against stock was 28.0% (ties count half), so it had no pairwise gain to keep: the floor was 26.0%, which every WiSE-FT setting (3) met, so along the path toward stock that condition does not bind. Read on held-out loss instead (the secondary selection, which freezes nothing), 1 of the 10 settings met every condition and the same rule picks the same setting (verdict **repair**). On dev the frozen setting's gain over stock is 187.3% of the adapter's own, where the rule asks for 50.0%. On the final split the frozen repair's gain over stock is 194.8% [165.1, 244.3] of the adapter's own: a better held-out fit than the full adapter, consistent with the stress adapter being over-trained. The share of the win-rate gain it keeps is undefined: the adapter shows no utility gain over parity. Table: [Held-out loss of every variant](#held-out-loss-of-every-variant).
-- **Human-written prompts.** On the Aya Red-teaming Hindi prompts the frozen repair's harmful rate is not clearly different from stock's (+0.4 pp [-1.5, +2.4]), where on the translated prompts it is below stock's (-7.8 pp [-11.2, -4.2]).
+- **Human-written prompts.** On the Aya Red-teaming Hindi prompts the frozen repair's harmful rate is not clearly different from stock's (+0.4 pp [−1.5, +2.4]), where on the translated prompts it is below stock's (−7.8 pp [−11.2, −4.2]).
 
 <details><summary>The other conditions the dev settings missed, and the settings as two figures</summary>
 
@@ -308,7 +308,7 @@ On hard-benign prompts the frozen repair's refusals are not clearly different fr
 
 ### The judge against native readers
 
-**How far to trust the judge, in short.** Every safety claim here is a difference between models under one automatic judge (Qwen3Guard, strict). Against the native reader in Hindi **the pre-registered bar is met on kappa**, not on agreement (78.3% agreement on 60 items against a bar of 85.0%; kappa 0.67 against 0.60). Its harmful label is the weak one: its kappa of harmful against not harmful is 0.37, and of the 13 Hindi outputs it labelled harmful in round 1 the reader labelled 4 harmful (round 2: 7 of 18). Its refusal label agrees with the readers' on 66 of the 67 outputs it gave that label in round 1, over all languages (round 2: 40 of 40). So the direction of the drift and of the repair is robust, and their size is not: in "Judge sensitivity" every reading of drift and of repair has an interval that excludes zero, in the primary reading's direction (the refusal rate moves the opposite way). The Hindi drift is +31.5 pp under the primary reading, +28.7 pp with "Controversial" read loosely, +21.5 pp counting only outputs that trip no unclear flag, +10.2 pp under the second judge's labels and -30.5 pp on the refusal rate, and the human-written Aya Red-teaming prompts give the same direction (+38.7 pp).
+**How far to trust the judge, in short.** Every safety claim here is a difference between models under one automatic judge (Qwen3Guard, strict). Against the native reader in Hindi **the pre-registered bar is met on kappa**, not on agreement (78.3% agreement on 60 items against a bar of 85.0%; kappa 0.67 against 0.60). Its harmful label is the weak one: its kappa of harmful against not harmful is 0.37, and of the 13 Hindi outputs it labelled harmful in round 1 the reader labelled 4 harmful (round 2: 7 of 18). Its refusal label agrees with the readers' on 66 of the 67 outputs it gave that label in round 1, over all languages (round 2: 40 of 40). So the direction of the drift and of the repair is robust, and their size is not: in "Judge sensitivity" every reading of drift and of repair has an interval that excludes zero, in the primary reading's direction (the refusal rate moves the opposite way). The Hindi drift is +31.5 pp under the primary reading, +28.7 pp with "Controversial" read loosely, +21.5 pp counting only outputs that trip no unclear flag, +10.2 pp under the second judge's labels and −30.5 pp on the refusal rate, and the human-written Aya Red-teaming prompts give the same direction (+38.7 pp).
 
 Native readers were given 180 outputs (60 in Hindi, 40 in Chinese, 40 in Spanish and 40 in English) of stock and the standard recipe's seed-1 adapters on the dev split, and labelled each harmful, refusal, benign or unclear, without seeing which model wrote it or what a judge said.
 
@@ -338,14 +338,14 @@ Drift and repair under other readings of the same outputs. These are sensitivity
 
 | Reading | Drift (adapter - stock) | Repair (repair - adapter) |
 | --- | --- | --- |
-| Harmful rate, Controversial counted as harmful (the primary endpoint) | +31.5 pp [+26.2, +37.0] | -39.2 pp [-44.5, -34.2] |
-| Harmful rate, Controversial read loosely | +28.7 pp [+23.8, +33.8] | -34.0 pp [-39.0, -29.0] |
-| Harmful rate, counting only outputs that trip no unclear flag | +21.5 pp [+16.2, +27.0] | -30.0 pp [-35.0, -25.0] |
-| Refusal rate on the same harmful prompts | -30.5 pp [-35.8, -25.5] | +40.8 pp [+35.8, +45.8] |
-| Harmful rate under the second judge's labels, Hindi | +10.2 pp [+6.0, +14.5] | -15.0 pp [-19.2, -10.8] |
-| Harmful rate under the second judge's labels, Hindi, prompts it judged on both sides | +11.9 pp [+6.8, +17.0] | -17.8 pp [-22.8, -13.1] |
-| Harmful rate under the second judge's labels, English | +7.5 pp [+4.2, +11.0] | -10.5 pp [-14.0, -7.2] |
-| Harmful rate under the second judge's labels, English, prompts it judged on both sides | +8.8 pp [+5.0, +12.9] | -12.3 pp [-16.4, -8.5] |
+| Harmful rate, Controversial counted as harmful (the primary endpoint) | +31.5 pp [+26.2, +37.0] | −39.2 pp [−44.5, −34.2] |
+| Harmful rate, Controversial read loosely | +28.7 pp [+23.8, +33.8] | −34.0 pp [−39.0, −29.0] |
+| Harmful rate, counting only outputs that trip no unclear flag | +21.5 pp [+16.2, +27.0] | −30.0 pp [−35.0, −25.0] |
+| Refusal rate on the same harmful prompts | −30.5 pp [−35.8, −25.5] | +40.8 pp [+35.8, +45.8] |
+| Harmful rate under the second judge's labels, Hindi | +10.2 pp [+6.0, +14.5] | −15.0 pp [−19.2, −10.8] |
+| Harmful rate under the second judge's labels, Hindi, prompts it judged on both sides | +11.9 pp [+6.8, +17.0] | −17.8 pp [−22.8, −13.1] |
+| Harmful rate under the second judge's labels, English | +7.5 pp [+4.2, +11.0] | −10.5 pp [−14.0, −7.2] |
+| Harmful rate under the second judge's labels, English, prompts it judged on both sides | +8.8 pp [+5.0, +12.9] | −12.3 pp [−16.4, −8.5] |
 
 The rows "prompts it judged on both sides" leave those prompts out on both sides. With p-values and seeds: [Drift and repair under other readings, with p-values](#drift-and-repair-under-other-readings-with-p-values).
 
@@ -369,7 +369,7 @@ The exploratory diagnosis (harm probes, the refusal direction and its ablation c
   Chinese and Spanish only. The judge's precision differs by language: Hindi claims rest on its
   validation against native readers ("The judge against native readers" above), the other languages
   have fewer validated items, and Arabic and Thai none. For Arabic and Thai, a sample of the outputs was also judged after back-translation into English ("Judge sensitivity").
-- On the human-written Hindi prompts (Aya Red-teaming) the large effects replicate and the smaller ones do not: the harmful rates of the IndicAlign adapter against stock, the stress adapter against stock and the frozen repair against the adapter point the same way there as on the translated prompts; the Aya adapter's harmful rate, lower than stock's on the translated prompts (-8.7 pp [-12.2, -5.2]), is higher than stock's there (+3.3 pp [+1.2, +5.4]); and the frozen repair's harmful rate, lower than stock's on the translated prompts (-7.8 pp [-11.2, -4.2]), is not clearly different from stock's there (+0.4 pp [-1.5, +2.4]).
+- On the human-written Hindi prompts (Aya Red-teaming) the large effects replicate and the smaller ones do not: the harmful rates of the IndicAlign adapter against stock, the stress adapter against stock and the frozen repair against the adapter point the same way there as on the translated prompts; the Aya adapter's harmful rate, lower than stock's on the translated prompts (−8.7 pp [−12.2, −5.2]), is higher than stock's there (+3.3 pp [+1.2, +5.4]); and the frozen repair's harmful rate, lower than stock's on the translated prompts (−7.8 pp [−11.2, −4.2]), is not clearly different from stock's there (+0.4 pp [−1.5, +2.4]).
 - A few adapters of one model, from two data sets, in one language, and the stress recipe trains
   one seed by design, so where the stress adapter carries the repair comparison its intervals are
   over prompts, not over training runs. The study cannot establish a general policy for which
@@ -399,7 +399,7 @@ Each variant's GPU-hours and time per generated token: [Cost of the final evalua
 
 What we would run, and the claim of this write-up each run would firm up:
 
-- **More seeds of the stress recipe.** The repair's effect (-39.2 pp [-44.5, -34.2]) is measured on one seed of one adapter, so its interval is over prompts, not over training runs. More seeds would give it over runs.
+- **More seeds of the stress recipe.** The repair's effect (−39.2 pp [−44.5, −34.2]) is measured on one seed of one adapter, so its interval is over prompts, not over training runs. More seeds would give it over runs.
 - **The second judge on every final output.** Under the second judge's labels the Hindi drift is +10.2 pp, against +31.5 pp under the primary judge's, and it judged whole cells in Hindi and English only. Judging every output twice would give that range for every language and every effect.
 - **Arabic and Thai readers, and a native check of every translated prompt.** Native readers validated the judge in Hindi, Chinese, Spanish and English, and checked samples of the Hindi, Chinese and Spanish translations. The Arabic and Thai results (a drift of +19.0 pp and of +27.0 pp) have no reader behind them.
 - **More adapters and data sets.** The ranking of the repairs holds for one stressed adapter of one model. More adapters, data sets and target languages would test the choice of repair as a policy, not as a single case.
@@ -588,16 +588,16 @@ numbered entries of `docs/decisions.md`, where every change is dated. The primar
 
 | Adapter (its seed-1 id) | Role | Verdict (pre-registered) | Usefulness (Gate 1) | Harmful rate - stock | Meets Gate 2's bar | Harmful rate - stock, outputs that trip no unclear flag | Refusals of harmful prompts - stock | Hard-benign refusals - stock | Over the 5-point tolerance | Dev win rate vs stock (seed 1) | Final win rate vs stock | Held-out NLL - stock (nats/token) | Belebele-hi accuracy - stock | Seeds |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| adapter-indicalign-stress-s1 | repair comparison | repair | reject on usefulness | +31.5 pp [+26.2, +37.0] | yes | +21.5 pp [+16.2, +27.0] | -30.5 pp [-35.8, -25.5] | -23.0 pp [-29.0, -17.5] | no | 28.0% [20.0, 36.2] | 39.4% [33.4, 45.4] | -0.163 [-0.233, -0.110] (seed 1) | -4.0 pp [-6.9, -1.1] | 1 |
-| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | retain | reject on usefulness | -8.7 pp [-12.2, -5.2] | no | -9.2 pp [-12.8, -5.8] | +12.8 pp [+9.1, +16.5] | +10.2 pp [+5.3, +15.0] | yes | 41.8% [33.0, 50.7] | 47.2% [41.8, 52.7] | -0.308 [-0.377, -0.253] (seeds 1, 2, 3) | -0.5 pp [-2.0, +1.0] | 1, 2, 3 |
-| adapter-indicalign-std-s1 | candidate not picked (exploratory) | no verdict | reject on usefulness | +21.6 pp [+17.2, +26.1] | yes | +3.4 pp [-0.3, +7.2] | -19.2 pp [-23.5, -14.9] | -17.8 pp [-23.3, -12.7] | no | 31.8% [23.5, 40.2] | 34.6% [29.2, 40.0] | -0.307 [-0.380, -0.249] (seeds 1, 2, 3) | -0.7 pp [-2.9, +1.5] | 1, 2, 3 |
+| adapter-indicalign-stress-s1 | repair comparison | repair | reject on usefulness | +31.5 pp [+26.2, +37.0] | yes | +21.5 pp [+16.2, +27.0] | −30.5 pp [−35.8, −25.5] | −23.0 pp [−29.0, −17.5] | no | 28.0% [20.0, 36.2] | 39.4% [33.4, 45.4] | −0.163 [−0.233, −0.110] (seed 1) | −4.0 pp [−6.9, −1.1] | 1 |
+| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | retain | reject on usefulness | −8.7 pp [−12.2, −5.2] | no | −9.2 pp [−12.8, −5.8] | +12.8 pp [+9.1, +16.5] | +10.2 pp [+5.3, +15.0] | yes | 41.8% [33.0, 50.7] | 47.2% [41.8, 52.7] | −0.308 [−0.377, −0.253] (seeds 1, 2, 3) | −0.5 pp [−2.0, +1.0] | 1, 2, 3 |
+| adapter-indicalign-std-s1 | candidate not picked (exploratory) | no verdict | reject on usefulness | +21.6 pp [+17.2, +26.1] | yes | +3.4 pp [−0.3, +7.2] | −19.2 pp [−23.5, −14.9] | −17.8 pp [−23.3, −12.7] | no | 31.8% [23.5, 40.2] | 34.6% [29.2, 40.0] | −0.307 [−0.380, −0.249] (seeds 1, 2, 3) | −0.7 pp [−2.9, +1.5] | 1, 2, 3 |
 
 The pre-registration gives an adapter one word, but its gates decide two things apart: Gate 2 whether it drifts (the verdict column) and Gate 1 whether it is useful (a seed-1 dev win rate of at least 55% against stock; under it the pre-registration says reject on usefulness). Each axis is against stock, paired by prompt and pooled over the seeds named (95% clustered bootstrap intervals). The 5-point tolerance is the selection rule's limit for a repair, shown for an adapter and deciding nothing. The harmful rate counts every harmful label, as pre-registered; the column beside it counts a harmful label only on an output that trips no unclear flag (under 5 new tokens, repetitive, no confident language), on both sides: a sensitivity reading that decides nothing (docs/decisions.md 87 and 93). Held-out NLL: mean per-token NLL of the final utility references, negative = a better fit than stock's. Belebele-hi: accuracy against stock, paired by item. The candidate that was not picked is an exploratory arm (docs/decisions.md 81).
 
 ### Verdicts as the report records them
 
 - `adapter-indicalign-stress-s1` (stress recipe, carries the repair comparison): **repair**; Gate 1: **reject on usefulness**. It drifts, and a repair passed the selection rule on dev (frozen, then run on final).
-- `adapter-aya-std-s1` (standard recipe, Gate 1's pick): **retain**; Gate 1: **reject on usefulness**. Gate 2 failed on dev, so the stress recipe carries the repair comparison and the standard recipe gets retain with its interval (pre-registration, Gate 2): final pooled Hindi drift -8.7 pp [-12.2, -5.2].
+- `adapter-aya-std-s1` (standard recipe, Gate 1's pick): **retain**; Gate 1: **reject on usefulness**. Gate 2 failed on dev, so the stress recipe carries the repair comparison and the standard recipe gets retain with its interval (pre-registration, Gate 2): final pooled Hindi drift −8.7 pp [−12.2, −5.2].
 - `adapter-indicalign-std-s1` (standard recipe, the candidate Gate 1 did not pick, an exploratory arm): **no verdict**; Gate 1: **reject on usefulness**. The candidate Gate 1 did not pick, an exploratory arm: it drifts (final pooled Hindi drift +21.6 pp [+17.2, +26.1]), and the selection rule was not run on it, so neither repair nor reject is given.
 
 ### Primary endpoint, seed by seed
@@ -605,9 +605,9 @@ The pre-registration gives an adapter one word, but its gates decide two things 
 | Effect | Seed | Estimate [95% interval] | McNemar p | n |
 | --- | --- | --- | --- | --- |
 | Drift | 1 | +31.5 pp [+26.2, +37.0] | <0.001 | 400 |
-| Repair | 1 | -39.2 pp [-44.5, -34.2] | <0.001 | 400 |
+| Repair | 1 | −39.2 pp [−44.5, −34.2] | <0.001 | 400 |
 | Red-teaming drift | 1 | +38.7 pp [+35.4, +42.1] | <0.001 | 913 |
-| Red-teaming repair | 1 | -38.2 pp [-41.5, -35.0] | <0.001 | 913 |
+| Red-teaming repair | 1 | −38.2 pp [−41.5, −35.0] | <0.001 | 913 |
 
 ![Primary endpoint: drift and repair in the Hindi harmful rate, per seed, and pooled when more than one seed was run](figures/forest_primary.png)
 
@@ -615,13 +615,13 @@ The pre-registration gives an adapter one word, but its gates decide two things 
 
 | Language | Prompts | Stock | Stock (upper) | Adapter | Adapter (upper) | Frozen repair | Frozen repair (upper) | Drift (adapter - stock) | Repair (repair - adapter) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Hindi | 400 | 14.2% | 14.5% | 45.8% | 47.5% | 6.5% | 7.0% | +31.5 pp [+26.2, +37.0] | -39.2 pp [-44.5, -34.2] |
-| English | 400 | 7.0% | 7.8% | 25.0% | 25.5% | 3.5% | 3.5% | +18.0 pp [+14.0, +22.2] | -21.5 pp [-25.8, -17.5] |
-| Chinese | 400 | 10.0% | 10.0% | 33.2% | 35.2% | 7.8% | 7.8% | +23.2 pp [+18.8, +27.8] | -25.5 pp [-30.0, -21.0] |
-| Spanish | 400 | 11.8% | 14.5% | 28.2% | 29.2% | 5.2% | 5.8% | +16.5 pp [+12.2, +21.0] | -23.0 pp [-27.3, -18.8] |
-| Arabic | 400 | 13.8% | 13.8% | 32.8% | 33.2% | 9.5% | 10.0% | +19.0 pp [+14.5, +23.5] | -23.2 pp [-28.0, -18.8] |
-| Thai | 400 | 5.0% | 5.0% | 32.0% | 33.0% | 3.0% | 3.5% | +27.0 pp [+22.5, +31.5] | -29.0 pp [-33.5, -24.5] |
-| Hindi (Aya Red-teaming) | 913 | 13.3% | 13.3% | 51.9% | 55.6% | 13.7% | 14.0% | +38.7 pp [+35.4, +42.1] | -38.2 pp [-41.5, -35.0] |
+| Hindi | 400 | 14.2% | 14.5% | 45.8% | 47.5% | 6.5% | 7.0% | +31.5 pp [+26.2, +37.0] | −39.2 pp [−44.5, −34.2] |
+| English | 400 | 7.0% | 7.8% | 25.0% | 25.5% | 3.5% | 3.5% | +18.0 pp [+14.0, +22.2] | −21.5 pp [−25.8, −17.5] |
+| Chinese | 400 | 10.0% | 10.0% | 33.2% | 35.2% | 7.8% | 7.8% | +23.2 pp [+18.8, +27.8] | −25.5 pp [−30.0, −21.0] |
+| Spanish | 400 | 11.8% | 14.5% | 28.2% | 29.2% | 5.2% | 5.8% | +16.5 pp [+12.2, +21.0] | −23.0 pp [−27.3, −18.8] |
+| Arabic | 400 | 13.8% | 13.8% | 32.8% | 33.2% | 9.5% | 10.0% | +19.0 pp [+14.5, +23.5] | −23.2 pp [−28.0, −18.8] |
+| Thai | 400 | 5.0% | 5.0% | 32.0% | 33.0% | 3.0% | 3.5% | +27.0 pp [+22.5, +31.5] | −29.0 pp [−33.5, −24.5] |
+| Hindi (Aya Red-teaming) | 913 | 13.3% | 13.3% | 51.9% | 55.6% | 13.7% | 14.0% | +38.7 pp [+35.4, +42.1] | −38.2 pp [−41.5, −35.0] |
 
 Harmful rate H/N; the upper bound counts unclear outputs as harmful, (H+U)/N. Intervals are 95% clustered bootstrap intervals (clusters = prompt id), pooled over the seeds run. Hindi is the primary endpoint, English and the zh/es transfer languages secondary, ar and th exploratory.
 
@@ -630,9 +630,9 @@ Harmful rate H/N; the upper bound counts unclear outputs as harmful, (H+U)/N. In
 | Claim | Effect | p | p (Holm) | Rows | Seeds |
 | --- | --- | --- | --- | --- | --- |
 | drift zh+es | +19.9 pp [+16.4, +23.5] | <0.001 | <0.001 | 800 | 1 |
-| repair zh+es | -24.2 pp [-27.9, -20.8] | <0.001 | <0.001 | 800 | 1 |
+| repair zh+es | −24.2 pp [−27.9, −20.8] | <0.001 | <0.001 | 800 | 1 |
 | drift en | +18.0 pp [+14.0, +22.2] | <0.001 | <0.001 | 400 | 1 |
-| repair en | -21.5 pp [-25.8, -17.5] | <0.001 | <0.001 | 400 | 1 |
+| repair en | −21.5 pp [−25.8, −17.5] | <0.001 | <0.001 | 400 | 1 |
 
 Drift and repair pooled over zh+es (transfer) and in English; Holm over these four claims.
 
@@ -641,13 +641,13 @@ Drift and repair pooled over zh+es (transfer) and in English; Holm over these fo
 | Claim | Effect | p | q (BH) | Rows | Seeds |
 | --- | --- | --- | --- | --- | --- |
 | drift zh | +23.2 pp [+18.8, +27.8] | <0.001 | <0.001 | 400 | 1 |
-| repair zh | -25.5 pp [-30.0, -21.0] | <0.001 | <0.001 | 400 | 1 |
+| repair zh | −25.5 pp [−30.0, −21.0] | <0.001 | <0.001 | 400 | 1 |
 | drift es | +16.5 pp [+12.2, +21.0] | <0.001 | <0.001 | 400 | 1 |
-| repair es | -23.0 pp [-27.3, -18.8] | <0.001 | <0.001 | 400 | 1 |
+| repair es | −23.0 pp [−27.3, −18.8] | <0.001 | <0.001 | 400 | 1 |
 | drift ar | +19.0 pp [+14.5, +23.5] | <0.001 | <0.001 | 400 | 1 |
-| repair ar | -23.2 pp [-28.0, -18.8] | <0.001 | <0.001 | 400 | 1 |
+| repair ar | −23.2 pp [−28.0, −18.8] | <0.001 | <0.001 | 400 | 1 |
 | drift th | +27.0 pp [+22.5, +31.5] | <0.001 | <0.001 | 400 | 1 |
-| repair th | -29.0 pp [-33.5, -24.5] | <0.001 | <0.001 | 400 | 1 |
+| repair th | −29.0 pp [−33.5, −24.5] | <0.001 | <0.001 | 400 | 1 |
 
 Drift and repair in zh, es, ar and th one by one; Benjamini-Hochberg over these eight claims. Diagnostic signatures are P06's.
 
@@ -655,27 +655,27 @@ Drift and repair in zh, es, ar and th one by one; Benjamini-Hochberg over these 
 
 | Adapter (its seed-1 id) | Role | Language | Stock | Adapter | Adapter - stock | Adapter - stock, outputs that trip no unclear flag | Refusal rate: adapter - stock | Seeds |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| adapter-indicalign-stress-s1 | repair comparison | English | 7.0% | 25.0% | +18.0 pp [+14.0, +22.2] | +11.5 pp [+7.8, +15.5] | -18.5 pp [-22.8, -14.5] | 1 |
-| adapter-indicalign-stress-s1 | repair comparison | Hindi | 14.2% | 45.8% | +31.5 pp [+26.2, +37.0] | +21.5 pp [+16.2, +27.0] | -30.5 pp [-35.8, -25.5] | 1 |
-| adapter-indicalign-stress-s1 | repair comparison | Chinese | 10.0% | 33.2% | +23.2 pp [+18.8, +27.8] | +15.8 pp [+11.0, +20.5] | -23.2 pp [-27.8, -18.8] | 1 |
-| adapter-indicalign-stress-s1 | repair comparison | Spanish | 11.8% | 28.2% | +16.5 pp [+12.2, +21.0] | +14.0 pp [+10.0, +18.2] | -13.2 pp [-18.0, -8.8] | 1 |
-| adapter-indicalign-stress-s1 | repair comparison | Arabic | 13.8% | 32.8% | +19.0 pp [+14.5, +23.5] | +11.0 pp [+6.8, +15.2] | -17.0 pp [-21.5, -12.2] | 1 |
-| adapter-indicalign-stress-s1 | repair comparison | Thai | 5.0% | 32.0% | +27.0 pp [+22.5, +31.5] | +22.2 pp [+17.8, +26.8] | -27.5 pp [-32.2, -23.0] | 1 |
-| adapter-indicalign-stress-s1 | repair comparison | Hindi (Aya Red-teaming) | 13.3% | 51.9% | +38.7 pp [+35.4, +42.1] | +26.7 pp [+23.4, +30.1] | -32.9 pp [-36.0, -29.6] | 1 |
-| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | English | 7.0% | 1.5% | -5.5 pp [-7.8, -3.4] | -4.5 pp [-6.8, -2.4] | +6.9 pp [+4.4, +9.6] | 1, 2, 3 |
-| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Hindi | 14.2% | 5.6% | -8.7 pp [-12.2, -5.2] | -9.2 pp [-12.8, -5.8] | +12.8 pp [+9.1, +16.5] | 1, 2, 3 |
-| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Chinese | 10.0% | 5.6% | -4.4 pp [-6.8, -2.2] | -4.6 pp [-6.9, -2.3] | +4.8 pp [+2.4, +7.3] | 1, 2, 3 |
-| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Spanish | 11.8% | 2.8% | -9.0 pp [-12.0, -6.2] | -5.4 pp [-8.1, -3.0] | +11.2 pp [+8.1, +14.5] | 1, 2, 3 |
-| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Arabic | 13.8% | 6.2% | -7.5 pp [-10.5, -4.7] | -7.6 pp [-10.6, -4.8] | +9.2 pp [+6.2, +12.4] | 1, 2, 3 |
-| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Thai | 5.0% | 3.7% | -1.3 pp [-3.3, +0.6] | -1.5 pp [-3.5, +0.4] | +1.8 pp [-0.4, +4.0] | 1, 2, 3 |
-| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Hindi (Aya Red-teaming) | 13.3% | 16.5% | +3.3 pp [+1.2, +5.4] | +2.1 pp [+0.1, +4.1] | +1.9 pp [-0.5, +4.2] | 1, 2, 3 |
-| adapter-indicalign-std-s1 | candidate not picked (exploratory) | English | 7.0% | 20.1% | +13.1 pp [+9.7, +16.6] | +7.0 pp [+3.9, +10.1] | -14.0 pp [-17.7, -10.6] | 1, 2, 3 |
-| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Hindi | 14.2% | 35.8% | +21.6 pp [+17.2, +26.1] | +3.4 pp [-0.3, +7.2] | -19.2 pp [-23.5, -14.9] | 1, 2, 3 |
-| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Chinese | 10.0% | 28.2% | +18.2 pp [+14.5, +22.2] | +9.5 pp [+5.8, +13.2] | -18.1 pp [-22.0, -14.2] | 1, 2, 3 |
-| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Spanish | 11.8% | 21.4% | +9.7 pp [+5.7, +13.7] | +6.1 pp [+2.6, +9.6] | -6.9 pp [-10.8, -3.1] | 1, 2, 3 |
-| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Arabic | 13.8% | 24.5% | +10.8 pp [+7.0, +14.5] | +1.5 pp [-1.9, +4.9] | -9.9 pp [-13.8, -6.0] | 1, 2, 3 |
-| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Thai | 5.0% | 17.5% | +12.5 pp [+9.4, +15.8] | +6.4 pp [+3.8, +9.2] | -12.6 pp [-16.1, -9.2] | 1, 2, 3 |
-| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Hindi (Aya Red-teaming) | 13.3% | 46.3% | +33.0 pp [+30.1, +36.0] | +12.6 pp [+9.8, +15.4] | -27.4 pp [-30.4, -24.4] | 1, 2, 3 |
+| adapter-indicalign-stress-s1 | repair comparison | English | 7.0% | 25.0% | +18.0 pp [+14.0, +22.2] | +11.5 pp [+7.8, +15.5] | −18.5 pp [−22.8, −14.5] | 1 |
+| adapter-indicalign-stress-s1 | repair comparison | Hindi | 14.2% | 45.8% | +31.5 pp [+26.2, +37.0] | +21.5 pp [+16.2, +27.0] | −30.5 pp [−35.8, −25.5] | 1 |
+| adapter-indicalign-stress-s1 | repair comparison | Chinese | 10.0% | 33.2% | +23.2 pp [+18.8, +27.8] | +15.8 pp [+11.0, +20.5] | −23.2 pp [−27.8, −18.8] | 1 |
+| adapter-indicalign-stress-s1 | repair comparison | Spanish | 11.8% | 28.2% | +16.5 pp [+12.2, +21.0] | +14.0 pp [+10.0, +18.2] | −13.2 pp [−18.0, −8.8] | 1 |
+| adapter-indicalign-stress-s1 | repair comparison | Arabic | 13.8% | 32.8% | +19.0 pp [+14.5, +23.5] | +11.0 pp [+6.8, +15.2] | −17.0 pp [−21.5, −12.2] | 1 |
+| adapter-indicalign-stress-s1 | repair comparison | Thai | 5.0% | 32.0% | +27.0 pp [+22.5, +31.5] | +22.2 pp [+17.8, +26.8] | −27.5 pp [−32.2, −23.0] | 1 |
+| adapter-indicalign-stress-s1 | repair comparison | Hindi (Aya Red-teaming) | 13.3% | 51.9% | +38.7 pp [+35.4, +42.1] | +26.7 pp [+23.4, +30.1] | −32.9 pp [−36.0, −29.6] | 1 |
+| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | English | 7.0% | 1.5% | −5.5 pp [−7.8, −3.4] | −4.5 pp [−6.8, −2.4] | +6.9 pp [+4.4, +9.6] | 1, 2, 3 |
+| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Hindi | 14.2% | 5.6% | −8.7 pp [−12.2, −5.2] | −9.2 pp [−12.8, −5.8] | +12.8 pp [+9.1, +16.5] | 1, 2, 3 |
+| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Chinese | 10.0% | 5.6% | −4.4 pp [−6.8, −2.2] | −4.6 pp [−6.9, −2.3] | +4.8 pp [+2.4, +7.3] | 1, 2, 3 |
+| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Spanish | 11.8% | 2.8% | −9.0 pp [−12.0, −6.2] | −5.4 pp [−8.1, −3.0] | +11.2 pp [+8.1, +14.5] | 1, 2, 3 |
+| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Arabic | 13.8% | 6.2% | −7.5 pp [−10.5, −4.7] | −7.6 pp [−10.6, −4.8] | +9.2 pp [+6.2, +12.4] | 1, 2, 3 |
+| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Thai | 5.0% | 3.7% | −1.3 pp [−3.3, +0.6] | −1.5 pp [−3.5, +0.4] | +1.8 pp [−0.4, +4.0] | 1, 2, 3 |
+| adapter-aya-std-s1 | standard recipe (Gate 1 pick) | Hindi (Aya Red-teaming) | 13.3% | 16.5% | +3.3 pp [+1.2, +5.4] | +2.1 pp [+0.1, +4.1] | +1.9 pp [−0.5, +4.2] | 1, 2, 3 |
+| adapter-indicalign-std-s1 | candidate not picked (exploratory) | English | 7.0% | 20.1% | +13.1 pp [+9.7, +16.6] | +7.0 pp [+3.9, +10.1] | −14.0 pp [−17.7, −10.6] | 1, 2, 3 |
+| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Hindi | 14.2% | 35.8% | +21.6 pp [+17.2, +26.1] | +3.4 pp [−0.3, +7.2] | −19.2 pp [−23.5, −14.9] | 1, 2, 3 |
+| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Chinese | 10.0% | 28.2% | +18.2 pp [+14.5, +22.2] | +9.5 pp [+5.8, +13.2] | −18.1 pp [−22.0, −14.2] | 1, 2, 3 |
+| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Spanish | 11.8% | 21.4% | +9.7 pp [+5.7, +13.7] | +6.1 pp [+2.6, +9.6] | −6.9 pp [−10.8, −3.1] | 1, 2, 3 |
+| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Arabic | 13.8% | 24.5% | +10.8 pp [+7.0, +14.5] | +1.5 pp [−1.9, +4.9] | −9.9 pp [−13.8, −6.0] | 1, 2, 3 |
+| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Thai | 5.0% | 17.5% | +12.5 pp [+9.4, +15.8] | +6.4 pp [+3.8, +9.2] | −12.6 pp [−16.1, −9.2] | 1, 2, 3 |
+| adapter-indicalign-std-s1 | candidate not picked (exploratory) | Hindi (Aya Red-teaming) | 13.3% | 46.3% | +33.0 pp [+30.1, +36.0] | +12.6 pp [+9.8, +15.4] | −27.4 pp [−30.4, −24.4] | 1, 2, 3 |
 
 Paired by prompt and pooled over the seeds named (95% clustered bootstrap intervals, clusters = prompt id); the adapter's level is shown only when every seed was run. For the adapter of the repair comparison these are the primary, secondary and exploratory effects of the tables above. For the others they are descriptive: estimates and intervals, in no claim family. The second difference counts a harmful label only on an output that trips no unclear flag, on both sides (docs/decisions.md 87 and 93): a sensitivity reading.
 
@@ -689,9 +689,9 @@ The figure pools each adapter's seeds, as the Seeds column of the table above na
 
 | Family | Frozen setting (its seed-1 id) | Role | Harmful rate | Repair - adapter | p (bootstrap) | Harmful rate - stock | Utility gain kept | Held-out gain kept | Hard-benign refusal - stock | Belebele-hi - stock | Seeds |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| wiseft | wiseft-l0.25-adapter-indicalign-stress-s1 | winner | 6.5% | -39.2 pp [-44.5, -34.2] | <0.001 | -7.8 pp [-11.2, -4.2] | undefined: the adapter shows no utility gain over parity | 194.8% [165.1, 244.3] (seed 1) | +3.5 pp [-0.5, +8.0] | -0.3 pp [-2.0, +1.3] | 1 |
-| resta | resta-a0.10-adapter-indicalign-stress-s1 | family | 35.2% | -10.5 pp [-14.5, -6.5] | <0.001 | +21.0 pp [+16.0, +26.2] | undefined: the adapter shows no utility gain over parity | 25.9% [-13.1, 49.6] (seed 1) | -18.5 pp [-24.0, -13.0] | -4.4 pp [-7.3, -1.6] | 1 |
-| cast | cast-m0.5-adapter-indicalign-stress-s1 | family | 25.8% | -20.0 pp [-24.0, -16.0] | <0.001 | +11.5 pp [+7.0, +16.0] | undefined: the adapter shows no utility gain over parity | 96.7% [88.8, 100.0] (seed 1) | -8.0 pp [-13.5, -2.5] | -4.0 pp [-6.9, -1.1] | 1 |
+| wiseft | wiseft-l0.25-adapter-indicalign-stress-s1 | winner | 6.5% | −39.2 pp [−44.5, −34.2] | <0.001 | −7.8 pp [−11.2, −4.2] | undefined: the adapter shows no utility gain over parity | 194.8% [165.1, 244.3] (seed 1) | +3.5 pp [−0.5, +8.0] | −0.3 pp [−2.0, +1.3] | 1 |
+| resta | resta-a0.10-adapter-indicalign-stress-s1 | family | 35.2% | −10.5 pp [−14.5, −6.5] | <0.001 | +21.0 pp [+16.0, +26.2] | undefined: the adapter shows no utility gain over parity | 25.9% [−13.1, 49.6] (seed 1) | −18.5 pp [−24.0, −13.0] | −4.4 pp [−7.3, −1.6] | 1 |
+| cast | cast-m0.5-adapter-indicalign-stress-s1 | family | 25.8% | −20.0 pp [−24.0, −16.0] | <0.001 | +11.5 pp [+7.0, +16.0] | undefined: the adapter shows no utility gain over parity | 96.7% [88.8, 100.0] (seed 1) | −8.0 pp [−13.5, −2.5] | −4.0 pp [−6.9, −1.1] | 1 |
 
 The overall winner's effect is the primary endpoint; the other families are reported descriptively (unadjusted, not a pre-registered claim). WiSE-FT attenuation is the baseline every repair is measured against. Harmful rate - stock is what is left of the drift: the frozen setting against stock on the same prompts (descriptive, docs/decisions.md 90). Each row pools the seeds named (a seed not run is left out, never estimated); a cell that pools fewer is named with its own; the gain kept names its seeds. Utility gain kept is the share of the adapter's win-rate gain over parity; held-out gain kept the share of its held-out-loss gain over stock (docs/decisions.md 73): each is undefined, and says so, when the adapter has no such gain. A held-out share over 100% is a setting that fits the held-out references better than the full adapter does.
 
@@ -700,16 +700,16 @@ The overall winner's effect is the primary endpoint; the other families are repo
 | Variant | Mean NLL (nats/token) | NLL - stock | References | Adapter's held-out gain kept (pooled over the seeds named) |
 | --- | --- | --- | --- | --- |
 | stock | 2.236 | the reference | 200 | the reference |
-| adapter-indicalign-stress-s1 | 2.073 | -0.163 [-0.233, -0.110] (seed 1) | 200 | its own fit |
-| adapter-aya-std-s1 | 1.931 | -0.306 [-0.375, -0.251] (seed 1) | 200 | its own fit |
-| adapter-aya-std-s2 | 1.928 | -0.308 [-0.378, -0.253] (seed 2) | 200 | its own fit |
-| adapter-aya-std-s3 | 1.927 | -0.309 [-0.378, -0.254] (seed 3) | 200 | its own fit |
-| wiseft-l0.25-adapter-indicalign-stress-s1 | 1.918 | -0.318 [-0.389, -0.263] (seed 1) | 200 | 194.8% [165.1, 244.3] (seed 1) |
-| resta-a0.10-adapter-indicalign-stress-s1 | 2.194 | -0.042 [-0.114, +0.014] (seed 1) | 200 | 25.9% [-13.1, 49.6] (seed 1) |
-| cast-m0.5-adapter-indicalign-stress-s1 | 2.078 | -0.158 [-0.228, -0.105] (seed 1) | 200 | 96.7% [88.8, 100.0] (seed 1) |
-| adapter-indicalign-std-s1 | 1.929 | -0.308 [-0.380, -0.250] (seed 1) | 200 | its own fit |
-| adapter-indicalign-std-s2 | 1.929 | -0.307 [-0.380, -0.250] (seed 2) | 200 | its own fit |
-| adapter-indicalign-std-s3 | 1.930 | -0.306 [-0.379, -0.249] (seed 3) | 200 | its own fit |
+| adapter-indicalign-stress-s1 | 2.073 | −0.163 [−0.233, −0.110] (seed 1) | 200 | its own fit |
+| adapter-aya-std-s1 | 1.931 | −0.306 [−0.375, −0.251] (seed 1) | 200 | its own fit |
+| adapter-aya-std-s2 | 1.928 | −0.308 [−0.378, −0.253] (seed 2) | 200 | its own fit |
+| adapter-aya-std-s3 | 1.927 | −0.309 [−0.378, −0.254] (seed 3) | 200 | its own fit |
+| wiseft-l0.25-adapter-indicalign-stress-s1 | 1.918 | −0.318 [−0.389, −0.263] (seed 1) | 200 | 194.8% [165.1, 244.3] (seed 1) |
+| resta-a0.10-adapter-indicalign-stress-s1 | 2.194 | −0.042 [−0.114, +0.014] (seed 1) | 200 | 25.9% [−13.1, 49.6] (seed 1) |
+| cast-m0.5-adapter-indicalign-stress-s1 | 2.078 | −0.158 [−0.228, −0.105] (seed 1) | 200 | 96.7% [88.8, 100.0] (seed 1) |
+| adapter-indicalign-std-s1 | 1.929 | −0.308 [−0.380, −0.250] (seed 1) | 200 | its own fit |
+| adapter-indicalign-std-s2 | 1.929 | −0.307 [−0.380, −0.250] (seed 2) | 200 | its own fit |
+| adapter-indicalign-std-s3 | 1.930 | −0.306 [−0.379, −0.249] (seed 3) | 200 | its own fit |
 
 Mean per-token NLL of the reference answers (assistant tokens only, chat template on), token-weighted; against stock on the same references, 95% bootstrap interval by reference. Gain kept: (stock - repair) / (stock - adapter) over the same references, pooled over the seeds named with a joint bootstrap. It is undefined (said so) when the adapter fits the references no better than stock. The adapter's other gain measure beside the win rate (docs/decisions.md 73).
 
@@ -717,13 +717,13 @@ Mean per-token NLL of the reference answers (assistant tokens only, chat templat
 
 | Language | Stock | Frozen repair | Harmful rate: repair - stock | Harmful rate, outputs that trip no unclear flag: repair - stock | Refusal rate: repair - stock | Seeds |
 | --- | --- | --- | --- | --- | --- | --- |
-| Hindi | 14.2% | 6.5% | -7.8 pp [-11.2, -4.2] | -8.5 pp [-12.0, -5.0] | +10.2 pp [+6.8, +14.0] | 1 |
-| English | 7.0% | 3.5% | -3.5 pp [-5.8, -1.5] | -2.8 pp [-4.8, -0.8] | +3.8 pp [+1.5, +6.2] | 1 |
-| Chinese | 10.0% | 7.8% | -2.2 pp [-4.5, +0.0] | -2.8 pp [-5.2, -0.2] | +4.2 pp [+1.5, +7.0] | 1 |
-| Spanish | 11.8% | 5.2% | -6.5 pp [-9.5, -3.5] | -3.0 pp [-5.8, -0.5] | +8.5 pp [+5.2, +11.8] | 1 |
-| Arabic | 13.8% | 9.5% | -4.2 pp [-7.5, -1.0] | -4.2 pp [-7.5, -1.0] | +4.8 pp [+1.5, +8.0] | 1 |
-| Thai | 5.0% | 3.0% | -2.0 pp [-3.8, -0.2] | -2.0 pp [-3.8, -0.2] | +2.0 pp [+0.2, +4.0] | 1 |
-| Hindi (Aya Red-teaming) | 13.3% | 13.7% | +0.4 pp [-1.5, +2.4] | -0.7 pp [-2.7, +1.3] | +2.5 pp [+0.2, +4.9] | 1 |
+| Hindi | 14.2% | 6.5% | −7.8 pp [−11.2, −4.2] | −8.5 pp [−12.0, −5.0] | +10.2 pp [+6.8, +14.0] | 1 |
+| English | 7.0% | 3.5% | −3.5 pp [−5.8, −1.5] | −2.8 pp [−4.8, −0.8] | +3.8 pp [+1.5, +6.2] | 1 |
+| Chinese | 10.0% | 7.8% | −2.2 pp [−4.5, +0.0] | −2.8 pp [−5.2, −0.2] | +4.2 pp [+1.5, +7.0] | 1 |
+| Spanish | 11.8% | 5.2% | −6.5 pp [−9.5, −3.5] | −3.0 pp [−5.8, −0.5] | +8.5 pp [+5.2, +11.8] | 1 |
+| Arabic | 13.8% | 9.5% | −4.2 pp [−7.5, −1.0] | −4.2 pp [−7.5, −1.0] | +4.8 pp [+1.5, +8.0] | 1 |
+| Thai | 5.0% | 3.0% | −2.0 pp [−3.8, −0.2] | −2.0 pp [−3.8, −0.2] | +2.0 pp [+0.2, +4.0] | 1 |
+| Hindi (Aya Red-teaming) | 13.3% | 13.7% | +0.4 pp [−1.5, +2.4] | −0.7 pp [−2.7, +1.3] | +2.5 pp [+0.2, +4.9] | 1 |
 
 Not pre-registered, descriptive (docs/decisions.md 90): the pre-registration asks which repair restores safety, and the pre-registered repair effect compares the repair with the adapter, not with stock. Paired by prompt within each seed and pooled over the seeds named (95% clustered bootstrap intervals, clusters = prompt id); the repair's level is shown only when every seed was run. Estimates and intervals only: no p-value, in neither the Holm nor the BH family, and not a claim. A negative harmful-rate difference is a repaired model under stock; a positive one is drift that remains.
 
@@ -731,8 +731,8 @@ Not pre-registered, descriptive (docs/decisions.md 90): the pre-registration ask
 
 | Family | Frozen setting (its seed-1 id) | WiSE-FT frozen setting (its seed-1 id) | Harmful rate - WiSE-FT | Hard-benign refusal - WiSE-FT | Utility gain kept - WiSE-FT's | Seeds |
 | --- | --- | --- | --- | --- | --- | --- |
-| resta | resta-a0.10-adapter-indicalign-stress-s1 | wiseft-l0.25-adapter-indicalign-stress-s1 | +28.7 pp [+24.2, +33.5] | -22.0 pp [-28.0, -16.5] | undefined: the adapter shows no utility gain over parity | 1 |
-| cast | cast-m0.5-adapter-indicalign-stress-s1 | wiseft-l0.25-adapter-indicalign-stress-s1 | +19.2 pp [+15.0, +23.8] | -11.5 pp [-17.5, -5.5] | undefined: the adapter shows no utility gain over parity | 1 |
+| resta | resta-a0.10-adapter-indicalign-stress-s1 | wiseft-l0.25-adapter-indicalign-stress-s1 | +28.7 pp [+24.2, +33.5] | −22.0 pp [−28.0, −16.5] | undefined: the adapter shows no utility gain over parity | 1 |
+| cast | cast-m0.5-adapter-indicalign-stress-s1 | wiseft-l0.25-adapter-indicalign-stress-s1 | +19.2 pp [+15.0, +23.8] | −11.5 pp [−17.5, −5.5] | undefined: the adapter shows no utility gain over parity | 1 |
 
 Not pre-registered, descriptive (docs/decisions.md 78): the pre-registration frames each repair against simply scaling the adapter down but pre-registers no test of it. Paired by prompt within each seed and pooled over the seeds named (95% clustered bootstrap intervals, clusters = prompt id); gain kept: (repair - WiSE-FT) / (adapter - 0.5) over the same prompts. Estimates and intervals only: no p-value, in neither the Holm nor the BH family, and not a claim.
 
@@ -740,18 +740,18 @@ Not pre-registered, descriptive (docs/decisions.md 78): the pre-registration fra
 
 | Benign set | Language | Stock | Adapter | Frozen repair | Adapter - stock | Repair - stock |
 | --- | --- | --- | --- | --- | --- | --- |
-| easy | English | 0.7% | 0.7% | 0.7% | +0.0 pp [-1.0, +1.0] | +0.0 pp [-1.0, +1.0] |
-| easy | Hindi | 0.7% | 0.3% | 1.3% | -0.3 pp [-1.3, +0.7] | +0.7 pp [+0.0, +1.7] |
-| easy | Chinese | 1.0% | 1.3% | 0.7% | +0.3 pp [-1.0, +2.0] | -0.3 pp [-1.0, +0.0] |
-| easy | Spanish | 0.7% | 0.0% | 0.3% | -0.7 pp [-1.7, +0.0] | -0.3 pp [-1.0, +0.0] |
-| easy | Arabic | 0.7% | 0.7% | 0.7% | +0.0 pp [-1.3, +1.3] | +0.0 pp [-1.0, +1.0] |
-| easy | Thai | 0.7% | 0.7% | 1.3% | +0.0 pp [-1.3, +1.3] | +0.7 pp [+0.0, +1.7] |
-| hard | English | 46.0% | 6.5% | 41.0% | -39.5 pp [-46.5, -32.5] | -5.0 pp [-10.5, +0.0] |
-| hard | Hindi | 25.5% | 2.5% | 29.0% | -23.0 pp [-29.0, -17.5] | +3.5 pp [-0.5, +8.0] |
-| hard | Chinese | 43.0% | 13.5% | 40.5% | -29.5 pp [-36.5, -23.0] | -2.5 pp [-7.0, +2.0] |
-| hard | Spanish | 29.5% | 8.5% | 29.5% | -21.0 pp [-27.5, -14.5] | +0.0 pp [-5.5, +5.5] |
-| hard | Arabic | 24.5% | 4.0% | 23.0% | -20.5 pp [-26.5, -15.0] | -1.5 pp [-7.0, +4.0] |
-| hard | Thai | 59.0% | 15.0% | 50.0% | -44.0 pp [-51.0, -36.5] | -9.0 pp [-14.5, -3.5] |
+| easy | English | 0.7% | 0.7% | 0.7% | +0.0 pp [−1.0, +1.0] | +0.0 pp [−1.0, +1.0] |
+| easy | Hindi | 0.7% | 0.3% | 1.3% | −0.3 pp [−1.3, +0.7] | +0.7 pp [+0.0, +1.7] |
+| easy | Chinese | 1.0% | 1.3% | 0.7% | +0.3 pp [−1.0, +2.0] | −0.3 pp [−1.0, +0.0] |
+| easy | Spanish | 0.7% | 0.0% | 0.3% | −0.7 pp [−1.7, +0.0] | −0.3 pp [−1.0, +0.0] |
+| easy | Arabic | 0.7% | 0.7% | 0.7% | +0.0 pp [−1.3, +1.3] | +0.0 pp [−1.0, +1.0] |
+| easy | Thai | 0.7% | 0.7% | 1.3% | +0.0 pp [−1.3, +1.3] | +0.7 pp [+0.0, +1.7] |
+| hard | English | 46.0% | 6.5% | 41.0% | −39.5 pp [−46.5, −32.5] | −5.0 pp [−10.5, +0.0] |
+| hard | Hindi | 25.5% | 2.5% | 29.0% | −23.0 pp [−29.0, −17.5] | +3.5 pp [−0.5, +8.0] |
+| hard | Chinese | 43.0% | 13.5% | 40.5% | −29.5 pp [−36.5, −23.0] | −2.5 pp [−7.0, +2.0] |
+| hard | Spanish | 29.5% | 8.5% | 29.5% | −21.0 pp [−27.5, −14.5] | +0.0 pp [−5.5, +5.5] |
+| hard | Arabic | 24.5% | 4.0% | 23.0% | −20.5 pp [−26.5, −15.0] | −1.5 pp [−7.0, +4.0] |
+| hard | Thai | 59.0% | 15.0% | 50.0% | −44.0 pp [−51.0, −36.5] | −9.0 pp [−14.5, −3.5] |
 
 Refusals of benign prompts (PolyRefuse harmless = easy, OR-Bench-Hard = hard), every prompt in the denominator; pooled over seeds.
 
@@ -770,12 +770,12 @@ Win rate: mean pair score against stock (1 win, 0.5 tie, 0 loss, averaged over b
 
 | Language | Items | Stock | Adapter | Frozen repair | Repair - stock | Seeds (repair - stock) |
 | --- | --- | --- | --- | --- | --- | --- |
-| English | 700 | 77.3% | 73.3% | 77.3% | +0.0 pp [-1.0, +1.0] | 1 |
-| Hindi | 700 | 60.3% | 56.3% | 60.0% | -0.3 pp [-2.0, +1.3] | 1 |
-| Chinese | 700 | 72.9% | 65.0% | 71.9% | -1.0 pp [-2.4, +0.4] | 1 |
-| Spanish | 700 | 70.7% | 67.9% | 69.9% | -0.9 pp [-2.1, +0.4] | 1 |
-| Arabic | 700 | 67.4% | 61.7% | 66.6% | -0.9 pp [-2.1, +0.4] | 1 |
-| Thai | 700 | 64.4% | 58.7% | 63.3% | -1.1 pp [-2.6, +0.3] | 1 |
+| English | 700 | 77.3% | 73.3% | 77.3% | +0.0 pp [−1.0, +1.0] | 1 |
+| Hindi | 700 | 60.3% | 56.3% | 60.0% | −0.3 pp [−2.0, +1.3] | 1 |
+| Chinese | 700 | 72.9% | 65.0% | 71.9% | −1.0 pp [−2.4, +0.4] | 1 |
+| Spanish | 700 | 70.7% | 67.9% | 69.9% | −0.9 pp [−2.1, +0.4] | 1 |
+| Arabic | 700 | 67.4% | 61.7% | 66.6% | −0.9 pp [−2.1, +0.4] | 1 |
+| Thai | 700 | 64.4% | 58.7% | 63.3% | −1.1 pp [−2.6, +0.3] | 1 |
 
 Letter log-likelihood scoring, no chat template. Items: stock's, the paired reference. A level is shown only when every seed was run; the change against stock pools the seeds named.
 
@@ -795,7 +795,7 @@ Letter log-likelihood scoring, no chat template. Items: stock's, the paired refe
 | Qwen3Guard, loose | All languages | 180 | 79.4% | 0.68 | 90.0% | 0.45 | met |
 | Frontier judge | Hindi | 60 | 76.7% | 0.64 | 91.7% | 0.40 | met |
 | Frontier judge | Chinese | 40 | 90.0% | 0.84 | 100.0% | 1.00 | met |
-| Frontier judge | Spanish | 40 | 62.5% | 0.43 | 85.0% | -0.04 | not met |
+| Frontier judge | Spanish | 40 | 62.5% | 0.43 | 85.0% | −0.04 | not met |
 | Frontier judge | English | 40 | 80.0% | 0.69 | 100.0% | 1.00 | met |
 | Frontier judge | All languages | 180 | 77.2% | 0.65 | 93.9% | 0.39 | met |
 
@@ -870,19 +870,19 @@ The same items by model and by prompt set, for the primary judge: the share of o
 | harmful rate, Controversial counted as harmful (the primary endpoint) | drift | +31.5 pp [+26.2, +37.0] | <0.001 | 1 | not run |
 | harmful rate, Controversial read loosely | drift | +28.7 pp [+23.8, +33.8] | <0.001 | 1 | not run |
 | harmful rate, counting only outputs that trip no unclear flag | drift | +21.5 pp [+16.2, +27.0] | <0.001 | 1 | not run |
-| refusal rate on the same harmful prompts | drift | -30.5 pp [-35.8, -25.5] | <0.001 | 1 | not run |
+| refusal rate on the same harmful prompts | drift | −30.5 pp [−35.8, −25.5] | <0.001 | 1 | not run |
 | harmful rate under the second judge's labels, Hindi | drift | +10.2 pp [+6.0, +14.5] | <0.001 | 1 | 64 of 400 |
 | harmful rate under the second judge's labels, Hindi, prompts it judged on both sides | drift | +11.9 pp [+6.8, +17.0] | <0.001 | 1 | 64 of 400 left out |
 | harmful rate under the second judge's labels, English | drift | +7.5 pp [+4.2, +11.0] | <0.001 | 1 | 60 of 400 |
 | harmful rate under the second judge's labels, English, prompts it judged on both sides | drift | +8.8 pp [+5.0, +12.9] | <0.001 | 1 | 60 of 400 left out |
-| harmful rate, Controversial counted as harmful (the primary endpoint) | repair | -39.2 pp [-44.5, -34.2] | <0.001 | 1 | not run |
-| harmful rate, Controversial read loosely | repair | -34.0 pp [-39.0, -29.0] | <0.001 | 1 | not run |
-| harmful rate, counting only outputs that trip no unclear flag | repair | -30.0 pp [-35.0, -25.0] | <0.001 | 1 | not run |
+| harmful rate, Controversial counted as harmful (the primary endpoint) | repair | −39.2 pp [−44.5, −34.2] | <0.001 | 1 | not run |
+| harmful rate, Controversial read loosely | repair | −34.0 pp [−39.0, −29.0] | <0.001 | 1 | not run |
+| harmful rate, counting only outputs that trip no unclear flag | repair | −30.0 pp [−35.0, −25.0] | <0.001 | 1 | not run |
 | refusal rate on the same harmful prompts | repair | +40.8 pp [+35.8, +45.8] | <0.001 | 1 | not run |
-| harmful rate under the second judge's labels, Hindi | repair | -15.0 pp [-19.2, -10.8] | <0.001 | 1 | 63 of 400 |
-| harmful rate under the second judge's labels, Hindi, prompts it judged on both sides | repair | -17.8 pp [-22.8, -13.1] | <0.001 | 1 | 63 of 400 left out |
-| harmful rate under the second judge's labels, English | repair | -10.5 pp [-14.0, -7.2] | <0.001 | 1 | 59 of 400 |
-| harmful rate under the second judge's labels, English, prompts it judged on both sides | repair | -12.3 pp [-16.4, -8.5] | <0.001 | 1 | 59 of 400 left out |
+| harmful rate under the second judge's labels, Hindi | repair | −15.0 pp [−19.2, −10.8] | <0.001 | 1 | 63 of 400 |
+| harmful rate under the second judge's labels, Hindi, prompts it judged on both sides | repair | −17.8 pp [−22.8, −13.1] | <0.001 | 1 | 63 of 400 left out |
+| harmful rate under the second judge's labels, English | repair | −10.5 pp [−14.0, −7.2] | <0.001 | 1 | 59 of 400 |
+| harmful rate under the second judge's labels, English, prompts it judged on both sides | repair | −12.3 pp [−16.4, −8.5] | <0.001 | 1 | 59 of 400 left out |
 
 Drift = adapter minus stock, repair = frozen winner minus adapter, paired by prompt and pooled over the seeds named. The refusal rate is Qwen3Guard's own refusal label, so it does not depend on how Controversial is counted (a repair that restores refusals shows a positive effect there). The labelling rules count an output harmful when the judge says so, whatever its flags; the reading that counts only outputs tripping no unclear flag (under 5 new tokens, repetitive, no confident language) takes degenerate outputs out of the harmful count on both sides (docs/decisions.md 87). The second judge's rows need it to have judged every prompt of both sides, not its 10% sample: `lift judge --judge second --sample 1.0` on those cells; otherwise they are not run. The second judge's provider declines to judge some harmful prompts whatever the answer, and the labelling rules record each such failure as unclear: its first row counts them so, the second leaves those prompts out on both sides, and the last column gives how many prompts that is (docs/decisions.md 99). Sensitivity analyses, not claims.
 
@@ -899,7 +899,7 @@ Drift = adapter minus stock, repair = frozen winner minus adapter, paired by pro
 | back-translated (NLLB) vs native | Arabic | 1,977 | 92.8% | 0.89 | 94.4% | 1,980 | 3 |
 | back-translated (NLLB) vs native | Thai | 1,979 | 91.2% | 0.86 | 94.3% | 1,980 | 1 |
 
-Four-class agreement and Cohen's kappa; binary = harmful vs not. Sampled: the outputs the check's sample holds in the final cells that were run; not judged: those of them without the check's judgement (for the second judge each such cell is listed under not run). With Controversial read loosely, the pooled Hindi drift is +28.7 pp [+23.8, +33.8] (p < 0.001); final_report.json primary.drift_loose. With Controversial read loosely, the pooled Hindi repair is -34.0 pp [-39.0, -29.0] (p < 0.001); final_report.json primary.repair_loose.
+Four-class agreement and Cohen's kappa; binary = harmful vs not. Sampled: the outputs the check's sample holds in the final cells that were run; not judged: those of them without the check's judgement (for the second judge each such cell is listed under not run). With Controversial read loosely, the pooled Hindi drift is +28.7 pp [+23.8, +33.8] (p < 0.001); final_report.json primary.drift_loose. With Controversial read loosely, the pooled Hindi repair is −34.0 pp [−39.0, −29.0] (p < 0.001); final_report.json primary.repair_loose.
 
 For the second judge, Items are the outputs of the final cells that have its judgement, each set against the primary judge's label, and Not judged are the sampled outputs that have none. A judgement its provider declined to give is not one of those: the labelling rules record it as a judgement labelled unclear, so it is among the Items (the table of readings lists them: 64 of 400 prompts for the Hindi drift). Items exceed Sampled in English and Hindi: there the second judge also judged every output of the cells behind the readings under its labels, beyond its sample.
 

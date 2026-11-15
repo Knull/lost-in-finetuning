@@ -114,7 +114,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/0/refusal_harmful",
-   "shown": "-30.5 pp [-35.8, -25.5]",
+   "shown": "−30.5 pp [−35.8, −25.5]",
    "value": {
     "est": -0.305,
     "hi": -0.255,
@@ -124,7 +124,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/0/overrefusal",
-   "shown": "-23.0 pp [-29.0, -17.5]",
+   "shown": "−23.0 pp [−29.0, −17.5]",
    "value": {
     "est": -0.23,
     "hi": -0.175,
@@ -160,13 +160,13 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/0/heldout",
-   "shown": "-0.163 [-0.233, -0.110] (seed 1)",
+   "shown": "−0.163 [−0.233, −0.110] (seed 1)",
    "value": "-0.163 [-0.233, -0.110] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/0/belebele_hi",
-   "shown": "-4.0 pp [-6.9, -1.1]",
+   "shown": "−4.0 pp [−6.9, −1.1]",
    "value": {
     "est": -0.04,
     "hi": -0.011428571428571429,
@@ -206,7 +206,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/1/drift",
-   "shown": "-8.7 pp [-12.2, -5.2]",
+   "shown": "−8.7 pp [−12.2, −5.2]",
    "value": {
     "est": -0.08666666666666667,
     "hi": -0.051645833333333634,
@@ -222,7 +222,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/1/drift_intact",
-   "shown": "-9.2 pp [-12.8, -5.8]",
+   "shown": "−9.2 pp [−12.8, −5.8]",
    "value": {
     "est": -0.0925,
     "hi": -0.058333333333333334,
@@ -278,13 +278,13 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/1/heldout",
-   "shown": "-0.308 [-0.377, -0.253] (seeds 1, 2, 3)",
+   "shown": "−0.308 [−0.377, −0.253] (seeds 1, 2, 3)",
    "value": "-0.308 [-0.377, -0.253] (seeds 1, 2, 3)"
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/1/belebele_hi",
-   "shown": "-0.5 pp [-2.0, +1.0]",
+   "shown": "−0.5 pp [−2.0, +1.0]",
    "value": {
     "est": -0.005238095238095238,
     "hi": 0.009523809523809525,
@@ -340,7 +340,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/2/drift_intact",
-   "shown": "+3.4 pp [-0.3, +7.2]",
+   "shown": "+3.4 pp [−0.3, +7.2]",
    "value": {
     "est": 0.034166666666666665,
     "hi": 0.0725,
@@ -350,7 +350,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/2/refusal_harmful",
-   "shown": "-19.2 pp [-23.5, -14.9]",
+   "shown": "−19.2 pp [−23.5, −14.9]",
    "value": {
     "est": -0.19166666666666668,
     "hi": -0.14916666666666667,
@@ -360,7 +360,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/2/overrefusal",
-   "shown": "-17.8 pp [-23.3, -12.7]",
+   "shown": "−17.8 pp [−23.3, −12.7]",
    "value": {
     "est": -0.17833333333333334,
     "hi": -0.12666666666666668,
@@ -396,13 +396,13 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/2/heldout",
-   "shown": "-0.307 [-0.380, -0.249] (seeds 1, 2, 3)",
+   "shown": "−0.307 [−0.380, −0.249] (seeds 1, 2, 3)",
    "value": "-0.307 [-0.380, -0.249] (seeds 1, 2, 3)"
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapters/rows/2/belebele_hi",
-   "shown": "-0.7 pp [-2.9, +1.5]",
+   "shown": "−0.7 pp [−2.9, +1.5]",
    "value": {
     "est": -0.006666666666666667,
     "hi": 0.015238095238095238,
@@ -466,7 +466,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/1/reason",
-   "shown": "Gate 2 failed on dev, so the stress recipe carries the repair comparison and the standard recipe gets retain with its interval (pre-registration, Gate 2): final pooled Hindi drift -8.7 pp [-12.2, -5.2]",
+   "shown": "Gate 2 failed on dev, so the stress recipe carries the repair comparison and the standard recipe gets retain with its interval (pre-registration, Gate 2): final pooled Hindi drift −8.7 pp [−12.2, −5.2]",
    "value": "Gate 2 failed on dev, so the stress recipe carries the repair comparison and the standard recipe gets retain with its interval (pre-registration, Gate 2): final pooled Hindi drift -8.7 pp [-12.2, -5.2]"
   },
   {
@@ -545,7 +545,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/primary/repair/per_seed/0",
-   "shown": "-39.2 pp [-44.5, -34.2]",
+   "shown": "−39.2 pp [−44.5, −34.2]",
    "value": {
     "est": -0.3925,
     "hi": -0.3425,
@@ -607,7 +607,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/primary/redteam_repair/per_seed/0",
-   "shown": "-38.2 pp [-41.5, -35.0]",
+   "shown": "−38.2 pp [−41.5, −35.0]",
    "value": {
     "est": -0.3822562979189485,
     "hi": -0.35049288061336253,
@@ -696,7 +696,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/0/repair_effect",
-   "shown": "-39.2 pp [-44.5, -34.2]",
+   "shown": "−39.2 pp [−44.5, −34.2]",
    "value": {
     "est": -0.3925,
     "hi": -0.3425,
@@ -764,7 +764,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/1/repair_effect",
-   "shown": "-21.5 pp [-25.8, -17.5]",
+   "shown": "−21.5 pp [−25.8, −17.5]",
    "value": {
     "est": -0.215,
     "hi": -0.175,
@@ -832,7 +832,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/2/repair_effect",
-   "shown": "-25.5 pp [-30.0, -21.0]",
+   "shown": "−25.5 pp [−30.0, −21.0]",
    "value": {
     "est": -0.255,
     "hi": -0.21,
@@ -900,7 +900,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/3/repair_effect",
-   "shown": "-23.0 pp [-27.3, -18.8]",
+   "shown": "−23.0 pp [−27.3, −18.8]",
    "value": {
     "est": -0.23,
     "hi": -0.1875,
@@ -968,7 +968,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/4/repair_effect",
-   "shown": "-23.2 pp [-28.0, -18.8]",
+   "shown": "−23.2 pp [−28.0, −18.8]",
    "value": {
     "est": -0.2325,
     "hi": -0.1875,
@@ -1036,7 +1036,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/5/repair_effect",
-   "shown": "-29.0 pp [-33.5, -24.5]",
+   "shown": "−29.0 pp [−33.5, −24.5]",
    "value": {
     "est": -0.29,
     "hi": -0.245,
@@ -1104,7 +1104,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/6/repair_effect",
-   "shown": "-38.2 pp [-41.5, -35.0]",
+   "shown": "−38.2 pp [−41.5, −35.0]",
    "value": {
     "est": -0.3822562979189485,
     "hi": -0.35049288061336253,
@@ -1166,7 +1166,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/secondary/rows/1/effect",
-   "shown": "-24.2 pp [-27.9, -20.8]",
+   "shown": "−24.2 pp [−27.9, −20.8]",
    "value": {
     "est": -0.2425,
     "hi": -0.2075,
@@ -1246,7 +1246,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/secondary/rows/3/effect",
-   "shown": "-21.5 pp [-25.8, -17.5]",
+   "shown": "−21.5 pp [−25.8, −17.5]",
    "value": {
     "est": -0.215,
     "hi": -0.175,
@@ -1332,7 +1332,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/exploratory/rows/1/effect",
-   "shown": "-25.5 pp [-30.0, -21.0]",
+   "shown": "−25.5 pp [−30.0, −21.0]",
    "value": {
     "est": -0.255,
     "hi": -0.21,
@@ -1412,7 +1412,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/exploratory/rows/3/effect",
-   "shown": "-23.0 pp [-27.3, -18.8]",
+   "shown": "−23.0 pp [−27.3, −18.8]",
    "value": {
     "est": -0.23,
     "hi": -0.1875,
@@ -1492,7 +1492,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/exploratory/rows/5/effect",
-   "shown": "-23.2 pp [-28.0, -18.8]",
+   "shown": "−23.2 pp [−28.0, −18.8]",
    "value": {
     "est": -0.2325,
     "hi": -0.1875,
@@ -1572,7 +1572,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/exploratory/rows/7/effect",
-   "shown": "-29.0 pp [-33.5, -24.5]",
+   "shown": "−29.0 pp [−33.5, −24.5]",
    "value": {
     "est": -0.29,
     "hi": -0.245,
@@ -1662,7 +1662,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/0/refusal_change",
-   "shown": "-18.5 pp [-22.8, -14.5]",
+   "shown": "−18.5 pp [−22.8, −14.5]",
    "value": {
     "est": -0.185,
     "hi": -0.145,
@@ -1728,7 +1728,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/1/refusal_change",
-   "shown": "-30.5 pp [-35.8, -25.5]",
+   "shown": "−30.5 pp [−35.8, −25.5]",
    "value": {
     "est": -0.305,
     "hi": -0.255,
@@ -1794,7 +1794,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/2/refusal_change",
-   "shown": "-23.2 pp [-27.8, -18.8]",
+   "shown": "−23.2 pp [−27.8, −18.8]",
    "value": {
     "est": -0.2325,
     "hi": -0.1875,
@@ -1860,7 +1860,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/3/refusal_change",
-   "shown": "-13.2 pp [-18.0, -8.8]",
+   "shown": "−13.2 pp [−18.0, −8.8]",
    "value": {
     "est": -0.1325,
     "hi": -0.0875,
@@ -1926,7 +1926,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/4/refusal_change",
-   "shown": "-17.0 pp [-21.5, -12.2]",
+   "shown": "−17.0 pp [−21.5, −12.2]",
    "value": {
     "est": -0.17,
     "hi": -0.1225,
@@ -1992,7 +1992,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/5/refusal_change",
-   "shown": "-27.5 pp [-32.2, -23.0]",
+   "shown": "−27.5 pp [−32.2, −23.0]",
    "value": {
     "est": -0.275,
     "hi": -0.23,
@@ -2058,7 +2058,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/6/refusal_change",
-   "shown": "-32.9 pp [-36.0, -29.6]",
+   "shown": "−32.9 pp [−36.0, −29.6]",
    "value": {
     "est": -0.32858707557502737,
     "hi": -0.29572836801752467,
@@ -2104,7 +2104,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/7/drift",
-   "shown": "-5.5 pp [-7.8, -3.4]",
+   "shown": "−5.5 pp [−7.8, −3.4]",
    "value": {
     "est": -0.055,
     "hi": -0.034166666666666665,
@@ -2114,7 +2114,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/7/drift_intact",
-   "shown": "-4.5 pp [-6.8, -2.4]",
+   "shown": "−4.5 pp [−6.8, −2.4]",
    "value": {
     "est": -0.045,
     "hi": -0.024166666666666666,
@@ -2170,7 +2170,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/8/drift",
-   "shown": "-8.7 pp [-12.2, -5.2]",
+   "shown": "−8.7 pp [−12.2, −5.2]",
    "value": {
     "est": -0.08666666666666667,
     "hi": -0.051645833333333634,
@@ -2180,7 +2180,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/8/drift_intact",
-   "shown": "-9.2 pp [-12.8, -5.8]",
+   "shown": "−9.2 pp [−12.8, −5.8]",
    "value": {
     "est": -0.0925,
     "hi": -0.058333333333333334,
@@ -2236,7 +2236,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/9/drift",
-   "shown": "-4.4 pp [-6.8, -2.2]",
+   "shown": "−4.4 pp [−6.8, −2.2]",
    "value": {
     "est": -0.04416666666666667,
     "hi": -0.021666666666666667,
@@ -2246,7 +2246,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/9/drift_intact",
-   "shown": "-4.6 pp [-6.9, -2.3]",
+   "shown": "−4.6 pp [−6.9, −2.3]",
    "value": {
     "est": -0.04583333333333333,
     "hi": -0.023333333333333334,
@@ -2302,7 +2302,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/10/drift",
-   "shown": "-9.0 pp [-12.0, -6.2]",
+   "shown": "−9.0 pp [−12.0, −6.2]",
    "value": {
     "est": -0.09,
     "hi": -0.06166666666666667,
@@ -2312,7 +2312,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/10/drift_intact",
-   "shown": "-5.4 pp [-8.1, -3.0]",
+   "shown": "−5.4 pp [−8.1, −3.0]",
    "value": {
     "est": -0.05416666666666667,
     "hi": -0.03,
@@ -2368,7 +2368,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/11/drift",
-   "shown": "-7.5 pp [-10.5, -4.7]",
+   "shown": "−7.5 pp [−10.5, −4.7]",
    "value": {
     "est": -0.075,
     "hi": -0.04666666666666667,
@@ -2378,7 +2378,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/11/drift_intact",
-   "shown": "-7.6 pp [-10.6, -4.8]",
+   "shown": "−7.6 pp [−10.6, −4.8]",
    "value": {
     "est": -0.07583333333333334,
     "hi": -0.04833333333333333,
@@ -2434,7 +2434,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/12/drift",
-   "shown": "-1.3 pp [-3.3, +0.6]",
+   "shown": "−1.3 pp [−3.3, +0.6]",
    "value": {
     "est": -0.013333333333333334,
     "hi": 0.005833333333333334,
@@ -2444,7 +2444,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/12/drift_intact",
-   "shown": "-1.5 pp [-3.5, +0.4]",
+   "shown": "−1.5 pp [−3.5, +0.4]",
    "value": {
     "est": -0.015,
     "hi": 0.004166666666666667,
@@ -2454,7 +2454,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/12/refusal_change",
-   "shown": "+1.8 pp [-0.4, +4.0]",
+   "shown": "+1.8 pp [−0.4, +4.0]",
    "value": {
     "est": 0.0175,
     "hi": 0.04,
@@ -2520,7 +2520,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/13/refusal_change",
-   "shown": "+1.9 pp [-0.5, +4.2]",
+   "shown": "+1.9 pp [−0.5, +4.2]",
    "value": {
     "est": 0.018619934282584884,
     "hi": 0.04235122307411464,
@@ -2586,7 +2586,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/14/refusal_change",
-   "shown": "-14.0 pp [-17.7, -10.6]",
+   "shown": "−14.0 pp [−17.7, −10.6]",
    "value": {
     "est": -0.14,
     "hi": -0.10583333333333333,
@@ -2642,7 +2642,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/15/drift_intact",
-   "shown": "+3.4 pp [-0.3, +7.2]",
+   "shown": "+3.4 pp [−0.3, +7.2]",
    "value": {
     "est": 0.034166666666666665,
     "hi": 0.0725,
@@ -2652,7 +2652,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/15/refusal_change",
-   "shown": "-19.2 pp [-23.5, -14.9]",
+   "shown": "−19.2 pp [−23.5, −14.9]",
    "value": {
     "est": -0.19166666666666668,
     "hi": -0.14916666666666667,
@@ -2718,7 +2718,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/16/refusal_change",
-   "shown": "-18.1 pp [-22.0, -14.2]",
+   "shown": "−18.1 pp [−22.0, −14.2]",
    "value": {
     "est": -0.18083333333333335,
     "hi": -0.1425,
@@ -2784,7 +2784,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/17/refusal_change",
-   "shown": "-6.9 pp [-10.8, -3.1]",
+   "shown": "−6.9 pp [−10.8, −3.1]",
    "value": {
     "est": -0.06916666666666667,
     "hi": -0.030833333333333334,
@@ -2840,7 +2840,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/18/drift_intact",
-   "shown": "+1.5 pp [-1.9, +4.9]",
+   "shown": "+1.5 pp [−1.9, +4.9]",
    "value": {
     "est": 0.015,
     "hi": 0.049166666666666664,
@@ -2850,7 +2850,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/18/refusal_change",
-   "shown": "-9.9 pp [-13.8, -6.0]",
+   "shown": "−9.9 pp [−13.8, −6.0]",
    "value": {
     "est": -0.09916666666666667,
     "hi": -0.06,
@@ -2916,7 +2916,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/19/refusal_change",
-   "shown": "-12.6 pp [-16.1, -9.2]",
+   "shown": "−12.6 pp [−16.1, −9.2]",
    "value": {
     "est": -0.12583333333333332,
     "hi": -0.0925,
@@ -2982,7 +2982,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/20/refusal_change",
-   "shown": "-27.4 pp [-30.4, -24.4]",
+   "shown": "−27.4 pp [−30.4, −24.4]",
    "value": {
     "est": -0.2738225629791895,
     "hi": -0.2438846294267981,
@@ -3034,7 +3034,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/0/effect",
-   "shown": "-39.2 pp [-44.5, -34.2]",
+   "shown": "−39.2 pp [−44.5, −34.2]",
    "value": {
     "est": -0.3925,
     "hi": -0.3425,
@@ -3050,7 +3050,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/0/vs_stock",
-   "shown": "-7.8 pp [-11.2, -4.2]",
+   "shown": "−7.8 pp [−11.2, −4.2]",
    "value": {
     "est": -0.0775,
     "hi": -0.0425,
@@ -3072,7 +3072,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/0/overrefusal_change",
-   "shown": "+3.5 pp [-0.5, +8.0]",
+   "shown": "+3.5 pp [−0.5, +8.0]",
    "value": {
     "est": 0.035,
     "hi": 0.08,
@@ -3082,7 +3082,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/0/belebele_change",
-   "shown": "-0.3 pp [-2.0, +1.3]",
+   "shown": "−0.3 pp [−2.0, +1.3]",
    "value": {
     "est": -0.002857142857142857,
     "hi": 0.012857142857142857,
@@ -3122,7 +3122,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/1/effect",
-   "shown": "-10.5 pp [-14.5, -6.5]",
+   "shown": "−10.5 pp [−14.5, −6.5]",
    "value": {
     "est": -0.105,
     "hi": -0.065,
@@ -3154,13 +3154,13 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/1/heldout_kept",
-   "shown": "25.9% [-13.1, 49.6] (seed 1)",
+   "shown": "25.9% [−13.1, 49.6] (seed 1)",
    "value": "25.9% [-13.1, 49.6] (seed 1)"
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/1/overrefusal_change",
-   "shown": "-18.5 pp [-24.0, -13.0]",
+   "shown": "−18.5 pp [−24.0, −13.0]",
    "value": {
     "est": -0.185,
     "hi": -0.13,
@@ -3170,7 +3170,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/1/belebele_change",
-   "shown": "-4.4 pp [-7.3, -1.6]",
+   "shown": "−4.4 pp [−7.3, −1.6]",
    "value": {
     "est": -0.04428571428571428,
     "hi": -0.015714285714285715,
@@ -3210,7 +3210,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/2/effect",
-   "shown": "-20.0 pp [-24.0, -16.0]",
+   "shown": "−20.0 pp [−24.0, −16.0]",
    "value": {
     "est": -0.2,
     "hi": -0.16,
@@ -3248,7 +3248,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/2/overrefusal_change",
-   "shown": "-8.0 pp [-13.5, -2.5]",
+   "shown": "−8.0 pp [−13.5, −2.5]",
    "value": {
     "est": -0.08,
     "hi": -0.025,
@@ -3258,7 +3258,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/2/belebele_change",
-   "shown": "-4.0 pp [-6.9, -1.1]",
+   "shown": "−4.0 pp [−6.9, −1.1]",
    "value": {
     "est": -0.04,
     "hi": -0.011428571428571429,
@@ -3322,7 +3322,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/1/vs_stock",
-   "shown": "-0.163 [-0.233, -0.110] (seed 1)",
+   "shown": "−0.163 [−0.233, −0.110] (seed 1)",
    "value": "-0.163 [-0.233, -0.110] (seed 1)"
   },
   {
@@ -3352,7 +3352,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/2/vs_stock",
-   "shown": "-0.306 [-0.375, -0.251] (seed 1)",
+   "shown": "−0.306 [−0.375, −0.251] (seed 1)",
    "value": "-0.306 [-0.375, -0.251] (seed 1)"
   },
   {
@@ -3382,7 +3382,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/3/vs_stock",
-   "shown": "-0.308 [-0.378, -0.253] (seed 2)",
+   "shown": "−0.308 [−0.378, −0.253] (seed 2)",
    "value": "-0.308 [-0.378, -0.253] (seed 2)"
   },
   {
@@ -3412,7 +3412,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/4/vs_stock",
-   "shown": "-0.309 [-0.378, -0.254] (seed 3)",
+   "shown": "−0.309 [−0.378, −0.254] (seed 3)",
    "value": "-0.309 [-0.378, -0.254] (seed 3)"
   },
   {
@@ -3442,7 +3442,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/5/vs_stock",
-   "shown": "-0.318 [-0.389, -0.263] (seed 1)",
+   "shown": "−0.318 [−0.389, −0.263] (seed 1)",
    "value": "-0.318 [-0.389, -0.263] (seed 1)"
   },
   {
@@ -3472,7 +3472,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/6/vs_stock",
-   "shown": "-0.042 [-0.114, +0.014] (seed 1)",
+   "shown": "−0.042 [−0.114, +0.014] (seed 1)",
    "value": "-0.042 [-0.114, +0.014] (seed 1)"
   },
   {
@@ -3484,7 +3484,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/6/gain_kept",
-   "shown": "25.9% [-13.1, 49.6] (seed 1)",
+   "shown": "25.9% [−13.1, 49.6] (seed 1)",
    "value": "25.9% [-13.1, 49.6] (seed 1)"
   },
   {
@@ -3502,7 +3502,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/7/vs_stock",
-   "shown": "-0.158 [-0.228, -0.105] (seed 1)",
+   "shown": "−0.158 [−0.228, −0.105] (seed 1)",
    "value": "-0.158 [-0.228, -0.105] (seed 1)"
   },
   {
@@ -3532,7 +3532,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/8/vs_stock",
-   "shown": "-0.308 [-0.380, -0.250] (seed 1)",
+   "shown": "−0.308 [−0.380, −0.250] (seed 1)",
    "value": "-0.308 [-0.380, -0.250] (seed 1)"
   },
   {
@@ -3562,7 +3562,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/9/vs_stock",
-   "shown": "-0.307 [-0.380, -0.250] (seed 2)",
+   "shown": "−0.307 [−0.380, −0.250] (seed 2)",
    "value": "-0.307 [-0.380, -0.250] (seed 2)"
   },
   {
@@ -3592,7 +3592,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/heldout/rows/10/vs_stock",
-   "shown": "-0.306 [-0.379, -0.249] (seed 3)",
+   "shown": "−0.306 [−0.379, −0.249] (seed 3)",
    "value": "-0.306 [-0.379, -0.249] (seed 3)"
   },
   {
@@ -3640,7 +3640,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/0/change",
-   "shown": "-7.8 pp [-11.2, -4.2]",
+   "shown": "−7.8 pp [−11.2, −4.2]",
    "value": {
     "est": -0.0775,
     "hi": -0.0425,
@@ -3650,7 +3650,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/0/change_intact",
-   "shown": "-8.5 pp [-12.0, -5.0]",
+   "shown": "−8.5 pp [−12.0, −5.0]",
    "value": {
     "est": -0.085,
     "hi": -0.05,
@@ -3694,7 +3694,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/1/change",
-   "shown": "-3.5 pp [-5.8, -1.5]",
+   "shown": "−3.5 pp [−5.8, −1.5]",
    "value": {
     "est": -0.035,
     "hi": -0.015,
@@ -3704,7 +3704,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/1/change_intact",
-   "shown": "-2.8 pp [-4.8, -0.8]",
+   "shown": "−2.8 pp [−4.8, −0.8]",
    "value": {
     "est": -0.0275,
     "hi": -0.0075,
@@ -3748,7 +3748,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/2/change",
-   "shown": "-2.2 pp [-4.5, +0.0]",
+   "shown": "−2.2 pp [−4.5, +0.0]",
    "value": {
     "est": -0.0225,
     "hi": 0.0,
@@ -3758,7 +3758,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/2/change_intact",
-   "shown": "-2.8 pp [-5.2, -0.2]",
+   "shown": "−2.8 pp [−5.2, −0.2]",
    "value": {
     "est": -0.0275,
     "hi": -0.0025,
@@ -3802,7 +3802,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/3/change",
-   "shown": "-6.5 pp [-9.5, -3.5]",
+   "shown": "−6.5 pp [−9.5, −3.5]",
    "value": {
     "est": -0.065,
     "hi": -0.035,
@@ -3812,7 +3812,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/3/change_intact",
-   "shown": "-3.0 pp [-5.8, -0.5]",
+   "shown": "−3.0 pp [−5.8, −0.5]",
    "value": {
     "est": -0.03,
     "hi": -0.005,
@@ -3856,7 +3856,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/4/change",
-   "shown": "-4.2 pp [-7.5, -1.0]",
+   "shown": "−4.2 pp [−7.5, −1.0]",
    "value": {
     "est": -0.0425,
     "hi": -0.01,
@@ -3866,7 +3866,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/4/change_intact",
-   "shown": "-4.2 pp [-7.5, -1.0]",
+   "shown": "−4.2 pp [−7.5, −1.0]",
    "value": {
     "est": -0.0425,
     "hi": -0.01,
@@ -3910,7 +3910,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/5/change",
-   "shown": "-2.0 pp [-3.8, -0.2]",
+   "shown": "−2.0 pp [−3.8, −0.2]",
    "value": {
     "est": -0.02,
     "hi": -0.0025,
@@ -3920,7 +3920,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/5/change_intact",
-   "shown": "-2.0 pp [-3.8, -0.2]",
+   "shown": "−2.0 pp [−3.8, −0.2]",
    "value": {
     "est": -0.02,
     "hi": -0.0025,
@@ -3964,7 +3964,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/6/change",
-   "shown": "+0.4 pp [-1.5, +2.4]",
+   "shown": "+0.4 pp [−1.5, +2.4]",
    "value": {
     "est": 0.004381161007667032,
     "hi": 0.024096385542168676,
@@ -3974,7 +3974,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/6/change_intact",
-   "shown": "-0.7 pp [-2.7, +1.3]",
+   "shown": "−0.7 pp [−2.7, +1.3]",
    "value": {
     "est": -0.0065717415115005475,
     "hi": 0.013143483023001095,
@@ -4052,7 +4052,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_wiseft/rows/0/overrefusal",
-   "shown": "-22.0 pp [-28.0, -16.5]",
+   "shown": "−22.0 pp [−28.0, −16.5]",
    "value": {
     "est": -0.22,
     "hi": -0.165,
@@ -4102,7 +4102,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_wiseft/rows/1/overrefusal",
-   "shown": "-11.5 pp [-17.5, -5.5]",
+   "shown": "−11.5 pp [−17.5, −5.5]",
    "value": {
     "est": -0.115,
     "hi": -0.055,
@@ -4160,7 +4160,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/0/adapter_change",
-   "shown": "+0.0 pp [-1.0, +1.0]",
+   "shown": "+0.0 pp [−1.0, +1.0]",
    "value": {
     "est": 0.0,
     "hi": 0.01,
@@ -4170,7 +4170,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/0/repair_change",
-   "shown": "+0.0 pp [-1.0, +1.0]",
+   "shown": "+0.0 pp [−1.0, +1.0]",
    "value": {
     "est": 0.0,
     "hi": 0.01,
@@ -4210,7 +4210,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/1/adapter_change",
-   "shown": "-0.3 pp [-1.3, +0.7]",
+   "shown": "−0.3 pp [−1.3, +0.7]",
    "value": {
     "est": -0.0033333333333333335,
     "hi": 0.006666666666666667,
@@ -4260,7 +4260,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/2/adapter_change",
-   "shown": "+0.3 pp [-1.0, +2.0]",
+   "shown": "+0.3 pp [−1.0, +2.0]",
    "value": {
     "est": 0.0033333333333333335,
     "hi": 0.02,
@@ -4270,7 +4270,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/2/repair_change",
-   "shown": "-0.3 pp [-1.0, +0.0]",
+   "shown": "−0.3 pp [−1.0, +0.0]",
    "value": {
     "est": -0.0033333333333333335,
     "hi": 0.0,
@@ -4310,7 +4310,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/3/adapter_change",
-   "shown": "-0.7 pp [-1.7, +0.0]",
+   "shown": "−0.7 pp [−1.7, +0.0]",
    "value": {
     "est": -0.006666666666666667,
     "hi": 0.0,
@@ -4320,7 +4320,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/3/repair_change",
-   "shown": "-0.3 pp [-1.0, +0.0]",
+   "shown": "−0.3 pp [−1.0, +0.0]",
    "value": {
     "est": -0.0033333333333333335,
     "hi": 0.0,
@@ -4360,7 +4360,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/4/adapter_change",
-   "shown": "+0.0 pp [-1.3, +1.3]",
+   "shown": "+0.0 pp [−1.3, +1.3]",
    "value": {
     "est": 0.0,
     "hi": 0.013333333333333334,
@@ -4370,7 +4370,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/4/repair_change",
-   "shown": "+0.0 pp [-1.0, +1.0]",
+   "shown": "+0.0 pp [−1.0, +1.0]",
    "value": {
     "est": 0.0,
     "hi": 0.01,
@@ -4410,7 +4410,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/5/adapter_change",
-   "shown": "+0.0 pp [-1.3, +1.3]",
+   "shown": "+0.0 pp [−1.3, +1.3]",
    "value": {
     "est": 0.0,
     "hi": 0.013333333333333334,
@@ -4460,7 +4460,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/6/adapter_change",
-   "shown": "-39.5 pp [-46.5, -32.5]",
+   "shown": "−39.5 pp [−46.5, −32.5]",
    "value": {
     "est": -0.395,
     "hi": -0.325,
@@ -4470,7 +4470,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/6/repair_change",
-   "shown": "-5.0 pp [-10.5, +0.0]",
+   "shown": "−5.0 pp [−10.5, +0.0]",
    "value": {
     "est": -0.05,
     "hi": 0.000124999999998181,
@@ -4510,7 +4510,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/7/adapter_change",
-   "shown": "-23.0 pp [-29.0, -17.5]",
+   "shown": "−23.0 pp [−29.0, −17.5]",
    "value": {
     "est": -0.23,
     "hi": -0.175,
@@ -4520,7 +4520,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/7/repair_change",
-   "shown": "+3.5 pp [-0.5, +8.0]",
+   "shown": "+3.5 pp [−0.5, +8.0]",
    "value": {
     "est": 0.035,
     "hi": 0.08,
@@ -4560,7 +4560,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/8/adapter_change",
-   "shown": "-29.5 pp [-36.5, -23.0]",
+   "shown": "−29.5 pp [−36.5, −23.0]",
    "value": {
     "est": -0.295,
     "hi": -0.23,
@@ -4570,7 +4570,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/8/repair_change",
-   "shown": "-2.5 pp [-7.0, +2.0]",
+   "shown": "−2.5 pp [−7.0, +2.0]",
    "value": {
     "est": -0.025,
     "hi": 0.02,
@@ -4610,7 +4610,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/9/adapter_change",
-   "shown": "-21.0 pp [-27.5, -14.5]",
+   "shown": "−21.0 pp [−27.5, −14.5]",
    "value": {
     "est": -0.21,
     "hi": -0.145,
@@ -4620,7 +4620,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/9/repair_change",
-   "shown": "+0.0 pp [-5.5, +5.5]",
+   "shown": "+0.0 pp [−5.5, +5.5]",
    "value": {
     "est": 0.0,
     "hi": 0.055,
@@ -4660,7 +4660,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/10/adapter_change",
-   "shown": "-20.5 pp [-26.5, -15.0]",
+   "shown": "−20.5 pp [−26.5, −15.0]",
    "value": {
     "est": -0.205,
     "hi": -0.15,
@@ -4670,7 +4670,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/10/repair_change",
-   "shown": "-1.5 pp [-7.0, +4.0]",
+   "shown": "−1.5 pp [−7.0, +4.0]",
    "value": {
     "est": -0.015,
     "hi": 0.04,
@@ -4710,7 +4710,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/11/adapter_change",
-   "shown": "-44.0 pp [-51.0, -36.5]",
+   "shown": "−44.0 pp [−51.0, −36.5]",
    "value": {
     "est": -0.44,
     "hi": -0.365,
@@ -4720,7 +4720,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/overrefusal/rows/11/repair_change",
-   "shown": "-9.0 pp [-14.5, -3.5]",
+   "shown": "−9.0 pp [−14.5, −3.5]",
    "value": {
     "est": -0.09,
     "hi": -0.035,
@@ -4932,7 +4932,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/belebele/rows/0/repair_change",
-   "shown": "+0.0 pp [-1.0, +1.0]",
+   "shown": "+0.0 pp [−1.0, +1.0]",
    "value": {
     "est": 0.0,
     "hi": 0.01,
@@ -4978,7 +4978,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/belebele/rows/1/repair_change",
-   "shown": "-0.3 pp [-2.0, +1.3]",
+   "shown": "−0.3 pp [−2.0, +1.3]",
    "value": {
     "est": -0.002857142857142857,
     "hi": 0.012857142857142857,
@@ -5024,7 +5024,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/belebele/rows/2/repair_change",
-   "shown": "-1.0 pp [-2.4, +0.4]",
+   "shown": "−1.0 pp [−2.4, +0.4]",
    "value": {
     "est": -0.01,
     "hi": 0.004285714285714286,
@@ -5070,7 +5070,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/belebele/rows/3/repair_change",
-   "shown": "-0.9 pp [-2.1, +0.4]",
+   "shown": "−0.9 pp [−2.1, +0.4]",
    "value": {
     "est": -0.008571428571428572,
     "hi": 0.004285714285714286,
@@ -5116,7 +5116,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/belebele/rows/4/repair_change",
-   "shown": "-0.9 pp [-2.1, +0.4]",
+   "shown": "−0.9 pp [−2.1, +0.4]",
    "value": {
     "est": -0.008571428571428572,
     "hi": 0.004285714285714286,
@@ -5162,7 +5162,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/belebele/rows/5/repair_change",
-   "shown": "-1.1 pp [-2.6, +0.3]",
+   "shown": "−1.1 pp [−2.6, +0.3]",
    "value": {
     "est": -0.011428571428571429,
     "hi": 0.002857142857142857,
@@ -5560,55 +5560,55 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/1/axes/heldout/est",
-   "shown": "-0.308",
+   "shown": "−0.308",
    "value": -0.3075104554578636
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/1/axes/heldout/lo",
-   "shown": "-0.377",
+   "shown": "−0.377",
    "value": -0.37731765330039946
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/1/axes/heldout/hi",
-   "shown": "-0.253",
+   "shown": "−0.253",
    "value": -0.2527564348850672
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/2/axes/heldout/est",
-   "shown": "-0.307",
+   "shown": "−0.307",
    "value": -0.3069076601293834
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/2/axes/heldout/lo",
-   "shown": "-0.380",
+   "shown": "−0.380",
    "value": -0.37963766508270225
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/2/axes/heldout/hi",
-   "shown": "-0.249",
+   "shown": "−0.249",
    "value": -0.24949773663070346
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/0/axes/heldout/est",
-   "shown": "-0.163",
+   "shown": "−0.163",
    "value": -0.16344718264693858
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/0/axes/heldout/lo",
-   "shown": "-0.233",
+   "shown": "−0.233",
    "value": -0.23257063411147008
   },
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/0/axes/heldout/hi",
-   "shown": "-0.110",
+   "shown": "−0.110",
    "value": -0.10966908387653755
   },
   {
@@ -5660,7 +5660,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/1/axes/drift",
-   "shown": "-8.7 pp [-12.2, -5.2]",
+   "shown": "−8.7 pp [−12.2, −5.2]",
    "value": {
     "est": -0.08666666666666667,
     "hi": -0.051645833333333634,
@@ -5709,7 +5709,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/1/axes/drift_intact",
-   "shown": "-9.2 pp [-12.8, -5.8]",
+   "shown": "−9.2 pp [−12.8, −5.8]",
    "value": {
     "est": -0.0925,
     "hi": -0.058333333333333334,
@@ -5725,7 +5725,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/2/axes/drift_intact",
-   "shown": "+3.4 pp [-0.3, +7.2]",
+   "shown": "+3.4 pp [−0.3, +7.2]",
    "value": {
     "est": 0.034166666666666665,
     "hi": 0.0725,
@@ -5771,7 +5771,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/2/axes/refusal_harmful",
-   "shown": "-19.2 pp [-23.5, -14.9]",
+   "shown": "−19.2 pp [−23.5, −14.9]",
    "value": {
     "est": -0.19166666666666668,
     "hi": -0.14916666666666667,
@@ -5787,7 +5787,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/0/axes/refusal_harmful",
-   "shown": "-30.5 pp [-35.8, -25.5]",
+   "shown": "−30.5 pp [−35.8, −25.5]",
    "value": {
     "est": -0.305,
     "hi": -0.255,
@@ -5818,7 +5818,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/2/axes/overrefusal_hard_hi",
-   "shown": "-17.8 pp [-23.3, -12.7]",
+   "shown": "−17.8 pp [−23.3, −12.7]",
    "value": {
     "est": -0.17833333333333334,
     "exceeds": false,
@@ -5835,7 +5835,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/0/axes/overrefusal_hard_hi",
-   "shown": "-23.0 pp [-29.0, -17.5]",
+   "shown": "−23.0 pp [−29.0, −17.5]",
    "value": {
     "est": -0.23,
     "exceeds": false,
@@ -5850,7 +5850,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/1/axes/belebele_hi",
-   "shown": "-0.5 pp [-2.0, +1.0]",
+   "shown": "−0.5 pp [−2.0, +1.0]",
    "value": {
     "est": -0.005238095238095238,
     "hi": 0.009523809523809525,
@@ -5866,7 +5866,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/2/axes/belebele_hi",
-   "shown": "-0.7 pp [-2.9, +1.5]",
+   "shown": "−0.7 pp [−2.9, +1.5]",
    "value": {
     "est": -0.006666666666666667,
     "hi": 0.015238095238095238,
@@ -5882,7 +5882,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/0/axes/belebele_hi",
-   "shown": "-4.0 pp [-6.9, -1.1]",
+   "shown": "−4.0 pp [−6.9, −1.1]",
    "value": {
     "est": -0.04,
     "hi": -0.011428571428571429,
@@ -5996,7 +5996,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/0/repair_effect",
-   "shown": "-39.2 pp [-44.5, -34.2]",
+   "shown": "−39.2 pp [−44.5, −34.2]",
    "value": {
     "est": -0.3925,
     "hi": -0.3425,
@@ -6046,7 +6046,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/1/repair_effect",
-   "shown": "-21.5 pp [-25.8, -17.5]",
+   "shown": "−21.5 pp [−25.8, −17.5]",
    "value": {
     "est": -0.215,
     "hi": -0.175,
@@ -6096,7 +6096,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/2/repair_effect",
-   "shown": "-25.5 pp [-30.0, -21.0]",
+   "shown": "−25.5 pp [−30.0, −21.0]",
    "value": {
     "est": -0.255,
     "hi": -0.21,
@@ -6146,7 +6146,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/3/repair_effect",
-   "shown": "-23.0 pp [-27.3, -18.8]",
+   "shown": "−23.0 pp [−27.3, −18.8]",
    "value": {
     "est": -0.23,
     "hi": -0.1875,
@@ -6196,7 +6196,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/4/repair_effect",
-   "shown": "-23.2 pp [-28.0, -18.8]",
+   "shown": "−23.2 pp [−28.0, −18.8]",
    "value": {
     "est": -0.2325,
     "hi": -0.1875,
@@ -6246,7 +6246,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/5/repair_effect",
-   "shown": "-29.0 pp [-33.5, -24.5]",
+   "shown": "−29.0 pp [−33.5, −24.5]",
    "value": {
     "est": -0.29,
     "hi": -0.245,
@@ -6296,7 +6296,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/6/repair_effect",
-   "shown": "-38.2 pp [-41.5, -35.0]",
+   "shown": "−38.2 pp [−41.5, −35.0]",
    "value": {
     "est": -0.3822562979189485,
     "hi": -0.35049288061336253,
@@ -6354,7 +6354,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/headline/overrefusal_hard_hi_change",
-   "shown": "+3.5 pp [-0.5, +8.0]",
+   "shown": "+3.5 pp [−0.5, +8.0]",
    "value": {
     "est": 0.035,
     "hi": 0.08,
@@ -6364,7 +6364,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/headline/belebele_hi_change",
-   "shown": "-0.3 pp [-2.0, +1.3]",
+   "shown": "−0.3 pp [−2.0, +1.3]",
    "value": {
     "est": -0.002857142857142857,
     "hi": 0.012857142857142857,
@@ -6374,7 +6374,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/0/axes/belebele_hi",
-   "shown": "-4.0 pp [-6.9, -1.1]",
+   "shown": "−4.0 pp [−6.9, −1.1]",
    "value": {
     "est": -0.04,
     "hi": -0.011428571428571429,
@@ -6388,7 +6388,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/1/effect",
-   "shown": "-10.5 pp [-14.5, -6.5]",
+   "shown": "−10.5 pp [−14.5, −6.5]",
    "value": {
     "est": -0.105,
     "hi": -0.065,
@@ -6440,7 +6440,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_comparison/rows/2/effect",
-   "shown": "-20.0 pp [-24.0, -16.0]",
+   "shown": "−20.0 pp [−24.0, −16.0]",
    "value": {
     "est": -0.2,
     "hi": -0.16,
@@ -6502,7 +6502,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/0/change",
-   "shown": "-7.8 pp [-11.2, -4.2]",
+   "shown": "−7.8 pp [−11.2, −4.2]",
    "value": {
     "est": -0.0775,
     "hi": -0.0425,
@@ -6512,7 +6512,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/6/change",
-   "shown": "+0.4 pp [-1.5, +2.4]",
+   "shown": "+0.4 pp [−1.5, +2.4]",
    "value": {
     "est": 0.004381161007667032,
     "hi": 0.024096385542168676,
@@ -6534,7 +6534,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/0/axes/belebele_hi",
-   "shown": "-4.0 pp [-6.9, -1.1]",
+   "shown": "−4.0 pp [−6.9, −1.1]",
    "value": {
     "est": -0.04,
     "hi": -0.011428571428571429,
@@ -6623,7 +6623,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/primary/repair/pooled",
-   "shown": "-39.2 pp [-44.5, -34.2]",
+   "shown": "−39.2 pp [−44.5, −34.2]",
    "value": {
     "est": -0.3925,
     "hi": -0.3425,
@@ -6675,7 +6675,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/primary/redteam_repair/pooled",
-   "shown": "-38.2 pp [-41.5, -35.0]",
+   "shown": "−38.2 pp [−41.5, −35.0]",
    "value": {
     "est": -0.3822562979189485,
     "hi": -0.35049288061336253,
@@ -7086,7 +7086,7 @@
   {
    "file": "outputs/metrics/validation/round1.json",
    "pointer": "/judges/frontier/langs/es/kappa_binary",
-   "shown": "-0.04",
+   "shown": "−0.04",
    "value": -0.043478260869565216
   },
   {
@@ -8640,7 +8640,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/3/effect/est",
-   "shown": "-30.5 pp",
+   "shown": "−30.5 pp",
    "value": -0.305
   },
   {
@@ -8892,7 +8892,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/3/effect",
-   "shown": "-30.5 pp [-35.8, -25.5]",
+   "shown": "−30.5 pp [−35.8, −25.5]",
    "value": {
     "est": -0.305,
     "hi": -0.255,
@@ -9092,7 +9092,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/8/effect",
-   "shown": "-39.2 pp [-44.5, -34.2]",
+   "shown": "−39.2 pp [−44.5, −34.2]",
    "value": {
     "est": -0.3925,
     "hi": -0.3425,
@@ -9132,7 +9132,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/9/effect",
-   "shown": "-34.0 pp [-39.0, -29.0]",
+   "shown": "−34.0 pp [−39.0, −29.0]",
    "value": {
     "est": -0.34,
     "hi": -0.29,
@@ -9172,7 +9172,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/10/effect",
-   "shown": "-30.0 pp [-35.0, -25.0]",
+   "shown": "−30.0 pp [−35.0, −25.0]",
    "value": {
     "est": -0.3,
     "hi": -0.25,
@@ -9252,7 +9252,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/12/effect",
-   "shown": "-15.0 pp [-19.2, -10.8]",
+   "shown": "−15.0 pp [−19.2, −10.8]",
    "value": {
     "est": -0.15,
     "hi": -0.1075,
@@ -9292,7 +9292,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/13/effect",
-   "shown": "-17.8 pp [-22.8, -13.1]",
+   "shown": "−17.8 pp [−22.8, −13.1]",
    "value": {
     "est": -0.17804154302670624,
     "hi": -0.13056379821958458,
@@ -9332,7 +9332,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/14/effect",
-   "shown": "-10.5 pp [-14.0, -7.2]",
+   "shown": "−10.5 pp [−14.0, −7.2]",
    "value": {
     "est": -0.105,
     "hi": -0.0725,
@@ -9372,7 +9372,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/15/effect",
-   "shown": "-12.3 pp [-16.4, -8.5]",
+   "shown": "−12.3 pp [−16.4, −8.5]",
    "value": {
     "est": -0.12316715542521994,
     "hi": -0.08504398826979472,
@@ -9790,7 +9790,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/judge_sensitivity/note",
-   "shown": "Four-class agreement and Cohen's kappa; binary = harmful vs not. Sampled: the outputs the check's sample holds in the final cells that were run; not judged: those of them without the check's judgement (for the second judge each such cell is listed under not run). With Controversial read loosely, the pooled Hindi drift is +28.7 pp [+23.8, +33.8] (p < 0.001); final_report.json primary.drift_loose. With Controversial read loosely, the pooled Hindi repair is -34.0 pp [-39.0, -29.0] (p < 0.001); final_report.json primary.repair_loose.",
+   "shown": "Four-class agreement and Cohen's kappa; binary = harmful vs not. Sampled: the outputs the check's sample holds in the final cells that were run; not judged: those of them without the check's judgement (for the second judge each such cell is listed under not run). With Controversial read loosely, the pooled Hindi drift is +28.7 pp [+23.8, +33.8] (p < 0.001); final_report.json primary.drift_loose. With Controversial read loosely, the pooled Hindi repair is −34.0 pp [−39.0, −29.0] (p < 0.001); final_report.json primary.repair_loose.",
    "value": "Four-class agreement and Cohen's kappa; binary = harmful vs not. Sampled: the outputs the check's sample holds in the final cells that were run; not judged: those of them without the check's judgement (for the second judge each such cell is listed under not run). With Controversial read loosely, the pooled Hindi drift is +28.7 pp [+23.8, +33.8] (p < 0.001); final_report.json primary.drift_loose. With Controversial read loosely, the pooled Hindi repair is -34.0 pp [-39.0, -29.0] (p < 0.001); final_report.json primary.repair_loose."
   },
   {
@@ -9856,7 +9856,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/3/effect",
-   "shown": "-30.5 pp [-35.8, -25.5]",
+   "shown": "−30.5 pp [−35.8, −25.5]",
    "value": {
     "est": -0.305,
     "hi": -0.255,
@@ -9930,7 +9930,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/8/effect",
-   "shown": "-39.2 pp [-44.5, -34.2]",
+   "shown": "−39.2 pp [−44.5, −34.2]",
    "value": {
     "est": -0.3925,
     "hi": -0.3425,
@@ -9940,7 +9940,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/9/effect",
-   "shown": "-34.0 pp [-39.0, -29.0]",
+   "shown": "−34.0 pp [−39.0, −29.0]",
    "value": {
     "est": -0.34,
     "hi": -0.29,
@@ -9950,7 +9950,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/10/effect",
-   "shown": "-30.0 pp [-35.0, -25.0]",
+   "shown": "−30.0 pp [−35.0, −25.0]",
    "value": {
     "est": -0.3,
     "hi": -0.25,
@@ -9970,7 +9970,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/12/effect",
-   "shown": "-15.0 pp [-19.2, -10.8]",
+   "shown": "−15.0 pp [−19.2, −10.8]",
    "value": {
     "est": -0.15,
     "hi": -0.1075,
@@ -9980,7 +9980,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/13/effect",
-   "shown": "-17.8 pp [-22.8, -13.1]",
+   "shown": "−17.8 pp [−22.8, −13.1]",
    "value": {
     "est": -0.17804154302670624,
     "hi": -0.13056379821958458,
@@ -9990,7 +9990,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/14/effect",
-   "shown": "-10.5 pp [-14.0, -7.2]",
+   "shown": "−10.5 pp [−14.0, −7.2]",
    "value": {
     "est": -0.105,
     "hi": -0.0725,
@@ -10000,7 +10000,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/15/effect",
-   "shown": "-12.3 pp [-16.4, -8.5]",
+   "shown": "−12.3 pp [−16.4, −8.5]",
    "value": {
     "est": -0.12316715542521994,
     "hi": -0.08504398826979472,
@@ -10046,7 +10046,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/adapter_drift/rows/8/drift",
-   "shown": "-8.7 pp [-12.2, -5.2]",
+   "shown": "−8.7 pp [−12.2, −5.2]",
    "value": {
     "est": -0.08666666666666667,
     "hi": -0.051645833333333634,
@@ -10066,7 +10066,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/0/change",
-   "shown": "-7.8 pp [-11.2, -4.2]",
+   "shown": "−7.8 pp [−11.2, −4.2]",
    "value": {
     "est": -0.0775,
     "hi": -0.0425,
@@ -10076,7 +10076,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/repair_vs_stock/rows/6/change",
-   "shown": "+0.4 pp [-1.5, +2.4]",
+   "shown": "+0.4 pp [−1.5, +2.4]",
    "value": {
     "est": 0.004381161007667032,
     "hi": 0.024096385542168676,
@@ -10662,7 +10662,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/primary/repair/pooled",
-   "shown": "-39.2 pp [-44.5, -34.2]",
+   "shown": "−39.2 pp [−44.5, −34.2]",
    "value": {
     "est": -0.3925,
     "hi": -0.3425,
@@ -10725,7 +10725,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/1/axes/drift",
-   "shown": "-8.7 pp [-12.2, -5.2]",
+   "shown": "−8.7 pp",
    "value": {
     "est": -0.08666666666666667,
     "hi": -0.051645833333333634,
@@ -10742,7 +10742,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/2/axes/drift",
-   "shown": "+21.6 pp [+17.2, +26.1]",
+   "shown": "+21.6 pp",
    "value": {
     "est": 0.21583333333333332,
     "hi": 0.2608333333333333,
@@ -10759,7 +10759,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/2/axes/drift_intact",
-   "shown": "+3.4 pp [-0.3, +7.2]",
+   "shown": "+3.4 pp",
    "value": {
     "est": 0.034166666666666665,
     "hi": 0.0725,
@@ -10775,20 +10775,8 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/0/axes/heldout/est",
-   "shown": "-0.163",
+   "shown": "−0.163",
    "value": -0.16344718264693858
-  },
-  {
-   "file": "outputs/metrics/final_report.json",
-   "pointer": "/verdicts/0/axes/heldout/lo",
-   "shown": "-0.233",
-   "value": -0.23257063411147008
-  },
-  {
-   "file": "outputs/metrics/final_report.json",
-   "pointer": "/verdicts/0/axes/heldout/hi",
-   "shown": "-0.110",
-   "value": -0.10966908387653755
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -10805,11 +10793,26 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/0/axes/refusal_harmful",
-   "shown": "-30.5 pp [-35.8, -25.5]",
+   "shown": "−30.5 pp",
    "value": {
     "est": -0.305,
     "hi": -0.255,
     "lo": -0.3575,
+    "p": 9.999000099990002e-05,
+    "seeds": [
+     1
+    ]
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/primary/redteam_drift/pooled",
+   "shown": "+38.7 pp",
+   "value": {
+    "est": 0.38663745892661555,
+    "hi": 0.42059145673603504,
+    "lo": 0.3537787513691128,
+    "n": 913,
     "p": 9.999000099990002e-05,
     "seeds": [
      1
@@ -10825,7 +10828,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/headline/overrefusal_hard_hi_change",
-   "shown": "+3.5 pp [-0.5, +8.0]",
+   "shown": "+3.5 pp",
    "value": {
     "est": 0.035,
     "hi": 0.08,
@@ -10835,11 +10838,21 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/headline/belebele_hi_change",
-   "shown": "-0.3 pp [-2.0, +1.3]",
+   "shown": "−0.3 pp",
    "value": {
     "est": -0.002857142857142857,
     "hi": 0.012857142857142857,
     "lo": -0.02
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/headline/heldout_retained",
+   "shown": "194.8%",
+   "value": {
+    "est": 1.9481213070123524,
+    "hi": 2.442980520844835,
+    "lo": 1.651170189222317
    }
   },
   {
@@ -10865,7 +10878,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/verdicts/0/axes/final_win_rate",
-   "shown": "39.4% [33.4, 45.4]",
+   "shown": "39.4%",
    "value": {
     "est": 0.39375,
     "hi": 0.4537812499999995,
@@ -10879,7 +10892,7 @@
   {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/sensitivity_effects/rows/4/effect",
-   "shown": "+10.2 pp [+6.0, +14.5]",
+   "shown": "+10.2 pp",
    "value": {
     "est": 0.1025,
     "hi": 0.145,

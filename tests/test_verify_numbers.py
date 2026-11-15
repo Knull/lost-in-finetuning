@@ -109,6 +109,22 @@ def test_values_that_match_the_public_logs(tmp_path, capsys):
     assert sorted(logs.fetched) == sorted(logs.files)  # each public file once, whatever it holds
 
 
+def test_values_are_compared_parsed_never_by_the_text_the_article_shows(tmp_path, capsys):
+    """The article prints a negative number with a real minus sign (U+2212): the check reads the recorded
+    value, never the shown text, so the sign changes nothing, and a shown text that agrees with the
+    article does not save a value that differs."""
+    doc = {"primary": {"repair": {"pooled": {"est": -0.392, "lo": -0.445, "hi": -0.342}}}}
+    logs = Logs({"aggregates/final_report.json": doc})
+    pooled = {"est": -0.392, "lo": -0.445, "hi": -0.342}
+    shown = "\u221239.2 pp [\u221244.5, \u221234.2]"
+    values = [{"shown": shown, "file": REPORT_FILE, "pointer": "/primary/repair/pooled", "value": pooled}]
+    code, out, _ = run(tmp_path, capsys, values, logs)
+    assert code == 0 and out[0] == "1 values match the public logs; 0 differ; 0 not in the logs"
+    values[0]["value"] = {**pooled, "est": -0.391}
+    code, out, _ = run(tmp_path, capsys, values, logs)
+    assert code == 1 and out[0].startswith("0 values match the public logs; 1 differ")
+
+
 def test_a_value_that_differs_is_named_and_the_exit_code_is_1(tmp_path, capsys):
     logs = Logs({"aggregates/final_report.json": REPORT})
     values = [

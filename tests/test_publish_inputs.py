@@ -21,6 +21,10 @@ from lift.publish.inputs import NOT_RUN, PENDING, Facts, fmt, report_path
         (-0.14, "pp", "-14.0 pp"),
         ({"est": 0.2, "lo": 0.1, "hi": 0.3}, "pct_ci", "20.0% [10.0, 30.0]"),
         ([-0.1, -0.15, -0.05], "pp_ci", "-10.0 pp [-15.0, -5.0]"),
+        # an interval's estimate alone (the article's lead, which prints the interval elsewhere)
+        ({"est": -0.392, "lo": -0.445, "hi": -0.342}, "pp_est", "-39.2 pp"),
+        ({"est": 0.315, "lo": 0.262, "hi": 0.37}, "pp_est", "+31.5 pp"),
+        ({"est": 1.948, "lo": 1.651, "hi": 2.443}, "pct_est", "194.8%"),
         (0.0004, "p", "<0.001"),
         (0.0312, "p", "0.031"),
         (1234, "int", "1,234"),
@@ -109,6 +113,30 @@ def test_fill_refuses_unknown_slots():
     assert render.fill("a {{ x }} b", {"x": "1"}) == "a 1 b"
     with pytest.raises(PublishError, match="y"):
         render.fill("{{ x }} {{ y }}", {"x": "1"})
+
+
+def test_the_article_typesets_a_negative_number_with_a_real_minus_sign():
+    """``minus_signs``: the sign of a negative number becomes U+2212, a positive one keeps its "+", and a
+    hyphen that is no sign (an id, a range, a date, a licence, a flag) or sits in code, a comment, a link
+    target or a URL stays. ``fmt`` itself keeps the hyphen: the other artifacts print what they printed."""
+    from lift.publish.inputs import MINUS, minus_signs
+
+    assert MINUS == "\u2212"
+    assert fmt(-0.087, "pp") == "-8.7 pp"
+    assert minus_signs(fmt([-0.087, -0.122, -0.052], "pp_ci")) == "\u22128.7 pp [\u221212.2, \u22125.2]"
+    assert minus_signs(fmt([0.315, 0.262, 0.37], "pp_ci")) == "+31.5 pp [+26.2, +37.0]"
+    assert minus_signs("| -0.163 [-0.233, +0.014] (seed 1) |") == (
+        "| \u22120.163 [\u22120.233, +0.014] (seed 1) |"
+    )
+    assert minus_signs("(-3.0 pp), **-1.5**, a drift of -2.0 pp") == (
+        "(\u22123.0 pp), **\u22121.5**, a drift of \u22122.0 pp"
+    )
+    kept = (
+        "seeds 1-3, 2026-11-12, CC-BY-SA-3.0, Qwen3-8B, adapter-aya-std-s1, prh-test-0042, --limit 50, "
+        "`lift x --delta -1`, <!-- -1 -->, [a](#7-experiments), https://x.y/a?b=-1, 1e-9"
+    )
+    assert minus_signs(kept) == kept
+    assert minus_signs("```\nlift x -1\n```\nthen -1") == "```\nlift x -1\n```\nthen \u22121"
 
 
 def test_templates_type_no_result_numbers():
