@@ -187,8 +187,17 @@ def _claims(names: list[str], adj: str, title: str) -> dict:
     )
 
 
-def cell(variant: str, set_name: str, n: int, harmful: float, intact: float, lang: str = "hi") -> dict:
-    """A row of P07's table of every final cell (lift.report.tables.cells_table), the columns P08 reads."""
+def cell(
+    variant: str,
+    set_name: str,
+    n: int,
+    harmful: float,
+    intact: float,
+    lang: str = "hi",
+    cap: float | None = None,
+) -> dict:
+    """A row of P07's table of every final cell (lift.report.tables.cells_table), the columns P08 reads.
+    ``cap``: the share of answers that reached the token cap (P07 writes null when it has no generations)."""
     return {
         "variant": variant,
         "set": set_name,
@@ -196,16 +205,18 @@ def cell(variant: str, set_name: str, n: int, harmful: float, intact: float, lan
         "n": n,
         "harmful_rate": harmful,
         "harmful_intact_rate": intact,
+        "cap_hit_rate": cap,
     }
 
 
 # The judge's harmful label on answers to benign Hindi prompts (decisions item 95): frequent on the
-# hard-benign ones, more so for the adapter, rare on the easy-benign ones.
+# hard-benign ones, more so for the adapter, rare on the easy-benign ones. Stock's answers reach the token
+# cap more often than the adapter's (decisions item 132).
 BENIGN_CELLS = [
-    cell("stock", "hard_benign", 200, 0.30, 0.29),
-    cell("adapter-aya-std-s1", "hard_benign", 200, 0.55, 0.45),
-    cell("stock", "easy_benign", 300, 0.02, 0.02),
-    cell("adapter-aya-std-s1", "easy_benign", 300, 0.03, 0.03),
+    cell("stock", "hard_benign", 200, 0.30, 0.29, cap=0.80),
+    cell("adapter-aya-std-s1", "hard_benign", 200, 0.55, 0.45, cap=0.35),
+    cell("stock", "easy_benign", 300, 0.02, 0.02, cap=0.70),
+    cell("adapter-aya-std-s1", "easy_benign", 300, 0.03, 0.03, cap=0.10),
 ]
 
 
@@ -376,8 +387,14 @@ def _p07_tables() -> dict:
                 ("n", "n", "int"),
                 ("harmful_rate", "Harmful", "pct"),
                 ("harmful_intact_rate", "Harmful, no unclear flag", "pct"),
+                ("cap_hit_rate", "Cap hit", "pct"),
             ],
-            [cell("stock", "harmful", 400, 0.14, 0.14), *BENIGN_CELLS],
+            [
+                cell("stock", "harmful", 400, 0.14, 0.14, cap=0.40),
+                *BENIGN_CELLS,
+                cell("adapter-aya-std-s1", "harmful", 400, 0.21, 0.18, cap=0.15),
+                cell(WINNER, "harmful", 400, 0.07, 0.07, cap=0.20),
+            ],
             "Every final cell (variant x set x language)",
         ),
     }
@@ -1053,8 +1070,10 @@ def stress_report(selection_doc: dict | None = None) -> dict:
         for (kind, lang), x in second.items()
     ]
     tables["cells"]["rows"] += [
-        cell(STRESS, "hard_benign", 200, 0.79, 0.59),
-        cell(STRESS, "easy_benign", 300, 0.03, 0.03),
+        cell(STRESS, "hard_benign", 200, 0.79, 0.59, cap=0.36),
+        cell(STRESS, "easy_benign", 300, 0.03, 0.03, cap=0.09),
+        cell(STRESS, "harmful", 400, 0.44, 0.30, cap=0.16),
+        cell(winner, "harmful", 400, 0.07, 0.07, cap=0.17),
     ]
     return doc
 

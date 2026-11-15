@@ -1,5 +1,5 @@
-"""``lift publish datasets``: the public logs dataset, the gated raw completions and the translated
-prompt sets, staged under ``outputs/publish/datasets/``; on request (``--only sft``), the training sets.
+"""``lift publish datasets``: the public logs dataset, the gated raw completions, the translated prompt
+sets and the training sets, staged under ``outputs/publish/datasets/``.
 
 Logs (public; decisions items 14 and 62). No output text and no judge text. One row per primary-judge
 judgement (``LOG_FIELDS``): variant, method, seed, pid, language, set, split, the final label, the
@@ -49,20 +49,20 @@ Translated prompt sets (public). Every prompt record we translated (TranslationI
 ``lift.data.translate.ENGINE_NAMES``), with its English source and the native spot-check fields
 (checked, edited, note). PolyRefuse's own translations and the English sources are not republished.
 
-Training sets (a public repo, staged on request and so far not uploaded: decisions item 118). The files
-``lift train`` read, one folder per set of the plan (``sft_sets``: data/sft/{candidate}/{variant}/):
+Training sets (public; decisions item 118, and item 135 on the withheld rows). The
+files ``lift train`` read, one folder per set of the plan (``sft_sets``: data/sft/{candidate}/{variant}/):
 sft_messages.jsonl, CuratorKIT's manifest.json, rejected.jsonl and lexsi_provenance.json, our summary of
 its run and ``lift.data.sft``'s selection.json, and data/sft/report.json above them. They are training rows of
 public datasets, no model output, and are scanned like every public upload. The published rows must be
-exactly the rows the adapters were trained on, so a file is staged only while its sha256 is the one its
-training runs recorded (``trained_on``: the ``lift train`` manifests in outputs/manifests) and every
-registered adapter has such a run; anything else refuses (``PublishError``), naming the file, and
-leaves nothing staged. A set or a file that is not on this machine is listed as missing, which blocks
-``--yes``. The card's counts and hashes are recorded in outputs/publish/datasets/sft.sources.json.
-The plan is built only when named (``ON_REQUEST``): on the team's machine the scan finds a run of a
-model output in a row of each IndicAlign file (a model can repeat its training text; the scan reads
-content, not where a text came from), so ``--yes`` refuses it, and built with the others it would stop
-their upload too.
+the rows the adapters were trained on, so a set is staged only while its full training file has the
+sha256 its training runs recorded (``trained_on``: the ``lift train`` manifests in outputs/manifests) and
+every registered adapter has such a run; anything else refuses (``PublishError``), naming the file, and
+leaves nothing staged. Then the rows configs/publish.yaml withholds (``sft_withheld``: on the team's
+machine a stretch of one answer in each IndicAlign file is also in a model output, which the scan
+refuses; it reads content, not where a text came from, and is not given an exception) are left out of
+the staged copy (``withhold``: every other line as it is, in order). A set or a file that is not on this
+machine is listed as missing, which blocks ``--yes``. The card's counts and hashes, the full files' and
+the published files', are recorded in outputs/publish/datasets/sft.sources.json.
 """
 
 from __future__ import annotations
@@ -625,8 +625,16 @@ def _write_csv(path: Path, columns: list[dict], rows: list[dict]) -> None:
 
 AUDIT_NEEDS = ("variant", "set", "lang", "split", "judge", "judge_id", "labels_sha256", "keys_sha256")
 # Decision and validation files that go in as they are: none holds an output or a judge's words (the
-# validation reports and the judge decision count failures by kind: lift.validation.score).
-DECISION_FILES = ("selection_secondary.json", "gate1.json", "gate2.json", "judge_decision.json")
+# validation reports and the judge decision count failures by kind: lift.validation.score). Each only
+# when it exists, like the acceptance notebook's measured run time (lift.publish.acceptance.record_runtime:
+# minutes, GPU and the sample's setting), which the article cites.
+DECISION_FILES = (
+    "selection_secondary.json",
+    "gate1.json",
+    "gate2.json",
+    "judge_decision.json",
+    "acceptance_runtime.json",
+)
 
 
 def audit_record_problem(doc: object) -> str | None:
@@ -1099,12 +1107,122 @@ SFT_STAGES = (
     ("Exported by CuratorKIT", "MessagesExporter/exported_count"),
 )
 NOT_HERE = "not on this machine: lift sync pull"
+WITHHELD_SETTING = "configs/publish.yaml repos.sft.withheld"
+# How a training row's id names its row in the source, for the card (lift.data.sft: ``SftRow.row_id`` is the
+# source's tag and its index, which lift.data.sources.HFHub takes from the pinned split): {tag: (the row in a
+# few words, how an id of that source is read)}.
+SOURCE_ROWS = {
+    "ind": (
+        "IndicAlign `Dolly_T` row {n}",
+        "an IndicAlign id is `ind-` followed by the row's index in the `train` split of IndicAlign's "
+        "`Dolly_T` subset, counted from 0, and the training row comes from that row's Hindi pair (the first "
+        "turn of `hin_Deva`)",
+    ),
+    "aya": (
+        "Aya Dataset Hindi row {n}",
+        "an Aya Dataset id is `aya-` followed by the row's place among the Hindi rows of the Aya Dataset's "
+        "`train` split, counted from 0, and the training row comes from that row's `inputs` and `targets`",
+    ),
+}
+_ROW_ID = re.compile(r"(?P<tag>[a-z]+)-(?P<n>\d+)")
 
 
 class SftSet(NamedTuple):
     key: str  # "{candidate}/{variant}": the set's folder under data/sft/ and in the dataset
-    rows: int  # the rows in its staged sft_messages.jsonl
-    sha256: str  # of that staged file
+    rows: int  # the rows in its training file (data/sft/{key}/sft_messages.jsonl)
+    sha256: str  # of the training file: what its training runs recorded (``trained_on``)
+    withheld: tuple[str, ...] = ()  # the row ids its published file leaves out (``sft_withheld``)
+    published_rows: int | None = None  # the rows in its published file, once staged
+    published_sha256: str | None = None  # of the published file
+
+
+def sft_withheld() -> dict[str, tuple[str, ...]]:
+    """The rows the published training files leave out, by training set ({"candidate/variant": row ids}),
+    from configs/publish.yaml ``repos.sft.withheld`` ({candidate: {variant: [row ids]}}; nothing when it is
+    not set, and a set with an empty list withholds nothing). Refuses (PublishError) a setting of another
+    shape, an id that is not a non-empty string, and an id listed twice for one set."""
+    raw = settings.load()["repos"]["sft"].get("withheld") or {}
+    problems: list[str] = []
+    out: dict[str, tuple[str, ...]] = {}
+    if not isinstance(raw, dict):
+        raise PublishError(f"{WITHHELD_SETTING} must map each candidate to its variants' lists of row ids")
+    for candidate, variants in raw.items():
+        if not isinstance(variants, dict):
+            problems.append(f"{candidate}: not a mapping of variants to lists of row ids")
+            continue
+        for variant, ids in variants.items():
+            key = f"{candidate}/{variant}"
+            if not isinstance(ids, list) or not all(isinstance(i, str) and i.strip() for i in ids):
+                problems.append(f"{key}: not a list of row ids")
+                continue
+            twice = sorted(i for i, n in Counter(ids).items() if n > 1)
+            if twice:
+                problems.append(f"{key}: lists {', '.join(twice)} more than once")
+            elif ids:
+                out[key] = tuple(ids)
+    if problems:
+        raise PublishError(f"{WITHHELD_SETTING}: " + "; ".join(problems))
+    return out
+
+
+def withhold(path: Path, ids: Sequence[str], *, name: str) -> int:
+    """Leave the rows ``ids`` out of the staged copy ``path`` of a training file (``name``, as the error
+    names it), in place: every other line stays the full file's line, byte for byte and in order, each
+    ending in a line feed. Refuses (PublishError) unless each id is the ``id`` of exactly one row; a line
+    that is not a JSON row with an ``id`` is refused too, since it cannot be told from a withheld one.
+    Returns the rows left."""
+    want = set(ids)
+    seen: Counter[str] = Counter()
+    kept: list[bytes] = []
+    lines = path.read_bytes().split(b"\n")
+    if lines and not lines[-1]:
+        lines.pop()  # the line feed that ends the file
+    for i, line in enumerate(lines, 1):
+        if not line.strip():
+            kept.append(line)
+            continue
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            row = None
+        rid = row.get("id") if isinstance(row, dict) else None
+        if not isinstance(rid, str):
+            raise PublishError(
+                f"the training sets are not staged: {name} line {i} is not a JSON row with an id, so the "
+                f"rows {WITHHELD_SETTING} withholds cannot be told from it"
+            )
+        if rid in want:
+            seen[rid] += 1
+        else:
+            kept.append(line)
+    problems = [f"{rid} is not in it" for rid in ids if not seen[rid]]
+    problems += [f"{rid} is in it {seen[rid]} times" for rid in ids if seen[rid] > 1]
+    if problems:
+        raise PublishError(
+            f"the training sets are not staged: {WITHHELD_SETTING} withholds rows of {name} by id, and "
+            + "; ".join(problems)
+        )
+    path.write_bytes(b"".join(line + b"\n" for line in kept))
+    return sum(1 for line in kept if line.strip())
+
+
+def _published(folder: Path, s: SftSet, ids: Sequence[str]) -> SftSet:
+    """``s`` once its staged copy leaves out the rows ``ids`` (``withhold``), with the published file's rows
+    and sha256. A set that withholds nothing is published whole: its published file is its training file."""
+    if not ids:
+        return s._replace(published_rows=s.rows, published_sha256=s.sha256)
+    path = folder / s.key / SFT_EXPORT
+    rows = withhold(path, ids, name=sft_data_path(s.key))
+    return s._replace(withheld=tuple(ids), published_rows=rows, published_sha256=sha256_file(path))
+
+
+def _source_row(rid: str) -> str | None:
+    """The row a training row's id names in its source (``SOURCE_ROWS``), in a few words; None for an id of
+    another form."""
+    m = _ROW_ID.fullmatch(rid)
+    if m is None or m["tag"] not in SOURCE_ROWS:
+        return None
+    return SOURCE_ROWS[m["tag"]][0].format(n=int(m["n"]))
 
 
 def sft_sets() -> list[str]:
@@ -1165,9 +1283,10 @@ def runs_of(name: str, spec: object, runs: Sequence[tuple[Path, dict]]) -> list[
 
 
 def trained_on(sets: Sequence[SftSet]) -> dict[str, list[tuple[str, Path]]]:
-    """The guard of the training sets (decisions item 118): the published rows are exactly the rows the
-    adapters were trained on. Returns {set: [(registered adapter, the manifest of the run that trained
-    it)]} for the staged ``sets``, or refuses (PublishError), naming each file, when:
+    """The guard of the training sets (decisions item 118): each staged training file, read in full before
+    any row is withheld, is exactly the file the adapters were trained on. Returns {set: [(registered
+    adapter, the manifest of the run that trained it)]} for the staged ``sets``, or refuses (PublishError),
+    naming each file, when:
 
     - no training run on record names the file it trained on (``train_runs``);
     - a run, a registered adapter's or not, trained on a file that is not a training set of the plan, or
@@ -1291,27 +1410,89 @@ def _stage_count(sources: Facts, manifest: Path, pointer: str) -> str:
     return sources.value(manifest, at, "int", what="a CuratorKIT stage count", stage=SFT_BUILD)
 
 
-def _sft_changes(relativised: dict[str, int]) -> str:
-    """What the card says the published files differ in from the build's: nothing, or the absolute
-    local paths ``preflight.relativise_folder`` made repo-relative."""
+def _sft_changes(relativised: dict[str, int], withheld: Sequence[str] = ()) -> str:
+    """What the card says the published files differ in from the build's: nothing, the rows left out of
+    the training files ``withheld`` (their paths in the dataset), or the absolute local paths
+    ``preflight.relativise_folder`` made repo-relative."""
     kept = "CuratorKIT's own files as the copies with LF line endings that the build keeps"
-    if not relativised:
+    if not relativised and not withheld:
         return f"No file was changed for publication: each is the file `{SFT_BUILD}` wrote ({kept})."
-    files = ", ".join(f"`{name}`" for name in sorted(relativised))
+    done = []
+    if withheld:
+        names = [f"`{name}`" for name in withheld]
+        files = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        done.append(f'the rows listed under "Withheld rows" were left out of {files}')
+    if relativised:
+        files = ", ".join(f"`{name}`" for name in sorted(relativised))
+        done.append(
+            f"{sum(relativised.values())} absolute local path(s) of the build machine were made relative to "
+            f"the repository in {files}"
+        )
     return (
-        f"For publication, {sum(relativised.values())} absolute local path(s) of the build machine were "
-        f"made relative to the repository in {files}. Nothing else differs from the files `{SFT_BUILD}` "
-        f"wrote ({kept})."
+        f"For publication, {', and '.join(done)}. Nothing else differs from the files `{SFT_BUILD}` wrote "
+        f"({kept})."
     )
+
+
+def _withheld_section(
+    sources: Facts, sets: Sequence[SftSet], *, curatorkit: str, github: str, none_yet: str
+) -> str:
+    """The card's "Withheld rows" section. When a staged set withholds rows (hf/templates/sft_withheld.md):
+    each set's withheld ids with the row each names in its source, the training file's and the published
+    file's rows and sha256 (each recorded in ``sources``), why the rows are withheld and how the training
+    files are rebuilt from their public sources. Otherwise one line: no row is withheld, or no training
+    set is here (``none_yet``)."""
+    if not sets:
+        return f"## Withheld rows\n\n{none_yet}\n\n"
+    if not any(s.withheld for s in sets):
+        whole = f"No row is withheld: each published `{SFT_EXPORT}` is its training file, byte for byte."
+        return f"## Withheld rows\n\n{whole}\n\n"
+    lines = []
+    for s in sets:
+        staged, sha = shown(stage_root() / "sft" / s.key / SFT_EXPORT), s.published_sha256
+        for what, value, text in (("rows", s.published_rows, f"{s.published_rows:,}"), ("sha256", sha, sha)):
+            sources.sources.append(
+                {"shown": text, "file": staged, "what": what, "value": value, "file_sha256": sha}
+            )
+        if not s.withheld:
+            lines.append(
+                f"- `{s.key}`: no row withheld, so published whole: {s.rows:,} rows, sha256 `{s.sha256}`."
+            )
+            continue
+        candidate, variant = s.key.split("/", 1)
+        sources.config("publish", f"repos.sft.withheld.{candidate}.{variant}", "list")
+        named = ((rid, _source_row(rid)) for rid in s.withheld)
+        ids = ", ".join(f"`{rid}` ({where})" if where else f"`{rid}`" for rid, where in named)
+        lines.append(
+            f"- `{s.key}`: {ids} withheld. Training file: {s.rows:,} rows, sha256 `{s.sha256}`. Published "
+            f"file: {s.published_rows:,} rows, sha256 `{sha}`."
+        )
+    found = (_ROW_ID.fullmatch(rid) for s in sets for rid in s.withheld)
+    tags = sorted({m["tag"] for m in found if m is not None and m["tag"] in SOURCE_ROWS})
+    lookup = (
+        'A withheld row can also be looked up in its source, at the revision under "Licences and '
+        f'attribution", by its id: {"; ".join(SOURCE_ROWS[tag][1] for tag in tags)}. Each training row is '
+        'that source text, cleaned as described under "How they were made".'
+        if tags
+        else ""
+    )
+    body = render.fill(
+        render.template("sft_withheld.md"),
+        {"list": "\n".join(lines), "curatorkit": curatorkit, "github": github, "lookup": lookup},
+    )
+    return "## Withheld rows\n\n" + body.strip() + "\n\n"
 
 
 def build_sft(facts: Facts | None = None) -> Upload:
     """The training sets with CuratorKIT's files (module docstring): every file of each set of the plan
     that is on this machine, data/sft/report.json and the card, whose counts and hashes come from the
-    staged files and the train manifests. A set or a file that is not here is listed as missing. Refuses
-    (PublishError, nothing left staged) unless the staged rows are the ones the adapters were trained
-    on (``trained_on``), the build's own records agree with them (``_build_records``) and no absolute
-    local path had to be rewritten in a row."""
+    staged files, the train manifests and configs/publish.yaml. A set or a file that is not here is listed
+    as missing. Refuses (PublishError, nothing left staged) unless the full training files are the ones
+    the adapters were trained on (``trained_on``), the build's own records agree with them
+    (``_build_records``), no absolute local path had to be rewritten in a row, and every row
+    configs/publish.yaml withholds (``sft_withheld``) is in a training set of the plan and is the id of
+    exactly one row of its file. The staged copy of each such file then leaves those rows out
+    (``withhold``); every other file is staged as it is."""
     from lift.publish.model import _links
 
     repo = settings.repo("sft")
@@ -1336,6 +1517,13 @@ def build_sft(facts: Facts | None = None) -> Upload:
     elif here:
         expected.append(f"{shown(src / SFT_REPORT)} ({NOT_HERE})")
     try:
+        withheld = sft_withheld()
+        outside = sorted(set(withheld) - set(sft_sets()))
+        if outside:
+            raise PublishError(
+                f"the training sets are not staged: {WITHHELD_SETTING} names {', '.join(outside)}, which is "
+                f"not a training set of the plan ({', '.join(sft_sets())})"
+            )
         relativised = preflight.relativise_folder(folder)  # no absolute local path goes public (XB2-04)
         rewritten = sorted(name for name in relativised if name.endswith(f"/{SFT_EXPORT}"))
         if rewritten:
@@ -1355,6 +1543,8 @@ def build_sft(facts: Facts | None = None) -> Upload:
                 "from another build):\n  " + "\n  ".join(problems) + f"\n  {PULL}"
             )
         trained = trained_on(sets) if sets else {}
+        # Checked in full above; only now are the withheld rows left out of the staged copies.
+        sets = [_published(folder, s, withheld.get(s.key, ())) for s in sets]
     except PublishError:
         shutil.rmtree(folder, ignore_errors=True)  # nothing unchecked stays staged
         (stage_root() / "sft.sources.json").unlink(missing_ok=True)  # nor an earlier build's record of it
@@ -1397,6 +1587,17 @@ def build_sft(facts: Facts | None = None) -> Upload:
         )
     none_yet = f"_No training set is on this machine yet ({NOT_HERE})._"
     links = _links()
+    curatorkit = " and ".join(sorted(set(versions))) or pending(
+        "CuratorKIT's version", "data/sft/{set}/curatorkit/manifest.json", SFT_BUILD
+    )
+    withheld_files = [f"{s.key}/{SFT_EXPORT}" for s in sets if s.withheld]
+    if withheld_files:
+        published = (
+            f'Each `{SFT_EXPORT}` is the file its training runs read, less the rows listed under "Withheld '
+            'rows"; every other line is as it was.'
+        )
+    else:
+        published = f"Each `{SFT_EXPORT}` is byte for byte the file its training runs read."
     meta = {
         "license": "other",
         "license_name": "mixed-see-card",
@@ -1412,19 +1613,28 @@ def build_sft(facts: Facts | None = None) -> Upload:
         render.template("sft_card.md"),
         {
             "table": render.markdown_table(
-                ["Training set", "Adapters trained on it", "Rows in the file", "Rows trained", "sha256"],
+                [
+                    "Training set",
+                    "Adapters trained on it",
+                    "Rows in the training file",
+                    "Rows trained",
+                    "sha256 of the training file",
+                ],
                 table,
             )
             if table
             else none_yet,
+            "published": published,
+            "withheld": _withheld_section(
+                sources, sets, curatorkit=curatorkit, github=links["github"], none_yet=none_yet
+            ),
             "stages": render.markdown_table(
                 ["Training set", *(label for label, _ in SFT_STAGES), "In the training file"], stages
             )
             if stages
             else none_yet,
-            "curatorkit": " and ".join(sorted(set(versions)))
-            or pending("CuratorKIT's version", "data/sft/{set}/curatorkit/manifest.json", SFT_BUILD),
-            "changes": _sft_changes(relativised),
+            "curatorkit": curatorkit,
+            "changes": _sft_changes(relativised, withheld_files),
             "aya_revision": sources.config("project", "sources.sft.aya.revision", "text"),
             "indicalign_revision": sources.config("project", "sources.sft.indicalign.revision", "text"),
             "dolly_revision": sources.config("project", "sources.sft.dolly.revision", "text"),
@@ -1437,9 +1647,19 @@ def build_sft(facts: Facts | None = None) -> Upload:
     if sets:
         notes = [
             f"{len(sets)} training sets ({', '.join(f'{s.key}: {s.rows:,} rows' for s in sets)}); each "
-            f"{SFT_EXPORT} has the sha256 its training runs recorded ({sum(map(len, trained.values()))} "
+            f"training file has the sha256 its training runs recorded ({sum(map(len, trained.values()))} "
             f"registered adapters, {len(train_runs())} train manifests)"
         ]
+        if withheld_files:
+            notes.append(
+                f"rows withheld from the published files ({WITHHELD_SETTING}): "
+                + "; ".join(
+                    f"{s.key} {', '.join(s.withheld)} ({s.rows:,} rows -> {s.published_rows:,})"
+                    for s in sets
+                    if s.withheld
+                )
+                + "; every other line as it is"
+            )
     else:
         notes = [f"no training set on this machine yet ({NOT_HERE})"]
     # the card too (its links): the rows were hashed above, and the card is not one of the build's files
@@ -1448,16 +1668,12 @@ def build_sft(facts: Facts | None = None) -> Upload:
 
 
 BUILDERS = {"logs": build_logs, "raw": build_raw, "prompts": build_prompts, "sft": build_sft}
-# Built only when named (``--only sft``), never by a plain ``lift publish datasets``: the training sets
-# fail the public-text scan on the team's machine, so ``--yes`` refuses them (decisions item 118), and
-# every plan is checked before anything is sent, so their plan would stop the upload of the other three.
-ON_REQUEST = frozenset({"sft"})
 
 
 def build(only: list[str] | None = None) -> list[Upload]:
     facts = Facts()
     out = []
-    for name in only or [n for n in BUILDERS if n not in ON_REQUEST]:
+    for name in only or list(BUILDERS):
         if name not in BUILDERS:
             raise PublishError(f"unknown dataset {name!r} (one of {', '.join(BUILDERS)})")
         out.append(BUILDERS[name](facts))

@@ -11,8 +11,8 @@ the file and the stage that writes it, and an upload is refused while any staged
 - ``render``       the template filler (``{{ name }}``) and markdown tables
 - ``hub``          upload plans: dry run by default, ``--yes`` uploads (gating set before any file goes up)
 - ``model``        the repaired model, the repair parameters and the gated adapters, with their cards
-- ``datasets``     the public logs dataset, the gated raw completions, the translated prompt sets; on
-                   request the training sets with CuratorKIT's files (docs/decisions.md item 118)
+- ``datasets``     the public logs dataset, the gated raw completions, the translated prompt sets and the
+                   training sets with CuratorKIT's files (docs/decisions.md item 118)
 - ``collect``      the two HF collections
 - ``article``      hf/article.md from hf/templates/article.md
 - ``preflight``    secrets, tokens and raw completions in tracked files and git history

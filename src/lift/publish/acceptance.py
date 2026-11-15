@@ -9,9 +9,15 @@ sample is small, and it never touches the final split. Its verdict covers safety
 (utility and Belebele are separate checks), and it says so. A prompt one variant has no label for stops
 the summary (rule 3) unless the caller allows it, and then it is counted and shown.
 
+``fetch_adapter`` registers the adapter it downloads as ``adapter-notebook`` (``adapter_name``): the name
+says that the notebook fetched it and nothing the notebook cannot know, so no training recipe (the study's
+own adapters are adapter-{candidate}-{std|stress}-s{seed}) and no seed unless the caller gives one.
+
 A fresh clone has no prompts (data/ is gitignored): ``check_ready``, which ``run_check`` calls first, stops
-before any GPU work and says how to get them, and also checks the installed extras and what the primary
-judge needs (a frontier judge: its API key and a spend cap). It makes no data public.
+before any GPU work and says how to get them (the team: ``lift sync pull --only data``; everyone else:
+``fetch_prompts``, our translations from the public prompt-set dataset and the study's build of the other
+files from their public sources), and also checks the installed extras and what the primary judge needs
+(a frontier judge: its API key and a spend cap). It makes no data public.
 
 The run time is measured, never assumed: ``start_clock`` and ``record_runtime`` time a run of the notebook
 into outputs/metrics/acceptance_runtime.json, and ``runtime_text`` renders it (or "not yet timed") for the
@@ -36,31 +42,36 @@ from pathlib import Path
 from typing import Any
 
 from lift import config, paths
+from lift.io import read_jsonl, write_jsonl
 from lift.publish import PublishError
 
-NOTEBOOK_CANDIDATE = "notebook"
+NOTEBOOK_SOURCE = "notebook"  # what the name of a fetched adapter says: the notebook fetched it
 SCOPED_REPAIR = "repair (safety and over-refusal only)"
 SETS = ("harmful", "hard_benign")
 CAST_METHODS = ("cast", "cast_always")
 
 
-def adapter_name(seed: int = 1) -> str:
-    from lift.train.lora import adapter_name as name
+def adapter_name(seed: int | None = None) -> str:
+    """``adapter-notebook``, or ``adapter-notebook-s{seed}`` when the caller gives a seed
+    (lift.train.lora.fetched_adapter_name): no recipe token, since the notebook does not know how the
+    adapter was trained."""
+    from lift.train.lora import fetched_adapter_name
 
-    return name(NOTEBOOK_CANDIDATE, "standard", seed)
+    return fetched_adapter_name(NOTEBOOK_SOURCE, seed)
 
 
 def fetch_adapter(
     repo_id: str,
     *,
     revision: str | None = None,
-    seed: int = 1,
+    seed: int | None = None,
     download: Callable[..., Any] | None = None,
     registry: Path | None = None,
 ) -> str:
     """Download a LoRA adapter of Tiny Aya Global from the Hub into outputs/adapters/{name} and register
-    it in this checkout's configs/variants.yaml (adapter name ``adapter-notebook-std-s{seed}``)."""
-    from lift.train.lora import register_adapter
+    it in this checkout's configs/variants.yaml as ``adapter_name(seed)``: ``adapter-notebook`` with no
+    seed in its name or entry, unless the caller passes one (the notebook does not), and never a recipe."""
+    from lift.train.lora import register_fetched_adapter
     from lift.train.merge import adapter_hash
 
     if download is None:
@@ -74,14 +85,13 @@ def fetch_adapter(
         allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
     )
     digest = adapter_hash(target)
-    register_adapter(
+    register_fetched_adapter(
         name,
         digest,
-        candidate=NOTEBOOK_CANDIDATE,
-        recipe="standard",
+        source=NOTEBOOK_SOURCE,
         seed=seed,
         location=f"hf:{repo_id}@{revision or 'main'}",
-        note="registered by the acceptance-test notebook",
+        note="registered by the acceptance-test notebook (training recipe unknown)",
         registry=registry,
         replace=True,
     )
@@ -104,11 +114,12 @@ def frozen_repair(params_file: str | Path | None = None) -> dict[str, Any]:
 
 
 def _entry_lines(entry: Mapping[str, Any]) -> list[str]:
+    seed = [] if entry["seed"] is None else [f"    seed: {int(entry['seed'])}"]  # a fetched adapter has none
     return [
         f"  - name: {entry['name']}",
         f"    method: {entry['method']}",
         f"    adapter: {entry['adapter']}",
-        f"    seed: {int(entry['seed'])}",
+        *seed,
         f"    params: {json.dumps(entry['params'])}",
         f"    artifacts: {json.dumps(entry['artifacts'])}",
         f"    note: {json.dumps(entry['note'])}",
@@ -117,7 +128,9 @@ def _entry_lines(entry: Mapping[str, Any]) -> list[str]:
 
 def register_repair(adapter: str, frozen: Mapping[str, Any], *, registry: Path | None = None) -> str:
     """Register the frozen repair applied to ``adapter`` (WiSE-FT or ReSta: same parameters, this adapter's
-    hash). CAST needs its own fit on the adapter first (``lift fit-cast``, P05), which writes the entry."""
+    hash and seed), named as the frozen variant with ``adapter`` in its adapter's place: for example
+    wiseft-l0.25-adapter-notebook. CAST needs its own fit on the adapter first (``lift fit-cast``, P05),
+    which writes the entry."""
     from lift.models.variants import get_spec
 
     method = frozen["method"]
@@ -125,7 +138,9 @@ def register_repair(adapter: str, frozen: Mapping[str, Any], *, registry: Path |
         raise PublishError(
             "the frozen repair is CAST: fit it on this adapter first with "
             f"lift.cli.main(['fit-cast', '--adapter', '{adapter}']) and register the variant it "
-            "prints (P05), then pass that name to run_check"
+            "prints (P05), then pass that name to run_check. A CAST entry carries its adapter's seed (lift "
+            "register-repairs writes it), so first fetch an adapter that has none again with "
+            "fetch_adapter(..., seed=N)"
         )
     if method not in ("wiseft", "resta"):
         raise PublishError(f"not a repair method: {method!r}")
@@ -182,15 +197,107 @@ def _installed(module: str) -> bool:
     return importlib.util.find_spec(module) is not None
 
 
+def prompts_repo() -> str:
+    """The public prompt-set dataset (configs/publish.yaml repos.prompts): the files we translated."""
+    from lift.publish import settings
+
+    return settings.repo("prompts").repo_id
+
+
 def _how_to_get_prompts(sets: Sequence[str], langs: Sequence[str]) -> str:
+    args = repr(tuple(langs)) + ("" if tuple(sets) == SETS else f", sets={tuple(sets)!r}")
     return (
-        "data/ is gitignored, so a fresh clone has no prompts. Team members: set LIFT_RUNS_REPO and log "
-        "in with your HF token, then run `!lift sync pull`. Everyone else: our translated prompt sets are "
-        "in the prompt-set dataset of the article's data collection (log in with your HF token), and "
-        f"`!lift data build --only {' '.join(sets)} --langs {' '.join(langs)}` rebuilds these files from "
-        "the source datasets with that HF token (the Hindi translations also need GOOGLE_TRANSLATE_API_KEY). "
-        "Then run this cell again."
+        "data/ is gitignored, so a fresh clone has no prompts. Team members: set LIFT_RUNS_REPO, log in "
+        "with an HF token that can read that private repo, and run `!lift sync pull --only data`. Everyone "
+        f"else: run `acceptance.fetch_prompts({args})`. It copies our translated files from the public "
+        f"dataset {prompts_repo()} into data/prompts/, and builds the ones it does not hold (English, and "
+        "PolyRefuse's own translations) from their public sources with `lift data build --skip-translation`, "
+        "which needs no translation key. Then run this cell again."
     )
+
+
+def fetch_prompts(
+    langs: Sequence[str] = ("hi", "en"),
+    *,
+    sets: Sequence[str] = SETS,
+    revision: str | None = None,
+    files: Callable[..., Sequence[str]] | None = None,
+    download: Callable[..., Any] | None = None,
+    main: Callable[[list[str]], int] | None = None,
+) -> dict[str, str]:
+    """The prompt files ``check_ready`` needs, on a clone outside the team (the team pulls the runs repo's:
+    ``lift sync pull --only data``). For each set and language with no data/prompts/{set}_{lang}.jsonl:
+    our translation from the public prompt-set dataset (``prompts_repo``, {set}/{lang}.jsonl there) when it
+    holds one, written there once every row is checked as a PromptRecord of that set and language (a file
+    whose schema differs is refused, and nothing of it is written); otherwise the study's build from its
+    public source, ``lift data build --only SET --langs LANG --skip-translation``: English, and PolyRefuse's
+    own translations, need no translation key. A file already there is kept, never replaced.
+    Returns {"{set}_{lang}": "kept" | "fetched from <dataset>" | "built by lift data build"}."""
+    target = paths.prompts_dir()
+    cells = [(s, lang) for s in sets for lang in langs]
+    out = {f"{s}_{lang}": "kept" for s, lang in cells if (target / f"{s}_{lang}.jsonl").exists()}
+    missing = [(s, lang) for s, lang in cells if f"{s}_{lang}" not in out]
+    if missing:
+        repo_id = prompts_repo()
+        if files is None:
+            from huggingface_hub import HfApi
+
+            files = HfApi().list_repo_files
+        held = set(files(repo_id, repo_type="dataset", revision=revision))
+        fetch = [(s, lang) for s, lang in missing if f"{s}/{lang}.jsonl" in held]
+        if fetch and download is None:
+            from huggingface_hub import hf_hub_download as download
+        for set_name, lang in fetch:
+            name = f"{set_name}/{lang}.jsonl"
+            local = Path(download(repo_id=repo_id, filename=name, repo_type="dataset", revision=revision))
+            rows = _prompt_rows(local, set_name, lang, f"{repo_id}:{name}")
+            write_jsonl(target / f"{set_name}_{lang}.jsonl", rows)
+            out[f"{set_name}_{lang}"] = f"fetched from {repo_id}"
+        build = [cell for cell in missing if cell not in fetch]
+        if build and main is None:
+            from lift.cli import main
+        for set_name, lang in build:
+            argv = ["data", "build", "--only", set_name, "--langs", lang, "--skip-translation"]
+            code = main(argv)
+            if code != 0 or not (target / f"{set_name}_{lang}.jsonl").exists():
+                what = (
+                    f"exited {code}: the log above says why"
+                    if code
+                    else "skipped it, as it needs a translation: run lift data build without "
+                    "--skip-translation, with GOOGLE_TRANSLATE_API_KEY set"
+                )
+                raise PublishError(
+                    f"{set_name}_{lang} is not in {repo_id}, and `lift {' '.join(argv)}` {what}"
+                )
+            out[f"{set_name}_{lang}"] = "built by lift data build"
+    return {f"{s}_{lang}": out[f"{s}_{lang}"] for s, lang in cells}
+
+
+def _prompt_rows(path: Path, set_name: str, lang: str, where: str) -> list[dict]:
+    """The rows of a downloaded prompt file, each checked as a PromptRecord of ``set_name`` in ``lang`` (the
+    record lift.data.build.load_prompts reads); PublishError, quoting no prompt text, otherwise."""
+    import pydantic
+
+    from lift.schemas import PromptRecord
+
+    try:
+        rows = list(read_jsonl(path))
+    except ValueError as exc:
+        raise PublishError(f"{where} is not JSONL ({exc}): nothing was written") from None
+    for i, row in enumerate(rows, 1):
+        try:
+            rec = PromptRecord.model_validate(row)
+        except pydantic.ValidationError as exc:
+            first = exc.errors()[0]
+            where_in = ".".join(map(str, first["loc"])) or "the row"
+            raise PublishError(
+                f"{where} row {i} is not a prompt record ({where_in}: {first['msg']}): nothing was written"
+            ) from None
+        if (rec.set, rec.lang) != (set_name, lang):
+            raise PublishError(f"{where} row {i} is a {rec.set} prompt in {rec.lang}: nothing was written")
+    if not rows:
+        raise PublishError(f"{where} holds no prompt: nothing was written")
+    return rows
 
 
 def check_ready(

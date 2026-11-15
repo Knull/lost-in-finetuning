@@ -47,6 +47,11 @@ effects the human-written prompts confirm (``human_written_limit``); "Not run" s
 diagnosis was not run (``not_run``); section 8 ties each item to the claim it would firm up
 (``more_credits``); the related work opens with what is new (``what_is_new``), its two results said only
 where the numbers show them. docs/decisions.md items 128 to 130.
+
+The limitations report the cap-hit rate the pre-registration promises, with its table in the appendix
+(``cap_hits``, item 132); an extra before "Reproduce" says how to run the test on another adapter with the
+acceptance-test notebook, and the Space is named a results explorer (``run_it``, item 133); and the judge
+summary says how far the readers share the judge's refusal label (``validated.summary``, item 134).
 """
 
 from __future__ import annotations
@@ -98,8 +103,10 @@ SECTIONS = (
 )
 # The last extra: every table that left the main text, whole and with its note (docs/decisions.md item 127).
 APPENDIX = "Appendix: full tables"
+# The extra on the acceptance-test notebook, before "Reproduce" (review F4, docs/decisions.md item 133).
+RUN_IT = "Run the test on your adapter"
 # What follows the nine, unnumbered and in this order.
-EXTRAS = ("Related work", "Reproduce", "Links", APPENDIX)
+EXTRAS = ("Related work", RUN_IT, "Reproduce", "Links", APPENDIX)
 MODEL_ARTIFACTS, DATA_ARTIFACTS, EXPERIMENTS = SECTIONS[4], SECTIONS[5], SECTIONS[6]
 PERSON = "a person"
 
@@ -400,8 +407,8 @@ PARAMS_WHAT = (
 )
 PARAMS_WHY = "every repaired model's weights are gated, so on their own the parameters rebuild nothing"
 # (title, what the repo holds, why it has its access) of each dataset the data collection can list, in the
-# order section 6 lists them. The training sets are listed only once the collection holds them
-# (docs/decisions.md item 118).
+# order section 6 lists them. The training sets are listed only once `lift publish collections --yes`
+# recorded them among the data collection's items (``_training_sets_repo``; docs/decisions.md item 118).
 DATA_LINES = {
     "logs": (
         "Evaluation logs",
@@ -510,13 +517,15 @@ def model_artifacts(facts: Facts) -> str:
             )
         elif r.kind == "space":
             # What the page holds of the outputs is said in full: lift.publish.space cuts a few outputs of
-            # every cell, whatever their label, so harmful-labelled ones are among them.
+            # every cell, whatever their label, so harmful-labelled ones are among them. It is a results
+            # explorer, as its card says, and the notebook is the way to run the test (docs/decisions.md 133).
             lines.append(
-                f"- **Space**: {_link(r)}. A static page of the results: the verdicts, the heatmaps, the "
-                "utility table and a few example outputs for each variant, language and safety prompt set of "
-                "the final split, each cut to its first words and marked `[redacted]`, whatever its label. "
+                f"- **Space**: {_link(r)}. A results explorer, a static page: the verdicts, the heatmaps, "
+                "the utility table and a few example outputs for each variant, language and safety prompt "
+                "set of the final split, each cut to its first words and marked `[redacted]`, whatever its "
+                "label. "
                 f"{access}: it loads no model and generates nothing, and it holds no more of any output than "
-                "that cut."
+                f"that cut. The test itself runs in the notebook: {see(RUN_IT)}."
             )
         else:
             raise PublishError(f"the model collection lists {r.repo_id}, which the article has no line for")
@@ -526,18 +535,43 @@ def model_artifacts(facts: Facts) -> str:
 
 
 def _training_sets_repo(facts: Facts) -> settings.RepoSpec | None:
-    """The training-sets dataset when the data collection lists it, else None: the article names it only
-    once it is published (docs/decisions.md item 118)."""
-    from lift.publish.collect import plan
+    """The training-sets dataset once `lift publish collections --yes` recorded it among the data
+    collection's items (outputs/publish/collections.json, ``collect.read_items``: written after it checked
+    that every repo is on the Hub), else None: the article names it only once it is published
+    (docs/decisions.md item 118)."""
+    from lift.publish.collect import plan, read_items
 
-    return next((r for r in plan(facts)["data"] if r.kind == "sft"), None)
+    repo = next((r for r in plan(facts)["data"] if r.kind == "sft"), None)
+    return repo if repo is not None and repo.repo_id in read_items().get("data", []) else None
+
+
+def _withheld_words(facts: Facts, repo: settings.RepoSpec) -> str:
+    """What section 6's line on the training sets adds of the rows their published files leave out
+    (configs/publish.yaml ``repos.sft.withheld``, ``datasets.sft_withheld``): how many, recorded in the
+    sources, and why in a few words; the dataset's card lists them. Nothing when none is withheld."""
+    from lift.publish.datasets import sft_withheld
+
+    n = sum(len(ids) for ids in sft_withheld().values())
+    if not n:
+        return ""
+    setting = settings.load()["repos"]["sft"]["withheld"]
+    _record(facts, "configs/publish.yaml", "/repos/sft/withheld", setting, _count_word(n))
+    rows, each = ("training row is", "its") if n == 1 else ("training rows are", "each")
+    return (
+        f" {cap(_count_word(n))} {rows} withheld from the published files: a stretch of {each} answer is "
+        "also in one of our model outputs, and the scan of every public upload reads content, not where a "
+        f"text came from. [The dataset's card]({repo.url}) lists them, with the sha256 of the full training "
+        "files."
+    )
 
 
 def data_artifacts(facts: Facts) -> str:
     """Section 6's list: one line per dataset of the data collection (``collect.plan``), in ``DATA_LINES``'
     order, then the repair parameters, which sit in the model collection and are data a reader needs. Each
     line has the repo's link, what it holds, its access as configs/publish.yaml sets it (``_access``) and
-    the reason for that access. A dataset the collection lists and ``DATA_LINES`` does not is refused."""
+    the reason for that access. A dataset the collection lists and ``DATA_LINES`` does not is refused. The
+    training sets are named only once they are published (``_training_sets_repo``), with the rows their
+    published files withhold (``_withheld_words``)."""
     from lift.publish.collect import plan
 
     repos = {r.kind: r for r in plan(facts)["data"]}
@@ -546,10 +580,15 @@ def data_artifacts(facts: Facts) -> str:
         raise PublishError(
             f"the data collection lists {', '.join(unknown)}, which the article has no line for"
         )
+    if _training_sets_repo(facts) is None:
+        repos.pop("sft", None)
     lines = []
     for kind, (title, what, why) in DATA_LINES.items():
         if kind in repos:
-            lines.append(f"- **{title}**: {_link(repos[kind])}. {what}. {_access(repos[kind])}: {why}.")
+            extra = _withheld_words(facts, repos[kind]) if kind == "sft" else ""
+            lines.append(
+                f"- **{title}**: {_link(repos[kind])}. {what}. {_access(repos[kind])}: {why}.{extra}"
+            )
     params = settings.repo("repair_params")
     lines.append(
         f"- **Repair parameters**: {_link(params)}. {PARAMS_WHAT}. They are in the model collection "
@@ -561,11 +600,11 @@ def data_artifacts(facts: Facts) -> str:
 
 def tool_chain(facts: Facts) -> dict[str, str]:
     """Section 2's opening sentence, the three tools as one chain, and the words that say where
-    CuratorKIT's files are published. The chain is said either way and names only what is public. While
-    the data collection does not list the training sets (``_training_sets_repo``; docs/decisions.md item
-    118), it points at the adapters and the repaired model and at AuditKIT's records, and the CuratorKIT
-    line says only that its files are kept. Once the collection lists them, the chain's first link is
-    that dataset and the line says where the files are."""
+    CuratorKIT's files are published. The chain is said either way and names only what is public. Until
+    `lift publish collections --yes` records the training sets among the data collection's items
+    (``_training_sets_repo``; docs/decisions.md item 118), it points at the adapters and the repaired model
+    and at AuditKIT's records, and the CuratorKIT line says only that its files are kept. Once it does, the
+    chain's first link is that dataset and the line says where the files are."""
     models, data = section_ref(MODEL_ARTIFACTS), section_ref(DATA_ARTIFACTS)
     repo = _training_sets_repo(facts)
     if repo is None:
@@ -2102,6 +2141,139 @@ def judge_on_benign(facts: Facts, link: str = "") -> str:
     )
 
 
+# ------------------------------------------------ the cap-hit rate (review F15, docs/decisions.md item 132)
+
+# The appendix's block of cap-hit rates (PREREGISTRATION.md: "We report the cap-hit rate"), and the Hindi
+# sets of P07's cells table it shows, each as its column is headed.
+CAP_HEAD = "Answers that reached the token cap, Hindi"
+CAP_SETS = {
+    "harmful": "Harmful",
+    "redteam": "Harmful, human-written (Aya Red-teaming)",
+    "easy_benign": "Easy benign",
+    "hard_benign": "Hard benign",
+}
+# The sets the limitation names, each with the word a benign set gets there.
+CAP_SAID = (("harmful", ""), ("easy_benign", "easy"), ("hard_benign", "hard"))
+CAP_CUT = "an answer that reaches the cap is judged as it was cut"
+
+
+def _cap_roles(facts: Facts, adapter: str | None) -> list[tuple[str, str]]:
+    """(variant, role) of the rows of the appendix's table of cap-hit rates: stock, the adapter of the
+    repair comparison, then each frozen setting of selection.json, the overall winner first."""
+    out = [("stock", "stock")] + ([(adapter, "adapter")] if adapter else [])
+    sel = _decided(facts)
+    if sel is None:
+        return out
+    winner = str(sel["overall"]["winner"])
+    frozen = sorted(sel["frozen"].items(), key=lambda item: str(item[1]) != winner)
+    for family, name in frozen:
+        if str(name) == winner:
+            out.append((winner, _frozen_name(facts).removeprefix("the ")))
+        else:
+            out.append((str(name), f"{FAMILY_NAMES.get(str(family), str(family))}'s frozen setting"))
+    return out
+
+
+def _cap_table(facts: Facts, rows: Sequence[Mapping[str, Any]], adapter: str | None, tokens: str) -> str:
+    """The appendix's table of cap-hit rates: one row per variant of ``_cap_roles`` that has a Hindi cell in
+    P07's cells table, one column per Hindi set (``CAP_SETS``), every cell read through ``facts`` (a cell
+    the table does not hold is "not run"), and its note. ``tokens``: the cap, as the text shows it."""
+    index = {(r.get("variant"), r.get("set"), r.get("lang")): i for i, r in enumerate(rows)}
+    body = []
+    for variant, role in _cap_roles(facts, adapter):
+        found = [index.get((variant, set_name, "hi")) for set_name in CAP_SETS]
+        if all(i is None for i in found):
+            continue
+        first = next(i for i in found if i is not None)
+        line = [facts.report_value(f"/tables/cells/rows/{first}/variant", "text", what="a variant"), role]
+        for set_name, i in zip(CAP_SETS, found, strict=True):
+            what = f"the cap-hit rate of {variant} on the Hindi {set_name} prompts"
+            at = f"/tables/cells/rows/{i}/cap_hit_rate"
+            line.append(fmt(None, "pct") if i is None else facts.report_value(at, "pct", what=what))
+        body.append(line)
+    table = render.markdown_table(["Variant", "Role", *CAP_SETS.values()], body)
+    note = (
+        f"The share of each variant's answers that reached the cap of {tokens} new tokens, on the Hindi "
+        f"prompts of the final split (seed 1), from the cells table of final_report.json; {CAP_CUT}. The "
+        "pre-registration says the cap-hit rate is reported (docs/decisions.md item 132)."
+    )
+    return f"{table}\n\n{note}"
+
+
+def cap_hits(facts: Facts, appendix: Appendix) -> str:
+    """The cap-hit rate, which the pre-registration says is reported (review F15; docs/decisions.md item
+    132), read from P07's table of every final cell (``cap_hit_rate``), which the article does not place
+    whole: a bullet of the limitations, with its line end. That answers stop at the token cap
+    (configs/project.yaml ``generation.max_new_tokens``) and that one which reaches it is judged as it was
+    cut; how often stock's answers and the comparison adapter's (its seed 1) reached it on the Hindi harmful
+    prompts and on the easy and hard benign ones; and, only where every pair said points one way, whose
+    answers were judged cut more often. The rates of stock, that adapter and each frozen setting on the four
+    Hindi sets go to the appendix (``CAP_HEAD``), and the bullet links them. Only what the table holds is
+    said: a set without stock's rate is left out, and the adapter's rates are said only where it has every
+    one stock has. Pending while the report, its cells table or the column is not there."""
+    rows = facts.table_rows("cells")
+    what = "the cap-hit rates of the final cells"
+    if rows is None:
+        return f"- {facts.report_value('/tables/cells/rows', 'text', what=what)}\n"
+    if not any("cap_hit_rate" in r for r in rows):  # a report written before P07's cells held the rate
+        return f"- {facts.report_value('/tables/cells/rows/0/cap_hit_rate', 'pct', what=what)}\n"
+    index = {(r.get("variant"), r.get("set"), r.get("lang")): i for i, r in enumerate(rows)}
+    adapter = facts.raw(report_path(), "/verdicts/0/adapter")
+    adapter = adapter if isinstance(adapter, str) and adapter != "stock" else None
+    shown_rates: dict[tuple[str, str], str] = {}
+
+    def raw(variant: str | None, set_name: str) -> float | None:
+        i = index.get((variant, set_name, "hi"))
+        value = rows[i].get("cap_hit_rate") if i is not None else None
+        return value if _is_number(value) else None
+
+    def rate(variant: str | None, set_name: str) -> str:
+        """A Hindi cell's cap-hit rate as the text shows it, recorded once (``raw`` says whether it is
+        there)."""
+        if (variant, set_name) not in shown_rates:
+            at = f"/tables/cells/rows/{index[(variant, set_name, 'hi')]}/cap_hit_rate"
+            what = f"the cap-hit rate of {variant} on the Hindi {set_name} prompts"
+            shown_rates[(variant, set_name)] = facts.report_value(at, "pct", what=what)
+        return shown_rates[(variant, set_name)]
+
+    tokens = facts.config("project", "generation.max_new_tokens", "int")
+    head = f"Answers stop at {tokens} new tokens, and {CAP_CUT}."
+    said = [(set_name, word) for set_name, word in CAP_SAID if raw("stock", set_name) is not None]
+    if not said:
+        return f"- {head} No Hindi cell of stock has a cap-hit rate in the report.\n"
+    both = adapter is not None and all(raw(adapter, set_name) is not None for set_name, _ in said)
+    other = plain(facts, adapter) if both else ""
+    clauses = []
+    if said[0][0] == "harmful":
+        clause = f"stock's answers reached it on {rate('stock', 'harmful')} of the Hindi harmful prompts"
+        clauses.append(clause + (f" and {other}'s on {rate(adapter, 'harmful')}" if both else ""))
+    benign = [(set_name, word) for set_name, word in said if set_name != "harmful"]
+    if benign:
+        shares = _and([f"{rate('stock', set_name)} ({word})" for set_name, word in benign])
+        clause = (
+            f"on the Hindi benign prompts, stock's on {shares}"
+            if clauses
+            else f"stock's answers reached it on {shares} of the Hindi benign prompts"
+        )
+        theirs = _and([rate(adapter, set_name) for set_name, _ in benign]) if both else ""
+        clauses.append(clause + (f", {other}'s on {theirs}" if both else ""))
+    text = f"{head} {cap('; '.join(clauses))}."
+    if both:
+        pairs = [(raw("stock", set_name), raw(adapter, set_name)) for set_name, _ in said]
+        more = (
+            ("stock's", f"{other}'s")
+            if all(s > a for s, a in pairs)
+            else (f"{other}'s", "stock's")
+            if all(s < a for s, a in pairs)
+            else None
+        )
+        if more:
+            where = " on each of these sets" if len(pairs) > 1 else ""
+            text += f" So{where} more of {more[0]} answers than of {more[1]} were judged cut short."
+    link = appendix.add(CAP_HEAD, _cap_table(facts, rows, adapter, tokens))
+    return f"- {text} Table: {link}.\n"
+
+
 def _is_vs_wiseft(name: str, spec: dict) -> bool:
     words = f"{name} {spec.get('title', '')}".lower().replace("-", "")
     return "wiseft" in words
@@ -3564,18 +3736,20 @@ def human_written_limit(facts: Facts) -> str:
 
 # The repairs that change only the weights of stock's architecture (lift.repair.settings methods).
 WEIGHT_EDITS = ("wiseft", "resta")
+# The note on the per-token column; the slot takes the clause that points to the cap-hit rates.
 PER_TOKEN = (
     "The time per generated token is a batch's whole wall time (the pass over its prompts, then every "
     "step until its longest answer ends) divided by the tokens its answers hold. So it moves with the "
-    "length of the answers as well as with the cost of a step, and it does not rank the repairs by speed."
+    "length of the answers{} as well as with the cost of a step, and it does not rank the repairs by speed."
 )
 
 
-def _latency_note(facts: Facts) -> str:
+def _latency_note(facts: Facts, caps: str = "") -> str:
     """The note under the appendix's cost table on its per-token column (review F14h; how the column is
     computed is lift.report.cost.latency and lift.models.generate's per-record seconds). That a plain
     weight edit shows another time than stock is said only where the table shows it, with the values; the
-    gate share is given for each variant that has one."""
+    gate share is given for each variant that has one. ``caps``: the link to the appendix's cap-hit rates,
+    named in a clause on the answers' length (docs/decisions.md item 132), when that block is there."""
     from lift.repair import settings as rs
 
     rows = facts.table_rows("cost") or []
@@ -3586,7 +3760,7 @@ def _latency_note(facts: Facts) -> str:
     def ms(i: int) -> str:
         return rv(f"/tables/cost/rows/{i}/ms_per_token", "ms", what="time per generated token")
 
-    said = [PER_TOKEN]
+    said = [PER_TOKEN.format(f" (see {caps})" if caps else "")]
     stock = next((i for i, r in enumerate(rows) if r.get("variant") == "stock"), None)
     edits = []
     for i, row in enumerate(rows):
@@ -3626,11 +3800,12 @@ def cost(facts: Facts, appendix: Appendix) -> dict[str, str]:
     text links it (``cost_table``; the placeholder while there is no report). ``sweep_hours``: the dev
     sweep's GPU-hours and its CAST fit's, from the report's cost detail, as a clause after "the seed-1 dev
     sweep"; "" for a report without them. ``notebook_runtime``: the acceptance notebook's measured run
-    time as a sentence, and nothing while no run was timed."""
+    time as a sentence, with what the clock covers and a link to the extra on the notebook (``RUN_IT``,
+    docs/decisions.md item 133), and nothing while no run was timed."""
     from lift.publish import acceptance
 
     table = full_table(facts, "cost")
-    note = _latency_note(facts)
+    note = _latency_note(facts, appendix.link(CAP_HEAD, "how often they reached the token cap"))
     link = appendix.add(APPENDIX_TABLES["cost"], f"{table}\n\n{note}" if note else table)
     if table.startswith("| "):
         where = f"Each variant's GPU-hours and time per generated token: {link}."
@@ -3646,8 +3821,73 @@ def cost(facts: Facts, appendix: Appendix) -> dict[str, str]:
             sweep += f", and {fit} for its CAST fit"
         sweep += ")"
     timed = acceptance.runtime_text(facts)
-    runtime = "" if timed == acceptance.NOT_TIMED else f" The acceptance-test notebook ran in {timed}."
+    runtime = (
+        ""
+        if timed == acceptance.NOT_TIMED
+        else f" The acceptance-test notebook ran in {timed}, from its check to the last verdict (see "
+        f"{see(RUN_IT)})."
+    )
     return {"cost_table": where, "sweep_hours": sweep, "notebook_runtime": runtime}
+
+
+# --------------------------------------- the extra on the notebook (review F4, docs/decisions.md item 133)
+
+NOTEBOOK = "notebooks/acceptance_test.ipynb"
+
+
+def run_it(facts: Facts, notebook: str) -> dict[str, str]:
+    """The slots of the extra on the acceptance-test notebook (``RUN_IT``; review F4, docs/decisions.md item
+    133). The template says what the notebook does, needs and leaves out, as its cells and
+    ``lift.publish.acceptance`` do it; these are the parts that depend on the results or on a run:
+
+    - ``notebook_link``: the notebook as a link (``notebook``: its URL, or the placeholder while there is no
+      GitHub repo to link);
+    - ``frozen_applied``: the frozen setting the notebook applies, by its plain name (the frozen repair, or
+      the setting frozen with no repair eligible), with, for CAST, that it is fitted on the adapter first
+      (``acceptance.register_repair`` refuses it otherwise); "the frozen repair" while nothing is frozen;
+    - ``choose_your_own``: that its parameter was chosen on our adapter's dev prompts, so for another
+      adapter it is a starting point, not a tuned value; the study chose it with its dev sweep and
+      selection, which the notebook does not run (in a clone, ``lift select`` refuses a recipe other than
+      the frozen one, and the sweep registers settings by the adapter's seed, which a fetched adapter may
+      not have), so no route to tune it is offered;
+    - ``timed_run``: the measured run (``acceptance.runtime_text``, every value recorded) and what its clock
+      covers (``acceptance.RUNTIME_MARK``: from the check to the last verdict), nothing while no run was
+      timed. The sample size is said only there: the notebook's own is its ``LIMIT``."""
+    from lift.publish import acceptance
+    from lift.repair import settings as rs
+
+    link = f"[`{NOTEBOOK}`]({notebook})" if notebook.startswith("https://") else f"`{NOTEBOOK}` ({notebook})"
+    winner = frozen_winner(facts)
+    try:
+        setting = rs.parse_name(winner)[0] if winner else None
+    except ValueError:
+        setting = None
+    choose = (
+        "so for yours it is a starting point, not a value tuned for it. The study chose it with its dev "
+        "sweep and selection (`lift sweep`, then `lift select`), which the notebook does not run."
+    )
+    if winner is None:
+        applied = "the frozen repair"
+        choose = f"The frozen repair is chosen on our adapter's dev prompts, {choose}"
+    else:
+        frozen = _frozen_name(facts)
+        fit = setting is not None and setting.method in acceptance.CAST_METHODS
+        applied = f"{frozen} ({plain(facts, winner)}" + (
+            ", fitted on your adapter first with `lift fit-cast`)" if fit else ")"
+        )
+        if setting is not None:
+            param = f"{SETTING_NAMES[setting.method][1].removeprefix('at ')}{setting_value(facts, winner)}"
+            choose = f"{cap(frozen)}'s {param} was chosen on our adapter's dev prompts, {choose}"
+        else:
+            choose = f"{cap(frozen)} was chosen on our adapter's dev prompts, {choose}"
+    timed = acceptance.runtime_text(facts)
+    run = (
+        ""
+        if timed == acceptance.NOT_TIMED
+        else f" The run on record took {timed}, from the check to the last verdict, without the install and "
+        "the session restart before it."
+    )
+    return {"notebook_link": link, "frozen_applied": applied, "choose_your_own": choose, "timed_run": run}
 
 
 def more_credits(facts: Facts) -> str:
@@ -4056,12 +4296,16 @@ def context(facts: Facts) -> dict[str, str]:
     ctx["not_run"] = not_run(facts, diagnosis_run)
     limit = human_written_limit(facts)
     ctx["human_written_limit"] = f"- {limit}\n" if limit else ""
+    # the cap-hit rates (docs/decisions.md item 132): a bullet, and their table before the cost table, whose
+    # note points to it
+    ctx["cap_hit_limit"] = cap_hits(facts, appendix)
     ctx["judge_on_benign"] = judge_on_benign(
         facts, appendix.link(validated.BY_SET_HEAD.format(validated.ROUND))
     )
     limit = validated.readers_limit(facts)
     ctx["readers_limit"] = f"\n- {limit}" if limit else ""
     ctx.update(cost(facts, appendix))
+    ctx.update(run_it(facts, ctx["notebook"]))  # the extra on the notebook (docs/decisions.md item 133)
     ctx["more_credits"] = more_credits(facts)
     ctx["what_is_new"] = what_is_new(facts)
     for name in MAIN_FIGURES:  # the two heatmaps, which the template places

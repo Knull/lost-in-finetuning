@@ -118,6 +118,9 @@ After training
   sync pull``, then ``lift register-adapter NAME`` (``register_pulled``: it recomputes the hash from the
   pulled files, checks it against registration.json and that parity passed, writes the same entry, or
   removes the entry when the fp32 parity failed), and commits configs/variants.yaml.
+- An adapter the study did not train (the acceptance notebook fetches one from the Hub) is named
+  ``fetched_adapter_name`` (adapter-{source}, -s{seed} only when the caller gives one, never a recipe
+  token) and registered by ``register_fetched_adapter``: the same text edit, checked against that name.
 - Resume: an adapter folder that holds the weights is never trained again. The run does what is
   missing (the push; parity, unless registration.json holds one for this hash in that precision; the
   registration) and exits 0. ``--retrain`` first sets the folder aside under
@@ -251,6 +254,19 @@ def adapter_name(candidate: str, recipe: str, seed: int) -> str:
     if recipe not in RECIPE_TAGS:
         raise TrainRefused(f"unknown recipe {recipe!r}; choose from {list(RECIPES)}")
     return f"adapter-{candidate}-{RECIPE_TAGS[recipe]}-s{int(seed)}"
+
+
+def fetched_adapter_name(source: str, seed: int | None = None) -> str:
+    """``adapter-{source}``, or ``adapter-{source}-s{seed}`` when the caller gives a seed: an adapter the
+    study did not train (the acceptance notebook's, fetched from the Hub). It says where the adapter came
+    from and no more: no recipe token, as nothing here knows how it was trained. ``source`` is one
+    lowercase word that starts no study name: neither a candidate configs/train.yaml trains nor a recipe."""
+    candidates = {str(c) for c in config.load("train").get("candidates") or []}
+    taken = candidates | set(RECIPES) | set(RECIPE_TAGS.values())
+    if not re.fullmatch(r"[a-z0-9]+", str(source)) or source in taken:
+        raise ValueError(f"{source!r} cannot name a fetched adapter: one lowercase word, not one of "
+                         f"{sorted(taken)}")
+    return f"adapter-{source}" + ("" if seed is None else f"-s{int(seed)}")
 
 
 @dataclass(frozen=True)
@@ -1143,10 +1159,11 @@ def _note(trained: Mapping[str, Any], parity: str) -> str:
             f"{trained['data']['rows_trained']} rows of {trained['data']['key']}; merge parity {parity}")
 
 
-def adapter_entry(name: str, digest: str, *, seed: int, location: str, note: str) -> dict[str, Any]:
+def adapter_entry(name: str, digest: str, *, seed: int | None, location: str, note: str) -> dict[str, Any]:
     """The configs/variants.yaml entry of a trained adapter (location and note document it; the rest is
-    the VariantSpec every cache key built on it digests)."""
-    return {"name": name, "method": "adapter", "adapter": name, "seed": int(seed),
+    the VariantSpec every cache key built on it digests). ``seed`` None, a fetched adapter's when its
+    caller gives none (``register_fetched_adapter``), writes no seed."""
+    return {"name": name, "method": "adapter", "adapter": name, "seed": None if seed is None else int(seed),
             "artifacts": {"adapter": digest}, "location": location, "note": note}
 
 
@@ -1309,6 +1326,26 @@ def register_adapter(name: str, digest: str, *, candidate: str, recipe: str, see
     if name != adapter_name(candidate, recipe, seed):
         raise ValueError(f"{name!r} is not the adapter name of {candidate}, {recipe}, seed {seed} "
                          f"({adapter_name(candidate, recipe, seed)!r})")
+    return _register_entry(name, digest, seed=seed, location=location, note=note, registry=registry,
+                           replace=replace)
+
+
+def register_fetched_adapter(name: str, digest: str, *, source: str, seed: int | None, location: str,
+                             note: str, registry: Path | None = None, replace: bool = False) -> str:
+    """``register_adapter`` for an adapter the study did not train (the acceptance notebook's): ``name``
+    must be ``fetched_adapter_name(source, seed)``, and the entry has a seed only when the caller gave
+    one. The same text edit, checks and outcomes; the study's own names go through register_adapter."""
+    want = fetched_adapter_name(source, seed)
+    if name != want:
+        seeded = "" if seed is None else f", seed {seed}"
+        raise ValueError(f"{name!r} is not the name of an adapter fetched by {source}{seeded} ({want!r})")
+    return _register_entry(name, digest, seed=seed, location=location, note=note, registry=registry,
+                           replace=replace)
+
+
+def _register_entry(name: str, digest: str, *, seed: int | None, location: str, note: str,
+                    registry: Path | None, replace: bool) -> str:
+    """What register_adapter and register_fetched_adapter do once the name is checked."""
     if not _HEX64.fullmatch(str(digest)):
         raise ValueError(f"{digest!r} is not an adapter hash (64 hex: lift.train.merge.adapter_hash)")
     path = Path(registry) if registry is not None else default_registry()
@@ -1395,10 +1432,12 @@ def _registry_specs(doc: Any, path: Path) -> dict[str, Any]:
 
 
 def _entry_lines(entry: Mapping[str, Any], indent: str) -> list[str]:
-    """The entry as YAML block lines, strings quoted as JSON (valid YAML double-quoted scalars)."""
+    """The entry as YAML block lines, strings quoted as JSON (valid YAML double-quoted scalars); no seed
+    line for an entry without one (a fetched adapter's)."""
     inner = indent + "  "
+    seed = [] if entry.get("seed") is None else [f"{inner}seed: {int(entry['seed'])}"]
     return [f"{indent}- name: {entry['name']}", f"{inner}method: {entry['method']}",
-            f"{inner}adapter: {entry['adapter']}", f"{inner}seed: {int(entry['seed'])}",
+            f"{inner}adapter: {entry['adapter']}", *seed,
             f"{inner}artifacts: {{adapter: {json.dumps(entry['artifacts']['adapter'])}}}",
             f"{inner}location: {json.dumps(entry['location'], ensure_ascii=False)}",
             f"{inner}note: {json.dumps(entry['note'], ensure_ascii=False)}"]

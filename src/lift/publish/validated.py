@@ -24,9 +24,10 @@ and 128):
 
 - a summary of how far to trust the judge (``summary``): the judge every claim is read under; Gate 1's
   verdict in Hindi with the agreement and kappa it rests on, and how the bar was met, on agreement, on
-  kappa or on both (the bar is "or"); how weak the harmful label is; then the sentences the article reads
-  from its report. A bar that is not met is said with the README's consequence (the Hindi claims rest on
-  the validated sample), never softened;
+  kappa or on both (the bar is "or"); how weak the harmful label is; on how many of the outputs it
+  labelled refusals the readers did too (item 134); then the sentences the article reads from its report.
+  A bar that is not met is said with the README's consequence (the Hindi claims rest on the validated
+  sample), never softened;
 - how many outputs the readers labelled, per language, and how many of them are scored;
 - in one sentence, how the primary judge stands against the bar in each language and pooled (met on
   agreement, on kappa or on both, or missed), with the links to the tables of every judge view and of the
@@ -521,17 +522,51 @@ def _judged_harmful(val: _Reader, at: str, block: Mapping[str, Any] | None) -> t
     shown) of a block's confusion matrix (rows the readers, columns the judge), each cell of the judge's
     harmful column read through ``val`` so that the sum's parts are recorded; None when the block has no
     such matrix or no judgement."""
+    return _judged_as(val, at, block, "harmful")
+
+
+def _judged_as(
+    val: _Reader, at: str, block: Mapping[str, Any] | None, label: str
+) -> tuple[int, int, str] | None:
+    """``_judged_harmful`` for any of the four labels: (the outputs the judge gave ``label``, those of them
+    the readers gave it too, that count as shown), from the judge's column of the block's matrix."""
     confusion = (block or {}).get("confusion") or {}
     labels, matrix = confusion.get("labels") or [], confusion.get("matrix") or []
-    if "harmful" not in labels or not (block or {}).get("n_judged"):
+    if label not in labels or not (block or {}).get("n_judged"):
         return None
-    h = labels.index("harmful")
+    h = labels.index(label)
     what = "a count of the confusion matrix (readers by judge)"
     try:
         cells = [val(f"{at}/confusion/matrix/{i}/{h}", "int", what) for i in range(len(labels))]
         return sum(row[h] for row in matrix), matrix[h][h], cells[h]
     except (IndexError, TypeError) as exc:
         raise PublishError(f"{shown(val.path)}{at}/confusion: not a matrix of its labels ({exc})") from exc
+
+
+def _refusal_label(facts: Facts, doc: Mapping[str, Any]) -> str:
+    """How far the readers share the primary judge's refusal label (review F3; docs/decisions.md item 134):
+    of the outputs it labelled refusals over all languages, on how many the readers' label was a refusal
+    too, on round 1 and, once it is scored, on round 2. The refusal rate is one of the readings the summary
+    gives the drift under, and this is the label it counts. Counts only, each column's cells recorded; ""
+    while round 1's pooled matrix holds no refusal label of the judge."""
+    view = str(doc.get("primary_view"))
+    at = f"/judges/{view}/pooled"
+    block = ((doc.get("judges") or {}).get(view) or {}).get("pooled")
+    counts = _judged_as(_Reader(facts, scores_path(), SCORE), at, block, "refusal")
+    if counts is None or not counts[0]:
+        return ""
+    judged, _, agreed = counts
+    later = ""
+    second = _second_round(facts, doc)
+    if second is not None:
+        block = ((second.get("judges") or {}).get(view) or {}).get("pooled")
+        again = _judged_as(_Reader(facts, scores_path(2), _stage(2)), at, block, "refusal")
+        if again is not None and again[0]:
+            later = f" (round 2: {again[2]} of {again[0]})"
+    return (
+        f"Its refusal label agrees with the readers' on {agreed} of the {judged} "
+        f"{_count(judged, 'output', 'outputs')} it gave that label in round 1, over all languages{later}."
+    )
 
 
 def _harmful_label(
@@ -1097,14 +1132,17 @@ def in_short(facts: Facts, by_set: str = "") -> tuple[list[str], bool]:
 
 def summary(facts: Facts, readings: Any = None, by_set: str = "") -> str:
     """The paragraph that opens the judge's part (review R5 and F3; docs/decisions.md item 128): how far to
-    trust the judge, in short. The sentences that rest on the validation files (``in_short``), then the
-    ones the article reads from its report, given whether the harmful label was called the weak one
-    (``readings``: lift.publish.article's sentences on the direction of the effects and the sizes of the
-    drift under each reading; none when it is not given). "" while round 1 is not scored."""
+    trust the judge, in short. The sentences that rest on the validation files (``in_short``), with how far
+    the readers share its refusal label (``_refusal_label``, item 134), then the ones the article reads
+    from its report, given whether the harmful label was called the weak one (``readings``:
+    lift.publish.article's sentences on the direction of the effects and the sizes of the drift under each
+    reading; none when it is not given). "" while round 1 is not scored."""
     said, weak = in_short(facts, by_set)
     if not said:
         return ""
-    return " ".join([IN_SHORT, *said, *(readings(weak) if readings is not None else [])])
+    refusals = _refusal_label(facts, facts.doc(scores_path()))
+    from_report = readings(weak) if readings is not None else []
+    return " ".join([IN_SHORT, *said, *([refusals] if refusals else []), *from_report])
 
 
 def judged_langs(facts: Facts) -> list[str]:

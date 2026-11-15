@@ -1,12 +1,15 @@
 """``lift publish collections``: the two HF collections the article links to.
 
 "models" lists the repaired model, the repair parameters, the gated adapters and the Space; "data"
-lists the logs dataset, the gated raw completions and the translated prompt sets. With ``--yes`` every
-listed repo is first checked to exist on the Hub (nothing is created while one is missing, so no
-collection is left half-built), then the collections are created (or reused: ``exists_ok``) under the
-team namespace and every item is added, and their urls are written to outputs/publish/collections.json,
-which the article reads for its links. Both name the repaired model, so ``--yes`` refuses while the
-recipe is not frozen at its ``recipe-frozen-*`` tag (``lift.publish.inputs.recipe_block``, review XB2-02).
+lists the logs dataset, the gated raw completions, the translated prompt sets and the training sets.
+With ``--yes`` every listed repo is first checked to exist on the Hub (nothing is created while one is
+missing, so no collection is left half-built), then the collections are created (or reused:
+``exists_ok``) under the team namespace and every item is added. Each collection's slug, url and items
+(the repo ids it was given, every one checked to be on the Hub) are written to
+outputs/publish/collections.json: the article reads the urls for its links (``read_links``), and calls
+the training sets published only once they are among the data collection's items (``read_items``).
+Both name the repaired model, so ``--yes`` refuses while the recipe is not frozen at its
+``recipe-frozen-*`` tag (``lift.publish.inputs.recipe_block``, review XB2-02).
 """
 
 from __future__ import annotations
@@ -25,11 +28,27 @@ def links_path() -> Path:
     return paths.output_dir() / "publish" / "collections.json"
 
 
-def read_links() -> dict[str, str]:
+def _recorded() -> dict[str, Any]:
     path = links_path()
     if not path.is_file():
         return {}
-    return {k: v["url"] for k, v in json.loads(path.read_text(encoding="utf-8")).items() if "url" in v}
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    return {k: v for k, v in doc.items() if isinstance(v, dict)} if isinstance(doc, dict) else {}
+
+
+def read_links() -> dict[str, str]:
+    """{collection: its url}, as ``execute`` recorded them in outputs/publish/collections.json."""
+    return {k: v["url"] for k, v in _recorded().items() if "url" in v}
+
+
+def read_items() -> dict[str, list[str]]:
+    """{collection: the repo ids ``execute`` added to it}, from outputs/publish/collections.json. A file
+    written before the items were recorded gives none, so nothing reads as published on its account."""
+    return {
+        k: [i for i in v["items"] if isinstance(i, str)]
+        for k, v in _recorded().items()
+        if isinstance(v.get("items"), list)
+    }
 
 
 def plan(facts: Facts | None = None) -> dict[str, list[settings.RepoSpec]]:
@@ -41,7 +60,7 @@ def plan(facts: Facts | None = None) -> dict[str, list[settings.RepoSpec]]:
     # every registered adapter, pulled here or not (review XB-05): execute checks each repo is on the Hub
     models += [settings.repo("adapter", adapter=name) for name in sorted(registered_adapters())]
     models.append(settings.repo("space"))
-    data = [settings.repo("logs"), settings.repo("raw"), settings.repo("prompts")]
+    data = [settings.repo("logs"), settings.repo("raw"), settings.repo("prompts"), settings.repo("sft")]
     return {"models": models, "data": data}
 
 
@@ -59,7 +78,7 @@ def execute(
     *,
     api_factory: Callable[[], Any] | None = None,
     log: Callable[[str], None] = print,
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     problems = [
         r.repo_id
         for items in p.values()
@@ -86,7 +105,7 @@ def execute(
             + ", ".join(absent)
         )
     cfg = settings.load()["collections"]
-    out: dict[str, dict[str, str]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for key, items in p.items():
         col = api.create_collection(
             cfg[key]["title"],
@@ -99,6 +118,7 @@ def execute(
         out[key] = {
             "slug": col.slug,
             "url": getattr(col, "url", None) or f"https://huggingface.co/collections/{col.slug}",
+            "items": [r.repo_id for r in items],
         }
         log(f"collection {key}: {out[key]['url']} ({len(items)} items)")
     render.write_text(links_path(), json.dumps(out, indent=1))

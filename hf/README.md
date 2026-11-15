@@ -2,8 +2,8 @@
 
 The rules say every artifact is hosted on HF and the project is deployed publicly by the
 deadline. Gating follows docs/decisions.md items 14 and 84. Gated repos are still hosted publicly
-(anyone can see them and, after accepting the terms, download them), and the GitHub repo, Space, article, logs, prompt sets and
-repair parameters are public, so the public deploy is met.
+(anyone can see them and, after accepting the terms, download them), and the GitHub repo, Space, article, logs, prompt sets,
+training sets and repair parameters are public, so the public deploy is met.
 
 | Artifact | Access | Contents |
 | --- | --- | --- |
@@ -13,7 +13,7 @@ repair parameters are public, so the public deploy is met.
 | Logs dataset | public | Prompt ids, labels, flags, generation keys, output hashes (the redacted AuditKIT records), metadata and aggregate tables. No output text, and no judge text: `JudgementRecord.raw`, `native.reason` and the text of `native.judge_failure` (the judges' replies, a frontier judge's reason, and the part of a reply a failure quotes: a frontier provider's refusal, the start of a Qwen3Guard reply that did not parse) stay out with it, as CLAUDE.md rule 6 gates judge logs. A failed judgement keeps only that its judge failed, and the failure's kind. |
 | Raw completions | gated, automatic approval (manual until Nov 14, docs/decisions.md item 110) | Every judged output in full, refusals and benign answers included, the harmful ones too. No other artifact holds more of an output than the Space's 10-word cut. |
 | Translated prompt sets | public | Hindi PolyRefuse, Chinese harmless, OR-Bench-Hard in 5 languages, with native-check notes and the CC-BY-4.0 attribution for OR-Bench. |
-| Training sets | not uploaded: staged only (decisions item 118) | The three files `lift train` read (the Aya Dataset's Hindi rows, the IndicAlign `Dolly_T` sample deduplicated, and the stress recipe's undeduplicated sample), each with CuratorKIT's manifest, rejected rows and provenance, and the build report. `lift publish datasets --only sft` stages them as `lift-hindi-sft`, and only while each file's sha256 is the one its training runs recorded. The scan of every upload refuses two of the files: one row in each IndicAlign file holds one of the scan's 60-character windows of an output on the team's machine. So the dataset is not on the Hub, and in neither collection, until a person decides. |
+| Training sets | public, two rows withheld (decisions items 118 and 135) | The three files `lift train` read (the Aya Dataset's Hindi rows, the IndicAlign `Dolly_T` sample deduplicated, and the stress recipe's undeduplicated sample), each with CuratorKIT's manifest, rejected rows and provenance, and the build report, as `lift-hindi-sft` in the data collection. `lift publish datasets` stages them only while each full training file's sha256 is the one its training runs recorded, and leaves out of the staged copies the rows `configs/publish.yaml` `repos.sft.withheld` names (every other line as it is): one row in each IndicAlign file holds one of the scan's 60-character windows of an output on the team's machine, and the scan is given no exception. The card lists the withheld ids with the rows and sha256 of the full training files and of the published ones, and says how to rebuild the training files from the public sources. |
 | Collections | public | One for model artifacts, one for data artifacts, both linked from the article. |
 | Article | public | The organisers' nine sections, numbered and in their order (the kickoff slides' "Submission artifacts" list, decisions item 119), then Related work, Reproduce, Links and an appendix of full tables (decisions item 127), from the metrics files and the `lift train` manifests only. It is the repository's README.md. Sections 5 and 6 list every repo of the two collections with its access and the reason for it. |
 | Notebook | public, in the repo | `notebooks/acceptance_test.ipynb`: run the check on any Tiny Aya adapter. `lift publish article` stamps its links and the frozen winner; it is committed with the README (decisions item 122). |
@@ -36,10 +36,10 @@ a dry run unless given `--yes`.
 | Command | Builds | Reads |
 | --- | --- | --- |
 | `lift publish model [--variant V] [--build --device cuda:0] [--yes]` | repaired model (gated), repair parameters, gated adapters; writes outputs/publish/model.sources.json (every value on the model card with its file and pointer) | `selection.json`, `final_report.json`, configs/variants.yaml, outputs/adapters, outputs/artifacts/cast |
-| `lift publish datasets [--only logs raw prompts] [--yes]` | logs (public: ids, labels, flags and hashes, no output or judge text), raw completions (gated, automatic approval), translated prompts (public) | outputs/judgements, generations, utility, metrics (the gate, selection and validation reports, auditkit), validation keys and labels, data/prompts |
-| `lift publish datasets --only sft` | the training sets with CuratorKIT's files, staged only when named; `--yes` refuses them while the public-text scan finds an output's text in them (decisions item 118); writes outputs/publish/datasets/sft.sources.json (the card's counts and hashes) | data/sft, the `lift train` manifests in outputs/manifests, configs/variants.yaml and configs/train.yaml |
+| `lift publish datasets [--only logs raw prompts sft] [--yes]` | logs (public: ids, labels, flags and hashes, no output or judge text; the aggregates include the acceptance notebook's run time once it was timed), raw completions (gated, automatic approval), translated prompts (public), training sets (public, below) | outputs/judgements, generations, utility, metrics (the gate, selection and validation reports, auditkit, acceptance_runtime.json), validation keys and labels, data/prompts |
+| `lift publish datasets --only sft` | the training sets with CuratorKIT's files, only while each full training file has the sha256 its training runs recorded (decisions item 118), with the rows `repos.sft.withheld` names left out of the staged copies; writes outputs/publish/datasets/sft.sources.json (the card's counts and hashes, of the full and the published files) | data/sft, the `lift train` manifests in outputs/manifests, configs/variants.yaml, configs/train.yaml and configs/publish.yaml |
 | `lift publish space [--yes]` | the static Space (`index.html`, drawn by `hf/space/app.py`) with `examples.json`: two outputs per variant, language and set of the final split, each cut to at most 10 words plus `[redacted]` whatever its label | outputs/generations and the primary judgements (for the cuts); the Space itself reads the logs dataset |
-| `lift publish collections [--yes]` | the two collections; writes outputs/publish/collections.json | the repo ids above |
+| `lift publish collections [--yes]` | the two collections (the data collection lists the training sets); writes outputs/publish/collections.json: each collection's slug, url and items, the repo ids it added once it had checked each is on the Hub. The article names the training sets only once they are among the data collection's items | the repo ids above |
 | `lift publish article` | `hf/article.md`, the same text as the repository's `README.md`, and `hf/article.sources.json` (every value with its file and JSON pointer); stamps the notebook's links and frozen winner | `final_report.json`, `selection.json`, the validation files (`validation/round1.json`, `validation/gate1.json`, `judge_decision.json`), the `lift train` manifests of the registered adapters (the training rows), configs, collections.json, configs/publish.yaml, the collections plan |
 | `lift publish preflight [--no-history] [--no-fetch]` | nothing; fetches every branch, tag and pull-request ref of origin first (`--no-fetch` skips it: local refs only, not enough to go public), then fails on a secret, token, raw completion, notebook output, forbidden path or a run of any model output's text in the tracked files or the git history | the git repo, and every generation in this machine's `outputs/`, whatever its label (it refuses a machine that has none) |
 
@@ -61,16 +61,23 @@ refuse to run without them. Every dry run runs the public-text scan too and exit
    check it, then `lift publish model --yes` (no `--build`) uploads those same weights. Without
    `--build`, staged weights are used only while their `lift_variant.json` matches the winner's
    registry entry (spec, adapter hash, Global revision); otherwise the command asks for `--build`.
-4. On the laptop, after `lift sync pull`: `lift publish datasets`, then `--yes`;
-   `lift publish space`, then `--yes`; `lift publish collections`, then `--yes` (it checks every
-   repo is on the Hub before creating anything, so run it after the uploads). The training sets
-   are no part of this: `lift publish datasets` leaves them out, `--only sft` stages them, and
-   `--yes` refuses them while the scan finds an output's text in them (decisions item 118).
-5. `lift publish article` (no placeholder left), then commit together `README.md`, `hf/article.md`,
+4. On the laptop, after `lift sync pull`: `lift publish datasets` (the dry run of all four
+   datasets, the training sets with their withheld rows left out), then
+   `lift publish datasets --only raw sft logs --yes`: the raw completions, the training sets and
+   the logs, which carry the acceptance notebook's run time (`aggregates/acceptance_runtime.json`)
+   and the redrawn figures. `lift publish space`, then `--yes`. Then `lift publish collections`,
+   then `--yes`: it checks that every repo, the training sets included, is on the Hub before it
+   creates anything, so it runs after the uploads, and it records each collection's items in
+   `outputs/publish/collections.json`.
+5. `lift publish article` (no placeholder left), after `lift publish collections --yes`: the article
+   names the training sets (section 6, and the chain in section 2) only once collections.json
+   records them among the data collection's items. Then commit together `README.md`, `hf/article.md`,
    `hf/article.sources.json`, the figures it copies into `figures/` beside the README, which links
    them, and `notebooks/acceptance_test.ipynb`, which it stamps with the repo's links and the frozen
    winner (never restore the notebook before the preflight: the committed one would keep its
-   placeholders, decisions item 122). The README is the write-up the submission form links to
+   placeholders, decisions item 122), and push once `lift publish preflight` passes (step 7): that
+   push is what makes the README name the training sets. The README is the write-up the submission
+   form links to
    (docs/decisions.md item 96: an HF community article needs a PRO account; item 119: the
    organisers confirmed that a markdown README in the GitHub repo counts as the article).
 6. `python scripts/verify_numbers.py`: every result value of the committed

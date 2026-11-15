@@ -28,11 +28,19 @@ repos:
   prompts: {name: lift-multilingual-safety-prompts, type: dataset, access: public}
   # The three Hindi training sets (the Aya Dataset rows, the IndicAlign Dolly_T sample deduplicated and
   # the stress recipe's undeduplicated one) with CuratorKIT's manifest, rejected rows and provenance.
-  # Training rows of public datasets, no model output; staged only while each file's sha256 is the one
-  # its training runs recorded. NOT UPLOADED, and in neither collection: the public-text scan refuses
-  # the two IndicAlign files, so it is staged only by `lift publish datasets --only sft`
-  # (docs/decisions.md item 118).
-  sft: {name: lift-hindi-sft, type: dataset, access: public}
+  # Training rows of public datasets, no model output; staged only while each full training file's
+  # sha256 is the one its training runs recorded (docs/decisions.md item 118). In the data collection.
+  # `withheld`: the rows each published file leaves out, by training set ({candidate: {variant: [row
+  # ids]}}; docs/decisions.md item 135). In each, a stretch of the answer
+  # is also in one of this project's model outputs, which the public-text scan of every upload refuses.
+  # The scan reads content, not where a text came from, so the rows are withheld and the scan is
+  # unchanged. Every other line is published as it is, and the card lists these ids with the full
+  # files' sha256.
+  sft:
+    name: lift-hindi-sft
+    type: dataset
+    access: public
+    withheld: {indicalign: {dedup: [ind-02551], raw: [ind-04884]}}
   # A static page: HF hosts a Gradio Space on free CPU only for PRO (402 for the organisation, then for a
   # user), while a static Space is free for everyone (Nov 14, docs/decisions.md 112-113).
   space: {name: lift-acceptance-test, type: space, access: public, sdk: static}

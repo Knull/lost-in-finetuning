@@ -8566,6 +8566,54 @@
    "value": 0.3684210526315789
   },
   {
+   "file": "outputs/metrics/validation/round1.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/0/1",
+   "shown": "0",
+   "value": 0
+  },
+  {
+   "file": "outputs/metrics/validation/round1.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/1/1",
+   "shown": "66",
+   "value": 66
+  },
+  {
+   "file": "outputs/metrics/validation/round1.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/2/1",
+   "shown": "1",
+   "value": 1
+  },
+  {
+   "file": "outputs/metrics/validation/round1.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/3/1",
+   "shown": "0",
+   "value": 0
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/0/1",
+   "shown": "0",
+   "value": 0
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/1/1",
+   "shown": "40",
+   "value": 40
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/2/1",
+   "shown": "0",
+   "value": 0
+  },
+  {
+   "file": "outputs/metrics/validation/round2.json",
+   "pointer": "/judges/qwen3guard_strict/pooled/confusion/matrix/3/1",
+   "shown": "0",
+   "value": 0
+  },
+  {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/primary/drift/pooled/est",
    "shown": "+31.5 pp",
@@ -10036,6 +10084,198 @@
    }
   },
   {
+   "file": "configs/project.yaml",
+   "pointer": "/generation/max_new_tokens",
+   "shown": "256",
+   "value": 256
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/1/cap_hit_rate",
+   "shown": "38.0%",
+   "value": 0.38
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/20/cap_hit_rate",
+   "shown": "15.8%",
+   "value": 0.1575
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/7/cap_hit_rate",
+   "shown": "67.3%",
+   "value": 0.6733333333333333
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/13/cap_hit_rate",
+   "shown": "78.5%",
+   "value": 0.785
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/26/cap_hit_rate",
+   "shown": "8.7%",
+   "value": 0.08666666666666667
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/32/cap_hit_rate",
+   "shown": "36.0%",
+   "value": 0.36
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/1/variant",
+   "shown": "stock",
+   "value": "stock"
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/1/cap_hit_rate",
+   "shown": "38.0%",
+   "value": 0.38
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/18/cap_hit_rate",
+   "shown": "51.9%",
+   "value": 0.5191675794085433
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/7/cap_hit_rate",
+   "shown": "67.3%",
+   "value": 0.6733333333333333
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/13/cap_hit_rate",
+   "shown": "78.5%",
+   "value": 0.785
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/20/variant",
+   "shown": "adapter-indicalign-stress-s1",
+   "value": "adapter-indicalign-stress-s1"
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/20/cap_hit_rate",
+   "shown": "15.8%",
+   "value": 0.1575
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/37/cap_hit_rate",
+   "shown": "11.9%",
+   "value": 0.11938663745892661
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/26/cap_hit_rate",
+   "shown": "8.7%",
+   "value": 0.08666666666666667
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/32/cap_hit_rate",
+   "shown": "36.0%",
+   "value": 0.36
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/96/variant",
+   "shown": "wiseft-l0.25-adapter-indicalign-stress-s1",
+   "value": "wiseft-l0.25-adapter-indicalign-stress-s1"
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/96/cap_hit_rate",
+   "shown": "16.8%",
+   "value": 0.1675
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/113/cap_hit_rate",
+   "shown": "27.1%",
+   "value": 0.27053669222343923
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/102/cap_hit_rate",
+   "shown": "34.3%",
+   "value": 0.3433333333333333
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/108/cap_hit_rate",
+   "shown": "62.5%",
+   "value": 0.625
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/115/variant",
+   "shown": "resta-a0.10-adapter-indicalign-stress-s1",
+   "value": "resta-a0.10-adapter-indicalign-stress-s1"
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/115/cap_hit_rate",
+   "shown": "7.0%",
+   "value": 0.07
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/132/cap_hit_rate",
+   "shown": "3.5%",
+   "value": 0.03504928806133625
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/121/cap_hit_rate",
+   "shown": "7.7%",
+   "value": 0.07666666666666666
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/127/cap_hit_rate",
+   "shown": "18.0%",
+   "value": 0.18
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/134/variant",
+   "shown": "cast-m0.5-adapter-indicalign-stress-s1",
+   "value": "cast-m0.5-adapter-indicalign-stress-s1"
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/134/cap_hit_rate",
+   "shown": "10.2%",
+   "value": 0.1025
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/151/cap_hit_rate",
+   "shown": "11.0%",
+   "value": 0.10952902519167579
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/140/cap_hit_rate",
+   "shown": "8.7%",
+   "value": 0.08666666666666667
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/cells/rows/146/cap_hit_rate",
+   "shown": "31.5%",
+   "value": 0.315
+  },
+  {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/cells/rows/13/harmful_rate",
    "shown": "33.5%",
@@ -10352,6 +10592,72 @@
    "pointer": "/cost_detail/fit_cast_gpu_hours",
    "shown": "0.08 h",
    "value": 0.08403805555555555
+  },
+  {
+   "file": "outputs/metrics/acceptance_runtime.json",
+   "pointer": "/minutes",
+   "shown": "4",
+   "value": 4
+  },
+  {
+   "file": "outputs/metrics/acceptance_runtime.json",
+   "pointer": "/gpu",
+   "shown": "NVIDIA A100-SXM4-40GB",
+   "value": "NVIDIA A100-SXM4-40GB"
+  },
+  {
+   "file": "outputs/metrics/acceptance_runtime.json",
+   "pointer": "/variants",
+   "shown": "3",
+   "value": 3
+  },
+  {
+   "file": "outputs/metrics/acceptance_runtime.json",
+   "pointer": "/limit",
+   "shown": "50",
+   "value": 50
+  },
+  {
+   "file": "outputs/metrics/acceptance_runtime.json",
+   "pointer": "/langs",
+   "shown": "hi, en",
+   "value": [
+    "hi",
+    "en"
+   ]
+  },
+  {
+   "file": "outputs/metrics/acceptance_runtime.json",
+   "pointer": "/minutes",
+   "shown": "4",
+   "value": 4
+  },
+  {
+   "file": "outputs/metrics/acceptance_runtime.json",
+   "pointer": "/gpu",
+   "shown": "NVIDIA A100-SXM4-40GB",
+   "value": "NVIDIA A100-SXM4-40GB"
+  },
+  {
+   "file": "outputs/metrics/acceptance_runtime.json",
+   "pointer": "/variants",
+   "shown": "3",
+   "value": 3
+  },
+  {
+   "file": "outputs/metrics/acceptance_runtime.json",
+   "pointer": "/limit",
+   "shown": "50",
+   "value": 50
+  },
+  {
+   "file": "outputs/metrics/acceptance_runtime.json",
+   "pointer": "/langs",
+   "shown": "hi, en",
+   "value": [
+    "hi",
+    "en"
+   ]
   },
   {
    "file": "outputs/metrics/final_report.json",

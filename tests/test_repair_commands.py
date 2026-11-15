@@ -507,12 +507,17 @@ def test_selection_json_holds_no_absolute_local_path(registry):
     to the repo (outputs/...), never the laptop's absolute paths."""
     from lift.paths import REPO_ROOT, output_dir
 
+    def posix(text):
+        """JSON text with each escaped backslash read as a forward slash: the writer rewrites a root and
+        keeps the separators after it (backslashes on Windows), so paths and roots are compared that way."""
+        return text.replace("\\\\", "/")
+
     _register_seed(2)
     doc = select.run(ADAPTER, reader=fake_reader(CASES["largest"]))     # cast wins; s2 has no artifact yet
-    text = select.report_paths()[0].read_text(encoding="utf-8")
+    text = posix(select.report_paths()[0].read_text(encoding="utf-8"))
     assert "outputs/artifacts/cast/adapter-aya-std-s2/" in text
-    assert str(output_dir()) not in text and str(REPO_ROOT) not in text
-    assert str(output_dir()) not in json.dumps(doc["freeze"])
+    assert output_dir().as_posix() not in text and REPO_ROOT.as_posix() not in text
+    assert output_dir().as_posix() not in posix(json.dumps(doc["freeze"]))
     numbers = case()
     del numbers["cast-m2.0"]
 
@@ -523,10 +528,10 @@ def test_selection_json_holds_no_absolute_local_path(registry):
         return fake_reader(numbers)(name, method, dtype)
 
     select.run(ADAPTER, reader=reader, refreeze=True)
-    text = select.report_paths()[0].read_text(encoding="utf-8")
+    text = posix(select.report_paths()[0].read_text(encoding="utf-8"))
     assert f"outputs/generations/cast-m2.0-{ADAPTER}/harmful_hi_dev.jsonl not found" in text
     assert "; configs/variants.yaml has no entry" in text
-    assert str(output_dir()) not in text and str(REPO_ROOT) not in text
+    assert output_dir().as_posix() not in text and REPO_ROOT.as_posix() not in text
 
 
 # --- the sweep ------------------------------------------------------------------------------------------

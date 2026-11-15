@@ -4,6 +4,226 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 15, 2026: fixes from the adversarial review of the submission
 
+137. **The offline tests pass on Windows, and the Reproduce section says so.** Tests and reporting
+     only (review F21). The section on running the offline tests said that on Windows a few tests
+     were known to fail for reasons of portability. Each cause was in a test, not in the code it
+     tests:
+     - Line endings. A helper of tests/test_final_report.py wrote selection.json with the platform's
+       line endings, so on Windows its sha256 was not the one the recipe pinned and `lift stats`
+       refused it (four tests). It now writes LF, as `lift select` does.
+     - Path separators. Three tests (in test_gates.py, test_publish_datasets.py and
+       test_repair_commands.py) expected forward slashes after the root that `gates._scrub`,
+       `select._relative` and `preflight.relative_text` rewrite; on Windows the rest of the path keeps
+       its backslashes. The tests now read either separator, and each still fails with its rewrite
+       turned off. The code is unchanged: gates.py is locked, the frozen selection.json holds no
+       path, and a change to the logs builder would change bytes already staged for the public logs
+       dataset. The paths are repo-relative either way.
+     - Process ids. Two tests of `lift.proclock` compared the pid of the process they started with
+       the pid the lock records. In a virtual environment on Windows the interpreter runs as a child
+       of a launcher, so the two differ. The holder now prints its own pid, and the tests compare the
+       lock's note with that.
+     - torch. Four tests of tests/test_loglik.py and one of tests/test_run_commands.py build torch
+       tensors or record torch's version; they now skip without torch (`pytest.importorskip`), as the
+       other torch tests of those files do. The sweep's refusal of a CAST setting with no artifact
+       already needed no torch (item 121).
+     With the light install (`pip install -e ".[sync,dev]"`, Python 3.12, no torch), the complete
+     offline suite on Windows has no failure: on Nov 15, 2,895 tests collected, 2,785 passed, 110
+     skipped and none failed. The folded block under "Run the offline tests" now says that the offline tests pass on Windows with the light install, where the model
+     tests skip, and that on a busy machine a test can now and then fail with "Access is denied",
+     when another process has just opened a file the test wrote, and passes when run again: that
+     happened once in these runs, in a test of `lift sync`, which passed on the next run. Nothing is
+     said of other systems, on which nothing was run for this change. No code that a reported number
+     comes from changes, and no number, label, analysis or artifact changes.
+
+136. **The acceptance notebook names a fetched adapter for what it knows, removes Colab's torchao and
+     says to restart, goes back into the clone after the restart, and says how a fresh clone gets its
+     prompts.** Arnav ran the notebook on a fresh Colab A100 on Nov 15, to its last verdict, and asked
+     for these fixes.
+     - The adapter's name. `fetch_adapter` registered every adapter it downloaded in the study's
+       scheme, as `adapter-notebook-std-s1` (candidate "notebook", the standard recipe, seed 1). So
+       the copy it fetched of the stress adapter (`racetracklexsi/lift-adapter-indicalign-stress-s1`)
+       was named as an adapter of the standard recipe. The notebook knows neither how an adapter it
+       fetches was trained nor its seed, and passes no seed. It now registers it as
+       `adapter-notebook`, with no seed in its entry, and as `adapter-notebook-s{N}`, with seed N,
+       only when the caller passes one. The frozen repair applied to it takes the frozen setting's
+       name with this one in the adapter's place (`wiseft-l0.25-adapter-notebook`).
+       `lift.train.lora.fetched_adapter_name` makes the name, which holds no recipe token and no
+       candidate configs/train.yaml trains. `register_fetched_adapter` writes the entry by the same
+       text edit as the study's registration, checked against that name. The study's adapter names
+       (`adapter-{candidate}-{std|stress}-s{seed}`), their registration and every check on them are
+       unchanged, and their entries are written line for line as before. A CAST entry carries its
+       adapter's seed (`lift register-repairs` writes it), so the refusal that sends a CAST repair to
+       `lift fit-cast` now says to fetch the adapter again with a seed; the frozen repair is WiSE-FT.
+     - torchao. Colab ships a torchao that peft refuses, so `lift run-dev` stopped at import. The
+       install cell now runs `pip uninstall -y torchao` after the install, as colab/job.py does. The
+       cell after it says to restart the session (Colab: Runtime > Restart session) before going on:
+       the install replaced packages the running kernel had already loaded, and removed torchao.
+     - The working directory. After a restart Colab starts in /content, where the cloned `lift`
+       folder hides the installed package ("No module named 'lift.publish'"). The first code cell
+       after the install now begins with `%cd /content/lift`. The restart note says what the line is
+       for, and that outside Colab it should name the folder the repo was cloned into (a folder that
+       is not there only prints an error).
+     - The prompts. A fresh clone has none. The old message sent the team to `lift sync pull`, and
+       everyone else to the prompt-set dataset, which nothing in the repo reads, or to a rebuild that
+       needs a translation key for the Hindi files (the review's F4). The check cell, and the message
+       `check_ready` stops with, now say: team members run `lift sync pull --only data`, which needs
+       LIFT_RUNS_REPO and an HF token that can read that private repo; everyone else runs
+       `acceptance.fetch_prompts`. For each file data/prompts/ lacks, it copies our translation from
+       the public prompt-set dataset (racetracklexsi/lift-multilingual-safety-prompts,
+       `{set}/{lang}.jsonl`: the rows we translated) once every row is checked as a prompt record of
+       that set and language. It builds the files the dataset does not hold (the English sets, and
+       PolyRefuse's own translations) from their public sources with `lift data build
+       --skip-translation`, which needs no translation key. It never replaces a file already there.
+       On Nov 15 the dataset's two Hindi files the notebook reads were byte for byte what its builder
+       makes from our prompt files, and `load_prompts` read them as they are, dev split included,
+       with no build report beside them. The English files come from the study's own build, from
+       sources that need no login (PolyRefuse's repository, OR-Bench, GlotLID); that build was not
+       run end to end for this change. Tests check the route with a fake Hub, from the builder's
+       staged files to `load_prompts`.
+     - The run-time line. `lift publish article` stamps it with the measured run in
+       outputs/metrics/acceptance_runtime.json. Its test asked for "not yet timed"; it now takes that
+       or a measured run in the stamp's words, made with the notebook's own sample, and still refuses
+       any other duration in the notebook.
+     No number, label or analysis changes.
+
+135. **The training sets are published, with the two rows the public-text scan refuses withheld.**
+     Item 118 staged `lift-hindi-sft` and held it back: the scan that every public upload passes
+     refused one row in each IndicAlign file. On Nov 15 Arnav decided to publish both IndicAlign sets
+     with only those two rows withheld, not the whole files. The card lists the withheld row ids and
+     the reason, and gives the sha256 of the full training files so that anyone can rebuild them from
+     IndicAlign. The scan gets no exception.
+     - The rows. configs/publish.yaml names them under `repos.sft.withheld`: `ind-02551` of
+       `indicalign/dedup` and `ind-04884` of `indicalign/raw` (rows 2551 and 4884, counted from 0, of
+       IndicAlign's `Dolly_T` at the pinned revision). A stretch of each answer is one of the scan's
+       60-character windows of a model output on the team's machine. A count-only run of the scan's
+       own functions (`preflight.load_windows`, then `scan_text` on every line of the full files;
+       1,092,900 windows from 86,178 outputs) matched those two rows and no other: none in
+       `aya/dedup`, one in each IndicAlign file, each time in the answer. No text of a row or of an
+       output was printed. With the two rows left out, the same scan finds nothing in the three
+       files. Neither answer, nor any 60-character stretch of either row, is in another file of the
+       dataset; `selection.json` lists both ids, as it lists every id of its training file.
+     - The build. `lift publish datasets` still holds each full training file to the `data_sha256`
+       that every training run of a registered adapter recorded (all seven, unchanged), and the
+       build's own records to it, before it withholds anything. The staged copy of each IndicAlign
+       file then leaves its withheld row out, and every other line is the training file's line, byte
+       for byte and in order. `aya/dedup` and every other file (selection.json, CuratorKIT's
+       manifest, rejected rows and provenance, our summary of its run, report.json) are staged as
+       they are. The build refuses, and leaves nothing staged, when a withheld id is not in its file
+       or is in it twice, names a set that is not a training set of the plan, or when the setting has
+       another shape. It checks the ids the setting names, not why they are named.
+     - What is recorded. The card has a new section, "Withheld rows": the ids, the row each names in
+       IndicAlign, the reason, and for each set the rows and sha256 of the training file and of the
+       published file. `indicalign/dedup`: 3,000 rows
+       (`29cf100ecced6dd6dc0446b4fbe3e26c531b40a503ca94897740cb5d1afbbb63`), published as 2,999
+       (`421f917a66826175e3ec211dafa32131054423b57abbe29b70fd3110fa541638`). `indicalign/raw`: 3,000
+       (`e23b5a9e98eb4eab48ee633ac26fca2dcd8c64e617fd926410a16e868b964313`), published as 2,999
+       (`57826706e264d35244cb84de1c70e928f108f610639c2484f6f4ba8953e5fbbf`). `aya/dedup`: whole, 677
+       rows (`e306c33486638a903068ff57e2d3ea6371b27f192fe26d1ad929b08bee968174`). The training files'
+       sha256 are the ones the training runs recorded. The section says how to rebuild the training
+       files: `lift data build --only sft` in the code repository reads the Aya Dataset, IndicAlign
+       and databricks-dolly-15k at their pinned revisions and GlotLID, all public and ungated
+       (checked on the Hub on Nov 15), runs CuratorKIT 0.1.22 and samples each file by the seed and
+       rules its selection.json records; the rebuild of item 67 gave the same sha256. It also says
+       how a withheld row is found in its source by its id. outputs/publish/datasets/sft.sources.json
+       records both files' rows and sha256, and the withheld ids with their pointer in
+       configs/publish.yaml.
+     - The scan is unchanged: no exemption, no allowlist, and no change to `lift.publish.preflight`
+       or `lift.publish.hub`. The staged folder now passes it: the dry run
+       `lift publish datasets --only sft` exits 0 with no finding.
+     - A plain `lift publish datasets` now builds the dataset with the other three, and the data
+       collection's plan lists it. `lift publish collections --yes` now records in
+       outputs/publish/collections.json the repo ids it added to each collection, after it has
+       checked that each is on the Hub; it still refuses while one is not.
+     - The article names the dataset only once it is published. Item 119 had it named as soon as the
+       data collection's plan listed it, which would now be at once. Now it is named once
+       collections.json records it among the data collection's items. Section 6 then gives its line,
+       which says that two training rows are withheld, why, and that the card lists them;
+       section 2 gives the chain with the dataset as its first link. The order is:
+       `lift publish datasets --only raw sft logs --yes`, then `lift publish collections --yes`, then
+       `lift publish article`, commit and push. Until then the README does not name the dataset;
+       regenerated today, it is unchanged on this account.
+     - The logs. The article cites the acceptance notebook's run time
+       (outputs/metrics/acceptance_runtime.json), so the logs builder stages that file under
+       `aggregates/` when it exists, and not otherwise. Until the logs are uploaded again,
+       `scripts/verify_numbers.py` lists its values as not in the logs.
+     No number, label or analysis changes.
+
+134. **The judge summary says how far the readers share the judge's refusal label.** Reporting only
+     (review F3). The summary of how far to trust the judge says its harmful label is the weak one,
+     with the counts behind it. It now also says, of the refusal label that the refusal-rate reading
+     counts, on how many of the outputs the primary judge labelled refusals the readers' label was a
+     refusal too, over all languages, in each scored round. The counts are the judge's refusal column
+     of the pooled confusion matrix of outputs/metrics/validation/round1.json and round2.json
+     (`/judges/qwen3guard_strict/pooled/confusion`; `lift.validation.score` writes the matrix with the
+     readers as its rows and the judge as its columns, and says so in the file): 66 of 67 in round 1
+     and 40 of 40 in round 2, the counts the review gave. The sentence states the counts whatever they
+     are, every cell of that column is recorded in hf/article.sources.json, and it is left out when
+     the judge gave no refusal label in round 1. No number, label or analysis changes.
+
+133. **A section says how to run the test on another adapter, and the Space is called what it is, a
+     results explorer.** Reporting and packaging only (review F4).
+     - "Run the test on your adapter", a new extra between the related work and "Reproduce"
+       (`article.EXTRAS`). What notebooks/acceptance_test.ipynb runs: stock and the adapter answer
+       the first `LIMIT` dev prompts of the harmful and hard-benign sets in Hindi and English, the
+       study's primary judge labels them, and the frozen repair is applied to the adapter and judged
+       on the same prompts. What it prints: each variant's rates, McNemar's test of drift and of
+       repair, and a screening verdict. What it needs: a GPU with native bf16 such as an A100 or an
+       L4 (the model load refuses bf16 on a T4, where an fp16 run would count only after Gate 0's
+       comparison) and a token with accepted access to Tiny Aya Global and Tiny Aya Base. That its
+       verdict covers safety and over-refusal only, so the full test also needs `lift utility` and
+       `lift belebele`. And that the frozen setting was chosen on our adapter's dev prompts, so for
+       another adapter it is a starting point, not a value tuned for it, and that the study chose it
+       with its dev sweep and selection (`lift sweep`, then `lift select`), which the notebook does
+       not run. No route to tune it for another adapter is offered: in a clone, `lift select` refuses
+       a recipe other than the frozen one, and the sweep registers its settings by the adapter's
+       seed, which an adapter the notebook fetches has only when one is given. The frozen setting
+       is named from selection.json, with its parameter from the registry; a CAST winner is said to
+       be fitted on the adapter first (`lift fit-cast`), as the notebook's `register_repair` requires.
+       Folded under it: the session restart the notebook asks for after its install, and how a fresh
+       clone gets the prompt files, as `acceptance.check_ready` says (team members: `lift sync pull
+       --only data`; everyone else: `acceptance.fetch_prompts`, which copies our Hindi prompt files
+       from the public prompt-set dataset and builds the English ones from their public sources,
+       with no translation key). A test checks every command, helper, variable and file the section
+       names against the CLI, `lift.publish.acceptance`, the notebook's cells and the tree.
+     - The timed run. The notebook was run end to end on Nov 15, and its last cell wrote
+       outputs/metrics/acceptance_runtime.json: 4 minutes on an NVIDIA A100-SXM4-40GB, for 3
+       variants on the first 50 dev prompts per set and language, in Hindi and English. The new
+       section and "Cost and ROI" give that run through `acceptance.runtime_text`, each value
+       recorded, with what its clock covers (`acceptance.RUNTIME_MARK`: from the check to the last
+       verdict), so the install and the session restart before the check are not in it. No other run
+       or time is named. Until the logs dataset is uploaded again, scripts/verify_numbers.py lists the
+       values read from that file as not in the logs.
+     - The Space. Its card and its page now say in their title and first line that it is a results
+       explorer, which loads no model and generates nothing, and both link the notebook as the way to
+       run the test (`lift publish space` fills the card's link from the GitHub repo of
+       configs/publish.yaml). Its repo keeps its name, lift-acceptance-test. Section 5's line for the
+       Space and the links say the same.
+     No number, label or analysis changes.
+
+132. **The cap-hit rate, which the pre-registration says is reported, is reported.** Reporting only
+     (review F15). PREREGISTRATION.md's paragraph on generation stops each answer at 256 new tokens
+     and says "We report the cap-hit rate", and the write-up did not report it. The rates were in the
+     report: final_report.json's table of every final cell, column `cap_hit_rate`, one row per
+     variant, prompt set and language of the final split (the share of a cell's outputs whose
+     generation reached the cap without stopping, `lift.report.analysis.cell_rates`).
+     - Limitations. A new bullet, before the one on how the judge reads an output that runs to the
+       cap: answers stop at 256 new tokens (configs/project.yaml `generation.max_new_tokens`), an
+       answer that reaches the cap is judged as it was cut, and how often stock's answers and the
+       comparison adapter's (its seed 1) reached it on the Hindi harmful prompts and on the easy and
+       hard benign ones. Stock's: 38.0%, 67.3% and 78.5%; the stress adapter's: 15.8%, 8.7% and
+       36.0% (the review read 38.0%, 15.75%, 67.3% and 78.5% in the same file). That more of stock's
+       answers than of the adapter's were judged cut short is said only where every set points one
+       way. A set without stock's rate is left out, and the adapter's rates are said only where it
+       has every one that stock has.
+     - Appendix. A small table, "Answers that reached the token cap, Hindi": stock, the comparison
+       adapter and each frozen setting that has a Hindi cell, on the four Hindi sets (harmful, Aya
+       Red-teaming, easy benign, hard benign), every value read from the cells table and recorded in
+       hf/article.sources.json. The cells table itself, about 200 rows, stays unplaced; only the rows
+       used are cited.
+     - The cost table's note: the sentence that says the time per generated token moves with the
+       length of the answers points to that table in one clause.
+     No number, label or analysis changes.
+
 131. **The figures name the variants as the text does, the heatmaps' numbers read on every cell, and
      the forest plot draws each effect once.** Drawings and alt texts only. The review found row
      labels of three styles in the heatmaps ("adapter", "Gate 1 pick", "not picked:

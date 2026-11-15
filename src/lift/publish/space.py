@@ -7,6 +7,10 @@ Space is built to at most MAX_WORDS words and under WINDOW characters and marked
 its label, refusals included (decisions item 62: no output is shown because of its label). No other
 output text goes in. The staged folder passes the public-text scan like every public upload: a cut is
 shorter than the scan's window, so it holds no run the scan looks for, and anything longer fails it.
+
+The Space is a results explorer, and its card and its page say so in their title and first line; both
+link the acceptance-test notebook as the way to run the test on an adapter (``notebook_url``, from the
+GitHub repo of configs/publish.yaml; docs/decisions.md item 133). The Space's repo name stays.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from lift.publish import preflight, render, settings
 from lift.publish.hub import Upload
 
 FILES = ("README.md",)  # the card; the page, index.html, is drawn by app.py's render_html (item 113)
+NOTEBOOK_LINK = "Run the test on your adapter (notebook)"  # the page's link to the notebook
 INDEX = "index.html"
 EXAMPLES = "examples.json"
 EXAMPLES_PER_CELL = 2
@@ -114,22 +119,34 @@ def _app():
     return mod
 
 
+def notebook_url() -> str | None:
+    """The acceptance-test notebook on GitHub, as the article links it (configs/publish.yaml github_repo,
+    else the origin remote); None while there is no GitHub repo to link."""
+    gh = settings.github_repo()
+    return f"{gh}/blob/main/notebooks/acceptance_test.ipynb" if gh else None
+
+
 def build() -> Upload:
     """The Space as a static page (HF hosts a Gradio Space on free CPU only for PRO, item 113): index.html
     drawn from final_report.json (what the logs dataset carries as aggregates/final_report.json) and the
-    cut examples, the card, and the examples as data."""
-    from lift.publish.inputs import Facts
+    cut examples, the card with its link to the notebook filled in (a placeholder, which ``--yes`` refuses,
+    while there is no GitHub repo), and the examples as data."""
+    from lift.publish.inputs import Facts, pending
 
     folder = paths.output_dir() / "publish" / "space"
     if folder.exists():
         shutil.rmtree(folder)
     folder.mkdir(parents=True)
+    notebook = notebook_url()
+    missing = pending("the notebook url", "configs/publish.yaml github_repo", "a person")
     for name in FILES:
-        shutil.copyfile(source_dir() / name, folder / name)
+        card = (source_dir() / name).read_text(encoding="utf-8")
+        render.write_text(folder / name, render.fill(card, {"notebook": notebook or missing}))
     logs = settings.repo("logs")
     rows = examples()
     render.write_text(folder / EXAMPLES, json.dumps(rows, indent=1, ensure_ascii=False))
-    links = {"Write-up and code": settings.github_repo(), "Aggregate logs dataset": logs.url}
+    links = {"Write-up and code": settings.github_repo(), NOTEBOOK_LINK: notebook}
+    links["Aggregate logs dataset"] = logs.url
     page = _app().render_html({"report": Facts().report(), "examples": rows}, links)
     render.write_text(folder / INDEX, page)
     return Upload(

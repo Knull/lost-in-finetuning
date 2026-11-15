@@ -238,7 +238,7 @@ is run on its adapter's seeds).
   repair fits which kind of drift.
 - Usefulness is read two ways, the pairwise judge and the held-out loss, which can disagree; we
   report both and do not adjudicate.
-- The harmful rate is one judge's strict reading, whatever the output looks like: an output that
+{{ cap_hit_limit }}- The harmful rate is one judge's strict reading, whatever the output looks like: an output that
   repeats itself to the token cap counts as harmful if the judge calls it unsafe. "Judge
   sensitivity" gives the same differences under the other readings.
 - {{ judge_on_benign }}{{ readers_limit }}
@@ -287,6 +287,32 @@ non-commercial, so we make no commercial claims.{{ notebook_runtime }}
 
 {{ references_note }}
 
+## Run the test on your adapter
+
+{{ notebook_link }} runs a screening version of this test on any LoRA adapter of Tiny Aya Global,
+with the study's own code: stock and your adapter answer the first `LIMIT` dev prompts of the harmful
+and hard-benign sets in Hindi and English, the study's primary judge labels the answers, and then
+{{ frozen_applied }} is applied to your adapter and judged on the same prompts. It prints each
+variant's rates, McNemar's test of drift and of repair, and a screening verdict. It needs a GPU with
+native bf16, such as an A100 or an L4, and a Hugging Face token with accepted access to Tiny Aya
+Global and Tiny Aya Base.{{ timed_run }}
+
+Its verdict covers safety and over-refusal only: the full test also needs `lift utility` and
+`lift belebele`. {{ choose_your_own }}
+
+<details><summary>Before the first run: a T4, the install and the prompt files</summary>
+
+The notebook runs in bf16, which the model load refuses on a T4: a T4 has no bf16, and a run there in
+fp16 would count only after Gate 0's fp16-vs-bf16 comparison. The notebook clones this repository and
+installs the pinned versions, then asks for a session restart before the next cell; it gives each
+step. A fresh clone has no prompt files (`data/prompts/` is not in git), and the check before any GPU
+work (`acceptance.check_ready`) stops and says how to get them: team members pull them from the
+private runs repo with `lift sync pull --only data`, and everyone else runs `acceptance.fetch_prompts`,
+which copies our Hindi prompt files from the public prompt-set dataset ({{ data_section }}) and builds
+the English ones from their public sources with `lift data build`, with no translation key.
+
+</details>
+
 ## Reproduce
 
 **Check every number in this write-up.** It takes a few seconds and needs no GPU, no token and
@@ -319,13 +345,14 @@ pip install -e ".[sync,dev]"
 pytest
 ```
 
-<details><summary>What the default run leaves out, and the tests known to fail on Windows</summary>
+<details><summary>What the default run leaves out, and the tests on Windows</summary>
 
 By default `pytest` leaves out the tests marked for a GPU or for the network. The model tests use a
 tiny randomly initialised model, never Tiny Aya, and are skipped unless the GPU stack is installed:
-`pip install -e ".[gpu,data,eval,report,dev]"` installs everything. On Windows a few tests are known
-to fail for reasons of portability (path separators, line endings, process ids); none of them touches
-a reported number.
+`pip install -e ".[gpu,data,eval,report,dev]"` installs everything. On Windows the offline tests pass
+with the light install, `pip install -e ".[sync,dev]"`, where the model tests skip. On a busy machine a
+test can now and then fail with "Access is denied", when another process (a virus scanner, say) has
+just opened a file the test wrote; it passes when run again.
 
 </details>
 
@@ -373,8 +400,8 @@ does.
 - Model collection: {{ models_collection }}
 - Data collection: {{ data_collection }}
 - Code: {{ github }}
-- Notebook: {{ notebook }}
-- Space: {{ space }}
+- Notebook, to run the test on your adapter: {{ notebook }}
+- Space, a results explorer: {{ space }}
 
 ## Appendix: full tables
 

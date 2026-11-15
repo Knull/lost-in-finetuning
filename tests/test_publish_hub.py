@@ -313,12 +313,17 @@ def test_cli_yes_uploads_with_a_fake_api(namespace, monkeypatch, outputs):
 
 
 def test_collections(namespace, monkeypatch):
+    """The data collection lists the training sets too (published with the rows configs/publish.yaml
+    withholds, the owner's decision of Nov 15). collections.json keeps each collection's slug and url and
+    records the repo ids it was given, every one checked to be on the Hub first: the article names the
+    training sets only once they are among the data collection's items."""
     write_inputs()
     plan = collect.plan()
     assert [r.repo_id for r in plan["data"]] == [
         "test-org/lift-eval-logs",
         "test-org/lift-raw-completions",
         "test-org/lift-multilingual-safety-prompts",
+        "test-org/lift-hindi-sft",
     ]
     assert plan["models"][0].repo_id == "test-org/lift-wiseft-l0.50-adapter-aya-std-s1"
     api = FakeApi()
@@ -327,6 +332,38 @@ def test_collections(namespace, monkeypatch):
     items = [c for c in api.calls if c[0] == "add_collection_item"]
     assert len(items) == len(plan["models"]) + len(plan["data"])
     assert all(c[2] == {"exists_ok": True} for c in items)
+    names = api.names()
+    checked = [c[1][0] for c in api.calls if c[0] == "repo_exists"]
+    assert checked == [r.repo_id for r in plan["models"] + plan["data"]]  # every one, before any collection
+    assert names.index("create_collection") > max(i for i, n in enumerate(names) if n == "repo_exists")
+    recorded = json.loads(collect.links_path().read_text(encoding="utf-8"))
+    for key in ("models", "data"):
+        assert set(recorded[key]) == {"slug", "url", "items"}
+        assert recorded[key]["items"] == [r.repo_id for r in plan[key]]
+    assert collect.read_items() == {key: [r.repo_id for r in plan[key]] for key in ("models", "data")}
+
+
+def test_a_collections_file_without_items_still_gives_its_links(namespace):
+    """collections.json as it was written before the items were recorded (Nov 15): its links still read,
+    and it records no item, so nothing reads as published on its account."""
+    render.write_text(
+        collect.links_path(),
+        json.dumps({"data": {"slug": "o/d", "url": "https://hf.co/collections/o/d"}}, indent=1),
+    )
+    assert collect.read_links() == {"data": "https://hf.co/collections/o/d"}
+    assert collect.read_items() == {}
+    collect.links_path().unlink()
+    assert collect.read_links() == {} and collect.read_items() == {}
+
+
+def test_collections_refuse_while_the_training_sets_are_not_on_the_hub(namespace):
+    """The data collection lists the training sets, so creating the collections waits for their upload,
+    and nothing is created or recorded meanwhile."""
+    write_inputs()
+    api = FakeApi(missing={"test-org/lift-hindi-sft"})
+    with pytest.raises(PublishError, match="not on the Hub yet.*dataset test-org/lift-hindi-sft"):
+        collect.execute(collect.plan(), api_factory=lambda: api, log=lambda _: None)
+    assert "create_collection" not in api.names() and not collect.links_path().exists()
 
 
 def test_collections_refuse_without_a_winner(namespace):

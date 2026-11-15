@@ -464,12 +464,26 @@ def test_notebook_installs_the_extras_and_checks_before_any_gpu_work():
 
 
 def test_notebook_claims_no_run_time_it_has_not_measured():
+    """The run-time line says "not yet timed", or the measured run that ``lift publish article`` stamps from
+    outputs/metrics/acceptance_runtime.json (in ``acceptance.runtime_text``'s words), made with the notebook's
+    own sample; no other line claims a duration."""
     nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
-    text = "".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "markdown")
-    assert not re.search(r"\d+\s*(?:-\s*)?minutes?", text.replace(acceptance.RUNTIME_MARK, "")), (
-        "an unmeasured duration"
+    lines = "\n".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "markdown").splitlines()
+    code = "\n".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code")
+    (line,) = [x for x in lines if x.startswith(acceptance.RUNTIME_MARK)]
+    said = line.removeprefix(acceptance.RUNTIME_MARK).strip()
+    run = re.fullmatch(
+        r"\d+ minutes on [^()]+ \((?P<variants>\d+) variants, the first (?P<limit>\d+) dev prompts per set "
+        r"and language, languages (?P<langs>[a-z]+(?:, [a-z]+)*)\)\.",
+        said,
     )
-    assert f"{acceptance.RUNTIME_MARK} not yet timed" in text
+    assert said == f"{acceptance.NOT_TIMED}." or run, said
+    if run:
+        langs = re.search(r"^LANGS = \((.+)\)", code, re.M).group(1)
+        assert run["langs"] == ", ".join(x.strip(' "') for x in langs.split(","))
+        assert re.search(rf"^LIMIT = {run['limit']}\b", code, re.M) and f"variants={run['variants']}" in code
+    rest = "\n".join(x for x in lines if not x.startswith(acceptance.RUNTIME_MARK))
+    assert not re.search(r"\d+\s*(?:-\s*)?minutes?", rest), "an unmeasured duration"
 
 
 # ---------------------------------------------------------------- notebook: the committed stamp (item 122)

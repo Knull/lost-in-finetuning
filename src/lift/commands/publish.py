@@ -12,10 +12,11 @@ collections) while configs/frozen_recipe.json is not the one the newest ``recipe
 that differs from the tag's is refused outright.
 A dry run runs that scan too and exits 1 when a file that would be public holds a run of any model
 output's text, whatever its label (decisions item 62).
-``datasets`` stages the logs, the raw completions and the translated prompt sets. The training sets
-with CuratorKIT's files are staged only when named (``--only sft``), and only while each file's sha256
-is the one its training runs recorded; ``--yes`` refuses them while the public-text scan finds an
-output's text in them, as it does in two of their files today (decisions item 118).
+``datasets`` stages the logs, the raw completions, the translated prompt sets and the training sets
+with CuratorKIT's files. The training sets are staged only while each full training file's sha256 is
+the one its training runs recorded (decisions item 118), and without the rows configs/publish.yaml
+``repos.sft.withheld`` withholds (one answer in each IndicAlign file shares a stretch with a model output,
+which the public-text scan refuses; the scan has no exception).
 ``article`` writes hf/article.md and the same text as README.md, and stamps the notebook's links and
 frozen winner (notebooks/acceptance_test.ipynb): commit them together.
 ``preflight`` checks the git repo can go public: it fetches every
@@ -212,16 +213,17 @@ def register(sub: argparse._SubParsersAction) -> None:
     q.set_defaults(func=_model)
 
     q = cmds.add_parser(
-        "datasets", help="logs (public), raw completions (gated), translated prompts (public)", epilog=_EPILOG
+        "datasets",
+        help="logs (public), raw completions (gated), translated prompts (public), training sets (public)",
+        epilog=_EPILOG,
     )
     q.add_argument(
         "--only",
         nargs="+",
         choices=["logs", "raw", "prompts", "sft"],
         default=None,
-        help="stage only these (default: logs, raw and prompts). sft: the training sets with CuratorKIT's "
-        "files, staged only when named; --yes refuses them while the public-text scan finds an output's "
-        "text in them (docs/decisions.md item 118)",
+        help="stage only these (default: all four). sft: the training sets with CuratorKIT's files, without "
+        "the rows configs/publish.yaml repos.sft.withheld withholds (docs/decisions.md item 118)",
     )
     upload_flags(q)
     q.set_defaults(func=_datasets)

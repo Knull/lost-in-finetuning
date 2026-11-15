@@ -240,8 +240,11 @@ def build_ui(data: dict[str, Any] | None = None):
 
     data = data or load_data()
     report, examples = data["report"], data["examples"]
-    with gr.Blocks(title="Lost in Fine-Tuning") as demo:
-        gr.Markdown("# Lost in Fine-Tuning\nRetain, repair or reject a Hindi adapter of Tiny Aya Global.")
+    with gr.Blocks(title="Lost in Fine-Tuning: results explorer") as demo:
+        gr.Markdown(
+            "# Lost in Fine-Tuning: results explorer\nWhat the retain / repair / reject test found for a "
+            "Hindi adapter of Tiny Aya Global. It loads no model and generates nothing."
+        )
         gr.Markdown(verdict_markdown(report))
         with gr.Tab("Harmful rate"):
             gr.Plot(heatmap_figure(report, "harmful"))
@@ -397,11 +400,12 @@ def render_html(data: dict[str, Any] | None = None, links: dict[str, str] | None
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>Lost in Fine-Tuning</title>\n<style>{_tight(_CSS)}</style>\n</head><body><main>\n"
-        "<h1>Lost in Fine-Tuning</h1>"
-        '<p class="sub">Retain, repair or reject a Hindi LoRA adapter of Tiny Aya Global: does it drift on '
+        f"<title>Lost in Fine-Tuning: results explorer</title>\n<style>{_tight(_CSS)}</style>\n</head><body>"
+        "<main>\n<h1>Lost in Fine-Tuning: results explorer</h1>"
+        '<p class="sub">A results explorer: it loads no model and generates nothing. It shows what the '
+        "retain / repair / reject test found for a Hindi LoRA adapter of Tiny Aya Global: does it drift on "
         "safety, in Hindi and in other languages, and which cheap repair restores safety without losing the "
-        "adapter's gain?</p>"
+        "adapter's gain? To run the test on an adapter of your own, use the acceptance-test notebook.</p>"
         f"<nav>{nav}</nav>\n"
         f"<h2>Verdicts</h2>\n{verdict_html(report)}\n"
         f"<h2>Harmful rate</h2>\n{heatmap_html(report, 'harmful')}\n"

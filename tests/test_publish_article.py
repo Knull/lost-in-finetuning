@@ -156,8 +156,14 @@ def test_the_numbered_sections_are_the_organisers_nine():
     assert len(article.SECTIONS) == len(SLIDE) == 9
     for heading, (line, words) in zip(article.SECTIONS, SLIDE, strict=True):
         assert set(words.split()) <= set(re.findall(r"[a-z]+", heading.lower())), (heading, line)
-    assert article.EXTRAS == ("Related work", "Reproduce", "Links", "Appendix: full tables")
-    assert article.APPENDIX == article.EXTRAS[-1]
+    assert article.EXTRAS == (
+        "Related work",
+        "Run the test on your adapter",
+        "Reproduce",
+        "Links",
+        "Appendix: full tables",
+    )
+    assert article.APPENDIX == article.EXTRAS[-1] and article.RUN_IT == article.EXTRAS[1]
     assert not set(article.EXTRAS) & set(article.SECTIONS)
     assert article.section_ref(article.EXPERIMENTS) == "section 7"
     assert article.section_ref(article.MODEL_ARTIFACTS) == "section 5"
@@ -268,8 +274,12 @@ def test_full_inputs_leave_no_placeholder(out, monkeypatch):
     # annotators: [] thanks nobody, so the teammates section is its list and nothing else
     assert "We thank" not in text
     assert _part(text, "9. Teammates").strip() == "- A ([@a-user](https://huggingface.co/a-user))"
-    # the links end on the Space, and the appendix, the last of the extras, ends the article
-    assert _part(text, "Links").rstrip().endswith(f"- Space: {settings.repo('space').url}")
+    # the links end on the Space, a results explorer as its card says (decisions item 133), and the
+    # appendix, the last of the extras, ends the article
+    links = _part(text, "Links")
+    assert links.rstrip().endswith(f"- Space, a results explorer: {settings.repo('space').url}")
+    notebook = "https://github.com/o/r/blob/main/notebooks/acceptance_test.ipynb"
+    assert f"- Notebook, to run the test on your adapter: {notebook}\n" in links
     assert _heads(text)[-1] == article.APPENDIX and text.index("## Links") < text.index("## Appendix")
     assert "Later releases centre them" in text
     sources = json.loads((out / "article.sources.json").read_text())
@@ -433,12 +443,14 @@ def test_section_5_lists_every_repo_of_the_model_collection_with_its_access_and_
     assert "trained on the IndicAlign `Dolly_T` sample with the stress recipe, seed 1." in lines[5]
     assert all(line.endswith(DRIFTED) for line in lines[2:6])
     assert lines[6].startswith("- **Space**: [`test-org/lift-acceptance-test`](https://huggingface.co/spaces/")
-    # the Space is public and shows the start of some outputs, harmful-labelled ones included: said in full
+    # the Space is public and shows the start of some outputs, harmful-labelled ones included: said in full.
+    # It is a results explorer, as its card says, and the test runs in the notebook (decisions item 133)
     assert lines[6].endswith(
-        "A static page of the results: the verdicts, the heatmaps, the utility table and a few example "
+        "A results explorer, a static page: the verdicts, the heatmaps, the utility table and a few example "
         "outputs for each variant, language and safety prompt set of the final split, each cut to its first "
         "words and marked `[redacted]`, whatever its label. Public: it loads no model and generates "
-        "nothing, and it holds no more of any output than that cut."
+        "nothing, and it holds no more of any output than that cut. The test itself runs in the notebook: "
+        "[Run the test on your adapter](#run-the-test-on-your-adapter)."
     )
     assert part.rstrip().endswith("The verdicts in section 7 say which adapters drifted.")
 
@@ -521,7 +533,8 @@ def test_section_6_lists_the_data_collection_then_the_parameters(out, monkeypatc
         "Repair parameters",
     ]
     listed = {r.kind: r for r in collect.plan()["data"]}
-    assert set(listed) == {"logs", "prompts", "raw"}  # the training sets are not published (item 118)
+    # the plan lists the training sets, and the article names them only once collections.json records them
+    assert set(listed) == {"logs", "prompts", "raw", "sft"}
     for line, kind in zip(lines, ("logs", "prompts", "raw"), strict=False):
         assert f"[`{listed[kind].repo_id}`]({listed[kind].url})" in line
     assert lines[0].endswith("Public: it holds no output text and no judge text.")
@@ -575,24 +588,27 @@ def test_section_2_opens_with_the_three_tools_as_one_chain(out, monkeypatch):
     assert article.tool_chain(Facts())["curatorkit_files"] == ""
 
 
-def test_the_training_sets_are_named_only_once_the_data_collection_lists_them(out, monkeypatch):
-    """Decisions item 118: the training sets with CuratorKIT's files are staged and not uploaded, so the
-    article does not name them. Once `lift publish collections` lists the dataset, section 6 has its line
-    and section 2 says where CuratorKIT's files are, with the three tools as one chain of public links."""
-    from lift.publish import collect
-
+def test_the_training_sets_are_named_only_once_the_data_collection_holds_them(out, monkeypatch):
+    """The plan of `lift publish collections` lists the training sets (published with the rows
+    configs/publish.yaml withholds, the owner's decision of Nov 15), but the article calls them public only
+    once `lift publish collections --yes`, which checks every repo is on the Hub, recorded them among the
+    data collection's items in collections.json. A file without items, or whose data collection holds
+    other repos, names nothing. Once it holds them, section 6 has their line, with how many rows are
+    withheld and why, and section 2 says where CuratorKIT's files are, with the three tools as one chain
+    of public links."""
     monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
     write_inputs()
-    held = article.tool_chain(Facts())
-    assert held["curatorkit_files"] == "" and "lift-hindi-sft" not in held["tool_chain"]
-    real = collect.plan
-
-    def plan(facts=None):
-        p = real(facts)
-        return {**p, "data": [*p["data"], settings.repo("sft")]}
-
-    monkeypatch.setattr(collect, "plan", plan)
-    text = article.build()[0].read_text(encoding="utf-8")
+    data = {"slug": "o/d", "url": "https://hf.co/collections/o/d"}
+    listed = [settings.repo(kind).repo_id for kind in ("logs", "raw", "prompts")]
+    for recorded in (None, {"data": data}, {"data": {**data, "items": listed}}):
+        if recorded is not None:
+            write_json(links_path(), recorded)
+        held = article.tool_chain(Facts())
+        assert held["curatorkit_files"] == "" and "lift-hindi-sft" not in held["tool_chain"]
+        assert "Training sets" not in article.data_artifacts(Facts())
+    write_json(links_path(), {"data": {**data, "items": [*listed, "test-org/lift-hindi-sft"]}})
+    path, facts = article.build()
+    text = path.read_text(encoding="utf-8")
     link = "[`test-org/lift-hindi-sft`](https://huggingface.co/datasets/test-org/lift-hindi-sft)"
     lines = _lines(_part(text, "6. Data artifacts, as an HF collection"))
     assert [line.split("**")[1] for line in lines] == [
@@ -605,8 +621,15 @@ def test_the_training_sets_are_named_only_once_the_data_collection_lists_them(ou
     assert lines[2] == (
         f"- **Training sets**: {link}. The Hindi training sets the adapters were trained on, each with "
         "CuratorKIT's manifest, rejected rows and provenance. Public: training rows of public datasets, no "
-        "model output."
+        "model output. Two training rows are withheld from the published files: a stretch of each answer is "
+        "also in one of our model outputs, and the scan of every public upload reads content, not where a "
+        "text came from. [The dataset's card](https://huggingface.co/datasets/test-org/lift-hindi-sft) lists "
+        "them, with the sha256 of the full training files."
     )
+    # the count is the committed setting's, recorded with its file and pointer
+    withheld = settings.load()["repos"]["sft"]["withheld"]
+    recorded = {"shown": "two", "file": "configs/publish.yaml", "pointer": "/repos/sft/withheld"}
+    assert {**recorded, "value": withheld} in facts.sources
     section_2 = _part(text, "2. Hackathon repos used and their features")
     assert section_2.lstrip().startswith(
         "The three tools run as one chain, and each link of it is published: CuratorKIT's training sets "
@@ -614,6 +637,13 @@ def test_the_training_sets_are_named_only_once_the_data_collection_lists_them(ou
         "records of every reported rate (the logs dataset, section 6).\n\n- **CuratorKIT** built"
     )
     assert f"provenance kept and published with the training sets ({link}).\n" in section_2
+    # one row withheld, then none: the sentence follows the setting
+    monkeypatch.setitem(settings.load()["repos"]["sft"], "withheld", {"indicalign": {"raw": ["ind-04884"]}})
+    line = _lines(article.data_artifacts(Facts()))[2]
+    assert "One training row is withheld from the published files: a stretch of its answer is also in" in line
+    monkeypatch.setitem(settings.load()["repos"]["sft"], "withheld", {})
+    line = _lines(article.data_artifacts(Facts()))[2]
+    assert line.endswith("Public: training rows of public datasets, no model output.")
 
 
 def test_a_dataset_the_article_has_no_line_for_is_refused(out, monkeypatch):
@@ -821,10 +851,10 @@ def _reproduce(text: str) -> str:
 
 def test_the_reproduce_section_names_the_number_check_the_tests_and_the_stages(out):
     """B4: how to check every number, how to run the offline tests and how to run the study again, between
-    the related work and the links."""
+    the extra on the notebook (decisions item 133) and the links."""
     write_inputs()
     text = article.build()[0].read_text(encoding="utf-8")
-    assert _heads(text)[-4:] == ["Related work", "Reproduce", "Links", article.APPENDIX]
+    assert _heads(text)[-5:] == ["Related work", article.RUN_IT, "Reproduce", "Links", article.APPENDIX]
     part = _reproduce(text)
     flat = " ".join(part.split())
     assert "```\npython scripts/verify_numbers.py\n```" in part
@@ -836,12 +866,18 @@ def test_the_reproduce_section_names_the_number_check_the_tests_and_the_stages(o
     assert '```\npip install -e ".[sync,dev]"\npytest\n```' in part
     assert part.count("<details><summary>") == part.count("</details>") == 3
     assert f"need {article.python_requirement()}:" in flat and "or later" in article.python_requirement()
-    # what is known of the suite, and no more: the failures on Windows are named, nothing is promised
+    # what is known of the suite on Windows, and no more: the light install passes there with the model
+    # tests skipped, and the one failure seen since (a file another process held) passes on a rerun;
+    # nothing is said of any other system
+    assert "<details><summary>What the default run leaves out, and the tests on Windows</summary>" in part
     assert (
-        "On Windows a few tests are known to fail for reasons of portability (path separators, line "
-        "endings, process ids); none of them touches a reported number."
+        'On Windows the offline tests pass with the light install, `pip install -e ".[sync,dev]"`, where '
+        'the model tests skip. On a busy machine a test can now and then fail with "Access is denied", '
+        "when another process (a virus scanner, say) has just opened a file the test wrote; it passes when "
+        "run again."
     ) in flat
-    assert "known to pass" not in flat
+    assert "known to fail" not in flat and "portability" not in flat
+    assert "known to pass" not in flat and "Linux" not in flat and "macOS" not in flat
     stages = [line for line in part.splitlines() if re.match(r"\d\. ", line)]
     assert [line[:2] for line in stages] == ["1.", "2.", "3.", "4.", "5.", "6."]
     assert stages[0].startswith("1. `lift data build`") and stages[-1].startswith("6. `lift publish article`")
@@ -1207,13 +1243,15 @@ def test_the_judge_rule_says_at_least(out):
 
 def test_the_notebook_run_time_is_not_claimed_until_measured(out, monkeypatch):
     """The review's F18: the cost section said the notebook's run time was "not yet timed". A run that was
-    not timed is not mentioned; one that was is said with its setting, each value recorded."""
+    not timed is not mentioned; one that was is said with its setting and what its clock covers, each value
+    recorded, in the cost section and in the extra on the notebook (decisions item 133)."""
     from lift.publish import acceptance
 
     write_inputs()
     path, facts = article.build()
     text = " ".join(path.read_text(encoding="utf-8").split())
     assert "not yet timed" not in text and "acceptance-test notebook ran" not in text
+    assert "The run on record" not in text and "minutes on" not in text
     assert "so we make no commercial claims. Each variant's GPU-hours" in text
     assert not any(s["file"] == "outputs/metrics/acceptance_runtime.json" for s in facts.sources)
     clock = iter([0.0, 1500.0])
@@ -1222,10 +1260,19 @@ def test_the_notebook_run_time_is_not_claimed_until_measured(out, monkeypatch):
     acceptance.record_runtime(limit=50, langs=("hi", "en"), variants=3, gpu="NVIDIA A100")
     path, facts = article.build()
     text = " ".join(path.read_text(encoding="utf-8").split())
+    timed = (
+        "25 minutes on NVIDIA A100 (3 variants, the first 50 dev prompts per set and language, languages hi, "
+        "en)"
+    )
     assert (
-        "so we make no commercial claims. The acceptance-test notebook ran in 25 minutes on NVIDIA A100 (3 "
-        "variants, the first 50 dev prompts per set and language, languages hi, en). Each variant's GPU-hours"
+        f"so we make no commercial claims. The acceptance-test notebook ran in {timed}, from its check to "
+        "the last verdict (see [Run the test on your adapter](#run-the-test-on-your-adapter)). Each "
+        "variant's GPU-hours"
     ) in text
+    assert (
+        f"The run on record took {timed}, from the check to the last verdict, without the install and the "
+        "session restart before it."
+    ) in " ".join(_part(path.read_text(encoding="utf-8"), article.RUN_IT).split())
     assert any(s["file"] == "outputs/metrics/acceptance_runtime.json" for s in facts.sources)
 
 
@@ -1485,10 +1532,11 @@ def test_the_design_counts_are_checked_for_every_set(out):
     """XB-15(c): easy and hard benign (stock's final cells), the utility pairs (each variant's row) and
     Belebele (stock's items per language) are checked against the design too; each count that differs
     is named with both numbers sourced, and a matching one is not."""
-    from publish_fakes import BENIGN_CELLS, WINNER, report
+    from publish_fakes import WINNER, report
 
     doc = report()
     cells = doc["tables"]["cells"]["rows"]
+    first = len(cells)  # the first row appended below
     cells += [
         {"variant": "stock", "set": "easy_benign", "lang": "hi", "n": 30},
         {"variant": "stock", "set": "hard_benign", "lang": "hi", "n": 30},
@@ -1506,7 +1554,6 @@ def test_the_design_counts_are_checked_for_every_set(out):
     assert "Belebele items in Hindi (40) against 700 designed" in text
     assert "in en (" not in text and "(29)" not in text and "match this design" not in text
     shown = {(s["pointer"], s["shown"]) for s in facts.sources}
-    first = 1 + len(BENIGN_CELLS)  # the first row appended above
     assert (f"/tables/cells/rows/{first}/n", "30") in shown and ("/tables/utility/rows/0/n", "40") in shown
     assert ("/tables/belebele/rows/0/n", "40") in shown
     sourced = {(s["file"], s["pointer"]) for s in facts.sources}
@@ -4256,6 +4303,11 @@ BOTH_LABELS = (
 )
 SIZES = "The Hindi drift is +30.0 pp under the primary reading and +10.0 pp under the second judge's labels"
 REDTEAM_AGREES = ", and the human-written Aya Red-teaming prompts give the same direction (+36.0 pp)."
+# How far the readers share the judge's refusal label, from the fixture's pooled matrix (decisions item 134).
+REFUSALS_AGREE = (
+    "Its refusal label agrees with the readers' on 46 of the 51 outputs it gave that label in round 1, over "
+    "all languages."
+)
 
 
 def _weak_label(docs):
@@ -4300,8 +4352,8 @@ def _reading(reading, kind, effect, failures=None) -> dict:
 def test_the_judge_part_opens_with_how_far_to_trust_the_judge(out):
     """Decisions item 128 (the review's R5 and F3): the judge's part opens with one paragraph that says
     which judge every claim is read under, how the bar was met in Hindi, how weak the harmful label is,
-    whether the direction of the effects holds under every reading, and the Hindi drift's size under
-    each. Every number is read through Facts."""
+    how far the readers share its refusal label (item 134), whether the direction of the effects holds
+    under every reading, and the Hindi drift's size under each. Every number is read through Facts."""
     from lift.publish import validated
 
     _inputs()
@@ -4314,7 +4366,7 @@ def test_the_judge_part_opens_with_how_far_to_trust_the_judge(out):
         "pre-registered bar is met on kappa**, not on agreement (80.0% agreement on 60 items against a bar "
         "of 85.0%; kappa 0.73 against 0.60). Its harmful label is the weak one: its kappa of harmful "
         "against not harmful is 0.37, and of the 15 Hindi outputs it labelled harmful in round 1 the reader "
-        "labelled 9 harmful. So the "
+        f"labelled 9 harmful. {REFUSALS_AGREE} So the "
         + ROBUST.format(BOTH[0], THEIR_SIZE, BOTH[1], "")
         + f" {SIZES}{REDTEAM_AGREES}"
     )
@@ -4468,7 +4520,7 @@ def test_the_summary_follows_the_primary_effects_and_the_human_written_prompts(o
 
     summary = article.judge_summary(_inputs(edit=not_weak))
     robust = ROBUST.format(BOTH[0], THEIR_SIZE, BOTH[1], "")
-    assert f"the reader labelled 9 harmful. The {robust}" in summary
+    assert f"the reader labelled 9 harmful. {REFUSALS_AGREE} The {robust}" in summary
 
 
 def test_the_summary_waits_for_its_inputs(out):
@@ -4485,7 +4537,7 @@ def test_the_summary_waits_for_its_inputs(out):
     article.report_path().unlink()
     summary = article.judge_summary(Facts())
     assert summary.startswith("**How far to trust the judge, in short.** Every safety claim here is a ")
-    assert summary.endswith("the reader labelled 9 harmful.") and "direction" not in summary
+    assert summary.endswith(f"the reader labelled 9 harmful. {REFUSALS_AGREE}") and "direction" not in summary
 
 
 def test_judge_sensitivity_keeps_one_small_table_of_drift_and_repair_under_each_reading(out):
@@ -4810,6 +4862,12 @@ PER_TOKEN = (
     "until its longest answer ends) divided by the tokens its answers hold. So it moves with the length of "
     "the answers as well as with the cost of a step, and it does not rank the repairs by speed."
 )
+# The same note in a whole article, whose appendix holds the cap-hit rates it points to (decisions item 132).
+PER_TOKEN_CAPS = PER_TOKEN.replace(
+    "the answers as well",
+    "the answers (see [how often they reached the token cap](#answers-that-reached-the-token-cap-hindi)) as "
+    "well",
+)
 
 
 def test_the_cost_section_says_the_check_up_and_its_table_is_in_the_appendix(out):
@@ -4843,11 +4901,11 @@ def test_the_cost_section_says_the_check_up_and_its_table_is_in_the_appendix(out
     block = _appendix(text, COST_HEAD)
     assert "| Variant | Role | GPU-hours | Per generated token | Gate share |" in block
     assert block.rstrip().endswith(
-        f"GPU-hours: the variant's whole final evaluation.\n\n{PER_TOKEN} WiSE-FT at {LAMBDA} = 0.25 changes "
-        "only the weights of stock's architecture and shows 1.7 ms against stock's 1.2 ms. The gate share is "
-        "the part of that time CAST's gate takes: 6.7% for CAST at strength 0.5."
+        f"GPU-hours: the variant's whole final evaluation.\n\n{PER_TOKEN_CAPS} WiSE-FT at {LAMBDA} = 0.25 "
+        "changes only the weights of stock's architecture and shows 1.7 ms against stock's 1.2 ms. The gate "
+        "share is the part of that time CAST's gate takes: 6.7% for CAST at strength 0.5."
     )
-    assert "ReSta" not in block.split(PER_TOKEN)[1]  # its time is stock's: nothing to say of it
+    assert "ReSta" not in block.split(PER_TOKEN_CAPS)[1]  # its time is stock's: nothing to say of it
     pointers = {s["pointer"] for s in facts.sources}
     assert {"/cost_detail/sweep_gpu_hours", "/cost_detail/fit_cast_gpu_hours"} <= pointers
     assert {"/tables/cost/rows/1/ms_per_token", "/tables/cost/rows/3/gate_share"} <= pointers

@@ -778,13 +778,15 @@ def test_absolute_local_paths_are_staged_repo_relative(outputs):
     write_json(paths.output_dir() / "manifests" / "utility-1.json", manifest)
     up = datasets.build_logs()
     staged = json.loads((up.folder / "aggregates" / "selection.json").read_text(encoding="utf-8"))
-    assert staged["freeze"]["variants"][1]["pending"] == (
+    # The root is rewritten (outputs/, or nothing for the repo); the rest of the path keeps the separators it
+    # was written with, backslashes on Windows.
+    assert staged["freeze"]["variants"][1]["pending"].replace("\\", "/") == (
         "outputs/artifacts/cast/adapter-aya-std-s2/cast.safetensors not found: run `lift fit-cast`"
     )
     man = json.loads((up.folder / "manifests" / "utility-1.json").read_text(encoding="utf-8"))
-    assert man["out_path"] == f"outputs/utility/j/{VARIANT}/utility_hi_final.jsonl"
+    assert man["out_path"].replace("\\", "/") == f"outputs/utility/j/{VARIANT}/utility_hi_final.jsonl"
     assert man["on_the_vm"] == "outputs/scores/belebele/x.jsonl"
-    assert man["config"] == "configs/project.yaml"
+    assert man["config"].replace("\\", "/") == "configs/project.yaml"
     text = _texts(up.folder)
     assert str(paths.output_dir()) not in text and str(paths.REPO_ROOT) not in text
     assert not preflight.local_paths(text)
@@ -908,7 +910,8 @@ def _rebuild(shas: dict, key: str, rows: list[dict], *, retrain: bool = True) ->
 @pytest.fixture
 def training(monkeypatch):
     """The three training sets under data/sft/, four registered adapters and the manifest of the run that
-    trained each. Returns {training set: sha256 of its rows}."""
+    trained each, with no row withheld (``_withhold`` sets some). Returns {training set: sha256 of its
+    rows}."""
     shas = {key: _write_sft_set(key, _sft_rows(key)) for key in SFT_SETS}
     write_json(paths.sft_dir() / "report.json", {"variants": {k: {"sha256": s} for k, s in shas.items()}})
     registry = {}
@@ -920,7 +923,13 @@ def training(monkeypatch):
         )
     monkeypatch.setattr("lift.models.variants.load_registry", lambda: dict(registry))
     monkeypatch.setitem(settings.load(), "github_repo", "https://github.com/test-org/lift")
+    monkeypatch.delitem(settings.load()["repos"]["sft"], "withheld", raising=False)  # the team's ids
     return shas
+
+
+def _withhold(monkeypatch, setting) -> None:
+    """configs/publish.yaml ``repos.sft.withheld`` as ``setting`` ({candidate: {variant: [row ids]}})."""
+    monkeypatch.setitem(settings.load()["repos"]["sft"], "withheld", setting)
 
 
 def _sft_staging():
@@ -1124,15 +1133,17 @@ def test_without_training_sets_only_the_card_is_staged():
     assert "No training set is on this machine yet" in (up.folder / "README.md").read_text(encoding="utf-8")
 
 
-def test_the_training_sets_are_staged_only_when_named(training, capsys):
-    """Decisions item 118: the dataset is not uploaded (the scan refuses two of its files on the team's
-    machine), so a plain ``lift publish datasets`` builds the other three, whose upload its plan would
-    stop, and the data collection does not list it. ``--only sft`` stages it."""
+def test_the_training_sets_are_built_by_default_and_listed_in_the_data_collection(training, capsys):
+    """Decisions item 118 held the dataset back (the scan refused one row in each IndicAlign file); on Nov
+    15 the owner decided to publish it with those rows withheld. So a plain ``lift publish datasets``
+    builds it with the other three, the data collection lists it, and ``--only sft`` still stages it
+    alone."""
     from lift import cli
 
-    assert [u.repo.kind for u in datasets.build()] == ["logs", "raw", "prompts"]
-    assert not _sft_staging().exists()
-    assert all(r.kind != "sft" for items in collect.plan().values() for r in items)
+    assert [u.repo.kind for u in datasets.build()] == ["logs", "raw", "prompts", "sft"]
+    assert (_sft_staging() / "aya" / "dedup" / "sft_messages.jsonl").is_file()
+    assert [r.repo_id for r in collect.plan()["data"] if r.kind == "sft"] == [settings.repo("sft").repo_id]
+    shutil.rmtree(_sft_staging())
     assert cli.main(["publish", "datasets", "--only", "sft"]) == 0
     out = capsys.readouterr().out
     assert "/lift-hindi-sft" in out and "dry run: nothing was uploaded" in out
@@ -1197,3 +1208,176 @@ def test_a_training_row_that_staging_would_rewrite_is_refused(training):
     with pytest.raises(PublishError, match="would change the rows the adapters were trained on"):
         datasets.build(["sft"])
     assert not _sft_staging().exists()
+
+
+# ------------------------------------- the rows the published training files withhold (the owner, Nov 15)
+
+
+def test_the_committed_setting_withholds_the_two_rows_the_scan_found():
+    """configs/publish.yaml as committed: one row of each IndicAlign set, the two whose answers the scan of
+    the team's machine refused (a count-only run of the scan's own functions named them), and none of the
+    Aya set."""
+    assert datasets.sft_withheld() == {"indicalign/dedup": ("ind-02551",), "indicalign/raw": ("ind-04884",)}
+
+
+def test_withheld_rows_are_left_out_of_the_published_files(training, monkeypatch):
+    """The guard reads each training file whole: its sha256 is still the one its training runs recorded.
+    The staged copy then leaves out the withheld rows, keeping every other line byte for byte and in order;
+    every other file is staged as it is, and a set that withholds nothing is published whole. The sources
+    and the card give both files' rows and sha256 and the withheld ids, and the card says why the rows are
+    withheld, how the training files are rebuilt and how a withheld row is found in its source."""
+    _withhold(monkeypatch, {"indicalign": {"dedup": ["ind-00002"], "raw": ["ind-00001", "ind-00004"]}})
+    [up] = datasets.build(["sft"])  # the manifests record the full files' sha256: the guard read those
+    gone = {"aya/dedup": (), "indicalign/dedup": ("ind-00002",), "indicalign/raw": ("ind-00001", "ind-00004")}
+    for key, ids in gone.items():
+        full = (paths.sft_dir() / key / "sft_messages.jsonl").read_bytes().splitlines(keepends=True)
+        published = (up.folder / key / "sft_messages.jsonl").read_bytes()
+        assert published == b"".join(line for line in full if json.loads(line)["id"] not in ids), key
+        assert published.endswith(b"\n") and b"\r" not in published
+        for name in SFT_FILES[1:]:
+            assert (up.folder / key / name).read_bytes() == (paths.sft_dir() / key / name).read_bytes()
+    raw = up.folder / "indicalign" / "raw" / "sft_messages.jsonl"
+    published_sha = sha256_file(raw)
+    assert published_sha != training["indicalign/raw"]
+    assert sha256_file(up.folder / "aya" / "dedup" / "sft_messages.jsonl") == training["aya/dedup"]
+
+    doc = json.loads((datasets.stage_root() / "sft.sources.json").read_text(encoding="utf-8"))
+    counted = {(v["file"], v["what"]): v["value"] for v in doc["values"] if "what" in v}
+    full_file = "data/sft/indicalign/raw/sft_messages.jsonl"
+    staged = "outputs/publish/datasets/sft/indicalign/raw/sft_messages.jsonl"
+    assert counted[(full_file, "rows")] == 6 and counted[(full_file, "sha256")] == training["indicalign/raw"]
+    assert counted[(staged, "rows")] == 4 and counted[(staged, "sha256")] == published_sha
+    withheld = {v["pointer"]: v["value"] for v in doc["values"] if v.get("file") == "configs/publish.yaml"}
+    assert withheld == {
+        "/repos/sft/withheld/indicalign/dedup": ["ind-00002"],
+        "/repos/sft/withheld/indicalign/raw": ["ind-00001", "ind-00004"],
+    }
+    assert not doc["pending"]
+
+    card = (up.folder / "README.md").read_text(encoding="utf-8")
+    assert "[PENDING" not in card and "{{" not in card
+    assert (
+        'Each `sft_messages.jsonl` is the file its training runs read, less the rows listed under "Withheld '
+        'rows"; every other line is as it was.'
+    ) in card
+    section = card.split("## Withheld rows\n", 1)[1].split("\n## ", 1)[0]
+    flat = " ".join(section.split())
+    assert (
+        "- `indicalign/raw`: `ind-00001` (IndicAlign `Dolly_T` row 1), `ind-00004` (IndicAlign `Dolly_T` "
+        f"row 4) withheld. Training file: 6 rows, sha256 `{training['indicalign/raw']}`. Published file: 4 "
+        f"rows, sha256 `{published_sha}`."
+    ) in section
+    assert (
+        f"- `aya/dedup`: no row withheld, so published whole: 4 rows, sha256 `{training['aya/dedup']}`."
+    ) in section
+    assert "A stretch of its answer is also in one of this project's model outputs" in flat
+    assert "the scan reads content, not where a text came from. So the row is withheld" in flat
+    assert '`pip install -e ".[data]"` and then `lift data build --only sft` rebuild all three' in flat
+    assert "an IndicAlign id is `ind-` followed by the row's index in the `train` split" in flat
+    assert "Each training row is that source text, cleaned as described" in flat
+    assert (
+        'For publication, the rows listed under "Withheld rows" were left out of '
+        "`indicalign/dedup/sft_messages.jsonl` and `indicalign/raw/sft_messages.jsonl`. Nothing else differs"
+    ) in " ".join(card.split())
+    assert "No file was changed for publication" not in card
+    assert any(
+        "indicalign/dedup ind-00002 (5 rows -> 4); indicalign/raw ind-00001, ind-00004 (6 rows -> 4)" in n
+        for n in up.notes
+    )
+
+
+def test_without_withheld_rows_every_file_is_published_whole(training):
+    """A setting that withholds nothing (here none) publishes every file whole, and the card says so; a
+    machine with no training set says that instead."""
+    [up] = datasets.build(["sft"])
+    card = (up.folder / "README.md").read_text(encoding="utf-8")
+    section = card.split("## Withheld rows\n", 1)[1].split("\n## ", 1)[0]
+    whole = "No row is withheld: each published `sft_messages.jsonl` is its training file, byte for byte."
+    assert section.strip() == whole
+    assert "less the rows listed" not in card and "were left out of" not in card
+    assert "Each `sft_messages.jsonl` is byte for byte the file its training runs read." in card
+    assert not [n for n in up.notes if "withheld" in n]
+    shutil.rmtree(paths.sft_dir())
+    [up] = datasets.build(["sft"])
+    section = (up.folder / "README.md").read_text(encoding="utf-8").split("## Withheld rows\n", 1)[1]
+    assert section.split("\n## ", 1)[0].strip().startswith("_No training set is on this machine yet")
+
+
+@pytest.mark.parametrize(
+    ("setting", "says"),
+    [
+        ({"indicalign": {"dedup": ["ind-00042"]}}, "sft_messages.jsonl by id, and ind-00042 is not in it"),
+        ({"aya": {"raw": ["aya-00001"]}}, "names aya/raw, which is not a training set of the plan"),
+        ({"indicalign": {"dedup": ["ind-00001"] * 2}}, "indicalign/dedup: lists ind-00001 more than once"),
+        ({"indicalign": ["ind-00001"]}, "indicalign: not a mapping of variants to lists of row ids"),
+        ({"indicalign": {"dedup": "ind-00001"}}, "indicalign/dedup: not a list of row ids"),
+        (["ind-00001"], "must map each candidate to its variants' lists of row ids"),
+    ],
+)
+def test_a_withheld_row_the_build_cannot_place_is_refused(training, monkeypatch, setting, says):
+    """Each withheld id must name one row of a training set of the plan: another row, another set, an id
+    named twice or a setting of another shape refuses the build, leaves nothing staged and removes an
+    earlier build's record of the card's values."""
+    datasets.build(["sft"])
+    sources = datasets.stage_root() / "sft.sources.json"
+    assert sources.is_file()
+    _withhold(monkeypatch, setting)
+    with pytest.raises(PublishError) as refused:
+        datasets.build(["sft"])
+    assert says in str(refused.value) and "configs/publish.yaml repos.sft.withheld" in str(refused.value)
+    assert not _sft_staging().exists() and not sources.exists()
+
+
+def test_a_withheld_id_that_two_rows_hold_is_refused(training, monkeypatch):
+    """Which of two rows with one id is meant would be a guess: the build refuses rather than withhold
+    both or either."""
+    rows = _sft_rows("indicalign/raw")
+    rows[4]["id"] = rows[1]["id"]
+    _rebuild(training, "indicalign/raw", rows)  # the rows the stress adapter was trained on: the guard passes
+    _withhold(monkeypatch, {"indicalign": {"raw": [rows[1]["id"]]}})
+    with pytest.raises(PublishError, match="ind-00001 is in it 2 times"):
+        datasets.build(["sft"])
+    assert not _sft_staging().exists()
+
+
+def test_the_withheld_rows_are_the_ones_the_scan_refuses(outputs, training, monkeypatch):
+    """The scan is unchanged and the guard. A row whose answer repeats an output on this machine fails it
+    (as above). Withholding another row is allowed, since the builder checks the ids the setting names, not
+    why it names them, and the scan still fails on the row that stays. Withholding that row passes it, and
+    the upload's checks with it: the finding came from that row alone."""
+    rows = _sft_rows("indicalign/dedup")
+    rows[2]["messages"][1]["content"] += " " + CASES["k9"][0]  # an answer that an output here repeats
+    _rebuild(training, "indicalign/dedup", rows)
+    _withhold(monkeypatch, {"indicalign": {"dedup": ["ind-00003"]}})
+    [up] = datasets.build(["sft"])
+    assert hub.scan_public([up]) == (
+        ["training sets: text of a model output: indicalign/dedup/sft_messages.jsonl (staged)"],
+        None,
+    )
+    _withhold(monkeypatch, {"indicalign": {"dedup": ["ind-00002"]}})
+    monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
+    [up] = datasets.build(["sft"])
+    assert hub.scan_public([up]) == ([], None)
+    published = (up.folder / "indicalign" / "dedup" / "sft_messages.jsonl").read_text(encoding="utf-8")
+    assert "BENIGN-TEXT-K9" not in published and "ind-00003" in published
+    hub.check_ready([up])  # the namespace, nothing missing or pending, and the scan against this machine
+
+
+# ------------------------------------------------- the acceptance notebook's run time in the logs (F18)
+
+
+def test_the_notebooks_run_time_goes_into_the_logs_when_it_exists(outputs):
+    """The article cites the notebook's measured run time (outputs/metrics/acceptance_runtime.json), so the
+    logs carry it under aggregates/, where scripts/verify_numbers.py looks for it. Without the file the logs
+    are staged as before."""
+    up = datasets.build_logs()
+    before = {p.relative_to(up.folder).as_posix() for p in up.files()}
+    assert "aggregates/acceptance_runtime.json" not in before
+    runtime = {"version": 1, "seconds": 222.4, "minutes": 4, "gpu": "a test GPU", "limit": 50}
+    write_json(paths.metrics_dir() / "acceptance_runtime.json", {**runtime, "langs": ["hi"], "variants": 3})
+    up = datasets.build_logs()
+    after = {p.relative_to(up.folder).as_posix() for p in up.files()}
+    assert after - before == {"aggregates/acceptance_runtime.json"}
+    copy = up.folder / "aggregates" / "acceptance_runtime.json"
+    assert copy.read_bytes() == (paths.metrics_dir() / "acceptance_runtime.json").read_bytes()
+    assert "- `acceptance_runtime.json`" in (up.folder / "README.md").read_text(encoding="utf-8")

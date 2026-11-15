@@ -154,7 +154,7 @@ No repo is private, and none is approved by hand.
 - **Unrepaired adapter**: [`racetracklexsi/lift-adapter-indicalign-std-s2`](https://huggingface.co/racetracklexsi/lift-adapter-indicalign-std-s2). A Hindi LoRA adapter trained on the IndicAlign `Dolly_T` sample with the standard recipe, seed 2. Gated, automatic approval: a research artifact whose safety may have drifted.
 - **Unrepaired adapter**: [`racetracklexsi/lift-adapter-indicalign-std-s3`](https://huggingface.co/racetracklexsi/lift-adapter-indicalign-std-s3). A Hindi LoRA adapter trained on the IndicAlign `Dolly_T` sample with the standard recipe, seed 3. Gated, automatic approval: a research artifact whose safety may have drifted.
 - **Unrepaired adapter**: [`racetracklexsi/lift-adapter-indicalign-stress-s1`](https://huggingface.co/racetracklexsi/lift-adapter-indicalign-stress-s1). A Hindi LoRA adapter trained on the IndicAlign `Dolly_T` sample with the stress recipe, seed 1. Gated, automatic approval: a research artifact whose safety may have drifted.
-- **Space**: [`racetracklexsi/lift-acceptance-test`](https://huggingface.co/spaces/racetracklexsi/lift-acceptance-test). A static page of the results: the verdicts, the heatmaps, the utility table and a few example outputs for each variant, language and safety prompt set of the final split, each cut to its first words and marked `[redacted]`, whatever its label. Public: it loads no model and generates nothing, and it holds no more of any output than that cut.
+- **Space**: [`racetracklexsi/lift-acceptance-test`](https://huggingface.co/spaces/racetracklexsi/lift-acceptance-test). A results explorer, a static page: the verdicts, the heatmaps, the utility table and a few example outputs for each variant, language and safety prompt set of the final split, each cut to its first words and marked `[redacted]`, whatever its label. Public: it loads no model and generates nothing, and it holds no more of any output than that cut. The test itself runs in the notebook: [Run the test on your adapter](#run-the-test-on-your-adapter).
 
 The verdicts in section 7 say which adapters drifted.
 
@@ -317,7 +317,7 @@ On hard-benign prompts the frozen repair's refusals are not clearly different fr
 
 ### The judge against native readers
 
-**How far to trust the judge, in short.** Every safety claim here is a difference between models under one automatic judge (Qwen3Guard, strict). Against the native reader in Hindi **the pre-registered bar is met on kappa**, not on agreement (78.3% agreement on 60 items against a bar of 85.0%; kappa 0.67 against 0.60). Its harmful label is the weak one: its kappa of harmful against not harmful is 0.37, and of the 13 Hindi outputs it labelled harmful in round 1 the reader labelled 4 harmful (round 2: 7 of 18). So the direction of the drift and of the repair is robust, and their size is not: in "Judge sensitivity" every reading of drift and of repair has an interval that excludes zero, in the primary reading's direction (the refusal rate moves the opposite way). The Hindi drift is +31.5 pp under the primary reading, +28.7 pp with "Controversial" read loosely, +21.5 pp counting only outputs that trip no unclear flag, +10.2 pp under the second judge's labels and -30.5 pp on the refusal rate, and the human-written Aya Red-teaming prompts give the same direction (+38.7 pp).
+**How far to trust the judge, in short.** Every safety claim here is a difference between models under one automatic judge (Qwen3Guard, strict). Against the native reader in Hindi **the pre-registered bar is met on kappa**, not on agreement (78.3% agreement on 60 items against a bar of 85.0%; kappa 0.67 against 0.60). Its harmful label is the weak one: its kappa of harmful against not harmful is 0.37, and of the 13 Hindi outputs it labelled harmful in round 1 the reader labelled 4 harmful (round 2: 7 of 18). Its refusal label agrees with the readers' on 66 of the 67 outputs it gave that label in round 1, over all languages (round 2: 40 of 40). So the direction of the drift and of the repair is robust, and their size is not: in "Judge sensitivity" every reading of drift and of repair has an interval that excludes zero, in the primary reading's direction (the refusal rate moves the opposite way). The Hindi drift is +31.5 pp under the primary reading, +28.7 pp with "Controversial" read loosely, +21.5 pp counting only outputs that trip no unclear flag, +10.2 pp under the second judge's labels and -30.5 pp on the refusal rate, and the human-written Aya Red-teaming prompts give the same direction (+38.7 pp).
 
 Native readers were given 180 outputs (60 in Hindi, 40 in Chinese, 40 in Spanish and 40 in English) of stock and the standard recipe's seed-1 adapters on the dev split, and labelled each harmful, refusal, benign or unclear, without seeing which model wrote it or what a judge said.
 
@@ -385,6 +385,7 @@ The exploratory diagnosis (harm probes, the refusal direction and its ablation c
   repair fits which kind of drift.
 - Usefulness is read two ways, the pairwise judge and the held-out loss, which can disagree; we
   report both and do not adjudicate.
+- Answers stop at 256 new tokens, and an answer that reaches the cap is judged as it was cut. Stock's answers reached it on 38.0% of the Hindi harmful prompts and the stress adapter's on 15.8%; on the Hindi benign prompts, stock's on 67.3% (easy) and 78.5% (hard), the stress adapter's on 8.7% and 36.0%. So on each of these sets more of stock's answers than of the stress adapter's were judged cut short. Table: [Answers that reached the token cap, Hindi](#answers-that-reached-the-token-cap-hindi).
 - The harmful rate is one judge's strict reading, whatever the output looks like: an output that
   repeats itself to the token cap counts as harmful if the judge calls it unsafe. "Judge
   sensitivity" gives the same differences under the other readings.
@@ -399,7 +400,7 @@ repair. The final battery took 0.68 h per variant on average, over the variants 
 the cost table. Re-running safety
 fine-tuning would need a safety dataset in every language and a training run per adapter; the
 repairs here need no gradient step, and neither does the check-up. Tiny Aya derivatives are
-non-commercial, so we make no commercial claims.
+non-commercial, so we make no commercial claims. The acceptance-test notebook ran in 4 minutes on NVIDIA A100-SXM4-40GB (3 variants, the first 50 dev prompts per set and language, languages hi, en), from its check to the last verdict (see [Run the test on your adapter](#run-the-test-on-your-adapter)).
 
 Each variant's GPU-hours and time per generated token: [Cost of the final evaluation](#cost-of-the-final-evaluation).
 
@@ -468,6 +469,32 @@ What we would run, and the claim of this write-up each run would firm up:
 
 </details>
 
+## Run the test on your adapter
+
+[`notebooks/acceptance_test.ipynb`](https://github.com/Knull/lost-in-finetuning/blob/main/notebooks/acceptance_test.ipynb) runs a screening version of this test on any LoRA adapter of Tiny Aya Global,
+with the study's own code: stock and your adapter answer the first `LIMIT` dev prompts of the harmful
+and hard-benign sets in Hindi and English, the study's primary judge labels the answers, and then
+the frozen repair (WiSE-FT at λ = 0.25) is applied to your adapter and judged on the same prompts. It prints each
+variant's rates, McNemar's test of drift and of repair, and a screening verdict. It needs a GPU with
+native bf16, such as an A100 or an L4, and a Hugging Face token with accepted access to Tiny Aya
+Global and Tiny Aya Base. The run on record took 4 minutes on NVIDIA A100-SXM4-40GB (3 variants, the first 50 dev prompts per set and language, languages hi, en), from the check to the last verdict, without the install and the session restart before it.
+
+Its verdict covers safety and over-refusal only: the full test also needs `lift utility` and
+`lift belebele`. The frozen repair's λ = 0.25 was chosen on our adapter's dev prompts, so for yours it is a starting point, not a value tuned for it. The study chose it with its dev sweep and selection (`lift sweep`, then `lift select`), which the notebook does not run.
+
+<details><summary>Before the first run: a T4, the install and the prompt files</summary>
+
+The notebook runs in bf16, which the model load refuses on a T4: a T4 has no bf16, and a run there in
+fp16 would count only after Gate 0's fp16-vs-bf16 comparison. The notebook clones this repository and
+installs the pinned versions, then asks for a session restart before the next cell; it gives each
+step. A fresh clone has no prompt files (`data/prompts/` is not in git), and the check before any GPU
+work (`acceptance.check_ready`) stops and says how to get them: team members pull them from the
+private runs repo with `lift sync pull --only data`, and everyone else runs `acceptance.fetch_prompts`,
+which copies our Hindi prompt files from the public prompt-set dataset (section 6) and builds
+the English ones from their public sources with `lift data build`, with no translation key.
+
+</details>
+
 ## Reproduce
 
 **Check every number in this write-up.** It takes a few seconds and needs no GPU, no token and
@@ -500,13 +527,14 @@ pip install -e ".[sync,dev]"
 pytest
 ```
 
-<details><summary>What the default run leaves out, and the tests known to fail on Windows</summary>
+<details><summary>What the default run leaves out, and the tests on Windows</summary>
 
 By default `pytest` leaves out the tests marked for a GPU or for the network. The model tests use a
 tiny randomly initialised model, never Tiny Aya, and are skipped unless the GPU stack is installed:
-`pip install -e ".[gpu,data,eval,report,dev]"` installs everything. On Windows a few tests are known
-to fail for reasons of portability (path separators, line endings, process ids); none of them touches
-a reported number.
+`pip install -e ".[gpu,data,eval,report,dev]"` installs everything. On Windows the offline tests pass
+with the light install, `pip install -e ".[sync,dev]"`, where the model tests skip. On a busy machine a
+test can now and then fail with "Access is denied", when another process (a virus scanner, say) has
+just opened a file the test wrote; it passes when run again.
 
 </details>
 
@@ -554,8 +582,8 @@ does.
 - Model collection: https://huggingface.co/collections/racetracklexsi/lost-in-fine-tuning-models-6af8ac21037f3d7eaf42fb39
 - Data collection: https://huggingface.co/collections/racetracklexsi/lost-in-fine-tuning-data-6af8ac23120d5e7caecf7d91
 - Code: https://github.com/Knull/lost-in-finetuning
-- Notebook: https://github.com/Knull/lost-in-finetuning/blob/main/notebooks/acceptance_test.ipynb
-- Space: https://huggingface.co/spaces/racetracklexsi/lift-acceptance-test
+- Notebook, to run the test on your adapter: https://github.com/Knull/lost-in-finetuning/blob/main/notebooks/acceptance_test.ipynb
+- Space, a results explorer: https://huggingface.co/spaces/racetracklexsi/lift-acceptance-test
 
 ## Appendix: full tables
 
@@ -884,6 +912,18 @@ Four-class agreement and Cohen's kappa; binary = harmful vs not. Sampled: the ou
 
 For the second judge, Items are the outputs of the final cells that have its judgement, each set against the primary judge's label, and Not judged are the sampled outputs that have none. A judgement its provider declined to give is not one of those: the labelling rules record it as a judgement labelled unclear, so it is among the Items (the table of readings lists them: 64 of 400 prompts for the Hindi drift). Items exceed Sampled in English and Hindi: there the second judge also judged every output of the cells behind the readings under its labels, beyond its sample.
 
+### Answers that reached the token cap, Hindi
+
+| Variant | Role | Harmful | Harmful, human-written (Aya Red-teaming) | Easy benign | Hard benign |
+| --- | --- | --- | --- | --- | --- |
+| stock | stock | 38.0% | 51.9% | 67.3% | 78.5% |
+| adapter-indicalign-stress-s1 | adapter | 15.8% | 11.9% | 8.7% | 36.0% |
+| wiseft-l0.25-adapter-indicalign-stress-s1 | frozen repair | 16.8% | 27.1% | 34.3% | 62.5% |
+| resta-a0.10-adapter-indicalign-stress-s1 | ReSta's frozen setting | 7.0% | 3.5% | 7.7% | 18.0% |
+| cast-m0.5-adapter-indicalign-stress-s1 | CAST's frozen setting | 10.2% | 11.0% | 8.7% | 31.5% |
+
+The share of each variant's answers that reached the cap of 256 new tokens, on the Hindi prompts of the final split (seed 1), from the cells table of final_report.json; an answer that reaches the cap is judged as it was cut. The pre-registration says the cap-hit rate is reported (docs/decisions.md item 132).
+
 ### Cost of the final evaluation
 
 | Variant | Role | GPU-hours | Per generated token | Gate share |
@@ -899,4 +939,4 @@ For the second judge, Items are the outputs of the final cells that have its jud
 
 GPU-hours: the variant's whole final evaluation (wall time x devices, from its lift final manifests). Latency: GPU milliseconds per generated token on the final split; the gate share is the part of it CAST's gate prefill takes (0 for a model without a gate). The seed-1 dev sweep took 3.08 h of GPU time, and its CAST fit 0.08 h. A check-up (the whole acceptance test of one adapter) is the dev sweep of the selected adapter in the reported precision, with its CAST fit, plus the final battery of stock, the seed-1 adapter and the seed-1 frozen winner.
 
-The time per generated token is a batch's whole wall time (the pass over its prompts, then every step until its longest answer ends) divided by the tokens its answers hold. So it moves with the length of the answers as well as with the cost of a step, and it does not rank the repairs by speed. WiSE-FT at λ = 0.25 and ReSta at α = 0.10 change only the weights of stock's architecture and show 1.7 ms and 2.9 ms against stock's 1.2 ms. The gate share is the part of that time CAST's gate takes: 6.7% for CAST at strength 0.5.
+The time per generated token is a batch's whole wall time (the pass over its prompts, then every step until its longest answer ends) divided by the tokens its answers hold. So it moves with the length of the answers (see [how often they reached the token cap](#answers-that-reached-the-token-cap-hindi)) as well as with the cost of a step, and it does not rank the repairs by speed. WiSE-FT at λ = 0.25 and ReSta at α = 0.10 change only the weights of stock's architecture and show 1.7 ms and 2.9 ms against stock's 1.2 ms. The gate share is the part of that time CAST's gate takes: 6.7% for CAST at strength 0.5.
