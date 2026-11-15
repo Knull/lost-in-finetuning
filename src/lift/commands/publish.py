@@ -12,7 +12,12 @@ collections) while configs/frozen_recipe.json is not the one the newest ``recipe
 that differs from the tag's is refused outright.
 A dry run runs that scan too and exits 1 when a file that would be public holds a run of any model
 output's text, whatever its label (decisions item 62).
-``article`` writes hf/article.md and the same text as README.md.
+``datasets`` stages the logs, the raw completions and the translated prompt sets. The training sets
+with CuratorKIT's files are staged only when named (``--only sft``), and only while each file's sha256
+is the one its training runs recorded; ``--yes`` refuses them while the public-text scan finds an
+output's text in them, as it does in two of their files today (decisions item 118).
+``article`` writes hf/article.md and the same text as README.md, and stamps the notebook's links and
+frozen winner (notebooks/acceptance_test.ipynb): commit them together.
 ``preflight`` checks the git repo can go public: it fetches every
 branch, tag and pull-request ref of origin first, and refuses a machine with no model outputs to check
 against. Exit codes: 0 done (or dry run), 1 refused or failed (preflight or a dry run's scan: findings).
@@ -113,8 +118,9 @@ def _article(args: argparse.Namespace) -> int:
         print(f"lift publish: BLOCKED, a draft not for posting: {block}", file=sys.stderr)
         return 1
     print(
-        "Commit README.md, figures/ and hf/article.md (with hf/article.sources.json): the README is the "
-        "write-up the submission links to."
+        "Commit README.md, figures/, hf/article.md (with hf/article.sources.json) and "
+        "notebooks/acceptance_test.ipynb, whose links and frozen winner this command stamps: the README is "
+        "the write-up the submission links to, and it links the notebook."
     )
     return 0
 
@@ -208,7 +214,15 @@ def register(sub: argparse._SubParsersAction) -> None:
     q = cmds.add_parser(
         "datasets", help="logs (public), raw completions (gated), translated prompts (public)", epilog=_EPILOG
     )
-    q.add_argument("--only", nargs="+", choices=["logs", "raw", "prompts"], default=None)
+    q.add_argument(
+        "--only",
+        nargs="+",
+        choices=["logs", "raw", "prompts", "sft"],
+        default=None,
+        help="stage only these (default: logs, raw and prompts). sft: the training sets with CuratorKIT's "
+        "files, staged only when named; --yes refuses them while the public-text scan finds an output's "
+        "text in them (docs/decisions.md item 118)",
+    )
     upload_flags(q)
     q.set_defaults(func=_datasets)
 

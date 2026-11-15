@@ -12,15 +12,15 @@ needs the text, such as checking our labels. The labels, without any output text
   token counts, cap hit, cache key);
 - `judgements/{judge}/{variant}/{set}_{lang}_{split}.jsonl`: JudgementRecord (labels, flags,
   the judge's raw output);
-- `utility/{judge}/{variant}/utility_hi_{split}.jsonl`: pairwise utility verdicts against stock;
-- `auditkit/`: the full AuditKIT records, which keep the outputs.
+- `utility/{judge}/{variant}/utility_hi_{split}.jsonl`: pairwise utility verdicts against stock.{{ auditkit_records }}
 
 Human annotators' labels and identities are not included.
 
 ## Terms
 
-Access is approved by hand. Do not redistribute harmful completions, do not use them to train
-models to produce harmful content, and quote at most a few words of any harmful text.
+Access is granted automatically when you accept these terms while logged in to Hugging Face.
+The data is meant for safety research only. Do not redistribute harmful completions, do not use
+them to train models to produce harmful content, and quote at most a few words of any harmful text.
 
 ## Licence
 

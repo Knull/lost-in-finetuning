@@ -1,20 +1,32 @@
 """lift publish datasets: the public logs hold ids, labels, flags and hashes and no output or judge text,
 whatever the label (decisions item 62), and every staged file is checked by content against every output
 on this machine; the logs refuse an incomplete record (human labels, primary and second judge, open
-batches); an AuditKIT record goes in only while it is its cell's; raw completions gated with manual
-approval; only our own translations in the prompt sets. Every output here is a made-up marker."""
+batches); an AuditKIT record goes in only while it is its cell's; raw completions gated with automatic
+approval, and their card says so; only our own translations in the prompt sets; the training sets staged
+only while each file is the one its training runs recorded, and scanned like every public upload. Every
+output and every training row here is a made-up marker."""
 
 from __future__ import annotations
 
 import json
+import shutil
 from types import SimpleNamespace
 
 import pytest
-from publish_fakes import no_committed_recipe, report, write_inputs, write_json, write_report  # noqa: F401
+import yaml
+from publish_fakes import (  # noqa: F401
+    FakeApi,
+    no_committed_recipe,
+    report,
+    write_inputs,
+    write_json,
+    write_report,
+)
 
 from lift import paths
-from lift.io import read_jsonl, sha256_obj, sha256_text, write_jsonl
-from lift.publish import PublishError, datasets, hub, preflight
+from lift.io import read_jsonl, sha256_file, sha256_obj, sha256_text, write_jsonl
+from lift.publish import PublishError, collect, datasets, hub, preflight, settings
+from lift.schemas import VariantSpec
 
 VARIANT = "adapter-aya-std-s1"
 CELL = "harmful_hi_dev"
@@ -559,6 +571,38 @@ def test_raw_is_gated_and_keeps_everything(outputs):
     assert "extra_gated_prompt" in card
 
 
+def test_the_raw_card_and_its_access_form_say_the_gate_is_automatic(outputs):
+    """Decisions item 117: the gate is automatic since item 110, and a visitor reads the card and the access
+    form, not the API. Both say access is granted automatically, and neither says it is granted by hand."""
+    card = (datasets.build_raw().folder / "README.md").read_text()
+    _, front, body = card.split("---\n", 2)
+    prompt = " ".join(yaml.safe_load(front)["extra_gated_prompt"].split())
+    granted = "Access is granted automatically when you accept these terms while logged in to Hugging Face."
+    assert granted in prompt and granted in " ".join(body.split())
+    assert "safety research only" in prompt and "safety research" in body  # what the data is meant for
+    assert "not to redistribute harmful completions" in prompt  # the terms stay
+    assert "by hand" not in card and "manual" not in card.lower()
+
+
+def test_the_raw_card_lists_the_full_auditkit_records_only_when_it_holds_one(outputs):
+    """lift.audit writes a full record (``*.full.json``) only when asked to keep the text, so the dataset
+    may hold none: the card and the plan's note then name no ``auditkit/`` folder (decisions item 117)."""
+    listed = "- `auditkit/`: the full AuditKIT records, which keep the outputs."
+    trees = "outputs/{generations,judgements,utility}"
+    up = datasets.build_raw()
+    card = (up.folder / "README.md").read_text()
+    assert listed in card and "{{" not in card
+    assert up.notes == [f"4 files: 3 from {trees} and 1 full AuditKIT record(s)"]
+    assert f"\n{len(list(up.files())) - 1} files, exactly as the pipeline wrote them" in card
+    _audit_path().with_name(f"{CELL}.full.json").unlink()
+    up = datasets.build_raw()
+    card = (up.folder / "README.md").read_text()
+    assert "auditkit" not in card.lower() and "{{" not in card
+    assert "pairwise utility verdicts against stock.\n\nHuman annotators' labels" in card
+    assert not (up.folder / "auditkit").exists()
+    assert up.notes == [f"3 files from {trees}"]
+
+
 def test_prompts_keep_only_our_translations():
     ours = {
         "pid": "prh-test-0001",
@@ -757,3 +801,399 @@ def test_a_local_path_that_cannot_be_made_relative_is_withheld(outputs, where):
     write_json(paths.output_dir() / "manifests" / "generate-2.json", {"run_id": "generate-2", "cache": where})
     with pytest.raises(PublishError, match="manifests/generate-2.json.*absolute local path"):
         datasets.build_logs()
+
+
+# ------------------------------------------- the training sets with CuratorKIT's files (decisions item 118)
+
+SFT_ROWS = {"aya/dedup": 4, "indicalign/dedup": 5, "indicalign/raw": 6}  # training set -> rows in its file
+SFT_SETS = tuple(SFT_ROWS)
+# registered adapter -> (the set it was trained on, the rows it dropped as unfit)
+SFT_ADAPTERS = {
+    "adapter-aya-std-s1": ("aya/dedup", 0),
+    "adapter-aya-std-s2": ("aya/dedup", 0),
+    "adapter-indicalign-std-s1": ("indicalign/dedup", 1),
+    "adapter-indicalign-stress-s1": ("indicalign/raw", 2),
+}
+SFT_FILES = (  # what a set's folder holds, under data/sft/ and in the dataset
+    "sft_messages.jsonl",
+    "selection.json",
+    "curatorkit/manifest.json",
+    "curatorkit/rejected.jsonl",
+    "curatorkit/lexsi_provenance.json",
+    "curatorkit/curatorkit_summary.json",
+)
+
+
+def _weights(name: str) -> str:
+    """The adapter hash the registry pins for ``name`` and its training run recorded (made up)."""
+    return sha256_text(f"weights of {name}")
+
+
+def _sft_rows(key: str, n: int | None = None) -> list[dict]:
+    tag = "aya" if key.startswith("aya") else "ind"
+    return [
+        {
+            "id": f"{tag}-{i:05d}",
+            "messages": [
+                {"role": "user", "content": f"TRAINING-QUESTION {key} {i}"},
+                {"role": "assistant", "content": f"TRAINING-ANSWER {key} {i}"},
+            ],
+        }
+        for i in range(SFT_ROWS[key] if n is None else n)
+    ]
+
+
+def _write_sft_set(key: str, rows: list[dict]) -> str:
+    """One training set as ``lift data build`` leaves it under data/sft/: the rows, selection.json and
+    CuratorKIT's files (the stress recipe's rows skip its deduplication). Returns the rows' sha256."""
+    folder = paths.sft_dir() / key
+    write_jsonl(folder / "sft_messages.jsonl", rows)
+    sha = sha256_file(folder / "sft_messages.jsonl")
+    write_json(folder / "selection.json", {"ids": [r["id"] for r in rows], "rows": len(rows), "sha256": sha})
+    n = len(rows)
+    stages = {
+        "JSONLReader": {"output_count": n + 3},
+        "SchemaGate": {"output_count": n + 2},
+        "MessagesExporter": {"exported_count": n},
+    }
+    if key.endswith("/dedup"):
+        stages["ExactDeduplicator"] = {"output_count": n + 1}
+        stages["MinHashDeduplicator"] = {"output_count": n}
+    curatorkit = folder / "curatorkit"
+    write_json(
+        curatorkit / "manifest.json", {"stage_counts": stages, "tool_versions": {"curatorkit": "0.1.22"}}
+    )
+    write_json(curatorkit / "lexsi_provenance.json", {"inputs": [{"ref": f"interim/sft/{key}/input.jsonl"}]})
+    write_json(curatorkit / "curatorkit_summary.json", {"input": n + 3, "passed": n, "deduplicated": []})
+    write_jsonl(
+        curatorkit / "rejected.jsonl",
+        [{"id": "rejected-1", "instruction": "TRAINING-QUESTION rejected", "rejection_reason": "too short"}],
+    )
+    return sha
+
+
+def _train_manifest(name: str, key: str, sha: str, *, rows: int, dropped: int = 0):
+    """The manifest of one ``lift train`` run (lift.train.lora: start_run's and finish_run's fields)."""
+    doc = {
+        "run_id": f"train-20261108T000000Z-{sha256_text(name)[:6]}",
+        "stage": "train",
+        "name": name,
+        "data_path": f"data/sft/{key}/sft_messages.jsonl",
+        "data_sha256": sha,
+        "n_rows": rows,
+        "n_rows_trained": rows - dropped,
+        "dropped_unfit": {"count": dropped, "ids": [f"ind-{i:05d}" for i in range(dropped)]},
+        "status": "ok",
+        "adapter_hash": _weights(name),
+    }
+    return write_json(paths.manifests_dir() / f"{doc['run_id']}.json", doc)
+
+
+def _manifest_of(name: str):
+    return next(
+        f for f in paths.manifests_dir().glob("train-*.json") if json.loads(f.read_text())["name"] == name
+    )
+
+
+def _rebuild(shas: dict, key: str, rows: list[dict], *, retrain: bool = True) -> None:
+    """Build ``key`` again with other rows (its selection.json and the build report follow) and, with
+    ``retrain``, train its adapters on them (their manifests follow)."""
+    shas[key] = _write_sft_set(key, rows)
+    write_json(paths.sft_dir() / "report.json", {"variants": {k: {"sha256": s} for k, s in shas.items()}})
+    for name, (trained_on, dropped) in SFT_ADAPTERS.items():
+        if retrain and trained_on == key:
+            _train_manifest(name, key, shas[key], rows=len(rows), dropped=dropped)
+
+
+@pytest.fixture
+def training(monkeypatch):
+    """The three training sets under data/sft/, four registered adapters and the manifest of the run that
+    trained each. Returns {training set: sha256 of its rows}."""
+    shas = {key: _write_sft_set(key, _sft_rows(key)) for key in SFT_SETS}
+    write_json(paths.sft_dir() / "report.json", {"variants": {k: {"sha256": s} for k, s in shas.items()}})
+    registry = {}
+    for name, (key, dropped) in SFT_ADAPTERS.items():
+        _train_manifest(name, key, shas[key], rows=SFT_ROWS[key], dropped=dropped)
+        pinned = {"adapter": _weights(name)}
+        registry[name] = VariantSpec(
+            name=name, method="adapter", adapter=name, seed=int(name[-1]), artifacts=pinned
+        )
+    monkeypatch.setattr("lift.models.variants.load_registry", lambda: dict(registry))
+    monkeypatch.setitem(settings.load(), "github_repo", "https://github.com/test-org/lift")
+    return shas
+
+
+def _sft_staging():
+    return datasets.stage_root() / "sft"
+
+
+def test_the_training_sets_are_staged_with_curatorkits_files(training):
+    """One folder per training set, holding the rows ``lift train`` read, CuratorKIT's manifest, rejected
+    rows and provenance, our summary of its run and selection.json, with the build report above them and
+    nothing else. Each file is byte for byte the one under data/sft/."""
+    [up] = datasets.build(["sft"])
+    staged = sorted(p.relative_to(up.folder).as_posix() for p in up.files())
+    assert staged == sorted(
+        ["README.md", "report.json", *(f"{key}/{name}" for key in SFT_SETS for name in SFT_FILES)]
+    )
+    for key, sha in training.items():
+        for name in SFT_FILES:
+            assert (up.folder / key / name).read_bytes() == (paths.sft_dir() / key / name).read_bytes()
+        assert sha256_file(up.folder / key / "sft_messages.jsonl") == sha
+    assert up.repo.repo_id.endswith("/lift-hindi-sft") and up.repo.repo_type == "dataset"
+    assert up.repo.gated is False and hub.scanned(up)  # public: scanned like every public upload
+    assert not up.expected and not up.blocked
+    assert "sha256 its training runs recorded (4 registered adapters, 4 train manifests)" in up.notes[0]
+
+
+def _table(text: str) -> dict[str, list[str]]:
+    """{a set's name: the other cells of its row} for the markdown table rows of ``text`` that name a set."""
+    rows = [[c.strip() for c in line.strip("|").split("|")] for line in text.splitlines()]
+    return {row[0].strip("`"): row[1:] for row in rows if row[0].strip("`") in SFT_SETS and len(row) > 1}
+
+
+def test_the_training_set_card_gives_counts_hashes_and_both_licences(training):
+    """The card's counts and hashes come from the staged files and the train manifests, each recorded in
+    sft.sources.json. It states both licences and that the rows are not model outputs, and holds no
+    placeholder."""
+    [up] = datasets.build(["sft"])
+    card = (up.folder / "README.md").read_text(encoding="utf-8")
+    meta = yaml.safe_load(card.split("---\n", 2)[1])
+    assert meta["license"] == "other" and meta["language"] == ["hi"]
+    assert [c["data_files"] for c in meta["configs"]] == [f"{key}/sft_messages.jsonl" for key in SFT_SETS]
+    assert "[PENDING" not in card and "{{" not in card
+    # Aya Dataset rows Apache-2.0; the Dolly_T rows share-alike through Dolly, whatever IndicAlign's card says
+    assert "Apache-2.0" in card and "CC-BY-SA-3.0" in card and "CC-BY-4.0" in card
+    assert "databricks-dolly-15k" in card and "share-alike" in card
+    assert "None is a model output" in card
+    assert "/datasets/YOUR-HF-ORG/lift-eval-logs" in card and "https://github.com/test-org/lift" in card
+    sets, stages = (_table(part) for part in card.split("## How they were made"))
+    adapters, n_rows, n_trained, sha = sets["indicalign/dedup"]
+    repo = "https://huggingface.co/YOUR-HF-ORG/lift-adapter-indicalign-std-s1"
+    assert adapters == f"[`adapter-indicalign-std-s1`]({repo})"
+    assert (n_rows, n_trained) == ("5", "4")  # one row dropped as unfit
+    assert sha == f"`{training['indicalign/dedup']}`"
+    assert "adapter-aya-std-s1" in sets["aya/dedup"][0] and "adapter-aya-std-s2" in sets["aya/dedup"][0]
+    assert sets["aya/dedup"][1:3] == ["4", "4"] and sets["indicalign/raw"][1:3] == ["6", "4"]
+    assert stages["aya/dedup"] == ["7", "6", "5", "4", "4", "4"]
+    assert stages["indicalign/raw"] == ["9", "8", "not run", "not run", "6", "6"]  # no deduplication stage
+    assert "CuratorKIT 0.1.22 curates" in card and "No file was changed for publication" in card
+    doc = json.loads((datasets.stage_root() / "sft.sources.json").read_text(encoding="utf-8"))
+    assert not doc["pending"]
+    counted = {(v["file"], v["what"]): v["value"] for v in doc["values"] if "what" in v}
+    assert counted[("data/sft/indicalign/raw/sft_messages.jsonl", "rows")] == 6
+    assert counted[("data/sft/aya/dedup/sft_messages.jsonl", "sha256")] == training["aya/dedup"]
+    trained = [v for v in doc["values"] if v.get("pointer") == "/n_rows_trained"]
+    assert len(trained) == len(SFT_ADAPTERS) and sorted(v["value"] for v in trained) == [4, 4, 4, 4]
+    assert all(v["file"].startswith("outputs/manifests/train-") for v in trained)
+
+
+def test_a_training_file_must_be_the_one_its_training_runs_recorded(training):
+    """The guard: the published rows are exactly the rows the adapters were trained on. A run that recorded
+    another sha256 for its file refuses the build, naming the file, and nothing stays staged."""
+    other = sha256_text("another file")
+    _train_manifest("adapter-indicalign-std-s1", "indicalign/dedup", other, rows=5, dropped=1)
+    with pytest.raises(PublishError) as refused:
+        datasets.build(["sft"])
+    said = str(refused.value)
+    assert "data/sft/indicalign/dedup/sft_messages.jsonl" in said
+    assert "is not the file adapter-indicalign-std-s1" in said and "decisions.md item 118" in said
+    assert "data/sft/aya/dedup" not in said and "indicalign/raw" not in said  # those are their runs' files
+    assert not _sft_staging().exists()
+
+
+def test_rows_built_again_after_training_are_refused(training):
+    """A file edited after the build contradicts the build's own records. A whole rebuild that gives other
+    rows than the adapters were trained on is refused by their manifests, naming the file and each run."""
+    rows = _sft_rows("aya/dedup", 3)
+    write_jsonl(paths.sft_dir() / "aya" / "dedup" / "sft_messages.jsonl", rows)
+    with pytest.raises(PublishError, match=r"aya/dedup/selection.json records sha256 .* for aya/dedup"):
+        datasets.build(["sft"])
+    assert not _sft_staging().exists()
+    _rebuild(training, "aya/dedup", rows, retrain=False)
+    with pytest.raises(PublishError) as refused:
+        datasets.build(["sft"])
+    built = f"data/sft/aya/dedup/sft_messages.jsonl (sha256 {training['aya/dedup'][:12]})"
+    for name in ("adapter-aya-std-s1", "adapter-aya-std-s2"):
+        assert f"{built} is not the file {name}" in str(refused.value)
+    assert not _sft_staging().exists()
+
+
+def test_training_sets_need_the_train_manifests(training):
+    for f in paths.manifests_dir().glob("train-*.json"):
+        f.unlink()
+    with pytest.raises(PublishError, match=r"no train manifest \(outputs/manifests/train-\*\.json\) records"):
+        datasets.build(["sft"])
+    assert not _sft_staging().exists()
+
+
+@pytest.mark.parametrize("problem", ["no manifest", "other weights", "a resumed run only"])
+def test_every_registered_adapter_needs_the_run_that_trained_it(training, problem):
+    """adapter-aya-std-s1's run still names aya/dedup, so the file has its record. adapter-aya-std-s2 has
+    no run of its own: no manifest, one of other weights than the registry pins (set aside by a retrain),
+    or only a resumed run, which trained nothing and names no file."""
+    name = "adapter-aya-std-s2"
+    path = _manifest_of(name)
+    doc = json.loads(path.read_text())
+    if problem == "no manifest":
+        path.unlink()
+    elif problem == "other weights":
+        write_json(path, {**doc, "adapter_hash": sha256_text("weights set aside")})
+    else:
+        resumed = {k: v for k, v in doc.items() if not k.startswith(("data_", "n_rows", "dropped"))}
+        write_json(path, {**resumed, "resumed": True})
+    with pytest.raises(PublishError) as refused:
+        datasets.build(["sft"])
+    why = "records the registered weights" if problem == "other weights" else "no train manifest records"
+    assert f"the registered adapter {name}: " in str(refused.value) and why in str(refused.value)
+    assert "adapter-aya-std-s1" not in str(refused.value)
+    assert not _sft_staging().exists()
+
+
+def test_an_adapter_the_registry_does_not_pin_needs_a_run_that_hashed_its_weights(training, monkeypatch):
+    """Where the registry pins no weights for an adapter, any finished run under its name is its run. One
+    that stopped before it hashed its adapter is not: it made no weights to register."""
+    from lift.models import variants
+
+    name = "adapter-aya-std-s2"
+    registry = variants.load_registry()
+    registry[name] = registry[name].model_copy(update={"artifacts": {}})
+    monkeypatch.setattr(variants, "load_registry", lambda: dict(registry))
+    [up] = datasets.build(["sft"])
+    assert name in (up.folder / "README.md").read_text(encoding="utf-8")
+    path = _manifest_of(name)
+    crashed = {k: v for k, v in json.loads(path.read_text()).items() if k != "adapter_hash"}
+    write_json(path, {**crashed, "status": "error"})
+    with pytest.raises(PublishError) as refused:
+        datasets.build(["sft"])
+    why = f"the registered adapter {name}: none of its 1 train manifest(s) records an adapter hash"
+    assert why in str(refused.value) and "the registry pins none" in str(refused.value)
+    assert not _sft_staging().exists()
+
+
+def test_a_refused_build_leaves_no_record_of_an_earlier_one(training):
+    """A refused build leaves nothing staged. The list of the card's values that an earlier build wrote
+    goes too: it would describe files that are no longer there."""
+    datasets.build(["sft"])
+    sources = datasets.stage_root() / "sft.sources.json"
+    assert sources.is_file() and _sft_staging().is_dir()
+    _manifest_of("adapter-aya-std-s2").unlink()
+    with pytest.raises(PublishError, match="the registered adapter adapter-aya-std-s2"):
+        datasets.build(["sft"])
+    assert not _sft_staging().exists() and not sources.exists()
+
+
+def test_a_run_on_a_file_outside_the_plan_is_refused(training):
+    """Every run on record counts, a registered adapter's or not: one trained on a file the dataset does
+    not hold means these files are not everything that was trained on."""
+    _train_manifest("adapter-aya-stress-s1", "aya/raw", sha256_text("rows no longer built"), rows=3)
+    outside = r"adapter-aya-stress-s1 .*trained on data/sft/aya/raw/sft_messages.jsonl, which is not a"
+    with pytest.raises(PublishError, match=outside):
+        datasets.build(["sft"])
+
+
+def test_a_run_whose_counts_do_not_add_up_is_refused(training):
+    """The card says rows trained are the file's rows less the rows dropped as unfit. A manifest that says
+    otherwise stops the build: a number that looks wrong is reported, not published."""
+    path = _manifest_of("adapter-indicalign-stress-s1")
+    write_json(path, {**json.loads(path.read_text()), "n_rows_trained": 6})  # 6 rows, 2 dropped, 6 trained
+    with pytest.raises(PublishError, match="indicalign/raw/sft_messages.jsonl holds 6 rows.*do not add up"):
+        datasets.build(["sft"])
+
+
+def test_a_training_set_that_is_not_here_is_listed_as_missing(training):
+    """A set or a file that is not on this machine is no reason to refuse the dry run: it is listed as
+    missing, which blocks --yes, and what is here is still held to its training runs."""
+    shutil.rmtree(paths.sft_dir() / "indicalign" / "raw")
+    (paths.sft_dir() / "aya" / "dedup" / "curatorkit" / "rejected.jsonl").unlink()
+    [up] = datasets.build(["sft"])
+    assert up.expected == [
+        "data/sft/aya/dedup/curatorkit/rejected.jsonl (not on this machine: lift sync pull)",
+        "data/sft/indicalign/raw/sft_messages.jsonl (not on this machine: lift sync pull)",
+    ]
+    assert not (up.folder / "indicalign" / "raw").exists() and (up.folder / "indicalign" / "dedup").is_dir()
+    with pytest.raises(PublishError, match="not built yet: data/sft/aya/dedup/curatorkit/rejected.jsonl"):
+        hub.check_ready([up], windows=set())
+
+
+def test_without_training_sets_only_the_card_is_staged():
+    """A fresh checkout: there is nothing to hold to a training run, so nothing refuses. Every training
+    file is listed as missing."""
+    [up] = datasets.build(["sft"])
+    assert [p.name for p in up.files()] == ["README.md"] and len(up.expected) == len(SFT_SETS)
+    assert "No training set is on this machine yet" in (up.folder / "README.md").read_text(encoding="utf-8")
+
+
+def test_the_training_sets_are_staged_only_when_named(training, capsys):
+    """Decisions item 118: the dataset is not uploaded (the scan refuses two of its files on the team's
+    machine), so a plain ``lift publish datasets`` builds the other three, whose upload its plan would
+    stop, and the data collection does not list it. ``--only sft`` stages it."""
+    from lift import cli
+
+    assert [u.repo.kind for u in datasets.build()] == ["logs", "raw", "prompts"]
+    assert not _sft_staging().exists()
+    assert all(r.kind != "sft" for items in collect.plan().values() for r in items)
+    assert cli.main(["publish", "datasets", "--only", "sft"]) == 0
+    out = capsys.readouterr().out
+    assert "/lift-hindi-sft" in out and "dry run: nothing was uploaded" in out
+    assert (_sft_staging() / "aya" / "dedup" / "sft_messages.jsonl").is_file()
+
+
+def test_a_training_row_that_an_output_repeats_fails_the_public_text_scan(outputs, training, monkeypatch):
+    """The training sets get no exemption from the scan. A fine-tuned model can repeat its training text,
+    and the scan reads content, not where a text came from: a row holding a run of an output on this
+    machine stops the upload. The finding names the file, never the text."""
+    rows = _sft_rows("indicalign/dedup")
+    rows[2]["messages"][1]["content"] += " " + CASES["k9"][0]  # an answer that an output here repeats
+    _rebuild(training, "indicalign/dedup", rows)
+    [up] = datasets.build(["sft"])  # these are the rows the adapter was trained on: the guard passes
+    found, why = hub.scan_public([up])
+    assert why is None
+    assert found == ["training sets: text of a model output: indicalign/dedup/sft_messages.jsonl (staged)"]
+    assert not [m for m in MARKERS if m in "\n".join(found)]
+    monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
+    api = FakeApi()
+    with pytest.raises(PublishError, match="text of a model output: indicalign/dedup/sft_messages.jsonl"):
+        hub.execute([up], message="m", api_factory=lambda: api, log=lambda _: None)
+    assert api.calls == []
+
+
+def test_an_absolute_path_curatorkit_recorded_is_staged_repo_relative(training):
+    """CuratorKIT copies the dataset path it is given into its manifest and provenance. An absolute local
+    path there is staged relative to the repo, the card says which file changed, and the rows are as they
+    were."""
+    recorded = paths.data_dir() / "interim" / "sft" / "aya" / "dedup" / "input.jsonl"
+    provenance = paths.sft_dir() / "aya" / "dedup" / "curatorkit" / "lexsi_provenance.json"
+    write_json(provenance, {"inputs": [{"ref": str(recorded)}]})
+    [up] = datasets.build(["sft"])
+    copy = up.folder / "aya" / "dedup" / "curatorkit" / "lexsi_provenance.json"
+    staged = json.loads(copy.read_text(encoding="utf-8"))
+    assert staged["inputs"][0]["ref"].replace("\\", "/") == "data/interim/sft/aya/dedup/input.jsonl"
+    assert not [f for f in preflight.scan_folder(up.folder, set()) if f.kind == preflight.LOCAL_PATH_KIND]
+    card = (up.folder / "README.md").read_text(encoding="utf-8")
+    assert (
+        "1 absolute local path(s) of the build machine were made relative to the repository in "
+        "`aya/dedup/curatorkit/lexsi_provenance.json`"
+    ) in card
+    assert "No file was changed for publication" not in card
+    assert sha256_file(up.folder / "aya" / "dedup" / "sft_messages.jsonl") == training["aya/dedup"]
+    assert any("aya/dedup/curatorkit/lexsi_provenance.json" in n for n in up.notes)
+
+
+def test_a_path_in_curatorkits_files_that_cannot_be_made_relative_is_withheld(training):
+    manifest = paths.sft_dir() / "indicalign" / "raw" / "curatorkit" / "manifest.json"
+    write_json(manifest, {**json.loads(manifest.read_text()), "source_files": ["/home/someone/input.jsonl"]})
+    with pytest.raises(PublishError, match="indicalign/raw/curatorkit/manifest.json.*absolute local path"):
+        datasets.build(["sft"])
+    assert not _sft_staging().exists()
+
+
+def test_a_training_row_that_staging_would_rewrite_is_refused(training):
+    """No absolute local path goes public, and no row may differ from what was trained on: a row that
+    names a path of this machine can be neither published as it is nor rewritten."""
+    rows = _sft_rows("aya/dedup")
+    rows[0]["messages"][1]["content"] += f" (see {paths.data_dir() / 'notes.txt'})"
+    _rebuild(training, "aya/dedup", rows)
+    with pytest.raises(PublishError, match="would change the rows the adapters were trained on"):
+        datasets.build(["sft"])
+    assert not _sft_staging().exists()

@@ -18,7 +18,7 @@ _NAMESPACE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
 @dataclass(frozen=True)
 class RepoSpec:
-    kind: str  # model | repair_params | adapter | logs | raw | prompts | space
+    kind: str  # model | repair_params | adapter | logs | raw | prompts | sft | space
     repo_id: str
     repo_type: str  # model | dataset | space
     access: str  # public | gated-auto | gated-manual

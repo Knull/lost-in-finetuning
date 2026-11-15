@@ -1,4 +1,5 @@
 This dataset holds raw model outputs that include harmful content (for example instructions for
-dangerous or illegal acts) in six languages. Access is granted by hand for safety research only.
-By requesting access you agree not to redistribute harmful completions, not to use them to train
-models to produce harmful content, and to quote at most a few words of any harmful text.
+dangerous or illegal acts) in six languages. Access is granted automatically when you accept these
+terms while logged in to Hugging Face. The data is meant for safety research only. By requesting
+access you agree not to redistribute harmful completions, not to use them to train models to
+produce harmful content, and to quote at most a few words of any harmful text.

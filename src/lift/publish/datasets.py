@@ -1,5 +1,5 @@
 """``lift publish datasets``: the public logs dataset, the gated raw completions and the translated
-prompt sets, staged under ``outputs/publish/datasets/``.
+prompt sets, staged under ``outputs/publish/datasets/``; on request (``--only sft``), the training sets.
 
 Logs (public; decisions items 14 and 62). No output text and no judge text. One row per primary-judge
 judgement (``LOG_FIELDS``): variant, method, seed, pid, language, set, split, the final label, the
@@ -39,13 +39,30 @@ known fields only, a failure as its kind) and the run manifests behind the cost 
 (``manifests/``). The utility verdicts quote both answers, so they are in the gated raw completions.
 
 Raw completions (gated, automatic approval; manual until Nov 14, docs/decisions.md 110). Every
-generations, judgements and utility-verdict file, and the full AuditKIT records, as they are in
-``outputs/``: every judged output, refusals and benign answers included, and the judges' raw replies,
-reasons and failure messages. Human labels (with annotator ids) stay private.
+generations, judgements and utility-verdict file, and any full AuditKIT record (``*.full.json``, which
+lift.audit writes only when asked to keep the text), as they are in ``outputs/``: every judged output,
+refusals and benign answers included, and the judges' raw replies, reasons and failure messages. The
+card and the plan name the full AuditKIT records only when the dataset holds one. Human labels (with
+annotator ids) stay private.
 
 Translated prompt sets (public). Every prompt record we translated (TranslationInfo.engine one of
 ``lift.data.translate.ENGINE_NAMES``), with its English source and the native spot-check fields
 (checked, edited, note). PolyRefuse's own translations and the English sources are not republished.
+
+Training sets (a public repo, staged on request and so far not uploaded: decisions item 118). The files
+``lift train`` read, one folder per set of the plan (``sft_sets``: data/sft/{candidate}/{variant}/):
+sft_messages.jsonl, CuratorKIT's manifest.json, rejected.jsonl and lexsi_provenance.json, our summary of
+its run and ``lift.data.sft``'s selection.json, and data/sft/report.json above them. They are training rows of
+public datasets, no model output, and are scanned like every public upload. The published rows must be
+exactly the rows the adapters were trained on, so a file is staged only while its sha256 is the one its
+training runs recorded (``trained_on``: the ``lift train`` manifests in outputs/manifests) and every
+registered adapter has such a run; anything else refuses (``PublishError``), naming the file, and
+leaves nothing staged. A set or a file that is not on this machine is listed as missing, which blocks
+``--yes``. The card's counts and hashes are recorded in outputs/publish/datasets/sft.sources.json.
+The plan is built only when named (``ON_REQUEST``): on the team's machine the scan finds a run of a
+model output in a row of each IndicAlign file (a model can repeat its training text; the scan reads
+content, not where a text came from), so ``--yes`` refuses it, and built with the others it would stop
+their upload too.
 """
 
 from __future__ import annotations
@@ -55,7 +72,7 @@ import json
 import re
 import shutil
 from collections import Counter, defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
@@ -63,7 +80,16 @@ from lift import config, paths
 from lift.io import read_jsonl, sha256_file, sha256_text, write_jsonl
 from lift.publish import PublishError, preflight, render, settings
 from lift.publish.hub import Upload
-from lift.publish.inputs import FIGURES, Facts, recipe_block, report_path, selection_path, shown
+from lift.publish.inputs import (
+    FIGURES,
+    NOT_RUN,
+    Facts,
+    pending,
+    recipe_block,
+    report_path,
+    selection_path,
+    shown,
+)
 
 SAFETY_SETS = ("harmful", "easy_benign", "hard_benign", "redteam")  # judged cells (validation.second_judge)
 # What a public row may hold (check_public refuses any other field): ids, labels, flags and hashes.
@@ -879,7 +905,7 @@ def logs_card(
 
 
 def facts_pending(facts: Facts) -> str:
-    from lift.publish.inputs import P07, pending
+    from lift.publish.inputs import P07
 
     return pending("the aggregate tables", shown(report_path()), P07)
 
@@ -945,12 +971,14 @@ def build_raw(facts: Facts | None = None) -> Upload:
             shutil.copyfile(f, dest)
             n += 1
     audit_root = paths.metrics_dir() / "auditkit"
+    n_full = 0  # lift.audit writes a full record only when asked to keep the text: there may be none
     for f in sorted(audit_root.rglob("*.full.json")) if audit_root.is_dir() else []:
         if f.stat().st_size:
             dest = folder / "auditkit" / f.relative_to(audit_root)
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(f, dest)
-            n += 1
+            n_full += 1
+    n += n_full
     meta = {
         "license": "cc-by-nc-4.0",
         "language": list(config.get("languages.all")),
@@ -965,16 +993,18 @@ def build_raw(facts: Facts | None = None) -> Upload:
             "I will not redistribute harmful completions": "checkbox",
         },
     }
+    # The card and the plan name the full AuditKIT records only when the dataset holds one.
+    full = "\n- `auditkit/`: the full AuditKIT records, which keep the outputs." if n_full else ""
     body = render.fill(
-        render.template("raw_card.md"), {"logs_repo": settings.repo("logs").url, "n_files": str(n)}
+        render.template("raw_card.md"),
+        {"logs_repo": settings.repo("logs").url, "n_files": str(n), "auditkit_records": full},
     )
     render.write_text(folder / "README.md", render.frontmatter(meta) + "\n" + body)
-    return Upload(
-        repo=repo,
-        folder=folder,
-        title="raw completions (gated, automatic approval)",
-        notes=[f"{n} files from outputs/{{{','.join(RAW_TREES)}}} and the full AuditKIT records"],
-    )
+    trees = f"outputs/{{{','.join(RAW_TREES)}}}"
+    note = f"{n} files from {trees}"
+    if n_full:
+        note = f"{n} files: {n - n_full} from {trees} and {n_full} full AuditKIT record(s)"
+    return Upload(repo=repo, folder=folder, title="raw completions (gated, automatic approval)", notes=[note])
 
 
 # ------------------------------------------------------------------------------------------- prompts
@@ -1054,13 +1084,380 @@ def build_prompts(facts: Facts | None = None) -> Upload:
     return Upload(repo=repo, folder=folder, title="translated prompt sets", notes=notes)
 
 
-BUILDERS = {"logs": build_logs, "raw": build_raw, "prompts": build_prompts}
+# ------------------------------------------------------------------------------------- training sets
+
+SFT_EXPORT = "sft_messages.jsonl"  # the rows `lift train` reads (lift.data.sft)
+SFT_REPORT = "report.json"  # data/sft/report.json: every count of the build, the row decision, the rules
+SFT_BUILD = "lift data build"  # the stage that writes data/sft/
+SFT_TRAIN = "lift train"  # the stage that writes the train manifests
+# What CuratorKIT kept at each stage, from its manifest.json (``stage_counts``), as the card shows it.
+SFT_STAGES = (
+    ("Rows in", "JSONLReader/output_count"),
+    ("After the schema gate", "SchemaGate/output_count"),
+    ("After exact deduplication", "ExactDeduplicator/output_count"),
+    ("After MinHash deduplication", "MinHashDeduplicator/output_count"),
+    ("Exported by CuratorKIT", "MessagesExporter/exported_count"),
+)
+NOT_HERE = "not on this machine: lift sync pull"
+
+
+class SftSet(NamedTuple):
+    key: str  # "{candidate}/{variant}": the set's folder under data/sft/ and in the dataset
+    rows: int  # the rows in its staged sft_messages.jsonl
+    sha256: str  # of that staged file
+
+
+def sft_sets() -> list[str]:
+    """The training sets of the plan (configs/train.yaml, as ``lift.data.sft`` reads it): each candidate
+    deduplicated (the standard recipe) and the stress candidate's undeduplicated rows, each as
+    "{candidate}/{variant}", its folder under data/sft/."""
+    from lift.data.sft import _variants
+
+    try:
+        return [f"{name}/{variant}" for name, variant in _variants(config.load("train"))]
+    except (KeyError, ValueError) as exc:
+        raise PublishError(f"configs/train.yaml gives no training plan: {exc}") from None
+
+
+def sft_files() -> tuple[str, ...]:
+    """A training set's files, relative to its folder: the rows, ``lift.data.sft``'s selection.json (the ids
+    sampled, the counts, the seed, the rows' sha256, the rules), CuratorKIT's own files and our summary of
+    its run (stage counts, and the ids rejected and deduplicated: no text)."""
+    from lift.data.sft import CURATORKIT_FILES
+
+    curatorkit = (*CURATORKIT_FILES, "curatorkit_summary.json")
+    return (SFT_EXPORT, "selection.json", *(f"curatorkit/{name}" for name in curatorkit))
+
+
+def sft_data_path(key: str) -> str:
+    """A training set's file as every ``lift train`` manifest names it (``data_path``)."""
+    return f"data/sft/{key}/{SFT_EXPORT}"
+
+
+def train_runs() -> list[tuple[Path, dict]]:
+    """(manifest, its document) of every training run on record that names the file it trained on: each
+    outputs/manifests/train-*.json with a ``data_path`` and a ``data_sha256`` (``lift.train.lora``). A run
+    that resumed an adapter already trained trains nothing, records neither and is left out."""
+    out = []
+    root = paths.manifests_dir()
+    for f in sorted(root.glob("train-*.json")) if root.is_dir() else []:
+        try:
+            doc = json.loads(f.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raise PublishError(f"{shown(f)} is not valid JSON: {PULL}") from None
+        if not isinstance(doc, dict) or doc.get("stage") != "train":
+            continue
+        if isinstance(doc.get("data_path"), str) and isinstance(doc.get("data_sha256"), str):
+            out.append((f, doc))
+    return out
+
+
+def runs_of(name: str, spec: object, runs: Sequence[tuple[Path, dict]]) -> list[tuple[Path, dict]]:
+    """The runs among ``runs`` (``train_runs``) that made a registered adapter's weights, oldest first: the
+    ones under its name whose ``adapter_hash`` is the hash the registry pins (a run that a retrain set
+    aside records another). Where the registry pins none, a run under its name counts only if it recorded
+    an adapter hash at all: one that stopped before it hashed its adapter made no weights to register."""
+    pin = (getattr(spec, "artifacts", None) or {}).get("adapter")
+    mine = [(f, doc) for f, doc in runs if doc.get("name") == name]
+    if pin:
+        return [(f, doc) for f, doc in mine if doc.get("adapter_hash") == pin]
+    return [(f, doc) for f, doc in mine if isinstance(doc.get("adapter_hash"), str) and doc["adapter_hash"]]
+
+
+def trained_on(sets: Sequence[SftSet]) -> dict[str, list[tuple[str, Path]]]:
+    """The guard of the training sets (decisions item 118): the published rows are exactly the rows the
+    adapters were trained on. Returns {set: [(registered adapter, the manifest of the run that trained
+    it)]} for the staged ``sets``, or refuses (PublishError), naming each file, when:
+
+    - no training run on record names the file it trained on (``train_runs``);
+    - a run, a registered adapter's or not, trained on a file that is not a training set of the plan, or
+      recorded another sha256 than the staged file's;
+    - a run's counts do not add up: its rows are not the staged file's, or its rows trained are not
+      those rows less the ones it dropped as unfit (the difference the card explains);
+    - no run names a staged file;
+    - a registered adapter (configs/variants.yaml) has no run of its own (``runs_of``): one under its
+      name, and of the weights the registry pins (``adapter_hash``) when it pins them.
+
+    A set that is not on this machine is checked by nothing here: the plan lists its file as missing,
+    which blocks the upload."""
+    from lift.publish.model import registered_adapters
+
+    runs = train_runs()
+    if not runs:
+        raise PublishError(
+            "the training sets are not staged: no train manifest (outputs/manifests/train-*.json) records "
+            "the file a run trained on, so nothing says these are the rows the adapters were trained on: "
+            f"{PULL}"
+        )
+    by_path = {sft_data_path(key): key for key in sft_sets()}
+    staged = {s.key: s for s in sets}
+    problems: list[str] = []
+    named: set[str] = set()
+    for f, doc in runs:
+        key = by_path.get(doc["data_path"])
+        who = f"{doc.get('name')} ({shown(f)})"
+        if key is None:
+            problems.append(
+                f"{who} trained on {doc['data_path']}, which is not a training set of the plan "
+                f"({', '.join(by_path)})"
+            )
+            continue
+        named.add(key)
+        s = staged.get(key)
+        if s is None:
+            continue
+        if doc["data_sha256"] != s.sha256:
+            problems.append(
+                f"{doc['data_path']} (sha256 {s.sha256[:12]}) is not the file {who} trained on "
+                f"(sha256 {doc['data_sha256'][:12]})"
+            )
+            continue
+        n, trained = doc.get("n_rows"), doc.get("n_rows_trained")
+        unfit = (doc.get("dropped_unfit") or {}).get("count")
+        if n != s.rows or not isinstance(trained, int) or not isinstance(unfit, int) or n - trained != unfit:
+            problems.append(
+                f"{doc['data_path']} holds {s.rows} rows, and {who} records {n} rows, {trained} trained and "
+                f"{unfit} dropped as unfit: the counts do not add up"
+            )
+    problems += [
+        f"{sft_data_path(s.key)}: no training run on record names it" for s in sets if s.key not in named
+    ]
+    out: dict[str, list[tuple[str, Path]]] = {s.key: [] for s in sets}
+    for name, spec in sorted(registered_adapters().items()):
+        pin = (spec.artifacts or {}).get("adapter")
+        mine = sum(doc.get("name") == name for _, doc in runs)
+        own = runs_of(name, spec, runs)
+        if not own:
+            why = "no train manifest records its training"
+            if mine and pin:  # a run set aside by a retrain, or one that stopped before it hashed its adapter
+                why = (
+                    f"none of its {mine} train manifest(s) records the registered weights (adapter hash "
+                    f"{pin[:12]})"
+                )
+            elif mine:  # the registry pins no weights, and no run got as far as hashing its adapter
+                why = (
+                    f"none of its {mine} train manifest(s) records an adapter hash, and the registry pins "
+                    "none"
+                )
+            problems.append(f"the registered adapter {name}: {why}")
+            continue
+        f, doc = own[-1]
+        if by_path.get(doc["data_path"]) in out:
+            out[by_path[doc["data_path"]]].append((name, f))
+    if problems:
+        raise PublishError(
+            "the training sets are not staged: a published file must be exactly the file its training "
+            "runs recorded, and every registered adapter must have such a run (docs/decisions.md item "
+            "118):\n  " + "\n  ".join(problems) + f"\n  If this machine's copies are stale, {PULL}; "
+            "otherwise a person decides: never publish rows the adapters were not trained on"
+        )
+    return out
+
+
+def _build_records(folder: Path, sets: Sequence[SftSet]) -> list[str]:
+    """Where the staged build files contradict the staged rows: a selection.json or a report.json that
+    records another sha256 for a set than its file's (a folder from another build)."""
+    problems = []
+    for s in sets:
+        records = (
+            (folder / s.key / "selection.json", ("sha256",)),
+            (folder / SFT_REPORT, ("variants", s.key, "sha256")),
+        )
+        for path, pointer in records:
+            if not path.is_file():
+                continue
+            try:
+                node = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                problems.append(f"{path.relative_to(folder).as_posix()} is not valid JSON")
+                continue
+            for part in pointer:
+                node = node.get(part) if isinstance(node, dict) else None
+            if node != s.sha256:
+                problems.append(
+                    f"{path.relative_to(folder).as_posix()} records sha256 {str(node)[:12]} for {s.key}, and "
+                    f"{sft_data_path(s.key)} has {s.sha256[:12]}"
+                )
+    return problems
+
+
+def _stage_count(sources: Facts, manifest: Path, pointer: str) -> str:
+    """One stage count of CuratorKIT's manifest.json, recorded in the sources; "not run" for a stage the
+    manifest does not list (deduplication, on the stress recipe's rows)."""
+    at = f"/stage_counts/{pointer}"
+    if sources.doc(manifest) is not None and sources.raw(manifest, at) is None:
+        sources.sources.append({"shown": NOT_RUN, "file": shown(manifest), "pointer": at, "value": None})
+        return NOT_RUN
+    return sources.value(manifest, at, "int", what="a CuratorKIT stage count", stage=SFT_BUILD)
+
+
+def _sft_changes(relativised: dict[str, int]) -> str:
+    """What the card says the published files differ in from the build's: nothing, or the absolute
+    local paths ``preflight.relativise_folder`` made repo-relative."""
+    kept = "CuratorKIT's own files as the copies with LF line endings that the build keeps"
+    if not relativised:
+        return f"No file was changed for publication: each is the file `{SFT_BUILD}` wrote ({kept})."
+    files = ", ".join(f"`{name}`" for name in sorted(relativised))
+    return (
+        f"For publication, {sum(relativised.values())} absolute local path(s) of the build machine were "
+        f"made relative to the repository in {files}. Nothing else differs from the files `{SFT_BUILD}` "
+        f"wrote ({kept})."
+    )
+
+
+def build_sft(facts: Facts | None = None) -> Upload:
+    """The training sets with CuratorKIT's files (module docstring): every file of each set of the plan
+    that is on this machine, data/sft/report.json and the card, whose counts and hashes come from the
+    staged files and the train manifests. A set or a file that is not here is listed as missing. Refuses
+    (PublishError, nothing left staged) unless the staged rows are the ones the adapters were trained
+    on (``trained_on``), the build's own records agree with them (``_build_records``) and no absolute
+    local path had to be rewritten in a row."""
+    from lift.publish.model import _links
+
+    repo = settings.repo("sft")
+    folder = _fresh(stage_root() / "sft")
+    src = paths.sft_dir()
+    expected: list[str] = []
+    here: list[str] = []
+    for key in sft_sets():
+        if not (src / key / SFT_EXPORT).is_file():
+            expected.append(f"{shown(src / key / SFT_EXPORT)} ({NOT_HERE})")
+            continue
+        here.append(key)
+        for rel in sft_files():
+            if not (src / key / rel).is_file():
+                expected.append(f"{shown(src / key / rel)} ({NOT_HERE})")
+                continue
+            dest = folder / key / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src / key / rel, dest)
+    if here and (src / SFT_REPORT).is_file():
+        shutil.copyfile(src / SFT_REPORT, folder / SFT_REPORT)
+    elif here:
+        expected.append(f"{shown(src / SFT_REPORT)} ({NOT_HERE})")
+    try:
+        relativised = preflight.relativise_folder(folder)  # no absolute local path goes public (XB2-04)
+        rewritten = sorted(name for name in relativised if name.endswith(f"/{SFT_EXPORT}"))
+        if rewritten:
+            raise PublishError(
+                f"the training sets are not staged: {', '.join(rewritten)} name an absolute local path of "
+                "this machine, and making it repo-relative would change the rows the adapters were trained on"
+            )
+        sets = []
+        for key in here:
+            with open(folder / key / SFT_EXPORT, "rb") as f:
+                rows = sum(1 for line in f if line.strip())
+            sets.append(SftSet(key, rows, sha256_file(folder / key / SFT_EXPORT)))
+        problems = _build_records(folder, sets)
+        if problems:
+            raise PublishError(
+                "the training sets are not staged: the build's own records contradict the rows (a folder "
+                "from another build):\n  " + "\n  ".join(problems) + f"\n  {PULL}"
+            )
+        trained = trained_on(sets) if sets else {}
+    except PublishError:
+        shutil.rmtree(folder, ignore_errors=True)  # nothing unchecked stays staged
+        (stage_root() / "sft.sources.json").unlink(missing_ok=True)  # nor an earlier build's record of it
+        raise
+    sources = Facts()  # the card's counts and hashes, for the claims audit (P08-R2-09)
+    table, stages, versions = [], [], []
+    for s in sets:
+        export = src / s.key / SFT_EXPORT
+        for what, value, text in (("rows", s.rows, f"{s.rows:,}"), ("sha256", s.sha256, s.sha256)):
+            sources.sources.append(
+                {"shown": text, "file": shown(export), "what": what, "value": value, "file_sha256": s.sha256}
+            )
+        adapters = trained[s.key]
+        counts = [
+            sources.value(f, "/n_rows_trained", "int", what=f"the rows {name} trained on", stage=SFT_TRAIN)
+            for name, f in adapters
+        ]
+        if len(set(counts)) == 1:
+            rows_trained = counts[0]
+        else:
+            rows_trained = "; ".join(f"{name}: {n}" for (name, _), n in zip(adapters, counts, strict=True))
+        table.append(
+            [
+                f"`{s.key}`",
+                ", ".join(f"[`{name}`]({settings.repo('adapter', adapter=name).url})" for name, _ in adapters)
+                or "no registered adapter",
+                f"{s.rows:,}",
+                rows_trained or "no registered adapter",
+                f"`{s.sha256}`",
+            ]
+        )
+        manifest = src / s.key / "curatorkit" / "manifest.json"
+        stages.append(
+            [f"`{s.key}`", *(_stage_count(sources, manifest, at) for _, at in SFT_STAGES), f"{s.rows:,}"]
+        )
+        versions.append(
+            sources.value(
+                manifest, "/tool_versions/curatorkit", "text", what="CuratorKIT's version", stage=SFT_BUILD
+            )
+        )
+    none_yet = f"_No training set is on this machine yet ({NOT_HERE})._"
+    links = _links()
+    meta = {
+        "license": "other",
+        "license_name": "mixed-see-card",
+        "language": ["hi"],
+        "pretty_name": "Lost in Fine-Tuning: Hindi training sets",
+        "tags": ["instruction-tuning", "hindi", "curatorkit", "tiny-aya", "lexsi-hackathon"],
+    }
+    if sets:
+        meta["configs"] = [
+            {"config_name": s.key.replace("/", "-"), "data_files": f"{s.key}/{SFT_EXPORT}"} for s in sets
+        ]
+    body = render.fill(
+        render.template("sft_card.md"),
+        {
+            "table": render.markdown_table(
+                ["Training set", "Adapters trained on it", "Rows in the file", "Rows trained", "sha256"],
+                table,
+            )
+            if table
+            else none_yet,
+            "stages": render.markdown_table(
+                ["Training set", *(label for label, _ in SFT_STAGES), "In the training file"], stages
+            )
+            if stages
+            else none_yet,
+            "curatorkit": " and ".join(sorted(set(versions)))
+            or pending("CuratorKIT's version", "data/sft/{set}/curatorkit/manifest.json", SFT_BUILD),
+            "changes": _sft_changes(relativised),
+            "aya_revision": sources.config("project", "sources.sft.aya.revision", "text"),
+            "indicalign_revision": sources.config("project", "sources.sft.indicalign.revision", "text"),
+            "dolly_revision": sources.config("project", "sources.sft.dolly.revision", "text"),
+            "logs_repo": links["logs_repo"],
+            "github": links["github"],
+        },
+    )
+    render.write_text(folder / "README.md", render.frontmatter(meta) + "\n" + body)
+    sources.write_sources(stage_root() / "sft.sources.json")
+    if sets:
+        notes = [
+            f"{len(sets)} training sets ({', '.join(f'{s.key}: {s.rows:,} rows' for s in sets)}); each "
+            f"{SFT_EXPORT} has the sha256 its training runs recorded ({sum(map(len, trained.values()))} "
+            f"registered adapters, {len(train_runs())} train manifests)"
+        ]
+    else:
+        notes = [f"no training set on this machine yet ({NOT_HERE})"]
+    # the card too (its links): the rows were hashed above, and the card is not one of the build's files
+    notes += preflight.relativised_note({**relativised, **preflight.relativise_folder(folder)})
+    return Upload(repo=repo, folder=folder, title="training sets", notes=notes, expected=expected)
+
+
+BUILDERS = {"logs": build_logs, "raw": build_raw, "prompts": build_prompts, "sft": build_sft}
+# Built only when named (``--only sft``), never by a plain ``lift publish datasets``: the training sets
+# fail the public-text scan on the team's machine, so ``--yes`` refuses them (decisions item 118), and
+# every plan is checked before anything is sent, so their plan would stop the upload of the other three.
+ON_REQUEST = frozenset({"sft"})
 
 
 def build(only: list[str] | None = None) -> list[Upload]:
     facts = Facts()
     out = []
-    for name in only or list(BUILDERS):
+    for name in only or [n for n in BUILDERS if n not in ON_REQUEST]:
         if name not in BUILDERS:
             raise PublishError(f"unknown dataset {name!r} (one of {', '.join(BUILDERS)})")
         out.append(BUILDERS[name](facts))
