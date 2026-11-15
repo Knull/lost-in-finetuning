@@ -1,4 +1,5 @@
-"""lift publish article: the organisers' sections in order, placeholders until the inputs exist."""
+"""lift publish article: the organisers' nine sections in order and the extras after them, placeholders
+until the inputs exist."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ import pytest
 from publish_fakes import (  # noqa: F401
     ADAPTER,
     CAST_WINS,
+    WINNER,
     no_committed_recipe,
     secondary_selection,
     selection,
@@ -19,7 +21,7 @@ from publish_fakes import (  # noqa: F401
 
 from lift.publish import PublishError, article, settings
 from lift.publish.collect import links_path
-from lift.publish.inputs import PENDING
+from lift.publish.inputs import PENDING, Facts
 
 
 @pytest.fixture
@@ -39,11 +41,123 @@ def _publish_cfg(monkeypatch, **extra):
     monkeypatch.setattr(settings, "load", lambda: cfg)
 
 
+HASH = "a" * 64
+# The adapters of a study like ours, with the training set each read: (its folder under data/sft/, the
+# rows in the file, the rows trained). Made-up counts; the IndicAlign runs dropped rows as unfit.
+TRAINED = {
+    "adapter-aya-std-s1": ("aya/dedup", 40, 40),
+    "adapter-aya-std-s2": ("aya/dedup", 40, 40),
+    "adapter-indicalign-std-s1": ("indicalign/dedup", 1200, 1199),
+    "adapter-indicalign-stress-s1": ("indicalign/raw", 1200, 1197),
+}
+
+
+def train_manifest(name: str, key: str, rows: int, trained: int, **changes) -> dict:
+    """A ``lift train`` manifest (lift.train.lora): the fields the article and ``datasets.train_runs``
+    read."""
+    doc = {
+        "run_id": f"train-{name}",
+        "stage": "train",
+        "name": name,
+        "candidate": name.split("-")[1],
+        "recipe": "stress" if "-stress-" in name else "standard",
+        "seed": int(name[-1]),
+        "data_path": f"data/sft/{key}/sft_messages.jsonl",
+        "data_sha256": "b" * 64,
+        "n_rows": rows,
+        "n_rows_trained": trained,
+        "dropped_unfit": {"count": rows - trained, "ids": []},
+        "adapter_hash": HASH,
+        "status": "ok",
+    }
+    return {**doc, **changes}
+
+
+def manifest_path(name: str, run: str = "20261108T000000Z"):
+    from lift import paths
+
+    return paths.manifests_dir() / f"train-{run}-{name}.json"
+
+
+def register_adapters(monkeypatch, trained=None, *, manifests: bool = True) -> dict:
+    """Register ``trained``'s adapters (default TRAINED) in the registry the publishing code reads, each
+    with the hash its training run recorded, and write each one's train manifest."""
+    from lift.models import variants
+    from lift.schemas import VariantSpec
+
+    trained = TRAINED if trained is None else trained
+    specs = {"stock": VariantSpec(name="stock", method="stock")}
+    for name in trained:
+        specs[name] = VariantSpec(
+            name=name, method="adapter", adapter=name, seed=int(name[-1]), artifacts={"adapter": HASH}
+        )
+
+    def get_spec(name):
+        if name not in specs:
+            raise KeyError(name)
+        return specs[name]
+
+    monkeypatch.setattr(variants, "load_registry", lambda: dict(specs))
+    monkeypatch.setattr(variants, "get_spec", get_spec)
+    if manifests:
+        for name, (key, rows, used) in trained.items():
+            write_json(manifest_path(name), train_manifest(name, key, rows, used))
+    return specs
+
+
+def _part(text: str, heading: str) -> str:
+    """The body of a level-two section, by its heading as written."""
+    return text.split(f"## {heading}\n", 1)[1].split("\n## ", 1)[0]
+
+
+# ---------------------------------------------------------------- the nine sections and the extras (B5)
+
+# The "Submission artifacts" list of the organisers' kickoff slides, word for word (docs/decisions.md item
+# 119), and the words of each line that its heading in the article must keep.
+SLIDE = (
+    ("Problem statement and approach, in brief", "problem statement and approach"),
+    ("Hackathon repos used: which ones, for what, and which features", "hackathon repos used features"),
+    ("Models used and their licenses", "models used licences"),
+    ("Datasets and benchmarks used and their licenses", "datasets benchmarks used licences"),
+    ("Model artifacts (weights, adapters, …) public, as an HF collection", "model artifacts hf collection"),
+    (
+        "Data artifacts (datasets, logs, benchmarks, …) public, as an HF collection",
+        "data artifacts hf collection",
+    ),
+    ("Experiments run, findings and what else was tested", "experiments run findings what else was tested"),
+    ("With more credits: your approach, before and after results", "with more credits"),
+    ("Teammates tagged", "teammates"),
+)
+
+
+def _heads(text: str) -> list[str]:
+    """The level-two headings of an article, as written."""
+    return [line[3:] for line in text.splitlines() if line.startswith("## ")]
+
+
+def _numbered() -> list[str]:
+    """The headings the nine sections and the extras must give, in order."""
+    return [f"{i}. {name}" for i, name in enumerate(article.SECTIONS, 1)] + list(article.EXTRAS)
+
+
+def test_the_numbered_sections_are_the_organisers_nine():
+    """B5: the article's numbered sections are the nine of the kickoff slides, one heading per line of
+    the slide and in its order, each keeping the words of its line; everything else comes after them,
+    unnumbered."""
+    assert len(article.SECTIONS) == len(SLIDE) == 9
+    for heading, (line, words) in zip(article.SECTIONS, SLIDE, strict=True):
+        assert set(words.split()) <= set(re.findall(r"[a-z]+", heading.lower())), (heading, line)
+    assert article.EXTRAS == ("Related work", "Reproduce", "Links")
+    assert not set(article.EXTRAS) & set(article.SECTIONS)
+    assert article.section_ref(article.EXPERIMENTS) == "section 7"
+    assert article.section_ref(article.MODEL_ARTIFACTS) == "section 5"
+    assert article.section_ref(article.DATA_ARTIFACTS) == "section 6"
+
+
 def test_sections_in_the_organisers_order_with_placeholders(out):
     path, facts = article.build()
     text = path.read_text(encoding="utf-8")
-    heads = [line[3:] for line in text.splitlines() if line.startswith("## ")]
-    assert [h.split(". ", 1)[1] for h in heads] == list(article.SECTIONS)
+    assert _heads(text) == _numbered()
     assert "2b, statement 6" in text and "statement 8" in text and "2a, statement 4" in text
     assert PENDING in text
     pending = article.placeholders(text)
@@ -55,8 +169,32 @@ def test_sections_in_the_organisers_order_with_placeholders(out):
     assert any(s["pointer"] == "/sizes/harmful/dev" for s in facts.sources)
 
 
+def test_metrics_open_the_experiments_section_and_cost_closes_it(out):
+    """B5: "Metrics and why" and "Cost and ROI" are no sections of the organisers' list. They are the
+    first and the last subsection of section 7, each with everything it held as a section."""
+    write_inputs()
+    text = article.build()[0].read_text(encoding="utf-8")
+    body = text.split("## 7. Experiments run, findings and what else was tested\n", 1)[1]
+    body = body.split("\n## ", 1)[0]
+    subs = [line[4:] for line in body.splitlines() if line.startswith("### ")]
+    assert subs[0] == "Metrics and why" and subs[-1] == "Cost and ROI" and subs[-2] == "Limitations"
+    assert subs.index("What each check said") == 1
+    metrics = body.split("### Metrics and why\n", 1)[1].split("\n### ", 1)[0]
+    for said in ("**Harmful rate**", "**Held-out loss**", "The selection rule, run on seed-1 dev only"):
+        assert said in metrics
+    assert 'Whether\nit did is under "The judge against native readers", below.' in metrics
+    cost = body.split("### Cost and ROI\n", 1)[1]
+    assert "| Variant | Role | GPU-hours |" in cost and "the repairs here need no gradient step" in cost
+    assert "1.25 h of GPU time" in cost and "we\nmake no commercial claims." in cost
+    # every reference to a section names it by the number it now has
+    assert "section 6," not in metrics and re.findall(r"section \d+", text.split("## 1. ", 1)[0]) == [
+        "section 7"
+    ]
+
+
 def test_full_inputs_leave_no_placeholder(out, monkeypatch):
     write_inputs(validation="stay")
+    register_adapters(monkeypatch)
     write_json(
         links_path(),
         {
@@ -74,6 +212,7 @@ def test_full_inputs_leave_no_placeholder(out, monkeypatch):
     path, facts = article.build()
     text = path.read_text(encoding="utf-8")
     assert PENDING not in text, article.placeholders(text)
+    assert _heads(text) == _numbered()
     assert "+16.0 pp [+11.0, +21.0], p < 0.001" in text and "p = <" not in text  # XB-15
     assert "**repair**" in text and "ReSta on seed 3" in text
     assert "https://github.com/o/r/blob/main/notebooks/acceptance_test.ipynb" in text
@@ -81,14 +220,18 @@ def test_full_inputs_leave_no_placeholder(out, monkeypatch):
     assert any('REPO_URL = "https://github.com/o/r"' in line for c in nb["cells"] for line in c["source"])
     assert "  - user: a-user" in text
     # the lead: drift, the frozen repair and its verdict, the other families, before section 1
-    lead = text.split("## 1. Problem and approach", 1)[0]
+    lead = text.split("## 1. Problem statement and approach", 1)[0]
     assert "**In short.**" in lead and "+16.0 pp [+11.0, +21.0]" in lead and "verdict **repair**" in lead
     assert (
         "**The other repairs.** Their frozen settings: `cast-m1.0-adapter-aya-std-s1` (**repair**), "
         "`resta-a0.25-adapter-aya-std-s1` (**repair**)."
     ) in lead
-    # annotators: [] thanks nobody, so the article ends on its team list
-    assert "We thank" not in text and text.endswith("- A ([@a-user](https://huggingface.co/a-user))\n")
+    assert "every interval are in section 7; every number's source is in" in lead
+    # annotators: [] thanks nobody, so the teammates section is its list and nothing else
+    assert "We thank" not in text
+    assert _part(text, "9. Teammates").strip() == "- A ([@a-user](https://huggingface.co/a-user))"
+    # the article ends on its links, the last of the extras
+    assert text.endswith(f"- Space: {settings.repo('space').url}\n")
     assert "Later releases centre them" in text
     sources = json.loads((out / "article.sources.json").read_text())
     assert sources["pending"] == []
@@ -107,11 +250,21 @@ def test_annotators_are_named_only_when_listed(monkeypatch):
     assert "R. Reader" in article._thanks(settings.load())
 
 
+def test_the_thanks_stay_under_the_team_list(out, monkeypatch):
+    """The teammates are section 9 and the extras follow it, so the thanks line sits under the team list,
+    in the same section, and no longer ends the article."""
+    _publish_cfg(monkeypatch, team=[{"name": "A", "hf": "a-user"}], annotators=["R. Reader"])
+    text = article.build()[0].read_text(encoding="utf-8")
+    assert _part(text, "9. Teammates").strip() == (
+        "- A ([@a-user](https://huggingface.co/a-user))\n\n"
+        "We thank R. Reader, who labelled the validation samples."
+    )
+
+
 def test_committed_draft_matches_the_template_sections():
     """hf/article.md is generated: it carries every section of the template, in order."""
     text = article.article_path().read_text(encoding="utf-8")
-    heads = [line[3:].split(". ", 1)[1] for line in text.splitlines() if line.startswith("## ")]
-    assert heads == list(article.SECTIONS)
+    assert _heads(text) == _numbered()
 
 
 def test_the_committed_readme_is_the_committed_article():
@@ -124,6 +277,26 @@ def test_the_committed_readme_is_the_committed_article():
     )
     assert "PREREGISTRATION.md" in (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert (REPO_ROOT / "PREREGISTRATION.md").is_file()
+
+
+def test_the_committed_write_up_tags_the_team_of_the_publish_config():
+    """Decisions item 122: the team is read from configs/publish.yaml, so a member added there is tagged
+    only once the write-up is generated again. The committed README and article tag every member the
+    committed config names, each with the HF account it gives, and nobody else."""
+    import yaml
+
+    from lift.paths import CONFIG_DIR, REPO_ROOT
+
+    team = yaml.safe_load((CONFIG_DIR / "publish.yaml").read_text(encoding="utf-8")).get("team") or []
+    assert team, "configs/publish.yaml names no team"
+    listed = _part((REPO_ROOT / "README.md").read_text(encoding="utf-8"), "9. Teammates")
+    front = article.article_path().read_text(encoding="utf-8").split("\n---\n", 1)[0]
+    assert all(m.get("hf") for m in team), "the organisers ask for every teammate to be tagged"
+    tagged = [f"- {m['name']} ([@{m['hf']}](https://huggingface.co/{m['hf']}))" for m in team]
+    assert [line for line in listed.splitlines() if line.startswith("- ")] == tagged
+    assert [line for line in front.splitlines() if line.startswith("  - user: ")] == [
+        f"  - user: {m['hf']}" for m in team
+    ]
 
 
 def test_the_readme_is_written_only_when_asked(out):
@@ -158,6 +331,566 @@ def test_the_readme_shows_the_figures_from_copies_beside_it(out):
     article.build(readme=True)
     assert not (folder / "tradeoff_dev_heldout.png").exists()
     assert "figures/tradeoff_dev_heldout.png" not in article.readme_path().read_text(encoding="utf-8")
+
+
+# ------------------------------------------- sections 5 and 6: what is published, where and why (B5, B6)
+
+AUTOMATIC = (
+    "A gated repo here is always gated with automatic approval: log in to Hugging Face, accept the terms on "
+    "the repo's page, and access is immediate, with no review by a person."
+)
+DRIFTED = "a research artifact whose safety may have drifted."
+
+
+def _lines(part: str) -> list[str]:
+    return [line for line in part.splitlines() if line.startswith("- ")]
+
+
+def test_section_5_lists_every_repo_of_the_model_collection_with_its_access_and_why(out, monkeypatch):
+    """B5 and B6: the model collection's link, then one line per repo that `lift publish collections`
+    puts in it, from the plan and configs/publish.yaml: what it is, its access, and the reason for it.
+    Every gate is said to be automatic and immediate, as Tiny Aya Global's own is."""
+    from lift.publish import collect
+
+    monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
+    write_inputs()
+    register_adapters(monkeypatch)
+    write_json(links_path(), {"models": {"slug": "o/m", "url": "https://hf.co/collections/o/m"}})
+    text = article.build()[0].read_text(encoding="utf-8")
+    part = _part(text, "5. Model artifacts, as an HF collection")
+    assert part.lstrip().startswith(
+        "The model artifacts are in one Hugging Face collection: https://hf.co/collections/o/m\n"
+    )
+    flat = " ".join(part.split())
+    assert AUTOMATIC in flat and "is gated the same way by Cohere Labs" in flat
+    assert "No repo is private, and none is approved by hand." in flat
+    lines = _lines(part)
+    plan = collect.plan()["models"]
+    assert len(lines) == len(plan) == 7  # the repaired model, the parameters, four adapters, the Space
+    for line, repo in zip(lines, plan, strict=True):
+        assert f"[`{repo.repo_id}`]({repo.url})" in line  # the collection's own order, each with its link
+        assert ("Public: " in line) == (repo.access == "public")
+        assert ("Gated, automatic approval" in line) == (repo.access == "gated-auto")
+    assert lines[0] == (
+        f"- **Repaired model**: [`test-org/lift-{WINNER}`](https://huggingface.co/test-org/lift-{WINNER}). "
+        f"The frozen repair `{WINNER}` (WiSE-FT, the adapter scaled back toward stock), saved as merged "
+        "weights. Gated, automatic approval, because it is a WiSE-FT repair, Global + lambda x (adapter - "
+        "Global), and lambda is public, so anyone could rebuild the gated adapter from these weights as "
+        "Global + (weights - Global) / lambda."
+    )
+    assert lines[1].startswith("- **Repair parameters**: [`test-org/lift-repair-params`](")
+    assert lines[1].endswith(
+        "Public: every repaired model's weights are gated, so on their own the parameters rebuild nothing."
+    )
+    assert lines[2] == (
+        "- **Unrepaired adapter**: [`test-org/lift-adapter-aya-std-s1`]"
+        "(https://huggingface.co/test-org/lift-adapter-aya-std-s1). A Hindi LoRA adapter trained on the Aya "
+        f"Dataset's Hindi rows with the standard recipe, seed 1. Gated, automatic approval: {DRIFTED}"
+    )
+    assert "the Aya Dataset's Hindi rows with the standard recipe, seed 2." in lines[3]
+    assert "trained on the IndicAlign `Dolly_T` sample with the standard recipe, seed 1." in lines[4]
+    assert "trained on the IndicAlign `Dolly_T` sample with the stress recipe, seed 1." in lines[5]
+    assert all(line.endswith(DRIFTED) for line in lines[2:6])
+    assert lines[6].startswith("- **Space**: [`test-org/lift-acceptance-test`](https://huggingface.co/spaces/")
+    # the Space is public and shows the start of some outputs, harmful-labelled ones included: said in full
+    assert lines[6].endswith(
+        "A static page of the results: the verdicts, the heatmaps, the utility table and a few example "
+        "outputs for each variant, language and safety prompt set of the final split, each cut to its first "
+        "words and marked `[redacted]`, whatever its label. Public: it loads no model and generates "
+        "nothing, and it holds no more of any output than that cut."
+    )
+    assert part.rstrip().endswith("The verdicts in section 7 say which adapters drifted.")
+
+
+def test_the_repaired_models_line_gives_its_methods_own_reason(out, monkeypatch):
+    """The reason is the one the model's card and access form give (model.gate_reasons): a CAST winner's
+    weights are the unrepaired adapter, and a rejected selection says so."""
+    from publish_fakes import REJECT
+
+    write_inputs(selection_doc=selection(CAST_WINS))
+    line = _lines(article.model_artifacts(Facts()))[0]
+    assert (
+        "The frozen repair `cast-m1.0-adapter-aya-std-s1` (CAST, conditional activation steering), saved as "
+        "the adapter-merged model it wraps, with the steering artifacts and the wrapper that applies them."
+    ) in line
+    assert "because it is a CAST repair: these weights are the unrepaired adapter, merged" in line
+    write_inputs(selection_doc=selection(REJECT))
+    line = _lines(article.model_artifacts(Facts()))[0]
+    assert '; and the verdict is "reject": no setting met every selection constraint' in line
+
+
+def test_the_repaired_model_is_pending_until_the_selection_is_decided(out):
+    facts = Facts()
+    lines = _lines(article.model_artifacts(facts))
+    assert lines[0].startswith(
+        f"- **Repaired model**: {PENDING}: the repaired model (the frozen winner) from "
+    )
+    assert "pending-winner" not in "\n".join(lines) and any("the repaired model" in m for m in facts.missing)
+    assert [line.split("**")[1] for line in lines] == ["Repaired model", "Repair parameters", "Space"]
+    assert "say which adapters drifted" not in article.model_artifacts(Facts())  # no adapter is listed
+
+
+@pytest.mark.parametrize(
+    ("kind", "access", "build"),
+    [
+        ("adapter", "gated-manual", "model_artifacts"),
+        ("model", "gated-manual", "model_artifacts"),
+        ("repair_params", "gated-auto", "model_artifacts"),
+        ("raw", "gated-manual", "data_artifacts"),
+        ("raw", "public", "data_artifacts"),
+        ("logs", "gated-auto", "data_artifacts"),
+    ],
+)
+def test_an_access_the_article_gives_no_reason_for_is_refused(out, monkeypatch, kind, access, build):
+    """B6: the two sections say that every gate opens when its terms are accepted, and give each repo's
+    reason for the access configs/publish.yaml sets. Another access, a gate a person approves above all,
+    is refused: the text would say what the repo is not."""
+    import copy
+
+    write_inputs()
+    register_adapters(monkeypatch)
+    cfg = copy.deepcopy(settings.load())
+    cfg["repos"][kind]["access"] = access
+    monkeypatch.setattr(settings, "load", lambda: cfg)
+    with pytest.raises(PublishError, match=rf"repos\.{kind}\.access is {access}"):
+        getattr(article, build)(Facts())
+    with pytest.raises(PublishError, match=rf"repos\.{kind}\.access is {access}"):
+        article.build()
+
+
+def test_section_6_lists_the_data_collection_then_the_parameters(out, monkeypatch):
+    """B5 and B6: the data collection's link, one line per dataset the collection holds, and the repair
+    parameters, which sit in the model collection. The raw completions are the only gated one, and the
+    section says the gate is automatic and that every number can be checked from public files."""
+    from lift.publish import collect
+
+    monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
+    write_inputs()
+    write_json(links_path(), {"data": {"slug": "o/d", "url": "https://hf.co/collections/o/d"}})
+    text = article.build()[0].read_text(encoding="utf-8")
+    part = _part(text, "6. Data artifacts, as an HF collection")
+    assert part.lstrip().startswith(
+        "The data artifacts are in one Hugging Face collection: https://hf.co/collections/o/d\n"
+    )
+    lines = _lines(part)
+    assert [line.split("**")[1] for line in lines] == [
+        "Evaluation logs",
+        "Translated prompt sets",
+        "Raw completions",
+        "Repair parameters",
+    ]
+    listed = {r.kind: r for r in collect.plan()["data"]}
+    assert set(listed) == {"logs", "prompts", "raw"}  # the training sets are not published (item 118)
+    for line, kind in zip(lines, ("logs", "prompts", "raw"), strict=False):
+        assert f"[`{listed[kind].repo_id}`]({listed[kind].url})" in line
+    assert lines[0].endswith("Public: it holds no output text and no judge text.")
+    assert "the aggregate tables and run manifests the numbers here are read from" in lines[0]
+    assert lines[1].endswith("Public: prompts only, no model output.")
+    assert lines[2] == (
+        "- **Raw completions**: [`test-org/lift-raw-completions`]"
+        "(https://huggingface.co/datasets/test-org/lift-raw-completions). Every generation, judgement and "
+        "utility verdict in full. Gated, automatic approval: it is the only repo that holds the outputs in "
+        "full, harmful ones included, so it sits behind a login and terms that keep it to safety research."
+    )
+    assert "[`test-org/lift-repair-params`](https://huggingface.co/test-org/lift-repair-params)" in lines[3]
+    assert "They are in the model collection (section 5) and listed here as well" in lines[3]
+    flat = " ".join(part.split())
+    # B6: this section too says the gate is automatic and instant, as Tiny Aya Global's own is
+    assert (
+        "The gate on the raw completions is automatic, like the gates of section 5 and like Tiny Aya "
+        "Global's own: log in to Hugging Face, accept the terms on the dataset's page, and access is "
+        "immediate, with no review by a person. Nothing in either collection is private or approved by hand."
+    ) in flat
+    assert (
+        "Every number in this write-up can be checked from public files alone. `hf/article.sources.json` "
+        "names the file and the JSON pointer each value was read from."
+    ) in flat
+    # the script compares the result values; the design numbers of configs/ it only counts (Reproduce)
+    assert "`python scripts/verify_numbers.py` compares every result value with its public copy" in flat
+    assert "every recorded value" not in text
+    # nothing here, nor in section 2, names the training sets as published
+    assert "lift-hindi-sft" not in text and "Training sets" not in part
+    section_2 = _part(text, "2. Hackathon repos used and their features")
+    assert "with its manifest, rejected rows and provenance kept.\n" in section_2
+    assert "published" not in section_2
+
+
+def test_section_2_opens_with_the_three_tools_as_one_chain(out, monkeypatch):
+    """The review's F8: no sentence showed the three Lexsi tools as one connected system. Section 2 opens
+    with one. While the training sets are not published (decisions item 118) it claims nothing of them: it
+    points at the adapters and the repaired model, and at AuditKIT's records in the logs dataset."""
+    write_inputs()
+    text = article.build()[0].read_text(encoding="utf-8")
+    section_2 = _part(text, "2. Hackathon repos used and their features")
+    chain, first_tool = section_2.strip().split("\n\n", 1)
+    assert " ".join(chain.split()) == (
+        "The three tools run as one chain: CuratorKIT builds the Hindi training sets, the LoRA adapters are "
+        "trained on them, SafeTune repairs an adapter, and AuditKIT records every reported rate. The "
+        "adapters and the repaired model are in section 5, and AuditKIT's redacted records are in the logs "
+        "dataset (section 6)."
+    )
+    assert first_tool.startswith("- **CuratorKIT** built the Hindi training sets")
+    assert "lift-hindi-sft" not in section_2 and "published" not in section_2
+    assert article.tool_chain(Facts())["curatorkit_files"] == ""
+
+
+def test_the_training_sets_are_named_only_once_the_data_collection_lists_them(out, monkeypatch):
+    """Decisions item 118: the training sets with CuratorKIT's files are staged and not uploaded, so the
+    article does not name them. Once `lift publish collections` lists the dataset, section 6 has its line
+    and section 2 says where CuratorKIT's files are, with the three tools as one chain of public links."""
+    from lift.publish import collect
+
+    monkeypatch.setenv("LIFT_HF_NAMESPACE", "test-org")
+    write_inputs()
+    held = article.tool_chain(Facts())
+    assert held["curatorkit_files"] == "" and "lift-hindi-sft" not in held["tool_chain"]
+    real = collect.plan
+
+    def plan(facts=None):
+        p = real(facts)
+        return {**p, "data": [*p["data"], settings.repo("sft")]}
+
+    monkeypatch.setattr(collect, "plan", plan)
+    text = article.build()[0].read_text(encoding="utf-8")
+    link = "[`test-org/lift-hindi-sft`](https://huggingface.co/datasets/test-org/lift-hindi-sft)"
+    lines = _lines(_part(text, "6. Data artifacts, as an HF collection"))
+    assert [line.split("**")[1] for line in lines] == [
+        "Evaluation logs",
+        "Translated prompt sets",
+        "Training sets",
+        "Raw completions",
+        "Repair parameters",
+    ]
+    assert lines[2] == (
+        f"- **Training sets**: {link}. The Hindi training sets the adapters were trained on, each with "
+        "CuratorKIT's manifest, rejected rows and provenance. Public: training rows of public datasets, no "
+        "model output."
+    )
+    section_2 = _part(text, "2. Hackathon repos used and their features")
+    assert section_2.lstrip().startswith(
+        "The three tools run as one chain, and each link of it is published: CuratorKIT's training sets "
+        f"({link}), the LoRA adapters trained on them and SafeTune's repair (section 5), and AuditKIT's "
+        "records of every reported rate (the logs dataset, section 6).\n\n- **CuratorKIT** built"
+    )
+    assert f"provenance kept and published with the training sets ({link}).\n" in section_2
+
+
+def test_a_dataset_the_article_has_no_line_for_is_refused(out, monkeypatch):
+    from lift.publish import collect
+
+    write_inputs()
+    real = collect.plan
+    extra = settings.RepoSpec(kind="other", repo_id="o/other", repo_type="dataset", access="public")
+    monkeypatch.setattr(collect, "plan", lambda facts=None: {**real(facts), "data": [extra]})
+    with pytest.raises(PublishError, match="the data collection lists o/other"):
+        article.data_artifacts(Facts())
+    monkeypatch.setattr(collect, "plan", lambda facts=None: {"models": [extra], "data": []})
+    with pytest.raises(PublishError, match="repos.other.access is public"):
+        article.model_artifacts(Facts())
+
+
+# ------------------------------------------- sections 3 and 4: the licences and the training data (F7)
+
+
+def test_every_model_and_tool_has_its_licence(out):
+    """F7: section 3 gives a licence for every model and tool, the reference model, the judges and the
+    language tools included; an API judge is used under its provider's terms."""
+    write_inputs()
+    text = article.build()[0].read_text(encoding="utf-8")
+    part = " ".join(_part(text, "3. Models used and their licences").split())
+    cohere = "CC-BY-NC-4.0 plus Cohere Labs' acceptable-use policy"
+    assert f"the model we adapt and repair. {cohere}." in part
+    assert f"only the ReSta reference. The same licence as Global: {cohere}." in part
+    assert "a safety classifier (Apache-2.0), run on the native text." in part
+    assert (
+        "(`configs/rubrics/safety_v1.md`), used through the provider's API under its terms of service."
+    ) in part
+    assert "- **GlotLID** (Apache-2.0 plus notices, per its card) for language identification and" in part
+    assert "**NLLB-200-distilled-600M** (CC-BY-NC-4.0)" in part
+
+
+TRAINING_HEAD = "| Training set | Source and licence | Rows | Adapters trained on it |"
+DOLLY = "IndicAlign `Dolly_T`, Hindi (CC-BY-SA-3.0 through Dolly)"
+
+
+def test_the_training_data_is_listed_with_its_licences_and_the_rows_each_run_recorded(out, monkeypatch):
+    """F7: section 4 lists the training data. Each set's rows, and the rows trained where a run dropped
+    some, are read from the train manifests of the registered adapters, every value recorded with its
+    manifest and pointer; the utility row names the licences of its two sources."""
+    write_inputs()
+    register_adapters(monkeypatch)
+    path, facts = article.build()
+    part = _part(path.read_text(encoding="utf-8"), "4. Datasets and benchmarks used and their licences")
+    assert (
+        "| Utility | held-out Hindi instructions from the two training sources: Aya Dataset (Apache-2.0) and "
+        "IndicAlign `Dolly_T` (CC-BY-SA-3.0 through Dolly, see the training data) |"
+    ) in part
+    table = part[part.index(TRAINING_HEAD) :].split("\n\n", 1)[0].splitlines()
+    assert table[2:] == [
+        "| `aya/dedup` | Aya Dataset, Hindi rows (Apache-2.0), deduplicated | 40 | standard recipe, "
+        "seeds 1, 2 |",
+        f"| `indicalign/dedup` | {DOLLY}, deduplicated | 1,200 (1,199 trained) | standard recipe, seed 1 |",
+        f"| `indicalign/raw` | {DOLLY}, not deduplicated | 1,200 (1,197 trained) | stress recipe, seed 1 |",
+    ]
+    flat = " ".join(part.split())
+    assert (
+        "The row counts are the ones each training run recorded in its manifest (`manifests/train-*.json` "
+        "in the logs dataset). Where fewer rows were trained than the file holds, the others were dropped "
+        "before training: their prompt alone, with the chat template's preamble, reaches the training "
+        "length and leaves no answer token to learn from."
+    ) in flat
+    assert (
+        "IndicAlign's card gives CC-BY-4.0, but its `Dolly_T` rows are a translation of "
+        "databricks-dolly-15k, which is CC-BY-SA-3.0, so the share-alike terms apply to them."
+    ) in flat
+    assert "These rows are in no evaluation split" in flat
+    # every run's own counts, recipe and seed are recorded: a reader can check each seed's manifest
+    recorded = {(s["file"], s["pointer"]): s["value"] for s in facts.sources}
+    for name, (_, rows, used) in TRAINED.items():
+        file = f"outputs/manifests/{manifest_path(name).name}"
+        assert recorded[(file, "/n_rows")] == rows and recorded[(file, "/n_rows_trained")] == used
+        assert recorded[(file, "/seed")] == int(name[-1])
+        assert recorded[(file, "/recipe")] == ("stress" if "-stress-" in name else "standard")
+    assert PENDING not in part
+
+
+def test_a_training_set_trained_whole_says_nothing_of_dropped_rows(out, monkeypatch):
+    register_adapters(monkeypatch, {"adapter-aya-std-s1": ("aya/dedup", 40, 40)})
+    said = article.training_data(Facts())
+    assert (
+        "| `aya/dedup` | Aya Dataset, Hindi rows (Apache-2.0), deduplicated | 40 | standard recipe, seed 1 |"
+    ) in said
+    assert "trained)" not in said and "dropped" not in said
+    assert said.endswith("(`manifests/train-*.json` in the logs dataset).")
+
+
+def test_the_run_that_counts_is_the_one_that_made_the_registered_weights(out, monkeypatch):
+    """A retrain leaves the earlier run's manifest on record under the same name, with another adapter
+    hash: the registry pins the weights, and the article reads the run that made them."""
+    name = "adapter-aya-std-s1"
+    register_adapters(monkeypatch, {name: ("aya/dedup", 40, 40)})
+    stale = train_manifest(name, "aya/dedup", 55, 55, adapter_hash="c" * 64)
+    write_json(manifest_path(name, "20261109T000000Z"), stale)
+    facts = Facts()
+    assert "| 40 | standard recipe, seed 1 |" in article.training_data(facts)
+    assert {s["file"] for s in facts.sources} == {f"outputs/manifests/{manifest_path(name).name}"}
+    assert article.training_runs()[name][0] == manifest_path(name)
+
+
+def test_a_run_that_never_hashed_its_adapter_is_no_run_of_a_registered_adapter(out, monkeypatch):
+    """Where the registry pins no weights for an adapter, a run under its name counts only if it recorded
+    an adapter hash: one that stopped before that trained nothing that is registered, and its counts are
+    not printed."""
+    from lift.models import variants
+    from lift.schemas import VariantSpec
+
+    name = "adapter-aya-std-s1"
+    spec = VariantSpec(name=name, method="adapter", adapter=name, seed=1, artifacts={})
+    monkeypatch.setattr(variants, "load_registry", lambda: {name: spec})
+    monkeypatch.setattr(variants, "get_spec", lambda n: {name: spec}[n])
+    crashed = {k: v for k, v in train_manifest(name, "aya/dedup", 55, 55).items() if k != "adapter_hash"}
+    write_json(manifest_path(name), {**crashed, "status": "error"})
+    assert article.training_runs() == {name: None}
+    assert article.training_data(Facts()) == (
+        f"_{PENDING}: the training run of `{name}` from outputs/manifests (lift train)]_"
+    )
+    write_json(manifest_path(name, "20261109T000000Z"), train_manifest(name, "aya/dedup", 40, 40))
+    assert article.training_runs()[name][0] == manifest_path(name, "20261109T000000Z")
+    assert "| 40 | standard recipe, seed 1 |" in article.training_data(Facts())
+
+
+@pytest.mark.parametrize(
+    ("change", "says"),
+    [
+        ({"n_rows": 41, "n_rows_trained": 41}, "disagree on its row counts"),
+        ({"n_rows_trained": 39}, "disagree on its row counts"),
+        # the same counts from another build of the path: two training sets, not one
+        ({"data_sha256": "d" * 64}, "read different files under that path"),
+    ],
+)
+def test_runs_that_disagree_on_a_training_sets_rows_are_refused(out, monkeypatch, change, says):
+    """One count is given per training set, so the runs trained on it must have read the same file and
+    record the same counts."""
+    register_adapters(monkeypatch)
+    name = "adapter-aya-std-s2"
+    doc = {**train_manifest(name, "aya/dedup", 40, 40), **change}
+    doc["dropped_unfit"] = {"count": doc["n_rows"] - doc["n_rows_trained"], "ids": []}
+    write_json(manifest_path(name), doc)
+    with pytest.raises(PublishError, match=says) as e:
+        article.training_data(Facts())
+    assert "data/sft/aya/dedup/sft_messages.jsonl" in str(e.value) and name in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"dropped_unfit": {"count": 0, "ids": []}},  # rows went missing that the run did not drop
+        {"dropped_unfit": None},
+        {"n_rows_trained": 1201},
+        {"n_rows": "1200"},
+        {"n_rows_trained": True},
+    ],
+)
+def test_row_counts_that_do_not_add_up_are_refused(out, monkeypatch, change):
+    """The rows trained are the file's rows less the ones the run dropped as unfit, as its manifest
+    records them (lift.train.lora); anything else is refused, not printed."""
+    name = "adapter-indicalign-std-s1"
+    register_adapters(monkeypatch, {name: TRAINED[name]})
+    write_json(manifest_path(name), {**train_manifest(name, *TRAINED[name]), **change})
+    with pytest.raises(PublishError, match="do not add up"):
+        article.training_data(Facts())
+    with pytest.raises(PublishError, match="do not add up"):
+        article.build()
+
+
+def test_the_training_data_is_pending_without_the_adapters_or_their_runs(out, monkeypatch):
+    """No adapter registered, or an adapter whose training run is not on this machine: the table says so
+    with a placeholder, which blocks a posting, and never guesses a count."""
+    facts = Facts()
+    said = article.training_data(facts)
+    assert said == (
+        f"_{PENDING}: the training sets of the registered adapters from outputs/manifests (lift train)]_"
+    )
+    assert facts.missing == ["the training sets of the registered adapters (outputs/manifests)"]
+    # adapters registered, none of their runs here: no table at all, one placeholder that names them
+    register_adapters(monkeypatch, {"adapter-aya-std-s1": TRAINED["adapter-aya-std-s1"]}, manifests=False)
+    assert article.training_data(Facts()) == (
+        f"_{PENDING}: the training run of `adapter-aya-std-s1` from outputs/manifests (lift train)]_"
+    )
+    register_adapters(monkeypatch)
+    manifest_path("adapter-indicalign-stress-s1").unlink()
+    manifest_path("adapter-aya-std-s2").unlink()
+    facts = Facts()
+    said = article.training_data(facts)
+    assert "| `aya/dedup` |" in said and "standard recipe, seed 1 |" in said
+    assert "`indicalign/raw`" not in said
+    assert said.endswith(
+        f"_{PENDING}: the training runs of `adapter-aya-std-s2` and `adapter-indicalign-stress-s1` from "
+        "outputs/manifests (lift train)]_"
+    )
+    assert len(facts.missing) == 1
+
+
+# ------------------------------------------------------------- the extras: how to reproduce (B4)
+
+
+def _reproduce(text: str) -> str:
+    return _part(text, "Reproduce")
+
+
+def test_the_reproduce_section_names_the_number_check_the_tests_and_the_stages(out):
+    """B4: how to check every number, how to run the offline tests and how to run the study again, between
+    the related work and the links."""
+    write_inputs()
+    text = article.build()[0].read_text(encoding="utf-8")
+    assert _heads(text)[-3:] == ["Related work", "Reproduce", "Links"]
+    part = _reproduce(text)
+    flat = " ".join(part.split())
+    assert "```\npython scripts/verify_numbers.py\n```" in part
+    assert f"from the logs dataset ({settings.repo('logs').url})" in flat
+    assert "needs no GPU, no token and nothing installed beyond Python" in flat
+    assert "Three things it does not check:" in flat and "which it does not recompute" in flat
+    assert '```\npip install -e ".[sync,dev]"\npytest\n```' in part
+    assert f"need {article.python_requirement()}:" in flat and "or later" in article.python_requirement()
+    # what is known of the suite, and no more: the failures on Windows are named, nothing is promised
+    assert (
+        "On Windows a few tests are known to fail for reasons of portability (path separators, line "
+        "endings, process ids); none of them touches a reported number."
+    ) in flat
+    assert "known to pass" not in flat
+    stages = [line for line in part.splitlines() if re.match(r"\d\. ", line)]
+    assert [line[:2] for line in stages] == ["1.", "2.", "3.", "4.", "5.", "6."]
+    assert stages[0].startswith("1. `lift data build`") and stages[-1].startswith("6. `lift publish article`")
+    assert "The full check-up of one adapter took 1.25 h of GPU time" in flat
+    assert '("Cost and ROI" in section 7). The whole study took more: it also trained every adapter' in flat
+    # the translations need the key: the public prompt sets are the record of what was run, not an input
+    assert (
+        "`GOOGLE_TRANSLATE_API_KEY` (the Cloud Translation API), with which `lift data build` makes the "
+        "translations. The translations we evaluated are public (section 6) as the record of what was run; "
+        "the build does not read them back, so a rebuilt set is translated anew."
+    ) in flat
+    assert "only to make the translations again" not in flat
+
+
+def test_the_python_version_comes_from_pyproject(monkeypatch, tmp_path):
+    """The template types no version: the requirement is pyproject.toml's requires-python."""
+    import tomllib
+
+    from lift import paths
+
+    spec = tomllib.loads((paths.REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert spec["requires-python"].startswith(">=")
+    assert article.python_requirement() == f"Python {spec['requires-python'][2:]} or later"
+    monkeypatch.setattr(paths, "REPO_ROOT", tmp_path)
+    (tmp_path / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.14"\n', encoding="utf-8")
+    assert article.python_requirement() == "Python 3.14 or later"
+    (tmp_path / "pyproject.toml").write_text('[project]\nrequires-python = "~=3.12.1"\n', encoding="utf-8")
+    assert article.python_requirement() == "Python ~=3.12.1"
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    with pytest.raises(PublishError, match="requires-python"):
+        article.python_requirement()
+
+
+def test_everything_the_reproduce_section_names_exists(out):
+    """A command, an extra, a file or a variable the section names is checked against the repository, so
+    the notes cannot drift from the code: every `lift` command is one the CLI has, every extra one
+    pyproject.toml defines, every file one that is tracked here, every variable one .env.example lists."""
+    import tomllib
+
+    from lift import cli, paths
+
+    write_inputs()
+    part = _reproduce(article.build()[0].read_text(encoding="utf-8"))
+    code = re.findall(r"`([^`\n]+)`", part) + re.findall(r"```\n(.*?)\n```", part, re.S)
+    code = [line for block in code for line in block.splitlines()]
+    parser = cli.build_parser()
+    has = set(next(a for a in parser._actions if getattr(a, "choices", None)).choices)
+    commands = {m.group(1) for line in code for m in [re.match(r"lift ([a-z][a-z-]*)", line)] if m}
+    stages = {"data", "smoke", "train", "run-dev", "utility", "belebele", "heldout-loss", "validate", "gate"}
+    stages |= {"fit-cast", "sweep", "select", "final", "stats", "report", "publish"}
+    assert stages | {"remote", "register-adapter", "register-repairs"} == commands
+    assert commands <= has, commands - has
+    # the forms it names with an argument parse (argparse exits on a subcommand or a flag it lacks)
+    for argv in (["data", "build"], ["publish", "article"], ["final", "--all"], ["gate", "1"], ["gate", "2"]):
+        assert " ".join(["lift", *argv]) in code
+        parser.parse_args(argv)
+    project = tomllib.loads((paths.REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    extras = {e for line in code for found in re.findall(r"\.\[([a-z,]+)\]", line) for e in found.split(",")}
+    assert extras == {"sync", "dev", "gpu", "data", "eval", "report"}
+    assert extras <= set(project["optional-dependencies"])
+    files = {x for x in code if re.fullmatch(r"[\w./-]+\.(?:py|md|json|txt|example)", x)}
+    assert files == {"hf/article.sources.json", "docs/runbook.md", "colab/README.md", ".env.example"}
+    assert "python scripts/verify_numbers.py" in code and "constraints.txt" in " ".join(code)
+    for name in sorted(files | {"scripts/verify_numbers.py", "constraints.txt", "figures", "configs"}):
+        assert (paths.REPO_ROOT / name).exists(), name
+    env = (paths.REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    variables = {x for x in code if re.fullmatch(r"[A-Z][A-Z_]+", x)}
+    assert variables == {
+        "HF_TOKEN",
+        "LIFT_RUNS_REPO",
+        "GITHUB_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "LIFT_JUDGE_MAX_USD",
+        "GOOGLE_TRANSLATE_API_KEY",
+    }
+    for name in sorted(variables):
+        assert re.search(rf"^{name}=", env, re.M), name
+
+    # "the build does not read them back": `lift data build` has no option that takes the published
+    # translations, so making the prompt sets again needs the translation key. An option that reads them
+    # would change that sentence.
+    def sub(p, name):
+        return next(a for a in p._actions if name in (getattr(a, "choices", None) or {})).choices[name]
+
+    flags = set(sub(sub(parser, "data"), "build")._option_string_actions) - {"-h", "--help"}
+    assert flags == {
+        "--only",
+        "--langs",
+        "--skip-translation",
+        "--cache-only",
+        "--retranslate-failed",
+        "--fallback-engine",
+    }
 
 
 # ---------------------------------------------------------------- judges from final_report.json (R1-15)
@@ -639,8 +1372,8 @@ BY_CONSTRUCTION = (
 
 
 def _limitations(text):
-    """The Limitations list (the last subsection of section 6), on one line."""
-    return " ".join(re.split(r"\n## ", text.split("### Limitations\n", 1)[1], maxsplit=1)[0].split())
+    """The Limitations list (a subsection of section 7, before "Cost and ROI"), on one line."""
+    return " ".join(re.split(r"\n#{2,3} ", text.split("### Limitations\n", 1)[1], maxsplit=1)[0].split())
 
 
 def _limits(doc=None):

@@ -121,7 +121,7 @@ lift gate 1
 - `lift gate 1` now has both halves: the Hindi validation bar, and the win-rate bar that already
   failed (which is why the stress adapter carries the repair comparison).
 - The article states the outcome (decisions item 94). After `decide-judge`, `lift publish article`
-  fills "The judge against native readers" in section 6 of `hf/article.md` (and `README.md`) from
+  fills "The judge against native readers" in section 7 of `hf/article.md` (and `README.md`) from
   `outputs\metrics\validation\round1.json`, `validation\gate1.json` and `judge_decision.json`:
   the Hindi verdict with its agreement and kappa, each judge against the readers per language,
   the decision, and the primary judge's harmful rate beside the readers' by model and by prompt

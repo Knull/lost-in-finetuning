@@ -1,13 +1,18 @@
 """``lift publish article``: hf/article.md from hf/templates/article.md and the metrics files.
 
-The organisers' sections, in their order (prompts/P08_publish.md). Results come from
+The organisers' nine sections, numbered and in their order (``SECTIONS``: the kickoff slides'
+"Submission artifacts" list, docs/decisions.md item 119), then ``EXTRAS``, unnumbered: related work, how
+to reproduce the numbers, and the links. Results come from
 final_report.json (P07) and selection.json (P05), what validation round 1 found from the three files
 ``lift validate`` writes (P04; ``lift.publish.validated``), the design numbers (set sizes, selection rule,
-validation bar) from configs/, and the links from configs/publish.yaml and the collections file.
+validation bar) from configs/, the rows each adapter was trained on from the ``lift train`` manifests,
+and the links from configs/publish.yaml and the collections file. Sections 5 and 6 list the repos of the
+two collections as ``lift publish collections`` plans them, each with the access configs/publish.yaml
+gives it and the reason for it.
 ``hf/article.sources.json`` lists every rendered value with its file and JSON pointer. While the recipe
 is not frozen at its ``recipe-frozen-*`` tag (``inputs.recipe_block``), the article is a draft marked
-blocked under its title (a placeholder: not for posting). The article is
-posted by hand (HF community articles have no upload API); ``lift publish article`` only writes it, and
+blocked under its title (a placeholder: not for posting). The article is the repository's README.md
+(docs/decisions.md item 96); ``lift publish article`` writes both files, and
 stamps the notebook's links (``acceptance.stamp_notebook``) from the same settings.
 
 Judges are named by their configs/project.yaml entry's kind (Qwen3Guard or a frontier model), never by
@@ -36,6 +41,7 @@ from lift.publish.inputs import (
     Facts,
     _decided,
     _interval,
+    frozen_winner,
     pending,
     recipe_block,
     report_path,
@@ -43,20 +49,31 @@ from lift.publish.inputs import (
     shown,
 )
 
+# The organisers' nine sections, in their order: the "Submission artifacts" list of the kickoff slides
+# (https://hackathon.lexsi.ai/kickoff-slides/, docs/decisions.md item 119). Each heading keeps the slide's
+# words, and the template numbers them 1 to 9. "Metrics and why" and "Cost and ROI" are the first and the
+# last subsection of the seventh.
 SECTIONS = (
-    "Problem and approach",
-    "Repos used and their features",
-    "Models and licences",
-    "Datasets, benchmarks and licences",
-    "Metrics and why",
-    "Experiments and findings",
-    "Cost and ROI",
-    "Related work",
-    "What we would do with more credits",
-    "Links",
-    "Team",
+    "Problem statement and approach",
+    "Hackathon repos used and their features",
+    "Models used and their licences",
+    "Datasets and benchmarks used and their licences",
+    "Model artifacts, as an HF collection",
+    "Data artifacts, as an HF collection",
+    "Experiments run, findings and what else was tested",
+    "With more credits",
+    "Teammates",
 )
+# What follows the nine, unnumbered and in this order.
+EXTRAS = ("Related work", "Reproduce", "Links")
+MODEL_ARTIFACTS, DATA_ARTIFACTS, EXPERIMENTS = SECTIONS[4], SECTIONS[5], SECTIONS[6]
 PERSON = "a person"
+
+
+def section_ref(name: str) -> str:
+    """ "section 7" for one of the nine numbered sections, by its heading: a reference in the text follows
+    the list when a section moves."""
+    return f"section {SECTIONS.index(name) + 1}"
 
 
 def placeholders(text: str) -> list[str]:
@@ -79,8 +96,9 @@ def sources_path() -> Path:
 
 def readme_path() -> Path:
     """The repository's README, which is the write-up the judges read (docs/decisions.md item 96: HF
-    articles need a PRO account, and the organisers accept a README). ``lift publish article`` writes the
-    article's text there too (``readme_text``), and the figures it shows beside it (``readme_figures``)."""
+    articles need a PRO account; item 119: the organisers confirmed that a markdown README in the GitHub
+    repo counts as the article). ``lift publish article`` writes the article's text there too
+    (``readme_text``), and the figures it shows beside it (``readme_figures``)."""
     return paths.REPO_ROOT / "README.md"
 
 
@@ -159,6 +177,362 @@ def _not_run(facts: Facts) -> str:
         return facts.report_value("/not_run", "text", what="the list of arms not run")
     items = report["not_run"] or []
     return "\n".join(f"- {item}" for item in items) if items else "Every pre-registered arm was run."
+
+
+# ------------------------------------------------- sections 5 and 6: what is published, where and why
+
+# A repo's access as the two sections say it. The text says every gated repo opens when its terms are
+# accepted, so a repo that waits for a person's approval is refused (the organisers may count one as
+# missing: docs/decisions.md item 110).
+ACCESS_WORDS = {"public": "Public", "gated-auto": "Gated, automatic approval"}
+# The access each line's reason is written for: another one in configs/publish.yaml needs another sentence.
+ACCESS_OF = {
+    "model": "gated-auto",
+    "adapter": "gated-auto",
+    "raw": "gated-auto",
+    "repair_params": "public",
+    "space": "public",
+    "logs": "public",
+    "prompts": "public",
+    "sft": "public",
+}
+# How the repaired model's repo holds each method's weights (lift.publish.model).
+MODEL_FORMS = {
+    "wiseft": "saved as merged weights",
+    "resta": "saved as merged weights",
+    "cast": "saved as the adapter-merged model it wraps, with the steering artifacts and the wrapper that "
+    "applies them",
+}
+MODEL_FORMS["castalways"] = MODEL_FORMS["cast"]
+# An adapter's training data, by the candidate in its name (configs/train.yaml ``candidates``).
+CANDIDATE_WORDS = {"aya": "the Aya Dataset's Hindi rows", "indicalign": "the IndicAlign `Dolly_T` sample"}
+_ADAPTER_NAME = re.compile(r"adapter-(?P<candidate>.+)-(?:std|stress)-s(?P<seed>\d+)")
+PARAMS_WHAT = (
+    "Every frozen setting's parameters: the WiSE-FT lambda, the ReSta alpha, and the CAST vectors, condition "
+    "and threshold"
+)
+PARAMS_WHY = "every repaired model's weights are gated, so on their own the parameters rebuild nothing"
+# (title, what the repo holds, why it has its access) of each dataset the data collection can list, in the
+# order section 6 lists them. The training sets are listed only once the collection holds them
+# (docs/decisions.md item 118).
+DATA_LINES = {
+    "logs": (
+        "Evaluation logs",
+        "One row per judged output (its prompt id, labels, flags and the sha256 of the output), the "
+        "aggregate tables and run manifests the numbers here are read from, the redacted AuditKIT records, "
+        "the per-item scores and the figures",
+        "it holds no output text and no judge text",
+    ),
+    "prompts": (
+        "Translated prompt sets",
+        "The translations we made, each with its English source and its native spot-check record: "
+        "PolyRefuse's harmful and harmless prompts in Hindi, its harmless prompts in Chinese, and the "
+        "OR-Bench-Hard sample in five languages",
+        "prompts only, no model output",
+    ),
+    "sft": (
+        "Training sets",
+        "The Hindi training sets the adapters were trained on, each with CuratorKIT's manifest, rejected "
+        "rows and provenance",
+        "training rows of public datasets, no model output",
+    ),
+    "raw": (
+        "Raw completions",
+        "Every generation, judgement and utility verdict in full",
+        "it is the only repo that holds the outputs in full, harmful ones included, so it sits behind a "
+        "login and terms that keep it to safety research",
+    ),
+}
+
+
+def _access(r: settings.RepoSpec) -> str:
+    """A repo's access in words; refused when configs/publish.yaml gives it another access than the one
+    the article's reason is written for."""
+    if r.access != ACCESS_OF.get(r.kind) or r.access not in ACCESS_WORDS:
+        raise PublishError(
+            f"configs/publish.yaml repos.{r.kind}.access is {r.access}, and the article gives its reason for "
+            f"{ACCESS_OF.get(r.kind, 'no repo of that kind')}: change what lift.publish.article says of it, "
+            "with a dated docs/decisions.md entry"
+        )
+    return ACCESS_WORDS[r.access]
+
+
+def _link(r: settings.RepoSpec) -> str:
+    return f"[`{r.repo_id}`]({r.url})"
+
+
+def _adapter_words(name: str, spec: object) -> str:
+    """An unrepaired adapter as section 5 says it: its training data and recipe from its name
+    (adapter-{candidate}-{std|stress}-s{seed}) and its seed from the registry."""
+    from lift.publish.model import recipe_of
+
+    m = _ADAPTER_NAME.fullmatch(name)
+    recipe = recipe_of(name)
+    if m is None or recipe is None:
+        return f"The LoRA adapter `{name}`"
+    seed = getattr(spec, "seed", None)
+    data = CANDIDATE_WORDS.get(m["candidate"], f"the `{m['candidate']}` rows")
+    return (
+        f"A Hindi LoRA adapter trained on {data} with the {recipe} recipe, "
+        f"seed {m['seed'] if seed is None else seed}"
+    )
+
+
+def model_artifacts(facts: Facts) -> str:
+    """Section 5's list: one line per repo of the model collection, in the order ``lift publish
+    collections`` lists them (``collect.plan``: the repaired model, the repair parameters, every registered
+    adapter, the Space). Each line has the repo's link, what it is, its access as configs/publish.yaml sets
+    it (``_access``) and the reason for that access. The repaired model's reason is the one its card and its
+    access form give (``model.gate_reasons``); it is pending while the selection is not decided. Then where
+    to read which adapters drifted."""
+    from types import SimpleNamespace
+
+    from lift.publish import model
+    from lift.publish.collect import plan
+
+    winner = frozen_winner(facts)
+    adapters = {
+        settings.repo("adapter", adapter=name).repo_id: (name, spec)
+        for name, spec in model.registered_adapters().items()
+    }
+    lines = []
+    for r in plan(facts)["models"]:
+        access = _access(r)
+        if r.kind == "model" and winner is None:
+            what = facts._missing("the repaired model (the frozen winner)", selection_path(), P05)
+            lines.append(f"- **Repaired model**: {what}")
+        elif r.kind == "model":
+            family = winner.split("-", 1)[0]
+            # The registry entry names the method; before the winner is registered, its name does.
+            spec = model._spec(winner) or SimpleNamespace(
+                method="cast_always" if family == "castalways" else family
+            )
+            form = f", {MODEL_FORMS[family]}" if family in MODEL_FORMS else ""
+            why = "; and ".join(model.gate_reasons(facts, spec))
+            lines.append(
+                f"- **Repaired model**: {_link(r)}. The frozen repair `{winner}` ({_method(winner)}){form}. "
+                f"{access}, because {why}."
+            )
+        elif r.kind == "repair_params":
+            lines.append(f"- **Repair parameters**: {_link(r)}. {PARAMS_WHAT}. {access}: {PARAMS_WHY}.")
+        elif r.kind == "adapter" and r.repo_id in adapters:
+            lines.append(
+                f"- **Unrepaired adapter**: {_link(r)}. {_adapter_words(*adapters[r.repo_id])}. {access}: a "
+                "research artifact whose safety may have drifted."
+            )
+        elif r.kind == "space":
+            # What the page holds of the outputs is said in full: lift.publish.space cuts a few outputs of
+            # every cell, whatever their label, so harmful-labelled ones are among them.
+            lines.append(
+                f"- **Space**: {_link(r)}. A static page of the results: the verdicts, the heatmaps, the "
+                "utility table and a few example outputs for each variant, language and safety prompt set of "
+                "the final split, each cut to its first words and marked `[redacted]`, whatever its label. "
+                f"{access}: it loads no model and generates nothing, and it holds no more of any output than "
+                "that cut."
+            )
+        else:
+            raise PublishError(f"the model collection lists {r.repo_id}, which the article has no line for")
+    if adapters:
+        lines.append(f"\nThe verdicts in {section_ref(EXPERIMENTS)} say which adapters drifted.")
+    return "\n".join(lines)
+
+
+def _training_sets_repo(facts: Facts) -> settings.RepoSpec | None:
+    """The training-sets dataset when the data collection lists it, else None: the article names it only
+    once it is published (docs/decisions.md item 118)."""
+    from lift.publish.collect import plan
+
+    return next((r for r in plan(facts)["data"] if r.kind == "sft"), None)
+
+
+def data_artifacts(facts: Facts) -> str:
+    """Section 6's list: one line per dataset of the data collection (``collect.plan``), in ``DATA_LINES``'
+    order, then the repair parameters, which sit in the model collection and are data a reader needs. Each
+    line has the repo's link, what it holds, its access as configs/publish.yaml sets it (``_access``) and
+    the reason for that access. A dataset the collection lists and ``DATA_LINES`` does not is refused."""
+    from lift.publish.collect import plan
+
+    repos = {r.kind: r for r in plan(facts)["data"]}
+    unknown = sorted(r.repo_id for kind, r in repos.items() if kind not in DATA_LINES)
+    if unknown:
+        raise PublishError(
+            f"the data collection lists {', '.join(unknown)}, which the article has no line for"
+        )
+    lines = []
+    for kind, (title, what, why) in DATA_LINES.items():
+        if kind in repos:
+            lines.append(f"- **{title}**: {_link(repos[kind])}. {what}. {_access(repos[kind])}: {why}.")
+    params = settings.repo("repair_params")
+    lines.append(
+        f"- **Repair parameters**: {_link(params)}. {PARAMS_WHAT}. They are in the model collection "
+        f"({section_ref(MODEL_ARTIFACTS)}) and listed here as well, because they are data a reader needs to "
+        f"apply a repair. {_access(params)}: {PARAMS_WHY}."
+    )
+    return "\n".join(lines)
+
+
+def tool_chain(facts: Facts) -> dict[str, str]:
+    """Section 2's opening sentence, the three tools as one chain, and the words that say where
+    CuratorKIT's files are published. The chain is said either way and names only what is public. While
+    the data collection does not list the training sets (``_training_sets_repo``; docs/decisions.md item
+    118), it points at the adapters and the repaired model and at AuditKIT's records, and the CuratorKIT
+    line says only that its files are kept. Once the collection lists them, the chain's first link is
+    that dataset and the line says where the files are."""
+    models, data = section_ref(MODEL_ARTIFACTS), section_ref(DATA_ARTIFACTS)
+    repo = _training_sets_repo(facts)
+    if repo is None:
+        return {
+            "tool_chain": "The three tools run as one chain: CuratorKIT builds the Hindi training sets, the "
+            "LoRA adapters are trained on them, SafeTune repairs an adapter, and AuditKIT records every "
+            f"reported rate. The adapters and the repaired model are in {models}, and AuditKIT's redacted "
+            f"records are in the logs dataset ({data}).\n\n",
+            "curatorkit_files": "",
+        }
+    return {
+        "tool_chain": "The three tools run as one chain, and each link of it is published: CuratorKIT's "
+        f"training sets ({_link(repo)}), the LoRA adapters trained on them and SafeTune's repair "
+        f"({models}), and AuditKIT's records of every reported rate (the logs dataset, {data}).\n\n",
+        "curatorkit_files": f" and published with the training sets ({_link(repo)})",
+    }
+
+
+# ------------------------------------------------------------------- section 4: the training data
+
+TRAIN = "lift train"
+# A training set's source and licence, by the candidate its folder under data/sft/ names; the sentence
+# under the table (hf/templates/article.md) says why IndicAlign's rows carry Dolly's licence.
+TRAINING_SOURCES = {
+    "aya": "Aya Dataset, Hindi rows (Apache-2.0)",
+    "indicalign": "IndicAlign `Dolly_T`, Hindi (CC-BY-SA-3.0 through Dolly)",
+}
+TRAINING_VARIANTS = {"dedup": "deduplicated", "raw": "not deduplicated"}
+_SFT_PATH = re.compile(r"data/sft/(?P<candidate>[^/]+)/(?P<variant>[^/]+)/[^/]+")
+
+
+def training_runs() -> dict[str, tuple[Path, dict] | None]:
+    """{registered adapter: (its train manifest, the manifest's document)}, None for an adapter with no
+    training run on record. An adapter's run is the one under its name whose adapter hash the registry
+    pins (``lift.publish.datasets.train_runs``: outputs/manifests/train-*.json; ``datasets.runs_of``: a
+    run that a retrain set aside records another hash, and one that never hashed an adapter is no run of
+    a registered adapter)."""
+    from lift.publish import datasets, model
+
+    runs = datasets.train_runs()
+    out: dict[str, tuple[Path, dict] | None] = {}
+    for name, spec in sorted(model.registered_adapters().items()):
+        own = datasets.runs_of(name, spec, runs)
+        out[name] = own[-1] if own else None
+    return out
+
+
+def _count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def training_data(facts: Facts) -> str:
+    """Section 4's training data: one row per training set (the file its ``lift train`` runs read: each
+    manifest's ``data_path``), with its source and licence, the rows in the file, the rows trained when
+    they are fewer, and the recipe and seeds trained on it. Every count, recipe and seed is read from the
+    train manifest of a registered adapter's run (``training_runs``; the logs dataset carries the
+    manifests under manifests/) and recorded in the sources. The runs of one set must have read the same
+    file (``data_sha256``) and agree on its counts, and each run's rows trained must be its rows less the
+    ones it dropped as unfit (``lift.train.lora``), or the table is refused. Pending while no adapter is
+    registered, and for an adapter whose run is not on record."""
+    runs = training_runs()
+    manifests = paths.manifests_dir()
+    if not runs:
+        return f"_{facts._missing('the training sets of the registered adapters', manifests, TRAIN)}_"
+    by_set: dict[str, list[tuple[str, Path, dict]]] = {}
+    for name, run in runs.items():
+        if run is not None:
+            by_set.setdefault(str(run[1].get("data_path")), []).append((name, *run))
+
+    def val(f: Path, pointer: str, kind: str, what: str) -> str:
+        return facts.value(f, pointer, kind, what=what, stage=TRAIN)
+
+    rows, fewer = [], False
+    for data_path, members in sorted(by_set.items()):
+        # Two builds of one path are two training sets, whether or not their counts are equal.
+        hashes = {name: str(doc.get("data_sha256")) for name, _, doc in members}
+        if len(set(hashes.values())) != 1:
+            read = ", ".join(f"{name}: sha256 {hashes[name][:12]} ({shown(f)})" for name, f, _ in members)
+            raise PublishError(
+                f"the training runs of {data_path} read different files under that path, and the article "
+                f"gives one row per training set: {read}"
+            )
+        counts = {(doc.get("n_rows"), doc.get("n_rows_trained")) for _, _, doc in members}
+        said = ", ".join(
+            f"{name}: {doc.get('n_rows')} rows, {doc.get('n_rows_trained')} trained, "
+            f"{(doc.get('dropped_unfit') or {}).get('count')} dropped ({shown(f)})"
+            for name, f, doc in members
+        )
+        if len(counts) != 1:
+            raise PublishError(
+                f"the training runs of {data_path} disagree on its row counts, and the article gives one "
+                f"count per training set: {said}"
+            )
+        ((n, trained),) = counts
+        dropped = {(doc.get("dropped_unfit") or {}).get("count") for _, _, doc in members}
+        if not _count(n) or not _count(trained) or trained > n or dropped != {n - trained}:
+            raise PublishError(
+                f"the row counts of the training runs of {data_path} do not add up (rows trained must be "
+                f"the rows less the ones dropped as unfit): {said}"
+            )
+        # Every run's own counts are recorded, so each seed's manifest is checked, and shown once.
+        in_file, used = [], []
+        by_recipe: dict[str, list[str]] = {}
+        for name, f, _ in sorted(members, key=lambda x: (str(x[2].get("recipe")), x[2].get("seed") or 0)):
+            in_file.append(val(f, "/n_rows", "int", f"the rows of the file {name} trained on"))
+            used.append(val(f, "/n_rows_trained", "int", f"the rows {name} was trained on"))
+            recipe = val(f, "/recipe", "text", f"the recipe of {name}")
+            by_recipe.setdefault(recipe, []).append(val(f, "/seed", "int", f"the seed of {name}"))
+        at = _SFT_PATH.fullmatch(data_path)
+        source = TRAINING_SOURCES.get(at["candidate"], f"`{at['candidate']}`") if at else ""
+        if at and at["variant"] in TRAINING_VARIANTS:
+            source += f", {TRAINING_VARIANTS[at['variant']]}"
+        fewer = fewer or trained < n
+        rows.append(
+            [
+                f"`{at['candidate']}/{at['variant']}`" if at else f"`{data_path}`",
+                source,
+                in_file[0] if trained == n else f"{in_file[0]} ({used[0]} trained)",
+                "; ".join(f"{recipe} recipe, {seeds_label(seeds)}" for recipe, seeds in by_recipe.items()),
+            ]
+        )
+    blocks = []
+    if rows:
+        header = ["Training set", "Source and licence", "Rows", "Adapters trained on it"]
+        note = (
+            "The row counts are the ones each training run recorded in its manifest "
+            "(`manifests/train-*.json` in the logs dataset)."
+        )
+        if fewer:
+            note += (
+                " Where fewer rows were trained than the file holds, the others were dropped before "
+                "training: their prompt alone, with the chat template's preamble, reaches the training "
+                "length and leaves no answer token to learn from."
+            )
+        blocks += [render.markdown_table(header, rows), note]
+    absent = [name for name, run in runs.items() if run is None]
+    if absent:
+        runs_word = "run" if len(absent) == 1 else "runs"
+        what = f"the training {runs_word} of {_and([f'`{name}`' for name in absent])}"
+        blocks.append(f"_{facts._missing(what, manifests, TRAIN)}_")
+    return "\n\n".join(blocks)
+
+
+def python_requirement() -> str:
+    """ "Python 3.12 or later", from pyproject.toml's ``requires-python`` (">=3.12"): the template types
+    no version. Another form of requirement is shown as it is written."""
+    import tomllib
+
+    path = paths.REPO_ROOT / "pyproject.toml"
+    try:
+        spec = str(tomllib.loads(path.read_text(encoding="utf-8"))["project"]["requires-python"]).strip()
+    except (OSError, KeyError, tomllib.TOMLDecodeError) as exc:
+        raise PublishError(f"pyproject.toml gives no requires-python for the article ({exc})") from exc
+    m = re.fullmatch(r">=\s*(\d+(?:\.\d+)*)", spec)
+    return f"Python {m.group(1)} or later" if m else f"Python {spec}"
 
 
 # ---------------------------------------------------------------- what each check said of each adapter
@@ -948,6 +1322,7 @@ def context(facts: Facts) -> dict[str, str]:
     links = read_links()
     gh = settings.github_repo()
     authors, team = _team(cfg)
+    thanks = _thanks(cfg)
     rv = facts.report_value
     sizes = {
         f"n_{short}_{split}": facts.config("project", f"sizes.{name}.{split}", "int")
@@ -963,7 +1338,17 @@ def context(facts: Facts) -> dict[str, str]:
     ctx = {
         "authors": authors,
         "team": team,
-        "thanks": _thanks(cfg),
+        # under the team list, with its own blank line: with nobody thanked the section ends on the list
+        "thanks": f"\n\n{thanks}" if thanks else "",
+        **tool_chain(facts),
+        "training_data": training_data(facts),
+        "model_artifacts": model_artifacts(facts),
+        "data_artifacts": data_artifacts(facts),
+        "models_section": section_ref(MODEL_ARTIFACTS),
+        "data_section": section_ref(DATA_ARTIFACTS),
+        "experiments_section": section_ref(EXPERIMENTS),
+        "logs_repo": settings.repo("logs").url,
+        "python_requirement": python_requirement(),
         "global_id": config.get("models.global.id"),
         "global_rev": config.get("models.global.revision"),
         "base_id": config.get("models.base.id"),
@@ -1098,8 +1483,8 @@ def in_short(facts: Facts, ctx: Mapping[str, str]) -> str:
     if others:
         lines.append(f"- **The other repairs.** Their frozen settings: {', '.join(others)}.")
     lines.append(
-        "- Each adapter's verdict, its usefulness and every interval are in section 6; every number's "
-        "source is in `hf/article.sources.json`."
+        f"- Each adapter's verdict, its usefulness and every interval are in {section_ref(EXPERIMENTS)}; "
+        "every number's source is in `hf/article.sources.json`."
     )
     return "**In short.**\n\n" + "\n".join(lines)
 
@@ -1121,7 +1506,6 @@ def build(facts: Facts | None = None, *, readme: bool = False) -> tuple[Path, Fa
     from lift.publish import acceptance
 
     facts = facts or Facts()
-    # rstrip: with nobody thanked the article ends on its team list, with no trailing blank lines
     text = render.fill(render.template("article.md"), context(facts)).rstrip() + "\n"
     mark = blocked_line(facts)
     if mark:  # right under the title

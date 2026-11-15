@@ -596,7 +596,9 @@ def test_the_article_states_the_validation_outcome_before_the_judge_sensitivity(
     assert "**the bar is met**" in section and "**Qwen3Guard stayed the primary judge**" in section
     assert len(tables(section)) == 2 and PENDING not in section
     assert text.index("### The judge against native readers") < text.index("### Judge sensitivity")
-    assert 'Whether\nit did is in section 6, "The judge against native readers".' in text
+    # the metrics are the first subsection of the same section, so the pointer names the subsection
+    assert 'Whether\nit did is under "The judge against native readers", below.' in text
+    assert text.index("### Metrics and why") < text.index("### The judge against native readers")
     sources = json.loads((out / "article.sources.json").read_text(encoding="utf-8"))
     assert any(
         v["file"] == "outputs/metrics/validation/gate1.json" and v["pointer"] == "/kappa"

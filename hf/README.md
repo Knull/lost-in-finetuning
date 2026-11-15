@@ -13,9 +13,11 @@ repair parameters are public, so the public deploy is met.
 | Logs dataset | public | Prompt ids, labels, flags, generation keys, output hashes (the redacted AuditKIT records), metadata and aggregate tables. No output text, and no judge text: `JudgementRecord.raw`, `native.reason` and the text of `native.judge_failure` (the judges' replies, a frontier judge's reason, and the part of a reply a failure quotes: a frontier provider's refusal, the start of a Qwen3Guard reply that did not parse) stay out with it, as CLAUDE.md rule 6 gates judge logs. A failed judgement keeps only that its judge failed, and the failure's kind. |
 | Raw completions | gated, automatic approval (manual until Nov 14, docs/decisions.md item 110) | Every judged output in full, refusals and benign answers included, the harmful ones too. No other artifact holds more of an output than the Space's 10-word cut. |
 | Translated prompt sets | public | Hindi PolyRefuse, Chinese harmless, OR-Bench-Hard in 5 languages, with native-check notes and the CC-BY-4.0 attribution for OR-Bench. |
+| Training sets | not uploaded: staged only (decisions item 118) | The three files `lift train` read (the Aya Dataset's Hindi rows, the IndicAlign `Dolly_T` sample deduplicated, and the stress recipe's undeduplicated sample), each with CuratorKIT's manifest, rejected rows and provenance, and the build report. `lift publish datasets --only sft` stages them as `lift-hindi-sft`, and only while each file's sha256 is the one its training runs recorded. The scan of every upload refuses two of the files: one row in each IndicAlign file holds one of the scan's 60-character windows of an output on the team's machine. So the dataset is not on the Hub, and in neither collection, until a person decides. |
 | Collections | public | One for model artifacts, one for data artifacts, both linked from the article. |
-| Article | public | The organisers' sections (prompts/P08_publish.md), from the metrics files only. |
-| Notebook | public, in the repo | `notebooks/acceptance_test.ipynb`: run the check on any Tiny Aya adapter. |
+| Article | public | The organisers' nine sections, numbered and in their order (the kickoff slides' "Submission artifacts" list, decisions item 119), then Related work, Reproduce and Links, from the metrics files and the `lift train` manifests only. It is the repository's README.md. Sections 5 and 6 list every repo of the two collections with its access and the reason for it. |
+| Notebook | public, in the repo | `notebooks/acceptance_test.ipynb`: run the check on any Tiny Aya adapter. `lift publish article` stamps its links and the frozen winner; it is committed with the README (decisions item 122). |
+| Number check | public, in the repo | `scripts/verify_numbers.py` (standard library only): compares every result value of `hf/article.sources.json` with the public logs dataset, and each figure with its copy in `figures/`; the design values from `configs/` are counted, not checked (decisions item 121). |
 | Space | public | A static page drawn from the aggregate dataset (decisions item 113): verdict, heatmaps, utility retained, and a few examples, each cut to about 10 words plus `[redacted]` whatever its label. No other output text, and no live generation. |
 
 The team lead's HF username must match the registration form. The HF account must also have the
@@ -23,7 +25,8 @@ registration email on it to redeem the hackathon credits.
 
 ## How it is built (`lift publish`)
 
-Every number comes from `outputs/metrics` (results) or `configs/` (design numbers), read through
+Every number comes from `outputs/metrics` (results), `configs/` (design numbers) or, for the rows
+each adapter was trained on, its `lift train` manifest in `outputs/manifests`, read through
 `lift.publish.inputs.Facts`. Nothing is typed by hand: `tests/test_publish_inputs.py` fails if a
 template in `hf/templates/` carries a rate, a difference or a decimal. An input that does not exist
 yet renders as `[PENDING: <what> from <file> (<stage>)]`, and `--yes` refuses to upload a staged
@@ -34,9 +37,10 @@ a dry run unless given `--yes`.
 | --- | --- | --- |
 | `lift publish model [--variant V] [--build --device cuda:0] [--yes]` | repaired model (gated), repair parameters, gated adapters; writes outputs/publish/model.sources.json (every value on the model card with its file and pointer) | `selection.json`, `final_report.json`, configs/variants.yaml, outputs/adapters, outputs/artifacts/cast |
 | `lift publish datasets [--only logs raw prompts] [--yes]` | logs (public: ids, labels, flags and hashes, no output or judge text), raw completions (gated, automatic approval), translated prompts (public) | outputs/judgements, generations, utility, metrics (the gate, selection and validation reports, auditkit), validation keys and labels, data/prompts |
+| `lift publish datasets --only sft` | the training sets with CuratorKIT's files, staged only when named; `--yes` refuses them while the public-text scan finds an output's text in them (decisions item 118); writes outputs/publish/datasets/sft.sources.json (the card's counts and hashes) | data/sft, the `lift train` manifests in outputs/manifests, configs/variants.yaml and configs/train.yaml |
 | `lift publish space [--yes]` | the static Space (`index.html`, drawn by `hf/space/app.py`) with `examples.json`: two outputs per variant, language and set of the final split, each cut to at most 10 words plus `[redacted]` whatever its label | outputs/generations and the primary judgements (for the cuts); the Space itself reads the logs dataset |
 | `lift publish collections [--yes]` | the two collections; writes outputs/publish/collections.json | the repo ids above |
-| `lift publish article` | `hf/article.md`, the same text as the repository's `README.md`, and `hf/article.sources.json` (every value with its file and JSON pointer) | `final_report.json`, `selection.json`, the validation files (`validation/round1.json`, `validation/gate1.json`, `judge_decision.json`), configs, collections.json, configs/publish.yaml |
+| `lift publish article` | `hf/article.md`, the same text as the repository's `README.md`, and `hf/article.sources.json` (every value with its file and JSON pointer); stamps the notebook's links and frozen winner | `final_report.json`, `selection.json`, the validation files (`validation/round1.json`, `validation/gate1.json`, `judge_decision.json`), the `lift train` manifests of the registered adapters (the training rows), configs, collections.json, configs/publish.yaml, the collections plan |
 | `lift publish preflight [--no-history] [--no-fetch]` | nothing; fetches every branch, tag and pull-request ref of origin first (`--no-fetch` skips it: local refs only, not enough to go public), then fails on a secret, token, raw completion, notebook output, forbidden path or a run of any model output's text in the tracked files or the git history | the git repo, and every generation in this machine's `outputs/`, whatever its label (it refuses a machine that has none) |
 
 ### Order on submission day (a person runs these)
@@ -59,12 +63,21 @@ refuse to run without them. Every dry run runs the public-text scan too and exit
    registry entry (spec, adapter hash, Global revision); otherwise the command asks for `--build`.
 4. On the laptop, after `lift sync pull`: `lift publish datasets`, then `--yes`;
    `lift publish space`, then `--yes`; `lift publish collections`, then `--yes` (it checks every
-   repo is on the Hub before creating anything, so run it after the uploads).
-5. `lift publish article` (no placeholder left), then commit `hf/article.md`, `README.md` and the
-   figures it copies into `figures/` beside it, which the README links. The
-   README is the write-up the submission form links to (docs/decisions.md item 96: an HF community
-   article needs a PRO account, and the organisers accept a README in the GitHub repo).
-6. `lift sync pull`, then `lift publish preflight` (without `--no-fetch` or `--no-history`), then
+   repo is on the Hub before creating anything, so run it after the uploads). The training sets
+   are no part of this: `lift publish datasets` leaves them out, `--only sft` stages them, and
+   `--yes` refuses them while the scan finds an output's text in them (decisions item 118).
+5. `lift publish article` (no placeholder left), then commit together `README.md`, `hf/article.md`,
+   `hf/article.sources.json`, the figures it copies into `figures/` beside the README, which links
+   them, and `notebooks/acceptance_test.ipynb`, which it stamps with the repo's links and the frozen
+   winner (never restore the notebook before the preflight: the committed one would keep its
+   placeholders, decisions item 122). The README is the write-up the submission form links to
+   (docs/decisions.md item 96: an HF community article needs a PRO account; item 119: the
+   organisers confirmed that a markdown README in the GitHub repo counts as the article).
+6. `python scripts/verify_numbers.py`: every result value of the committed
+   `hf/article.sources.json` must match the public logs dataset. A value that differs means the logs on the Hub are not the
+   ones the article was written from: upload them again (`lift publish datasets --only logs --yes`)
+   or find out why before pushing.
+7. `lift sync pull`, then `lift publish preflight` (without `--no-fetch` or `--no-history`), then
    the steps it prints to make the GitHub repo public.
 
 **Retraction.** HF keeps every past commit of a repo. Each upload mirrors its staged folder

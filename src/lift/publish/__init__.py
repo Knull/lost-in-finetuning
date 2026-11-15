@@ -1,7 +1,8 @@
 """Hugging Face artifacts, article, notebook helpers and the public-repo preflight (P08).
 
 Every number a public artifact shows is read from a file under ``outputs/metrics`` (or a config, for
-the pre-registered design numbers) through ``lift.publish.inputs.Facts``, which records where each one
+the pre-registered design numbers; or a ``lift train`` manifest under ``outputs/manifests``, for the rows
+an adapter was trained on) through ``lift.publish.inputs.Facts``, which records where each one
 came from. An input that does not exist yet renders as a ``[PENDING: ...]`` placeholder that names
 the file and the stage that writes it, and an upload is refused while any staged text still holds one.
 
@@ -10,7 +11,8 @@ the file and the stage that writes it, and an upload is refused while any staged
 - ``render``       the template filler (``{{ name }}``) and markdown tables
 - ``hub``          upload plans: dry run by default, ``--yes`` uploads (gating set before any file goes up)
 - ``model``        the repaired model, the repair parameters and the gated adapters, with their cards
-- ``datasets``     the public logs dataset, the gated raw completions, the translated prompt sets
+- ``datasets``     the public logs dataset, the gated raw completions, the translated prompt sets; on
+                   request the training sets with CuratorKIT's files (docs/decisions.md item 118)
 - ``collect``      the two HF collections
 - ``article``      hf/article.md from hf/templates/article.md
 - ``preflight``    secrets, tokens and raw completions in tracked files and git history

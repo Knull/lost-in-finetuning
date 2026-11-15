@@ -126,7 +126,8 @@ def test_the_article_reads_the_report_p07_writes(real_report):
         for set_name in ("hard_benign", "easy_benign")
         for variant in ("stock", STRESS.format(1))
     ]
-    limits = " ".join(text.split("### Limitations\n", 1)[1].split("\n## ", 1)[0].split())
+    # the Limitations subsection ends where the next one ("Cost and ROI") starts
+    limits = " ".join(re.split(r"\n#{2,3} ", text.split("### Limitations\n", 1)[1], maxsplit=1)[0].split())
     assert f"it is on {rates[0]} of stock's answers and {rates[1]} of {stress}'s (" in limits
     assert f"), against {rates[2]} and {rates[3]} on the easy-benign ones." in limits
 

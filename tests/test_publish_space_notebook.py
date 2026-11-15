@@ -470,3 +470,32 @@ def test_notebook_claims_no_run_time_it_has_not_measured():
         "an unmeasured duration"
     )
     assert f"{acceptance.RUNTIME_MARK} not yet timed" in text
+
+
+# ---------------------------------------------------------------- notebook: the committed stamp (item 122)
+
+
+def test_the_committed_notebook_is_stamped_for_the_committed_recipe():
+    """Decisions item 122. ``lift publish article`` stamps the notebook's parameters repo and frozen
+    winner, and the notebook is committed with the README it wrote. So once a recipe is frozen
+    (configs/frozen_recipe.json) and the team's namespace is set, the committed notebook names that
+    winner and the team's parameters repo, the committed README lists the same repaired model, and no
+    placeholder is left: a reader would stop at the repair cell otherwise. The last cell points at
+    PREREGISTRATION.md, where the design has been since the README became the write-up."""
+    import yaml
+
+    nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    code = "".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code")
+    text = "".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "markdown")
+    assert "are in `PREREGISTRATION.md`" in text and "repository README" not in text
+    assert (paths.REPO_ROOT / "PREREGISTRATION.md").is_file()
+    recipe = paths.CONFIG_DIR / "frozen_recipe.json"  # the committed one: tests move lift's own path to tmp
+    publish = yaml.safe_load((paths.CONFIG_DIR / "publish.yaml").read_text(encoding="utf-8"))
+    if not recipe.is_file() or not publish.get("namespace"):
+        pytest.skip("no recipe is frozen or no namespace is set: nothing to stamp yet")
+    winner = json.loads(recipe.read_text(encoding="utf-8"))["overall_winner"]
+    params = f"{publish['namespace']}/{publish['repos']['repair_params']['name']}"
+    assert f'PARAMS_REPO = "{params}"' in code and f'WINNER = "{winner}"' in code
+    assert "YOUR-HF-ORG" not in code and "the-frozen-winner-variant" not in code
+    readme = (paths.REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert f"{publish['namespace']}/lift-{winner}" in readme and params in readme

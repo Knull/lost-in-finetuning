@@ -1,7 +1,10 @@
 """What P08 reads, and the ``Facts`` reader that renders every number with its source.
 
 No number in a public artifact is typed by hand: each one is read here from a JSON file under
-``outputs/metrics`` (results) or ``configs/`` (the pre-registered design: set sizes, thresholds), and
+``outputs/metrics`` (results), from ``configs/`` (the pre-registered design: set sizes, thresholds) or,
+for the rows each adapter was trained on, from its ``lift train`` manifest under ``outputs/manifests``
+(``lift.publish.article.training_data``, docs/decisions.md item 120; the training sets' card also reads
+CuratorKIT's manifest.json under ``data/sft``: ``lift.publish.datasets.build_sft``), and
 ``Facts.sources`` lists every value with its file and JSON pointer, which ``lift publish`` writes
 beside each rendered file (``*.sources.json``) for the claims audit (R3). An input that does not exist
 yet renders as ``[PENDING: <what> from <file> (<stage>)]``; ``lift publish ... --yes`` refuses to upload

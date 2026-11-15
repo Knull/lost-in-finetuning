@@ -2,6 +2,171 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 15, 2026: fixes from the adversarial review of the submission
+
+122. **The team section tags Kendrick Low, and the notebook is committed with the stamp
+     `lift publish article` gives it.** Both were ready in the settings and missing from the committed
+     files.
+     - configs/publish.yaml has held Kendrick Low's HF account since Nov 14, but the write-up was not
+       generated again after it: the README's team section read "Kendrick" with no link, and
+       hf/article.md's front matter listed two authors. Generated again, both tag the three of us.
+     - `lift publish article` stamps the notebook with the repo's url, the repair-parameters repo and
+       the frozen winner, but the stamped file was discarded before each preflight. So the committed
+       notebook still held `YOUR-HF-ORG/lift-repair-params` and `the-frozen-winner-variant`, and a
+       reader who ran it would stop at the repair cell. The stamped notebook is now committed with
+       the README. The command says so, hf/README.md's order of the day says so, and a test checks the
+       committed notebook against the committed frozen recipe, the team's namespace and the README.
+     - The notebook's last cell said the design is in the repository README. Since item 96 it is in
+       PREREGISTRATION.md, and the cell now names that file.
+     No number, label or analysis changes.
+
+121. **The write-up says how to reproduce it, and `scripts/verify_numbers.py` checks every number
+     against the public logs.** The form asks for a public write-up and a repo with notes on how to
+     reproduce the results. The README had none. The only notes were three commands in
+     PREREGISTRATION.md, and docs/runbook.md, which is written for the team.
+     - A "Reproduce" section follows the related work, in three parts. Check every number: one
+       command, no GPU, no token, nothing to install. Run the offline tests: the install line, what
+       `pytest` leaves out by default and what it skips without the GPU stack. It says what is known
+       of the suite and promises nothing more: on Windows a few tests fail for reasons of portability
+       (path separators, line endings, process ids), and none of them touches a reported number. Run
+       the study again: the two install lines, the variables of `.env.example`, the stages in order,
+       and where the job lines and timings are (docs/runbook.md, colab/README.md). The translation
+       key is listed as needed: `lift data build` makes the translations with it and has no option
+       that reads the published ones back, which are the record of what was run. The section gives
+       the GPU time of one adapter's check-up and says that the whole study took more.
+     - With the install line the section gives (no GPU stack), one test failed on every platform:
+       `lift sweep` resolved the judge's device, which imports torch, before it checked its
+       settings, so its refusal of a CAST setting with no fitted artifact needed torch. The sweep
+       now checks its settings first; nothing else in it changes, and no sweep result does.
+     - `scripts/verify_numbers.py` uses the standard library only. It reads hf/article.sources.json,
+       fetches the public copy of each file a value was read from (the logs dataset's `aggregates/`,
+       `auditkit/` and `manifests/`) and compares the value at its pointer. A figure is compared by
+       its sha256 with the copy in figures/. The design values from configs/ are counted, not
+       checked: a test compares them with the configs. On today's write-up it reports 1,304 values
+       that match, none that differs and one the logs do not hold (the table of the diagnosis that
+       was not run), 6 figures that match and 17 design values.
+     - What it cannot check is said in the section: that the text shows the listed values and no
+       others, and that the aggregates follow from the per-output records.
+     - A test checks every command, extra, file and variable the section names against the CLI,
+       pyproject.toml, the tree and `.env.example`. The Python version is read from pyproject.toml.
+     No number, label or analysis changes.
+
+120. **Sections 3 and 4 give every licence, and the training data.**
+     - Section 3 gave no licence for four of the models and tools. It now gives CC-BY-NC-4.0 plus
+       Cohere Labs' acceptable-use policy for Tiny Aya Base (as for Global), Apache-2.0 for
+       Qwen3Guard-Gen-4B, and Apache-2.0 plus notices for GlotLID, each as its card on the Hub says
+       (read Nov 15). The frontier model, which is the second safety judge and the utility judge, is
+       said to be used through its provider's API under the provider's terms of service.
+     - Section 4 listed the evaluation sets only. A second table lists the three training sets: the
+       source and licence of each (the Aya Dataset's Hindi rows, Apache-2.0; IndicAlign `Dolly_T`,
+       CC-BY-SA-3.0 through Dolly, item 22), the rows in the file, the rows trained where a run
+       dropped some (item 66), and the recipe and seeds trained on it. The utility row names the
+       licences of the same two sources.
+     - The row counts go through `Facts` like every number. They are read from the `lift train`
+       manifest of each registered adapter's run (`n_rows`, `n_rows_trained`), so
+       hf/article.sources.json records them and the logs dataset holds the files (`manifests/`).
+       The runs of one training set must have read the same file (the sha256 each recorded) and
+       agree on its counts, and each run's rows trained must be its rows less the ones it dropped;
+       anything else is refused. As recorded: 677 rows for the Aya set, all trained; 3,000 for each
+       IndicAlign set, of which 2,999 and 2,997 were trained.
+     No number, label or analysis changes: these are the counts the training runs recorded.
+
+119. **The article's nine numbered sections are the organisers' nine.** The kickoff slides
+     (https://hackathon.lexsi.ai/kickoff-slides/, "Submission artifacts") list what the article must
+     have, in this order: the problem statement and approach, in brief; the hackathon repos used,
+     which ones, for what and which features; the models used and their licences; the datasets and
+     benchmarks used and their licences; the model artifacts, public, as an HF collection; the data
+     artifacts, public, as an HF collection; the experiments run, the findings and what else was
+     tested; with more credits, the approach and its before and after results; the teammates,
+     tagged. Our eleven sections came from an earlier paraphrase of that list (item 15,
+     prompts/P08_publish.md). Metrics and cost were sections of their own, related work and the
+     links were numbered among them, and the two collections appeared only under the links, so a
+     reader checking the list found no section for the model artifacts or for the data artifacts.
+     - The numbered sections are now those nine, 1 to 9, each heading in the slide's words.
+       "Metrics and why" is the first subsection of section 7 and "Cost and ROI" its last, with every
+       sentence and table they held. Related work, Reproduce (item 121) and Links follow,
+       unnumbered. The references to a section by number follow.
+     - Section 5 gives the model collection's link and one line per repo in it: the repaired model,
+       the repair parameters, each unrepaired adapter with its data, recipe and seed, and the Space.
+       The Space's line says what the public page holds of the outputs: a few examples for each
+       variant, language and safety prompt set of the final split, each cut to its first words and
+       marked, whatever its label, and no more of any output than that cut. Section 6 gives the
+       data collection's link and one line per dataset (the logs, the translated prompts, the raw
+       completions), then the repair parameters, which sit in the model collection and are data a
+       reader needs. Each line says what the repo is, its access and the reason for that access. The
+       lists are built from the plan of `lift publish collections` and configs/publish.yaml, not
+       typed.
+     - Both sections say what "gated" means here: automatic approval, so a reader logs in to Hugging
+       Face, accepts the terms and has access at once, as with Tiny Aya Global itself (the Hub
+       reports `gated: auto` for it, Nov 15). No access changes. A repo set to another access than
+       the one the text gives a reason for is refused, a manually approved one above all (item 110).
+     - Section 6 also says that every number can be checked from public files alone: the sources
+       file, the logs dataset, the configs and the script of item 121.
+     - Section 2 opens with one sentence that shows the three tools as one chain: CuratorKIT builds
+       the training sets, the adapters are trained on them, SafeTune repairs an adapter, and
+       AuditKIT records every reported rate. The review found no sentence that showed them as one
+       connected system. The sentence points only at what is public: the adapters and the repaired
+       model (section 5) and AuditKIT's redacted records (the logs dataset, section 6).
+     - The training sets are not named as an artifact: they are not published (item 118). Their line
+       in section 6, and the words in section 2 that say where CuratorKIT's files are published, are
+       written and appear once the data collection lists the dataset.
+     - The write-up stays the repository's README. Item 96 gave "the organisers accept a README"
+       with the Nov 3 answer quoted above it. On Nov 14 the organisers confirmed on Discord that an
+       HTML article, or a markdown GitHub README or HF model card, counts as the article.
+     No number, label or analysis changes.
+
+118. **The training sets can be staged with CuratorKIT's files, but are not published: the scan of every
+     upload refuses two of the three.** The review found CuratorKIT's output in no repo, public or gated,
+     although the article says its manifest, rejected rows and provenance are kept. The rules ask for
+     every dataset to be public, and CuratorKIT's files are what shows the three Lexsi tools as one chain
+     (CuratorKIT's training sets, the adapters, SafeTune's repairs, AuditKIT's record).
+     - `lift publish datasets --only sft` stages `lift-hindi-sft` (configs/publish.yaml `repos.sft`,
+       public): one folder per training set, aya/dedup, indicalign/dedup and indicalign/raw, each with
+       sft_messages.jsonl, CuratorKIT's manifest.json, rejected.jsonl and lexsi_provenance.json, our
+       summary of its run and selection.json, and data/sft/report.json above them. The card
+       (hf/templates/sft_card.md) takes its counts and hashes from the staged files and the train
+       manifests. It gives the licences (the Aya Dataset rows Apache-2.0; the IndicAlign `Dolly_T` rows
+       CC-BY-SA-3.0, as translations of databricks-dolly-15k: item 22) and says the rows are training
+       data from public datasets, not model outputs. It also says that CuratorKIT's files are those
+       of the last build, which ran once more after the first adapters had trained and gave the same
+       rows and the same sha256 (item 67).
+     - The guard: the published rows must be exactly the rows the adapters were trained on. A file is
+       staged only while its sha256 is the `data_sha256` its training runs recorded (the `lift train`
+       manifests). Every registered adapter must have such a run, under its name and the adapter hash
+       the registry pins, and the build's own records (selection.json, report.json) must agree.
+       Anything else refuses, names the file and leaves nothing staged. On Nov 15 the three files (677,
+       3,000 and 3,000 rows) hash to what all seven manifests recorded.
+     - The scan: the staged folder goes through the public-text scan like every public upload. It fails
+       on indicalign/dedup/sft_messages.jsonl and indicalign/raw/sft_messages.jsonl. In each, one answer
+       of one row holds one of the scan's 60-character windows of a model output on the team's machine
+       (two windows, of 1,092,900 from 86,178 outputs). aya/dedup, CuratorKIT's files and the build's
+       reports pass. A fine-tuned model can repeat its training text, and the scan reads content, not
+       where a text came from. No exemption is made: the scan is unchanged, and nothing was uploaded.
+     - So the dataset is staged only when named. A plain `lift publish datasets` builds the other three
+       as before (every plan is checked before anything is sent, so this one would stop their upload),
+       and the data collection does not list it. Publishing it needs a person's decision on those two
+       rows.
+     No number, label or analysis changes.
+
+117. **The raw completions' card and access form say the gate is automatic.** Item 110 moved
+     `lift-raw-completions` to automatic approval, but the card's terms still said "Access is approved by
+     hand", and the prompt on the access form said "Access is granted by hand for safety research only".
+     The organisers may treat a manually gated repo as missing (item 110), and a visitor, or anyone
+     checking that the artifacts can be reached, reads the card and the form, not the Hub API's
+     `gated: auto`.
+     - hf/templates/raw_card.md and hf/templates/gate_raw.txt now say "Access is granted automatically
+       when you accept these terms while logged in to Hugging Face." The data is still meant for safety
+       research only, and the terms are unchanged (no redistribution, no training on the completions, a
+       few words quoted at most).
+     - A test reads the built card and its gate prompt for the new sentence, and for "by hand". The
+       copy on the Hub follows with the next upload of the raw completions
+       (`lift publish datasets --only raw --yes`).
+     - The same card listed a folder `auditkit/` of full AuditKIT records, and the upload's note named
+       them, but the dataset holds none: `lift.audit` writes a full record only when a run asks it to
+       keep the text, and outputs/ holds no such file. The card and the note now name the folder only
+       when the dataset holds such a record.
+     No number, label or analysis changes.
+
 ## Nov 14, 2026 (evening): preflight before the repo goes public
 
 116. **Commits made from Claude's workspace are re-attributed to Knull.** 97 commits, from the Nov 3

@@ -62,6 +62,174 @@
    "value": 700
   },
   {
+   "file": "outputs/manifests/train-20261108T234236Z-bf1e37.json",
+   "pointer": "/n_rows",
+   "shown": "677",
+   "value": 677
+  },
+  {
+   "file": "outputs/manifests/train-20261108T234236Z-bf1e37.json",
+   "pointer": "/n_rows_trained",
+   "shown": "677",
+   "value": 677
+  },
+  {
+   "file": "outputs/manifests/train-20261108T234236Z-bf1e37.json",
+   "pointer": "/recipe",
+   "shown": "standard",
+   "value": "standard"
+  },
+  {
+   "file": "outputs/manifests/train-20261108T234236Z-bf1e37.json",
+   "pointer": "/seed",
+   "shown": "1",
+   "value": 1
+  },
+  {
+   "file": "outputs/manifests/train-20261110T113551Z-5661b8.json",
+   "pointer": "/n_rows",
+   "shown": "677",
+   "value": 677
+  },
+  {
+   "file": "outputs/manifests/train-20261110T113551Z-5661b8.json",
+   "pointer": "/n_rows_trained",
+   "shown": "677",
+   "value": 677
+  },
+  {
+   "file": "outputs/manifests/train-20261110T113551Z-5661b8.json",
+   "pointer": "/recipe",
+   "shown": "standard",
+   "value": "standard"
+  },
+  {
+   "file": "outputs/manifests/train-20261110T113551Z-5661b8.json",
+   "pointer": "/seed",
+   "shown": "2",
+   "value": 2
+  },
+  {
+   "file": "outputs/manifests/train-20261110T115207Z-0e9df3.json",
+   "pointer": "/n_rows",
+   "shown": "677",
+   "value": 677
+  },
+  {
+   "file": "outputs/manifests/train-20261110T115207Z-0e9df3.json",
+   "pointer": "/n_rows_trained",
+   "shown": "677",
+   "value": 677
+  },
+  {
+   "file": "outputs/manifests/train-20261110T115207Z-0e9df3.json",
+   "pointer": "/recipe",
+   "shown": "standard",
+   "value": "standard"
+  },
+  {
+   "file": "outputs/manifests/train-20261110T115207Z-0e9df3.json",
+   "pointer": "/seed",
+   "shown": "3",
+   "value": 3
+  },
+  {
+   "file": "outputs/manifests/train-20261108T235929Z-f95920.json",
+   "pointer": "/n_rows",
+   "shown": "3,000",
+   "value": 3000
+  },
+  {
+   "file": "outputs/manifests/train-20261108T235929Z-f95920.json",
+   "pointer": "/n_rows_trained",
+   "shown": "2,999",
+   "value": 2999
+  },
+  {
+   "file": "outputs/manifests/train-20261108T235929Z-f95920.json",
+   "pointer": "/recipe",
+   "shown": "standard",
+   "value": "standard"
+  },
+  {
+   "file": "outputs/manifests/train-20261108T235929Z-f95920.json",
+   "pointer": "/seed",
+   "shown": "1",
+   "value": 1
+  },
+  {
+   "file": "outputs/manifests/train-20261110T120756Z-c9055f.json",
+   "pointer": "/n_rows",
+   "shown": "3,000",
+   "value": 3000
+  },
+  {
+   "file": "outputs/manifests/train-20261110T120756Z-c9055f.json",
+   "pointer": "/n_rows_trained",
+   "shown": "2,999",
+   "value": 2999
+  },
+  {
+   "file": "outputs/manifests/train-20261110T120756Z-c9055f.json",
+   "pointer": "/recipe",
+   "shown": "standard",
+   "value": "standard"
+  },
+  {
+   "file": "outputs/manifests/train-20261110T120756Z-c9055f.json",
+   "pointer": "/seed",
+   "shown": "2",
+   "value": 2
+  },
+  {
+   "file": "outputs/manifests/train-20261110T131032Z-296652.json",
+   "pointer": "/n_rows",
+   "shown": "3,000",
+   "value": 3000
+  },
+  {
+   "file": "outputs/manifests/train-20261110T131032Z-296652.json",
+   "pointer": "/n_rows_trained",
+   "shown": "2,999",
+   "value": 2999
+  },
+  {
+   "file": "outputs/manifests/train-20261110T131032Z-296652.json",
+   "pointer": "/recipe",
+   "shown": "standard",
+   "value": "standard"
+  },
+  {
+   "file": "outputs/manifests/train-20261110T131032Z-296652.json",
+   "pointer": "/seed",
+   "shown": "3",
+   "value": 3
+  },
+  {
+   "file": "outputs/manifests/train-20261109T010051Z-bf38d9.json",
+   "pointer": "/n_rows",
+   "shown": "3,000",
+   "value": 3000
+  },
+  {
+   "file": "outputs/manifests/train-20261109T010051Z-bf38d9.json",
+   "pointer": "/n_rows_trained",
+   "shown": "2,997",
+   "value": 2997
+  },
+  {
+   "file": "outputs/manifests/train-20261109T010051Z-bf38d9.json",
+   "pointer": "/recipe",
+   "shown": "stress",
+   "value": "stress"
+  },
+  {
+   "file": "outputs/manifests/train-20261109T010051Z-bf38d9.json",
+   "pointer": "/seed",
+   "shown": "1",
+   "value": 1
+  },
+  {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/primary_judge",
    "shown": "Qwen/Qwen3Guard-Gen-4B@6ec42827da0c1ff11e7a49dc269d2e810d27e108#rules-a5016f6a#bf16#strict",
