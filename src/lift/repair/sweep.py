@@ -173,11 +173,13 @@ def gpu(adapter: str, *, families: Sequence[str], device: str, judge_device: str
     from lift.manifest import finish_run, start_run
 
     run_dtype = dtype or config.get("generation.dtype")
+    # The settings first: a refusal here (a CAST setting with no fitted artifact) needs no GPU stack, and
+    # resolving the judge's device below imports torch.
+    chosen = rs.settings(families)
+    specs = rs.specs_for(adapter, chosen)
     judge_device = _judge_device(judge_device)
     # The devices the stages hold: run-dev's judge takes its own GPU only when it is local and elsewhere.
     devices = len({device, judge_device}) if judge_dir("primary") == "qwen3guard" else 1
-    chosen = rs.settings(families)
-    specs = rs.specs_for(adapter, chosen)
     outcome = rs.register(specs)
     log.info("registry: %s", ", ".join(f"{k} {v}" for k, v in outcome.items()))
     state = read_state(adapter)

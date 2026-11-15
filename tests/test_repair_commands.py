@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 
 import pytest
 
@@ -623,6 +624,21 @@ def test_sweep_refuses_cast_without_its_artifact(registry, capsys):
     view["models"]["global"]["revision"] = "e" * 40
     assert cli.main(["sweep", "--adapter", ADAPTER, "--repairs", "cast"]) == 2
     assert "lift fit-cast" in capsys.readouterr().err
+
+
+def test_sweep_checks_its_settings_before_it_needs_the_gpu_stack(registry, capsys, monkeypatch):
+    """The light install has no torch. The sweep's settings are checked before the judge's device is
+    resolved (which imports torch), so the refusal above is the same on a machine without the GPU stack;
+    a sweep that has nothing to refuse still stops there, before it registers or runs anything."""
+    monkeypatch.setitem(sys.modules, "torch", None)   # `import torch` raises ImportError from here on
+    view = config.load("project")
+    view["models"]["global"]["revision"] = "e" * 40
+    assert cli.main(["sweep", "--adapter", ADAPTER, "--repairs", "cast"]) == 2
+    assert "lift fit-cast" in capsys.readouterr().err
+    before = registry.read_text(encoding="utf-8")
+    with pytest.raises(ImportError):
+        cli.main(["sweep", "--adapter", ADAPTER, "--repairs", "wiseft"])
+    assert registry.read_text(encoding="utf-8") == before and not sweep.state_path(ADAPTER).exists()
 
 
 def test_read_scores_names_every_missing_input_with_its_remedy(registry):
