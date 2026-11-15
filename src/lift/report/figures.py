@@ -2,11 +2,15 @@
 (the ``report`` extra); without it no figure is drawn and the command says so.
 
 - heatmap_harmful.png and heatmap_overrefusal.png: harmful rate (harmful set) and hard-benign refusal rate
-  per language (columns) for stock, the adapter, the other adapters described (the Gate 1 pick and the
-  candidate not picked, docs/decisions.md 81) and every frozen family (rows, pooled over seeds). A cell
-  that was not run is blank and labelled "not run".
+  per language (columns, the target language first) for stock, every adapter described and every frozen
+  family (rows, each pooled over its seeds). The adapters: the Gate 1 pick and the candidate not picked
+  (docs/decisions.md 81) when another adapter carries the repair comparison, then the adapter the repairs
+  are applied to, directly above them; a line under the plot says which rows are its repairs. A cell that
+  was not run is blank and labelled "not run". A cell's number is written in near-black or in white, by
+  the luminance of the cell's colour (``_ink_on``).
 - adapters_by_language.png: the harmful rate of stock and of every adapter in each language, final split
-  (grouped columns; an adapter's level is drawn only when every seed was run).
+  (grouped columns; an adapter's level is drawn only when every seed was run). The legend says what each
+  adapter is (``KIND_LABELS``).
 - tradeoff_dev.png: the safety-utility trade-off of every seed-1 dev setting from selection.json's table:
   harmful rate against win rate, with the win-rate floor, parity, and stock's and the adapter's harmful
   rates drawn in, and over-refusal increase against Belebele-hi drop with their limits; the region each
@@ -17,10 +21,15 @@
   loss, the half-gain line and the full adapter marked, stock's and the adapter's harmful rates, and a
   setting far below stock's loss drawn at the left edge with its share written out; a setting that met
   every condition of the secondary rule is filled.
+- forest_primary.png: the primary endpoint (drift, repair) per seed and pooled, with 95% intervals. An
+  effect with one seed has one row, named by the seed: its pooled estimate is that seed's own.
 
-Names are placed so they sit on no other name or point (``_label_points``); settings on one spot share a
-name.
-- forest_primary.png: the primary endpoint (drift, repair) per seed and pooled, with 95% intervals.
+Names. Every figure names a variant as the write-up does, from its id (``plain_name``): "stock", "Aya
+adapter (standard)", "stress adapter", "WiSE-FT, lambda = 0.25" (written with the Greek letter). On a
+point of a trade-off figure a setting has its family's name and its strength (``short_name``: "WiSE-FT
+0.25"), and the legend says what that number is. An id outside the naming scheme of configs/variants.yaml
+is written as it is. In the trade-off figures names are placed so they sit on no other name or point
+(``_label_points``); settings on one spot share a name.
 
 Colours: three categorical hues (blue, orange, aqua) that stay apart under the common colour-vision
 deficiencies, always in this order and tied to what they stand for (a repair family, an adapter's role),
@@ -32,26 +41,101 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from lift import config
 from lift.paths import figures_dir, metrics_dir
+from lift.repair import settings as repair_settings
 from lift.schemas import LANGS
 
 log = logging.getLogger("lift.report")
 
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 REFERENCE, INK, MUTED, GRID, SURFACE = "#8a8983", "#0b0b0b", "#52514e", "#e6e5e1", "#fcfcfb"
+WHITE = "#ffffff"
 FAMILY_COLOURS = {"wiseft": BLUE, "resta": ORANGE, "cast": AQUA}
 KIND_COLOURS = {"standard": BLUE, "candidate": ORANGE, "adapter": AQUA}
-KIND_LABELS = {
-    "standard": "standard recipe (Gate 1 pick)",
-    "candidate": "candidate not picked (exploratory)",
-    "adapter": "adapter of the repair comparison",
+KIND_LABELS = {  # what each adapter is, in the write-up's words (its naming key)
+    "standard": "the pre-registered pick",
+    "candidate": "the data set not picked (exploratory)",
+    "adapter": "carries the repair comparison",
 }
 LANG_LABELS = {"en": "English", "hi": "Hindi", "zh": "Chinese", "es": "Spanish", "ar": "Arabic", "th": "Thai"}
+
+# The names the write-up gives the variants, read from their ids (the naming scheme of
+# configs/variants.yaml: adapter-{candidate}-{std|stress}-s{seed}, and {setting}-{adapter} for a repair).
+CANDIDATE_NAMES = {"aya": "Aya", "indicalign": "IndicAlign"}  # a candidate not listed keeps its key
+_ADAPTER = re.compile(r"adapter-(?P<candidate>.+)-(?P<recipe>std|stress)-s\d+")
+LAMBDA, ALPHA = chr(0x3BB), chr(0x3B1)  # the Greek letters the write-up writes the two strengths with
+# Repair method -> (its name on a point of a trade-off figure, before the strength; its name in full,
+# around the strength). "Always on" is CAST with its gate left on for every prompt.
+METHOD_NAMES = {
+    "wiseft": ("WiSE-FT", "WiSE-FT, " + LAMBDA + " = {}"),
+    "resta": ("ReSta", "ReSta, " + ALPHA + " = {}"),
+    "cast": ("CAST", "CAST, strength {}"),
+    "cast_always": ("CAST always on", "CAST always on, strength {}"),
+}
+# What the legend of a trade-off figure calls a family: its name and what the number beside a point is.
+FAMILY_NAMES = {"wiseft": f"WiSE-FT ({LAMBDA})", "resta": f"ReSta ({ALPHA})", "cast": "CAST (strength)"}
+
+
+def _setting(variant: str) -> tuple[str, str] | None:
+    """(the method, the strength with the digits the id has) of a repair setting's id; None for any other
+    id."""
+    try:
+        setting, _adapter = repair_settings.parse_name(variant)
+    except ValueError:
+        return None
+    return setting.method, f"{setting.value:.{repair_settings.DIGITS[setting.method]}f}"
+
+
+def plain_name(variant: str) -> str:
+    """The name the write-up gives a variant, from its id: "Aya adapter (standard)" for an adapter of the
+    standard recipe, "stress adapter" for the stress recipe's (the recipe trains one candidate,
+    configs/train.yaml ``stress.candidate``; a stress adapter of another candidate is named with it),
+    "WiSE-FT, lambda = 0.25", "ReSta, alpha = 0.10" (with the Greek letters) and "CAST, strength 0.5" for
+    a repair setting. The seed is no part of the name. "stock", and an id outside the naming scheme, is
+    returned as it is."""
+    setting = _setting(variant)
+    if setting is not None:
+        method, strength = setting
+        return METHOD_NAMES[method][1].format(strength)
+    m = _ADAPTER.fullmatch(variant)
+    if m is None:
+        return variant
+    candidate = CANDIDATE_NAMES.get(m["candidate"], m["candidate"])
+    if m["recipe"] != "stress":
+        return f"{candidate} adapter (standard)"
+    own = m["candidate"] == config.get("stress.candidate", None, name="train")
+    return "stress adapter" if own else f"{candidate} stress adapter"
+
+
+def short_name(variant: str) -> str:
+    """A repair setting on a point of a trade-off figure: its family's name and its strength ("WiSE-FT
+    0.25", "CAST 0.5", "CAST always on 1.0"); the legend says what the number is in each family. Any other
+    id keeps its tag, the id up to the adapter's name."""
+    setting = _setting(variant)
+    if setting is None:
+        return variant.split("-adapter-")[0]
+    method, strength = setting
+    return f"{METHOD_NAMES[method][0]} {strength}"
+
+
+def _row_names(rows: Sequence[tuple[str, Sequence[str]]]) -> list[str]:
+    """The name of each row of a figure, a row being (its role, the variants it pools: the seeds of one
+    adapter or of one frozen setting): the plain name its variants share. A row whose variants share no
+    name, or whose name another row has too, keeps its first id; an empty row keeps its role."""
+    names = []
+    for role, variants in rows:
+        shared = {plain_name(v) for v in variants}
+        names.append(shared.pop() if len(shared) == 1 else variants[0] if variants else role)
+    return [
+        name if names.count(name) == 1 or not variants else variants[0]
+        for name, (_role, variants) in zip(names, rows, strict=True)
+    ]
 
 
 def _plt() -> Any:
@@ -71,26 +155,74 @@ def _rate(
     return rate(cells, names, set_name, lang, key)
 
 
+# A fill darker than this takes white text, a lighter one near-black. The two usual measures of text
+# contrast change ink on a red fill at a relative luminance of about 0.18 (WCAG 2's ratio) and of about
+# 0.36 (APCA); this is between the two, and leaves the ink chosen a contrast ratio above 3:1 on any fill.
+LIGHT_FILL = 0.27
+
+
+def _luminance(colour: Sequence[float]) -> float:
+    """The relative luminance (0 black, 1 white) of an sRGB colour given as channels in 0-1."""
+
+    def linear(c: float) -> float:
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (linear(float(c)) for c in colour[:3])
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _ink_on(fill: Sequence[float]) -> str:
+    """The ink for text written on a fill: near-black on a light fill, white on a dark one, by the fill's
+    luminance (``LIGHT_FILL``)."""
+    return INK if _luminance(fill) >= LIGHT_FILL else WHITE
+
+
+def _repairs_note(
+    roles: Mapping[str, Any], repairs: Sequence[tuple[str, Sequence[str]]], adapter: str
+) -> str:
+    """The line under a heatmap that says which rows are repairs, and of which adapter (``adapter``, the
+    name of the row above them). Empty when there is no repair row, or when a repair's id does not name
+    one of the adapter's seeds as the adapter it is applied to: nothing is said that the ids do not say."""
+    seeds = set(roles["adapter"].values())
+    try:
+        applied = {repair_settings.parse_name(v)[1] for _family, variants in repairs for v in variants}
+    except ValueError:
+        return ""
+    if not applied or not applied <= seeds:
+        return ""
+    the = "" if adapter in seeds else "the "  # an id stands without an article
+    if len(repairs) == 1:
+        return f"The last row is {the}{adapter} with the frozen repair applied."
+    return f"The last {len(repairs)} rows are {the}{adapter} with each frozen repair applied."
+
+
 def heatmap(stats: Mapping[str, Any], set_name: str, key: str, title: str, path: Path) -> Path:
     import numpy as np
 
     plt = _plt()
     roles = stats["roles"]
-    rows = [("stock", ["stock"]), ("adapter", list(roles["adapter"].values()))]
+    # Stock, the adapters, the frozen repairs. The adapter the repairs are applied to is the last of the
+    # adapters, so that it sits directly above them.
+    rows: list[tuple[str, list[str]]] = [("stock", ["stock"])]
     if roles.get("standard"):
         rows.append(("Gate 1 pick", list(roles["standard"].values())))
     rows += [
-        (f"not picked: {name}", list(by_seed.values()))
-        for name, by_seed in (roles.get("candidates") or {}).items()
+        ("candidate not picked", list(by_seed.values()))
+        for by_seed in (roles.get("candidates") or {}).values()
     ]
-    rows += [(fam, list(by_seed.values())) for fam, by_seed in roles["families"].items()]
-    data = np.full((len(rows), len(LANGS)), np.nan)
-    for i, (_label, names) in enumerate(rows):
-        for j, lang in enumerate(LANGS):
-            v = _rate(stats["cells"], names, set_name, lang, key)
+    rows.append(("adapter", list(roles["adapter"].values())))
+    repairs = [(family, list(by_seed.values())) for family, by_seed in roles["families"].items()]
+    rows += repairs
+    names = _row_names(rows)
+    target = str(config.get("languages.target"))
+    langs = [target] + [lang for lang in LANGS if lang != target]
+    data = np.full((len(rows), len(langs)), np.nan)
+    for i, (_role, variants) in enumerate(rows):
+        for j, lang in enumerate(langs):
+            v = _rate(stats["cells"], variants, set_name, lang, key)
             if v is not None:
                 data[i, j] = 100 * v
-    fig, ax = plt.subplots(figsize=(1.2 * len(LANGS) + 2, 0.6 * len(rows) + 1.5))
+    fig, ax = plt.subplots(figsize=(1.2 * len(langs) + 2, 0.6 * len(rows) + 1.5))
     im = ax.imshow(
         np.ma.masked_invalid(data),
         cmap="Reds",
@@ -98,18 +230,24 @@ def heatmap(stats: Mapping[str, Any], set_name: str, key: str, title: str, path:
         vmax=max(1.0, float(np.nanmax(data)) if np.isfinite(data).any() else 1.0),
     )
     for i in range(len(rows)):
-        for j in range(len(LANGS)):
+        for j in range(len(langs)):
+            empty = bool(np.isnan(data[i, j]))
             ax.text(
                 j,
                 i,
-                "not run" if np.isnan(data[i, j]) else f"{data[i, j]:.1f}",
+                "not run" if empty else f"{data[i, j]:.1f}",
                 ha="center",
                 va="center",
-                fontsize=8,
+                fontsize=9,
+                # An empty cell shows the white axes; a number sits on its cell's colour.
+                color=INK if empty else _ink_on(im.cmap(im.norm(data[i, j]))),
             )
-    ax.set_xticks(range(len(LANGS)), LANGS)
-    ax.set_yticks(range(len(rows)), [r[0] for r in rows])
+    ax.set_xticks(range(len(langs)), [LANG_LABELS.get(lang, lang) for lang in langs])
+    ax.set_yticks(range(len(rows)), names)
     ax.set_title(title)
+    note = _repairs_note(roles, repairs, names[len(rows) - len(repairs) - 1])
+    if note:
+        ax.set_xlabel(note, fontsize=8, color=MUTED, labelpad=8)
     fig.colorbar(im, ax=ax, label="%")
     fig.tight_layout()
     fig.savefig(path, dpi=150)
@@ -247,8 +385,8 @@ def _allowed(ax: Any, *, x: tuple[float | None, float | None], y: tuple[float | 
 
 
 def _family_legend(fig_or_ax: Any, families: Sequence[str], **where: Any) -> None:
-    """One filled marker per repair family: the fill of a point says whether it met the rule, so the legend
-    shows the hue only."""
+    """One filled marker per repair family, named as the write-up names it, with what the number beside
+    its points is: the fill of a point says whether it met the rule, so the legend shows the hue only."""
     from matplotlib.lines import Line2D
 
     handles = [
@@ -260,7 +398,7 @@ def _family_legend(fig_or_ax: Any, families: Sequence[str], **where: Any) -> Non
             markersize=7,
             markerfacecolor=FAMILY_COLOURS.get(f, REFERENCE),
             markeredgecolor=FAMILY_COLOURS.get(f, REFERENCE),
-            label=f,
+            label=FAMILY_NAMES.get(f, f),
         )
         for f in families
     ]
@@ -287,9 +425,11 @@ def adapters_by_language(stats: Mapping[str, Any], path: Path) -> Path | None:
     target = str(config.get("languages.target"))
     langs = [target] + [lang for lang in LANGS if lang != target]
     order = [k for kind in ("standard", "candidate", "adapter") for k in groups if k[0] == kind]
+    names = _row_names([(name, [name]) for _kind, name in order])
     series = [("stock", REFERENCE, stock)]
     series += [
-        (f"{name}: {KIND_LABELS[kind]}", KIND_COLOURS[kind], groups[(kind, name)]) for kind, name in order
+        (f"{shown}: {KIND_LABELS[kind]}", KIND_COLOURS[kind], groups[(kind, name)])
+        for shown, (kind, name) in zip(names, order, strict=True)
     ]
     width = 0.8 / len(series)
     fig, ax = plt.subplots(figsize=(10.5, 5.2), facecolor=SURFACE)
@@ -364,7 +504,7 @@ def tradeoff_heldout(secondary: Mapping[str, Any] | None, path: Path) -> Path | 
             linewidths=2,
             zorder=3,
         )
-        tag = r["name"].split("-adapter-")[0]
+        tag = short_name(r["name"])
         named.append((x, y, f"{tag} ({share:.0f}%)" if off else tag))
     for at, text in ((0.0, "stock's loss"), (floor, "half of the gain"), (100.0, "the full adapter")):
         _reference_line(ax, at, text, vertical=True)
@@ -416,7 +556,7 @@ def tradeoff(selection: Mapping[str, Any] | None, path: Path) -> Path | None:
         if family not in families:
             families.append(family)
         look = {"s": 60, "edgecolors": c, "facecolors": c if r.get("eligible") else "none", "linewidths": 2}
-        tag = r["name"].split("-adapter-")[0]
+        tag = short_name(r["name"])
         p1 = (100 * r["win_rate"], 100 * r["harmful_hi"])
         p2 = (100 * r["overrefusal_increase"], 100 * r["belebele_drop"])
         a1.scatter(*p1, zorder=3, **look)
@@ -480,17 +620,18 @@ def forest(stats: Mapping[str, Any], path: Path) -> Path | None:
     labels, est, lo, hi = [], [], [], []
     for kind in ("drift", "repair"):
         e = stats["primary"][kind]
-        for r in e.get("per_seed", []):
-            labels.append(f"{kind} seed {r['seed']}")
+        seeds = list(e.get("per_seed", []))
+        rows = [(f"{kind} seed {r['seed']}", r) for r in seeds]
+        pooled = e.get("pooled")
+        # With one seed the pooled estimate is that seed's own, interval and all (lift.stats.effects'
+        # pooled_effect resamples the same prompts the same way): one row, named by the seed, says both.
+        if pooled and not (len(seeds) == 1 and all(pooled[k] == seeds[0][k] for k in ("est", "lo", "hi"))):
+            rows.append((f"{kind} pooled", pooled))
+        for label, r in rows:
+            labels.append(label)
             est.append(100 * r["est"])
             lo.append(100 * r["lo"])
             hi.append(100 * r["hi"])
-        if e.get("pooled"):
-            p = e["pooled"]
-            labels.append(f"{kind} pooled")
-            est.append(100 * p["est"])
-            lo.append(100 * p["lo"])
-            hi.append(100 * p["hi"])
     if not labels:
         return None
     fig, ax = plt.subplots(figsize=(7, 0.45 * len(labels) + 1.5))
@@ -504,6 +645,7 @@ def forest(stats: Mapping[str, Any], path: Path) -> Path | None:
     )
     ax.axvline(0, c="k", lw=1)
     ax.set_yticks(ys, labels)
+    ax.set_ylim(-0.5, len(labels) - 0.5)  # each row in the middle of its own band, however many there are
     ax.set_xlabel("difference in Hindi harmful rate (points), final split")
     ax.set_title("Primary endpoint: drift (adapter - stock) and repair (repair - adapter)")
     fig.tight_layout()
@@ -522,13 +664,17 @@ def draw_all(stats: Mapping[str, Any]) -> list[Path]:
     folder.mkdir(parents=True, exist_ok=True)
     out = [
         heatmap(
-            stats, "harmful", "harmful_rate", "Harmful rate, final split (%)", folder / "heatmap_harmful.png"
+            stats,
+            "harmful",
+            "harmful_rate",
+            "Harmful rate on harmful prompts, final split (%)",
+            folder / "heatmap_harmful.png",
         ),
         heatmap(
             stats,
             "hard_benign",
             "refusal_rate",
-            "Hard-benign refusal rate, final split (%)",
+            "Refusal rate on hard-benign prompts, final split (%)",
             folder / "heatmap_overrefusal.png",
         ),
     ]
