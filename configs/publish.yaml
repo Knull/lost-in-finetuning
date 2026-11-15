@@ -57,8 +57,9 @@ annotators: []
 # it is null the article points at the draft in the repo, and nothing is pending.
 safetune_issue_url: null
 # Full citations for the article's related-work entries, as markdown lines; null leaves a placeholder
-# in the article. Each checked against its arXiv page (the Lexsi article against lexsi.ai) on Nov 13.
-# Devkar et al. (2026), which the related-work section names, is not here yet: no paper found.
+# in the article. Each checked against its arXiv page (the Lexsi article against lexsi.ai) on Nov 13;
+# the seven added on Nov 15 (Deng, Hazra, Hsu, the two of Huang, Röttger, Yong) against arXiv's own
+# record of title and authors that day (docs/decisions.md item 130).
 references: |-
   References:
 
@@ -68,12 +69,19 @@ references: |-
   - S. Banerjee, S. Layek, P. Chatterjee, A. Mukherjee and R. Hazra (2025). Soteria: Language-Specific Functional Parameter Steering for Multilingual Safety Alignment. [arXiv:2502.11244](https://arxiv.org/abs/2502.11244)
   - R. Bhardwaj, D. D. Anh and S. Poria (2024). Language Models are Homer Simpson! Safety Re-Alignment of Fine-tuned Language Models through Task Arithmetic (ReSta). [arXiv:2402.11746](https://arxiv.org/abs/2402.11746)
   - J. Cui, W.-L. Chiang, I. Stoica and C.-J. Hsieh (2024). OR-Bench: An Over-Refusal Benchmark for Large Language Models. [arXiv:2405.20947](https://arxiv.org/abs/2405.20947)
+  - Y. Deng, W. Zhang, S. J. Pan and L. Bing (2023). Multilingual Jailbreak Challenges in Large Language Models. [arXiv:2310.06474](https://arxiv.org/abs/2310.06474)
   - W. Hawkins et al. (2026). The Heterogeneous Safety Impacts of Benign Multilingual Fine-Tuning. [arXiv:2606.28843](https://arxiv.org/abs/2606.28843)
+  - R. Hazra, S. Layek, S. Banerjee and S. Poria (2024). Safety Arithmetic: A Framework for Test-time Safety Alignment of Language Models by Steering Parameters and Activations. [arXiv:2406.11801](https://arxiv.org/abs/2406.11801)
+  - C.-Y. Hsu, Y.-L. Tsai, C.-H. Lin, P.-Y. Chen, C.-M. Yu and C.-Y. Huang (2024). Safe LoRA: the Silver Lining of Reducing Safety Risks when Fine-tuning Large Language Models. [arXiv:2405.16833](https://arxiv.org/abs/2405.16833)
+  - T. Huang, G. Bhattacharya, P. Joshi, J. Kimball and L. Liu (2024). Antidote: Post-fine-tuning Safety Alignment for Large Language Models against Harmful Fine-tuning. [arXiv:2408.09600](https://arxiv.org/abs/2408.09600)
+  - T. Huang, S. Hu, F. Ilhan, S. F. Tekin and L. Liu (2024). Harmful Fine-tuning Attacks and Defenses for Large Language Models: A Survey. [arXiv:2409.18169](https://arxiv.org/abs/2409.18169)
   - C. Ifebi, B. Kong and A. Mehrotra (2026). Minionese: Comprehensive Benchmark and Mechanistic Study of Multilingual LLM Safety. TAIGR workshop at ICML 2026. [arXiv:2607.10112](https://arxiv.org/abs/2607.10112)
   - B. W. Lee et al. (2024). Programming Refusal with Conditional Activation Steering (CAST). [arXiv:2409.05907](https://arxiv.org/abs/2409.05907)
   - Lexsi Labs (2026). [The Lexsi Alignment and Safety Stack: correcting Gemma-4-31B for multilingual and cybersecurity safety, in the weights](https://lexsi.ai/resources/articles/the-lexsi-alignment-and-safety-stack-correcting-gemma-4-31b-for-multilingual-and-cybersecurity-safety-in-the-weights-copy). Oct 8, 2026.
   - X. Qi et al. (2023). Fine-tuning Aligned Language Models Compromises Safety, Even When Users Do Not Intend To! [arXiv:2310.03693](https://arxiv.org/abs/2310.03693)
+  - P. Röttger, H. R. Kirk, B. Vidgen, G. Attanasio, F. Bianchi and D. Hovy (2023). XSTest: A Test Suite for Identifying Exaggerated Safety Behaviours in Large Language Models. [arXiv:2308.01263](https://arxiv.org/abs/2308.01263)
   - A. R. Salamanca et al., Cohere Labs (2026). Tiny Aya: Bridging Scale and Multilingual Depth. [arXiv:2603.11510](https://arxiv.org/abs/2603.11510)
   - E. V. Stein, D. Meier, T. Ruas, J. P. Wahle and B. Gipp (2026). BabelSteering: Multilingual Safety Alignment via English Steering Vectors. [arXiv:2608.16577](https://arxiv.org/abs/2608.16577)
   - X. Wang, M. Wang, Y. Liu, H. Schütze and B. Plank (2025). Refusal Direction is Universal Across Safety-Aligned Languages (PolyRefuse). [arXiv:2505.17306](https://arxiv.org/abs/2505.17306)
   - M. Wortsman et al. (2022). Robust fine-tuning of zero-shot models (WiSE-FT). [arXiv:2109.01903](https://arxiv.org/abs/2109.01903)
+  - Z.-X. Yong, C. Menghini and S. H. Bach (2023). Low-Resource Languages Jailbreak GPT-4. [arXiv:2310.02446](https://arxiv.org/abs/2310.02446)

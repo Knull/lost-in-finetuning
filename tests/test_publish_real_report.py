@@ -69,55 +69,121 @@ def test_the_article_reads_the_report_p07_writes(real_report):
         assert f"/tables/{name}/" in json.dumps([s["pointer"] for s in facts.sources]), name
     checks = _section(text, "What each check said")
     stress, aya, other = (f"`{x.format(1)}`" for x in (STRESS, A, OTHER))
-    assert (
-        f"- {stress} (stress recipe, carries the repair comparison). The usual checks: held-out loss better"
-        in checks
-    )
-    assert f"- {aya} (standard recipe, Gate 1's pick)." in checks
-    assert f"- {other} (standard recipe, the candidate Gate 1 did not pick, an exploratory arm)." in checks
-    line = {
-        x: next(row for row in checks.splitlines() if row.startswith(f"- {x}")) for x in (stress, aya, other)
+    # One column per adapter, in the naming key's order, headed by its plain name, what the row is and
+    # the seeds its numbers pool (decisions item 125): P07's rows give all of it.
+    table = {
+        cells[0]: cells[1:]
+        for cells in (
+            [c.strip() for c in row.strip().strip("|").split("|")]
+            for row in checks.splitlines()
+            if row.startswith("|") and not row.startswith("| ---")
+        )
     }
-    # The three stories of the fake study, each said from its interval and none typed:
-    # each with the same difference counting only outputs that trip no unclear flag (decisions item 93):
-    # none of this study's outputs trips one, so the two readings agree
-    intact = "counting only outputs that trip no unclear flag)"
-    assert f"Hindi harmful rate higher than stock's, over Gate 2's bar (also higher {intact}" in line[stress]
-    assert f"Hindi harmful rate higher than stock's, over Gate 2's bar (also higher {intact}" in line[other]
-    # aya: +20 points of hard-benign refusals on ten prompts, an interval that reaches zero: nothing is said
+    assert table[""] == [
+        "The Aya adapter (the pre-registered pick; seeds 1, 2, 3)",
+        "The IndicAlign adapter (not picked, exploratory; seeds 1, 2, 3)",
+        "The stress adapter (carries the repair comparison; seed 1)",
+    ]
+    # The three stories of the fake study, each said from its interval and none typed. The harmful rate
+    # with the same difference counting only outputs that trip no unclear flag (decisions item 93): none
+    # of this study's outputs trips one, so the two readings agree.
+    rate = table["Hindi harmful rate - stock"]
+    intact = table["... counting only outputs that trip no unclear flag"]
+    # aya: an interval that reaches zero on both readings: nothing is said of it
+    assert [cell.split(":")[0] for cell in rate] == ["no clear change", "higher", "higher"]
+    assert [cell.split(":")[0] for cell in intact] == ["no clear change", "higher", "higher"]
+    # aya: +20 points of hard-benign refusals on ten prompts, an interval that reaches zero
+    assert table["Hard-benign refusals - stock"][0].startswith("no clear change: ")
+    loss = table["Held-out loss - stock, nats/token (the usual pre-ship check)"]
+    assert all(cell.startswith("better: -") for cell in loss)
+    assert all(re.fullmatch(r"\w[\w ]*: [+-]\d+\.\d pp \[[+-]\d+\.\d, [+-]\d+\.\d\]", cell) for cell in rate)
+    assert table["Verdict (pre-registered)"] == [
+        "**retain** (no drift); not useful enough to ship (Gate 1)",
+        "no verdict (exploratory arm); not useful enough to ship (Gate 1)",
+        "**repair**; not useful enough to ship (Gate 1)",
+    ]
     assert (
-        f"no clear change in the Hindi harmful rate (also no clear change {intact}; no clear change in "
-        "refusals"
-    ) in line[aya]
-    assert all("held-out loss better than stock's" in row for row in line.values())
-    assert all("Gate 1: reject on usefulness" in row for row in line.values())
-    assert f"For {stress} and {other}, the held-out loss improved while the Hindi harmful rate rose" in checks
-    assert f"For {aya}" not in checks and "the lower harmful rate comes with" not in checks
-    words = checks.split("| Adapter (seed 1) |", 1)[0]
-    assert not re.search(r"\d\.\d", words)
-    assert "| Belebele-hi accuracy - stock |" in checks
-    verdicts = _section(text, "Verdicts")
+        "**In one line: the check teams already run, held-out loss, passed all three adapters; the safety "
+        "test failed the IndicAlign adapter and the stress adapter"
+    ) in checks
+    assert "The Aya adapter's" not in checks and "the lower harmful rate comes with" not in checks
+    # the paragraph under the table says which way each interval points and repeats none of its numbers
+    one_line = next(part for part in checks.split("\n\n") if part.startswith("**In one line"))
+    assert not re.search(r"\d\.\d", one_line)
+    assert "`adapter-" not in checks
+    # the table of every axis, with P07's own columns, is in the appendix under its heading
+    appendix = text.split(f"## {article.APPENDIX}\n", 1)[1]
+    every_axis = appendix.split("### Every adapter on every axis\n", 1)[1].split("\n### ", 1)[0]
+    assert "| Adapter (its seed-1 id) | Role |" in every_axis
+    # P07's own table has Gate 2's bar and the dev win rate, so the pointer to it says so
+    assert "| Meets Gate 2's bar |" in every_axis and "| Dev win rate vs stock (seed 1) |" in every_axis
+    assert (
+        "The full table, with Gate 2's bar and the dev win rate Gate 1 reads: [Every adapter on every axis]"
+        "(#every-adapter-on-every-axis); the report's reason for each verdict: [Verdicts as the report "
+        "records them](#verdicts-as-the-report-records-them)."
+    ) in checks
+    assert "| Belebele-hi accuracy - stock |" in every_axis
+    assert "| Belebele-hi accuracy - stock | Seeds |" not in checks
+    # the verdicts are the table's last row and have no lines of their own; Gate 1 is said under the
+    # table (decisions item 127)
+    assert "### Verdicts\n" not in text
+    assert "No adapter met Gate 1's bar, a seed-1 dev win rate of at least 55.0% against stock (" in checks
+    assert "so the pre-registration says **reject on usefulness** of each." in checks
+    recorded = appendix.split("### Verdicts as the report records them\n", 1)[1].split("\n### ", 1)[0]
     assert (
         f"- {stress} (stress recipe, carries the repair comparison): **repair**; Gate 1: **reject on"
-        in verdicts
+        in recorded
     )
     assert (
-        f"- {aya} (standard recipe, Gate 1's pick): **retain**; Gate 1: **reject on usefulness**." in verdicts
+        f"- {aya} (standard recipe, Gate 1's pick): **retain**; Gate 1: **reject on usefulness**." in recorded
     )
     assert (
         f"- {other} (standard recipe, the candidate Gate 1 did not pick, an exploratory arm): **no verdict**"
-        in verdicts
+        in recorded
     )
-    assert f'carried by {stress} (stress recipe): "the adapter" below' in text
+    assert '"The adapter" below is the stress adapter, which carries the repair comparison.' in text
+    # The lead and the naming key (decisions item 123) read the same rows, in plain names: the pick whose
+    # interval reaches zero, the candidate whose rise holds on both readings (so no "no clean drift
+    # case"), the stress adapter's drift beside its better loss, and no adapter over parity.
+    lead = text.split("## 1. Problem statement and approach", 1)[0]
+    assert (
+        "- **The standard recipe.** The pre-registered pick (Aya Dataset, three seeds) did not clearly "
+        "change the share of translated Hindi harmful prompts it answered harmfully ("
+    ) in lead
+    assert "The other data set (IndicAlign) raised the rate (" in lead
+    assert "), and also once outputs that trip [an unclear flag](#metrics-and-why) are set aside (" in lead
+    assert (
+        "- **The stress adapter drifts, and the usual pre-ship check misses it.** Its held-out loss beats "
+        "stock's ("
+    ) in lead
+    assert "- **Read with care.** One stress adapter, one seed. No adapter beat stock in pairwise" in lead
+    assert PENDING not in lead and "`adapter-" not in lead
+    key = text.split("**Names.**", 1)[1].split("### Metrics and why", 1)[0]
+    assert f"- **the stress adapter**: {stress}. The stress recipe on the IndicAlign `Dolly_T` " in key
+    assert f"- **the Aya adapter**: {aya}, `-s2`, `-s3`. The standard recipe on the Aya Dataset's" in key
+    assert "Hindi rows; the pre-registered pick." in key and f"`{WINNER}`" in key
     # The adapter lost to stock on the win rate, so that share is undefined and says so; the held-out
     # one is a number.
-    # "Restores safety" is read against stock (decisions.md 90): P07's table arrives with its sentence.
-    restored = " ".join(_section(text, "The frozen repair against stock per language").split())
-    assert "Is safety restored? Descriptively (paired by prompt" in restored
-    assert "on Hindi the frozen repair's harmful rate is " in restored and "| Hindi |" in restored
-    assert text.index("### The frozen repair against stock") < text.index("### Each repair against WiSE-FT")
-    assert f"- of the win-rate gain: {analysis.UNDEFINED_GAIN}" in text
-    assert re.search(r"- of the held-out-loss gain: \d+\.\d% \[", text)
+    # "Restores safety" is read against stock (decisions.md 90): P07's table arrives with its sentence,
+    # the sentence folded under the repair comparison with the one against WiSE-FT (decisions item 127),
+    # and the table in the appendix under P07's own title.
+    comparison = _section(text, "Repair comparison")
+    restored = " ".join(comparison.split(article.CONTRASTS_FOLDED, 1)[1].split("</details>", 1)[0].split())
+    assert "Descriptively (paired by prompt" in restored and "| Hindi |" not in restored
+    # Hindi's group opens the clause, or every row points one way and the clause says so
+    opens = r"the frozen repair's harmful rate is [a-z' ,]+? (in Hindi|in every language|in any language)"
+    assert re.search(opens, restored), restored
+    title = "The frozen repair against stock per language, final split (not pre-registered, descriptive)"
+    assert f"[the frozen repair against stock](#{article.anchor(title)})" in restored
+    assert "| Hindi |" in appendix.split(f"### {title}\n", 1)[1].split("\n### ", 1)[0]
+    # P07's contrast with WiSE-FT has no row in this report: its table is in the appendix as P07 wrote it,
+    # and the folded paragraph says nothing of it
+    assert "### Each repair against WiSE-FT attenuation" in appendix and "WiSE-FT" not in restored
+    usefulness = next(row for row in text.splitlines() if row.startswith("- **Usefulness.**"))
+    assert f"The share of the win-rate gain it keeps is {analysis.UNDEFINED_GAIN}." in usefulness
+    kept = r"On the final split the frozen repair('s gain over stock is| keeps) \d+\.\d% \["
+    assert re.search(kept, usefulness)
+    assert article.broken_links(text) == []
     # The judge's harmful label on benign prompts (decisions.md 95), from P07's own table of every cell:
     # stock's and the comparison adapter's (the verdict row names its seed-1 variant, as the cells do).
     cells = {(r["variant"], r["set"], r["lang"]): r for r in real_report["tables"]["cells"]["rows"]}
@@ -128,8 +194,27 @@ def test_the_article_reads_the_report_p07_writes(real_report):
     ]
     # the Limitations subsection ends where the next one ("Cost and ROI") starts
     limits = " ".join(re.split(r"\n#{2,3} ", text.split("### Limitations\n", 1)[1], maxsplit=1)[0].split())
-    assert f"it is on {rates[0]} of stock's answers and {rates[1]} of {stress}'s (" in limits
+    assert f"it is on {rates[0]} of stock's answers and {rates[1]} of the stress adapter's (" in limits
     assert f"), against {rates[2]} and {rates[3]} on the easy-benign ones." in limits
+    # The judge, the readings and the cost over P07's own tables (decisions items 128 and 130): the two
+    # sensitivity tables and the cost table are whole in the appendix, and the main text keeps the small
+    # table of drift and repair under the readings P07 wrote.
+    for heading in (
+        "Drift and repair under other readings, with p-values",
+        "Second judge and back-translation against the primary judge",
+        "Cost of the final evaluation",
+    ):
+        assert f"### {heading}\n" in appendix and f"](#{article.anchor(heading)})" in text
+    readings = _section(text, "Judge sensitivity")
+    assert "| Reading | Drift (adapter - stock) | Repair (repair - adapter) |" in readings
+    assert "| Harmful rate, Controversial counted as harmful (the primary endpoint) | " in readings
+    assert "| Refusal rate on the same harmful prompts | " in readings
+    assert "| p (bootstrap) |" not in readings and "| p (bootstrap) |" in appendix
+    # this report holds no validation round and no diagnosis: "Not run" says the second, without "P06"
+    assert "### Exploratory signatures" not in text
+    not_run = "The exploratory diagnosis (harm probes, the refusal direction and its ablation check) was not"
+    assert not_run in _section(text, "Not run")
+    assert "P06" not in text.split(f"## {article.APPENDIX}\n", 1)[0]
 
 
 def test_the_model_card_and_the_logs_card_read_the_report_p07_writes(real_report, monkeypatch):

@@ -314,19 +314,30 @@ def test_the_article_says_both_selections_from_the_files_lift_select_writes(regi
     select.run_secondary(ADAPTER, reader=fake_reader(CASES["ties"]), heldout_reader=fake_heldout(nll))
     facts = Facts()
     said = article.dev_selection(facts)
-    assert said.startswith(
-        f"On seed-1 dev, 2 of the 10 settings met every condition of the rule. Its pick is "
-        f"`wiseft-l0.50-{ADAPTER}` (verdict **repair**), with a Hindi harmful rate of 13.5% against the "
-        "adapter's 30.0% and stock's 10.0%. Conditions not met, with the number of settings that missed "
-        "each: a lower harmful rate than the adapter's (8 settings)."
+    intro, pick, bullets = said.split("\n\n")
+    assert intro.startswith("Ten settings were tried on seed-1 dev prompts, of three families: WiSE-FT")
+    assert pick.startswith(
+        "**Two of the 10 settings met every condition, and the rule's pick among them is WiSE-FT at \u03bb = "
+        "0.50, which keeps half of the adapter's weight change** (verdict **repair**). On dev its Hindi "
+        "harmful rate was 13.5%, against the adapter's 30.0% and stock's 10.0%."
     )
-    assert f"`cast-m1.0-{ADAPTER}` for CAST (verdict **repair**)" in said
-    assert said.endswith(
-        f"1 of the 10 settings met every condition and the same rule picks `cast-m1.0-{ADAPTER}` (verdict "
-        "**repair**). The frozen winner keeps 33.3% of the adapter's held-out-loss gain on dev; the rule "
-        f"asks for 50.0%. `cast-m1.0-{ADAPTER}` keeps 100.0%."
+    assert pick.endswith(
+        "The condition that decided the comparison was a lower harmful rate than the adapter's, which 8 of "
+        "the 10 settings missed."
     )
-    files = {v["file"] for v in facts.sources}
+    assert (
+        "- **CAST.** Its frozen setting, CAST at strength 1.0, met every condition on dev too; the rule "
+        "picked WiSE-FT at \u03bb = 0.50 over it (the largest drop, ties to the cheaper repair)."
+    ) in bullets
+    assert bullets.endswith(
+        "1 of the 10 settings met every condition and the same rule picks CAST at strength 1.0 (verdict "
+        "**repair**). On dev the frozen setting keeps 33.3% of the adapter's held-out-loss gain; the rule "
+        "asks for 50.0%. CAST at strength 1.0 keeps 100.0%."
+    )
+    # no final report yet: nothing of the final split is said, and every number is of the two selection
+    # files (a setting's parameter is the registry's, where it is registered)
+    assert "final split" not in said
+    files = {v["file"] for v in facts.sources} - {"configs/variants.yaml"}
     assert files == {"outputs/metrics/selection.json", "outputs/metrics/selection_secondary.json"}
     # The secondary file of other dev numbers than the frozen selection's is refused, not quoted.
     select.run_secondary(ADAPTER, reader=fake_reader(CASES["largest"]), heldout_reader=fake_heldout(nll))

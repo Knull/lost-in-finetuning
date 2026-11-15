@@ -12,6 +12,10 @@ is in hf/article.sources.json. -->
 
 {{ in_short }}
 
+*pp = percentage points. Every interval in this write-up is a 95% interval, and every difference is computed before rounding.*
+
+{{ figure_heatmap_harmful }}
+
 ## 1. Problem statement and approach
 
 Fine-tuning a safety-tuned model on ordinary, harmless data can weaken its safety behaviour, even
@@ -20,31 +24,35 @@ held-out loss and a benchmark, do not look at safety at all. So a team that trai
 needs a cheap acceptance test before shipping it: keep the adapter as it is (retain), repair it
 without retraining (repair), or drop it (reject).
 
-We built that test and ran it on Hindi LoRA adapters of Tiny Aya Global, for the Lexsi AI Safety
+**Three questions, answered separately.** Does the adapter drift (its Hindi harmful rate against
+stock: {{ gate_2 }})? Is it useful (pairwise wins against stock, which Gate 1 reads, and the held-out
+loss)? Which cheap repair restores safety without over-refusing benign prompts, and does any beat
+simply scaling the adapter down (WiSE-FT)? One word would hide the answers, so the test gives one
+per axis: **retain** (no drift), **repair** (a repair met every condition of the selection rule on
+dev, then was scored once on the final split) or **reject** (none did), and, apart from that,
+whether the adapter is useful enough to ship. An adapter can be "retain" on safety and still fail
+Gate 1.
+
+We built that test and ran it on Hindi LoRA adapters of Tiny Aya Global for the Lexsi AI Safety
 and Alignment Hackathon, Track 2b, statement 6 (repairing safety drift without retraining). The
-inference-time repair, CAST, also addresses statement 8 (inference-time steering), and the
-multilingual design addresses Track 2a, statement 4.
+evaluation in six languages, with human-written Hindi prompts as a check, addresses
+Track 2a, statement 4. We also tested inference-time steering (CAST, statement 8),
+{{ cast_outcome }}.
 
-The adapters. Two Hindi instruction sets were candidates, the Hindi rows of the Aya Dataset and
-a sample of IndicAlign, each trained with one standard recipe. The pre-registered rule picks
-one of them as the adapter by its dev utility, never by its drift. A third adapter trains
-IndicAlign with a stress recipe (twice the learning rate, one more epoch, undeduplicated rows),
-planned for the case where the standard recipe does not drift, and labelled as a stress test:
-it then carries the repair comparison. The candidate the rule did not pick is evaluated on the
-final split as well, as an exploratory arm.
+**The adapters.** A LoRA adapter was trained with one standard recipe on each of two Hindi
+instruction sets, the Aya Dataset's Hindi rows and a sample of IndicAlign, over
+{{ standard_seeds }}. The pre-registered rule picks one of the two by dev usefulness, never by
+drift. A stress recipe ({{ stress_recipe }}, {{ stress_seeds }}) was pre-registered for the case
+where the standard recipe does not drift or no standard adapter passes Gate 1. {{ adapters_outcome }}
+The candidate not picked is reported as an exploratory arm.
 
-We asked three questions. Does an adapter drift on safety, in Hindi and in other languages?
-Which cheap post-hoc repair restores safety while keeping the adapter's gain and without
-over-refusing benign prompts? And does any repair beat simply scaling the adapter down?
-
-The test answers on separate axes, because one word hides them: whether the adapter drifts (its
-harmful rate against stock), whether it is useful (pairwise wins against stock, and the held-out
-loss), and what it costs in refusals of benign prompts.
-
-Every decision was pre-registered in the repository before any experimental run
-(`PREREGISTRATION.md`, the repository's README until this write-up took its place), and every
-later change is dated in `docs/decisions.md`. Repairs were chosen on dev prompts only; the
-final split was touched once, to score the frozen variants.
+**What was fixed in advance.** The design, every threshold and the selection rule were committed
+on Nov 3, before any experimental run, in `PREREGISTRATION.md` (then the repository's README;
+{{ prereg_frozen }}). Later changes are dated in `docs/decisions.md`. The two that touch the
+selection rule's usefulness floor came after the adapters' dev scores and before any sweep result
+was read; the second reading they add (held-out loss) freezes nothing{{ secondary_pick }}. The
+final split was used once, after the recipe was tagged ({{ frozen_tag }}), to score the frozen
+variants.
 
 ## 2. Hackathon repos used and their features
 
@@ -52,8 +60,8 @@ final split was touched once, to score the frozen variants.
   `messages` export, with its manifest, rejected rows and provenance kept{{ curatorkit_files }}.
 - **SafeTune** supplied all three repairs and the direction tools: `apply_wise_ft` (adapter
   attenuation), `apply_resta` (ReSta-A, DARE off), `fit_cast_condition`, `extract_caa_vectors`
-  and `CASTModel` (conditional activation steering), and `extract_refusal_direction` for the
-  exploratory diagnosis. We used only entry points its feature map badges as faithful. Its CAST
+  and `CASTModel` (conditional activation steering){{ diagnosis_tool }}. We used only entry points
+  its feature map badges as faithful. Its CAST
   fit holds every prompt's whole hidden-state sequence in memory, which killed our first fit; we
   patch that for the fit only, with a test that the fitted artifact is unchanged:
   {{ safetune_issue }}.
@@ -71,14 +79,15 @@ final split was touched once, to score the frozen variants.
 - **Tiny Aya Base** (`{{ base_id }}`, revision `{{ base_rev }}`): only the ReSta reference. The
   same licence as Global: CC-BY-NC-4.0 plus Cohere Labs' acceptable-use policy.
 - **{{ qwen_judge }}: a safety classifier (Apache-2.0), run on the native text. Its
-  "Controversial" label counts as harmful; the loose reading is a sensitivity analysis.
+  "Controversial" label counts as harmful (the strict reading); the loose reading, a sensitivity
+  analysis, makes a Controversial output a refusal or a benign answer by Qwen3Guard's own refusal flag.
 - **{{ frontier_judge }}: a frontier model prompted with our safety rubric
   (`configs/rubrics/safety_v1.md`), used through the provider's API under its terms of service.
   {{ utility_judge }}
 - {{ judge_roles }}
 - Which judge is primary was settled on the first validation round, before any final-split
-  number existed: the frontier judge would become primary only if its agreement with the native
-  readers exceeded Qwen3Guard's by more than {{ judge_rule }}.
+  number existed: the frontier judge would become primary only if it agreed with the native
+  readers at least {{ judge_rule }} more often than Qwen3Guard.
 - **GlotLID** (Apache-2.0 plus notices, per its card) for language identification{{ nllb }}.
 
 Everything derived from Tiny Aya (the adapters and the repaired model) is non-commercial.
@@ -139,118 +148,71 @@ with its public copy (see Reproduce, below).
 
 ## 7. Experiments run, findings and what else was tested
 
+{{ naming_key }}
+
 ### Metrics and why
 
 - **Harmful rate**, H/N, with an upper bound (H+U)/N that counts unclear outputs as harmful.
-  Every prompt stays in the denominator: judge failures and garbled or empty outputs are
-  unclear, never dropped.
-- **Refusal rate** on the same harmful prompts, beside the harmful rate: a lower harmful rate
-  can come from refusing more of everything.
-- **Over-refusal** on easy and hard benign prompts: a repair that refuses everything is not a
-  repair.
-- **Utility win rate** against stock on held-out Hindi instructions, judged pairwise in both
-  orders, and the share of the adapter's gain a repair keeps.
-- **Held-out loss**: the mean per-token negative log-likelihood of the reference answers to the
-  same held-out Hindi instructions. It is the check a team runs anyway, it needs no judge, and
-  it is the second reading of the adapter's gain.
+  Every prompt stays in the denominator. {{ unclear_flags }}
+- **Refusal rate** on the same harmful prompts, and **over-refusal** on easy and hard benign
+  prompts: a lower harmful rate can come from refusing more of everything.
+- **Usefulness**: the **utility win rate** against stock on held-out Hindi instructions, judged
+  pairwise in both orders, and the **held-out loss** of their reference answers (the mean per-token
+  negative log-likelihood), the check a team runs anyway, with no judge; a repair keeps a share of
+  the adapter's gain on each.
 - **Belebele** accuracy, as a capability check that needs no judge.
 
 The selection rule, run on seed-1 dev only, picked the setting with the largest drop in the
 Hindi harmful rate, subject to: Hindi hard-benign over-refusal within {{ rule_overrefusal }} of
 stock; at least {{ rule_gain }} of the adapter's win-rate gain kept; Belebele-hi within
-{{ rule_belebele }} of stock. Drops within {{ rule_tie }} of the best were ties, which went to
+{{ rule_belebele }} of stock{{ rule_drop }}. Drops within {{ rule_tie }} of the best were ties, which went to
 the cheaper repair. An adapter at or below parity with stock has no win-rate gain to keep: the
-floor is then the adapter's own win rate less {{ rule_tie }}, and a secondary selection applies
-the same rule with the gain read on held-out loss. The secondary selection is reported beside
-the primary one and freezes nothing (`docs/decisions.md` items 72 and 73, dated before any
-sweep result was read). Human labels are the ground truth for the judge: it had to reach
-{{ bar_agreement }} agreement or a Cohen's kappa of {{ bar_kappa }} with native readers. Whether
-it did is under "The judge against native readers", below.
+floor is then the adapter's own win rate less {{ rule_tie }}, and a secondary selection, which
+freezes nothing, applies the same rule with the gain read on held-out loss. Human labels are the
+ground truth for the judge: it had to reach {{ bar_agreement }} agreement or a Cohen's kappa of
+{{ bar_kappa }} with native readers, and in Hindi that check is Gate 1's other half, beside the
+win rate.
 
 ### What each check said
 
-Each adapter against stock on the final split, in words. A direction is said only where the
-95% interval excludes no change (for the win rate, parity); the table has the numbers.
+Each adapter against stock on the final split. A direction is said only where the 95% interval
+excludes no change (for the win rate, parity).
 
 {{ adapter_checks }}
 
-{{ table_adapters }}
-
-{{ figure_adapters_by_language }}
-
-### Verdicts
-
-{{ verdicts }}
-
 ### Primary endpoint: Hindi harmful rate, final split
 
-The repair comparison is carried by {{ comparison_adapter }}: "the adapter" below.
-Paired by prompt. The pooled effects use a bootstrap clustered by prompt id over the seeds that
-were run (drift: {{ drift_seeds }}; repair: {{ repair_seeds }}); each seed is shown
-below with McNemar's exact test.
+"The adapter" below is {{ comparison_adapter }}, which carries the repair comparison. Effects are
+paired by prompt, with a bootstrap clustered by prompt id (drift: {{ drift_seeds }}; repair:
+{{ repair_seeds }}).
 
 - **Drift** (adapter minus stock): {{ drift }}, {{ drift_p }}
 - **Repair** (frozen repair minus adapter): {{ repair }}, {{ repair_p }}
-- **Aya Red-teaming check**, drift: {{ redteam_drift }}; repair: {{ redteam_repair }}
+- **Aya Red-teaming check** (human-written Hindi prompts), drift: {{ redteam_drift }}; repair: {{ redteam_repair }}
 
-{{ table_per_seed }}
-
-{{ figure_forest_primary }}
+Each seed, with McNemar's exact test, and the effects as a figure: {{ see_per_seed }}.
 
 ### Per language
 
-{{ table_per_language }}
+Hindi is the primary endpoint. The secondary claims (Holm-corrected) are drift and repair in
+English and pooled over Chinese and Spanish, the transfer languages; the exploratory claims
+(Benjamini-Hochberg) are drift and repair in Chinese, Spanish, Arabic and Thai one by one.
+{{ claims }} The heatmap at the top shows the harmful rates, each adapter's seeds pooled (a repair
+is run on its adapter's seeds).
 
-{{ figure_heatmap_harmful }}
-
-Every adapter against stock, language by language (estimates with intervals; descriptive for the
-adapters outside the repair comparison):
-
-{{ table_adapter_drift }}
+{{ per_language }}
 
 ### Repair comparison
 
-Every repair family's frozen setting, against the adapter-scaling baseline (WiSE-FT). Each family's
-setting was chosen on seed-1 dev prompts.
-
 {{ dev_selection }}
 
-The dev settings against the rule's constraints:
+{{ dev_figures }}
 
-{{ figure_tradeoff_dev }}
-
-The same dev settings with the gain read on held-out loss, the secondary selection:
-
-{{ figure_tradeoff_dev_heldout }}
-
-{{ table_repair_comparison }}
-
-Share of the adapter's gain the frozen repair keeps on the final split:
-
-- of the win-rate gain: {{ utility_retained }}
-- of the held-out-loss gain: {{ heldout_retained }}
-
-{{ table_heldout }}{{ extra_tables }}
-
-### Transfer and exploratory languages
-
-Secondary claims (Holm-corrected):
-
-{{ table_secondary }}
-
-Exploratory claims (Benjamini-Hochberg):
-
-{{ table_exploratory }}
+{{ extra_tables }}
 
 ### What the repair costs
 
-{{ table_overrefusal }}
-
-{{ figure_heatmap_overrefusal }}
-
-{{ table_utility }}
-
-{{ table_belebele }}
+{{ repair_costs }}
 
 ### The judge against native readers
 
@@ -258,66 +220,44 @@ Exploratory claims (Benjamini-Hochberg):
 
 ### Judge sensitivity
 
-{{ table_judge_sensitivity }}
+{{ judge_sensitivity }}
 
-Drift and repair under other readings of the same outputs:
-
-{{ table_sensitivity_effects }}
-
-### Exploratory signatures
-
-These are descriptive, from one adapter. A signature is "consistent with" a mechanism; it does
-not show that the mechanism caused the drift.
-
-{{ table_signatures }}
-
-### Not run
+{{ signatures }}### Not run
 
 {{ not_run }}
 
 ### Limitations
 
-- Most prompts are machine translations. Native readers checked samples in Hindi, Chinese and
-  Spanish only; the Arabic and Thai prompts had no native check. {{ backtranslation_limit }}
-- A few adapters of one model, from two data sets, in one language. The study cannot establish
-  a general policy for which repair fits which kind of drift.
-- The stress recipe trains one seed by design, so where the stress adapter carries the repair
-  comparison its intervals are over prompts, not over training runs.
-- Usefulness is read two ways, a pairwise judge against stock and the held-out loss, and they
-  can disagree: a model can fit the references better and still be preferred less often. We
+- Most prompts are machine translations, and native readers checked samples of them in Hindi,
+  Chinese and Spanish only. The judge's precision differs by language: Hindi claims rest on its
+  validation against native readers ("The judge against native readers" above), the other languages
+  have fewer validated items, and Arabic and Thai none. {{ backtranslation_limit }}
+{{ human_written_limit }}- A few adapters of one model, from two data sets, in one language, and the stress recipe trains
+  one seed by design, so where the stress adapter carries the repair comparison its intervals are
+  over prompts, not over training runs. The study cannot establish a general policy for which
+  repair fits which kind of drift.
+- Usefulness is read two ways, the pairwise judge and the held-out loss, which can disagree; we
   report both and do not adjudicate.
-- The harmful rate is one automatic judge's strict reading, and the judge's "harmful" stands
-  whatever the output looks like: an output that repeats itself to the token cap counts as
-  harmful if the judge calls it unsafe. The claims are differences against stock under the same
-  judge; the sensitivity tables give the same differences on refusals, under the loose reading,
-  counting only outputs that trip no unclear flag, and under the second judge. The second
-  judge's provider declines to judge some harmful prompts whatever the answer; each of those
-  counts as unclear, and the table also gives its reading with those prompts left out on both
-  sides, and how many they are.
-- {{ judge_on_benign }}
-- The automatic judge's precision differs by language. Hindi claims rest on its validation
-  against native readers ("The judge against native readers" above); the other languages have
-  fewer validated items, and Arabic and Thai none.
+- The harmful rate is one judge's strict reading, whatever the output looks like: an output that
+  repeats itself to the token cap counts as harmful if the judge calls it unsafe. "Judge
+  sensitivity" gives the same differences under the other readings.
+- {{ judge_on_benign }}{{ readers_limit }}
 
 ### Cost and ROI
 
-{{ table_cost }}
+A full check-up of one adapter took {{ gpu_hours }} of GPU time: the seed-1 dev
+sweep{{ sweep_hours }}, then the final battery of stock, the seed-1 adapter and its seed-1 frozen
+repair. The final battery took {{ gpu_hours_variant }} per variant on average, over the variants in
+the cost table. Re-running safety
+fine-tuning would need a safety dataset in every language and a training run per adapter; the
+repairs here need no gradient step, and neither does the check-up. Tiny Aya derivatives are
+non-commercial, so we make no commercial claims.{{ notebook_runtime }}
 
-A full check-up of one adapter (the seed-1 dev sweep, then the final battery of stock, the seed-1
-adapter and its seed-1 frozen repair) took {{ gpu_hours }} of GPU time; the final battery took
-{{ gpu_hours_variant }} per variant on average. Run time of the acceptance-test notebook (default
-sample): {{ notebook_runtime }}. Re-running
-safety fine-tuning would need a safety dataset in every language and a training run per
-adapter; the repairs here need no gradient step. Tiny Aya derivatives are non-commercial, so we
-make no commercial claims.
+{{ cost_table }}
 
 ## 8. With more credits
 
-- Run the test on more adapters (other data sets and languages), so the choice of repair can be
-  tested as a policy rather than a single case, and more seeds of the stress recipe.
-- Native checks of every translated prompt in all six languages, and Arabic and Thai readers.
-- Judge every final output with a second frontier judge, not a sample.
-- Language-aware CAST, which we cut for time.
+{{ more_credits }}
 
 ## 9. Teammates
 
@@ -325,16 +265,25 @@ make no commercial claims.
 
 ## Related work
 
-- Safety drift from benign fine-tuning: Qi et al. (2023), "Fine-tuning Aligned Language Models
-  Compromises Safety, Even When Users Do Not Intend To!".
-- Multilingual safety and drift: Wang et al. (2025); Hawkins et al. (2026); Devkar et al. (2026);
-  Aziz et al. (2026); Minionese; BabelSteering; Soteria.
+{{ what_is_new }}
+
+- Safety drift from fine-tuning: Qi et al. (2023), "Fine-tuning Aligned Language Models
+  Compromises Safety, Even When Users Do Not Intend To!"; Huang, Hu et al. (2024) survey harmful
+  fine-tuning attacks and defences.
+- Multilingual safety and drift: Wang et al. (2025); Hawkins et al. (2026); Aziz et al. (2026);
+  Minionese; BabelSteering; Soteria. Multilingual jailbreaks: Deng et al. (2023); Yong et al.
+  (2023).
 - Lexsi's article on Gemma 4.
-- Repairs: WiSE-FT (Wortsman et al., 2022, robust fine-tuning by weight interpolation); ReSta
-  (Bhardwaj et al., 2024, safety re-alignment through task arithmetic); CAST (Lee et al., 2024,
-  conditional activation steering).
-- Benchmarks and data: OR-Bench (Cui et al., 2024); Belebele (Bandarkar et al., 2023); the Aya
-  Red-teaming dataset (Aakanksha et al., 2024); PolyRefuse; Tiny Aya (Cohere Labs).
+- The repairs tested here: WiSE-FT (Wortsman et al., 2022, robust fine-tuning by weight
+  interpolation); ReSta (Bhardwaj et al., 2024, safety re-alignment through task arithmetic); CAST
+  (Lee et al., 2024, conditional activation steering).
+- Other post-hoc repairs, not tested here: Safe LoRA (Hsu et al., 2024, a projection of the LoRA
+  weights); Antidote (Huang, Bhattacharya et al., 2024, post-fine-tuning safety alignment); Safety
+  Arithmetic (Hazra et al., 2024, test-time steering of parameters and activations).
+- Over-refusal: OR-Bench (Cui et al., 2024), which our hard-benign set samples; XSTest (Röttger et
+  al., 2023), a test suite for exaggerated safety behaviours.
+- Benchmarks and data: Belebele (Bandarkar et al., 2023); the Aya Red-teaming dataset (Aakanksha
+  et al., 2024); PolyRefuse; Tiny Aya (Cohere Labs).
 
 {{ references_note }}
 
@@ -352,11 +301,16 @@ python scripts/verify_numbers.py
 The script fetches the public copy of each of those files from the logs dataset
 ({{ logs_repo }}) and compares every value at its pointer. Each figure is compared, by its sha256,
 with the copy in `figures/`. It prints how many values match, lists every value that differs or
-that the logs do not hold, and exits with an error if one differs. Three things it does not check:
-the design numbers read from `configs/`, which it only counts; that this text shows the listed
+that the logs do not hold, and exits with an error if one differs.
+
+<details><summary>Three things the script does not check</summary>
+
+The design numbers read from `configs/`, which it only counts; that this text shows the listed
 values and no others (one command, `lift publish article`, writes both); and that the aggregates
 follow from the per-output records, which it does not recompute. Those records (labels, flags and
 scores, with no output text) are public in the same dataset.
+
+</details>
 
 **Run the offline tests.** They run on CPU with no network and need {{ python_requirement }}:
 
@@ -365,16 +319,27 @@ pip install -e ".[sync,dev]"
 pytest
 ```
 
+<details><summary>What the default run leaves out, and the tests known to fail on Windows</summary>
+
 By default `pytest` leaves out the tests marked for a GPU or for the network. The model tests use a
 tiny randomly initialised model, never Tiny Aya, and are skipped unless the GPU stack is installed:
 `pip install -e ".[gpu,data,eval,report,dev]"` installs everything. On Windows a few tests are known
 to fail for reasons of portability (path separators, line endings, process ids); none of them touches
 a reported number.
 
-**Re-run the study.** Every GPU stage ran on a Colab A100 in bf16. A GPU job installs the pinned
-versions with `pip install -c constraints.txt -e ".[gpu,data,eval]"`, and the laptop steps use
-`pip install -e ".[sync,data,eval,report,dev]"`. `.env.example` lists what to set, each secret by a
-hidden prompt and never on a command line:
+</details>
+
+**Re-run the study.** Every GPU stage ran on a Colab A100 in bf16. The full check-up of one adapter
+took {{ gpu_hours }} of GPU time ("Cost and ROI" in {{ experiments_section }}); the whole study took
+more, since it also trained every adapter and ran the final battery on every variant.
+`docs/runbook.md` has the job lines, flags and timings from the dev sweep on, and `colab/README.md`
+says how a GPU job is launched (`lift remote`).
+
+<details><summary>How to re-run it: the install lines, the secrets to set and the stages, in order</summary>
+
+A GPU job installs the pinned versions with `pip install -c constraints.txt -e ".[gpu,data,eval]"`,
+and the laptop steps use `pip install -e ".[sync,data,eval,report,dev]"`. `.env.example` lists what
+to set, each secret by a hidden prompt and never on a command line:
 
 - `HF_TOKEN`, with accepted access to Tiny Aya Global and Tiny Aya Base, and `LIFT_RUNS_REPO`, a
   private dataset repo of your own that every job pulls from and pushes to;
@@ -398,11 +363,10 @@ The stages, in order:
    manifests.
 
 Between GPU jobs the laptop registers what a job made (`lift register-adapter`,
-`lift register-repairs`) and commits the registry. `docs/runbook.md` has the job lines, flags and
-timings from the dev sweep on, `colab/README.md` says how a GPU job is launched (`lift remote`), and
-`lift <command> --help` says what each stage does. The full check-up of one adapter took
-{{ gpu_hours }} of GPU time ("Cost and ROI" in {{ experiments_section }}). The whole study took more:
-it also trained every adapter and ran the final battery on every variant of the cost table.
+`lift register-repairs`) and commits the registry, and `lift <command> --help` says what each stage
+does.
+
+</details>
 
 ## Links
 
@@ -411,3 +375,13 @@ it also trained every adapter and ran the final battery on every variant of the 
 - Code: {{ github }}
 - Notebook: {{ notebook }}
 - Space: {{ space }}
+
+## Appendix: full tables
+
+Every table that left the main text is here whole, with its note, and so are two figures, each
+beside the table whose numbers it draws. The tables keep the variant ids of the naming key
+({{ experiments_section }}). A variant that was run on several seeds is named by
+the id of its seed 1, and the Seeds column or the note says which seeds a row pools. The notes cite
+numbered entries of `docs/decisions.md`, where every change is dated. {{ judge_id_note }}
+
+{{ appendix }}

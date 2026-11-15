@@ -141,13 +141,15 @@ P07_FIGURES = "P07 lift report"
 # alt text P08 gives them. The logs dataset carries the PNGs; the article and the logs card embed them.
 FIGURES = {
     "adapters_by_language": "Harmful rate per language for stock and every adapter, final split",
-    "forest_primary": "Primary endpoint: drift and repair in the Hindi harmful rate, per seed and pooled",
+    "forest_primary": "Primary endpoint: drift and repair in the Hindi harmful rate, per seed, and pooled "
+    "when more than one seed was run",
     "tradeoff_dev": "Seed-1 dev settings of every repair family against the selection constraints",
     "tradeoff_dev_heldout": "Seed-1 dev settings of every repair family: Hindi harmful rate against the "
     "share of the adapter's held-out-loss gain kept",
-    "heatmap_harmful": "Harmful rate per language for stock, the adapter and each frozen repair, final split",
-    "heatmap_overrefusal": "Hard-benign refusal rate per language for stock, the adapter and each frozen "
-    "repair, final split",
+    "heatmap_harmful": "Hindi and five other languages: harmful rate for stock, every adapter and each "
+    "frozen repair, final split",
+    "heatmap_overrefusal": "Hindi and five other languages: hard-benign refusal rate for stock, every "
+    "adapter and each frozen repair, final split",
 }
 
 

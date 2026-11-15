@@ -855,6 +855,210 @@ def secondary_selection(
     return doc
 
 
+# --------------------------------------------------------------- a study shaped like ours (decisions 123)
+
+STRESS = "adapter-indicalign-stress-s1"
+# Dev scores (harmful, hard-benign refusal, win rate, Belebele) under which the rule freezes WiSE-FT at
+# lambda 0.25 with the verdict repair and rejects the other two families: their best settings keep the
+# adapter's own Belebele-hi accuracy, 5 points under stock's.
+STRESS_NUMBERS = {
+    "wiseft-l0.25": (0.07, 0.33, 0.48, 0.59),
+    "resta-a0.10": (0.22, 0.20, 0.27, 0.55),
+    "cast-m0.5": (0.20, 0.26, 0.28, 0.55),
+}
+# verdicts[i].axes of the three adapters, in the pattern of the study. The stress adapter: a better
+# held-out loss, a lost pairwise comparison, a harmful rate far over stock's on both readings, fewer
+# refusals and a lower Belebele-hi accuracy. The pick (aya): a lower harmful rate with more refusals of
+# benign prompts. The candidate not picked: a rise on every label that the reading without flagged
+# outputs does not show. None met Gate 1's bar.
+STRESS_AXES = {
+    "drift": {**interval(0.30, 0.25, 0.35), "p": 0.0001, "seeds": [1], "meaningful": True},
+    "drift_intact": {**interval(0.20, 0.15, 0.25), "p": 0.0001, "seeds": [1]},
+    "refusal_harmful": {**interval(-0.29, -0.34, -0.24), "p": 0.0001, "seeds": [1]},
+    "overrefusal_hard_hi": {**interval(-0.22, -0.28, -0.16), "p": 0.0001, "seeds": [1], "exceeds": False},
+    "usefulness": {"win_rate": 0.28, "lo": 0.20, "hi": 0.36, "bar": 0.55, "passes": False},
+    "final_win_rate": {**interval(0.39, 0.33, 0.45), "n": 200, "seeds": [1]},
+    "heldout": {**interval(-0.16, -0.23, -0.11), "n": 200, "n_clusters": 200, "seeds": [1]},
+    "belebele_hi": {**interval(-0.04, -0.07, -0.01), "p": 0.008, "seeds": [1]},
+}
+PICK_AXES = {
+    "drift": {**interval(-0.09, -0.12, -0.05), "p": 0.0001, "seeds": [1, 2, 3], "meaningful": False},
+    "drift_intact": {**interval(-0.09, -0.13, -0.06), "p": 0.0001, "seeds": [1, 2, 3]},
+    "refusal_harmful": {**interval(0.13, 0.09, 0.17), "p": 0.0001, "seeds": [1, 2, 3]},
+    "overrefusal_hard_hi": {**interval(0.10, 0.05, 0.15), "p": 0.0002, "seeds": [1, 2, 3], "exceeds": True},
+    "usefulness": {"win_rate": 0.42, "lo": 0.33, "hi": 0.51, "bar": 0.55, "passes": False},
+    "final_win_rate": {**interval(0.47, 0.42, 0.53), "n": 600, "seeds": [1, 2, 3]},
+    "heldout": {**interval(-0.31, -0.38, -0.25), "n": 600, "n_clusters": 200, "seeds": [1, 2, 3]},
+    "belebele_hi": {**interval(-0.005, -0.02, 0.01), "p": 0.5, "seeds": [1, 2, 3]},
+}
+OTHER_AXES = {
+    "drift": {**interval(0.22, 0.17, 0.26), "p": 0.0001, "seeds": [1, 2, 3], "meaningful": True},
+    "drift_intact": {**interval(0.03, -0.003, 0.07), "p": 0.08, "seeds": [1, 2, 3]},
+    "refusal_harmful": {**interval(-0.19, -0.24, -0.15), "p": 0.0001, "seeds": [1, 2, 3]},
+    "overrefusal_hard_hi": {
+        **interval(-0.18, -0.23, -0.13),
+        "p": 0.0001,
+        "seeds": [1, 2, 3],
+        "exceeds": False,
+    },
+    "usefulness": {"win_rate": 0.32, "lo": 0.24, "hi": 0.40, "bar": 0.55, "passes": False},
+    "final_win_rate": {**interval(0.35, 0.29, 0.40), "n": 600, "seeds": [1, 2, 3]},
+    "heldout": {**interval(-0.31, -0.38, -0.25), "n": 600, "n_clusters": 200, "seeds": [1, 2, 3]},
+    "belebele_hi": {**interval(-0.007, -0.03, 0.015), "p": 0.6, "seeds": [1, 2, 3]},
+}
+SECOND_JUDGE = "harmful rate under the second judge's labels, "  # P07's readings, then the language
+
+
+def stress_selection(numbers: dict | None = None) -> dict:
+    """selection.json of a study shaped like ours: the stress adapter carries the repair comparison, it
+    lost to stock on dev (a win rate of 28%) with a Belebele-hi accuracy 5 points under stock's, and the
+    rule freezes WiSE-FT at lambda 0.25 (repair) and rejects ReSta and CAST (``STRESS_NUMBERS``)."""
+    numbers = STRESS_NUMBERS if numbers is None else numbers
+    return selection(numbers, adapter=STRESS, adapter_win=0.28, adapter_belebele=0.55)
+
+
+def _axes_row(name: str, role: str, verdict: str, axes: dict) -> dict:
+    """A row of P07's adapters table for the same axes as a verdict row."""
+
+    def three(key: str) -> dict:
+        return interval(*(axes[key][k] for k in ("est", "lo", "hi")))
+
+    held = axes["heldout"]
+    seeds = ", ".join(str(s) for s in axes["drift"]["seeds"])
+    pooled = f"seeds {seeds}" if "," in seeds else f"seed {seeds}"
+    return {
+        "adapter": name,
+        "role": role,
+        "verdict": verdict,
+        "usefulness": "reject on usefulness",
+        "drift": three("drift"),
+        "drift_intact": three("drift_intact"),
+        "overrefusal": three("overrefusal_hard_hi"),
+        "final_win_rate": three("final_win_rate"),
+        "heldout": f"{held['est']:+.3f} [{held['lo']:+.3f}, {held['hi']:+.3f}] ({pooled})",
+        "belebele_hi": three("belebele_hi"),
+        "seeds": seeds,
+    }
+
+
+def stress_report(selection_doc: dict | None = None) -> dict:
+    """final_report.json for ``stress_selection`` (or ``selection_doc``, a selection of the stress
+    adapter), in the pattern of the study: three verdict rows (the stress adapter, the pick, the candidate
+    not picked) with their axes, the primary effects on one seed, an undefined win-rate share and a
+    held-out share over 100%, the frozen repair at stock's level on hard-benign refusals and Belebele-hi,
+    ReSta and CAST still under stock on Belebele-hi and over it on the harmful rate, and the second
+    judge's readings of drift and repair in Hindi and English. Made-up numbers; the tables this does not
+    touch stay ``report``'s."""
+    sel = stress_selection() if selection_doc is None else selection_doc
+    doc = report(sel)
+    rows = [
+        (STRESS, "stress", "adapter", "repair", STRESS_AXES, "It drifts, and a repair passed the rule."),
+        (ADAPTER, "standard", "standard", "retain", PICK_AXES, "Gate 2 failed on dev: retain."),
+        (CANDIDATE, "standard", "candidate", None, OTHER_AXES, "The candidate Gate 1 did not pick."),
+    ]
+    doc["verdicts"] = [
+        {
+            "adapter": name,
+            "recipe": recipe,
+            "kind": kind,
+            "verdict": verdict,
+            "usefulness_verdict": "reject on usefulness",
+            "reason": reason,
+            "axes": copy.deepcopy(axes),
+        }
+        for name, recipe, kind, verdict, axes, reason in rows
+    ]
+    one = (1,)
+    doc["primary"] = {
+        "drift": effect(0.30, 0.25, 0.35, 0.0001, one),
+        "repair": effect(-0.37, -0.42, -0.32, 0.0001, one),
+        "redteam_drift": effect(0.36, 0.33, 0.39, 0.0001, one),
+        "redteam_repair": effect(-0.35, -0.38, -0.32, 0.0001, one),
+        "drift_loose": effect(0.27, 0.22, 0.32, 0.0001, one),
+        "repair_loose": effect(-0.32, -0.37, -0.27, 0.0001, one),
+    }
+    doc["headline"].update(
+        utility_retained=UNDEFINED_GAIN,
+        heldout_retained=interval(1.9, 1.6, 2.4),
+        belebele_hi_change=interval(-0.003, -0.02, 0.013),
+        overrefusal_hard_hi_change=interval(0.035, -0.005, 0.08),
+    )
+    tables = doc["tables"]
+    hindi = tables["per_language"]["rows"][0]
+    hindi.update(
+        stock=0.14,
+        adapter=0.44,
+        repair=0.07,
+        drift=interval(0.30, 0.25, 0.35),
+        repair_effect=interval(-0.37, -0.42, -0.32),
+    )
+    roles = ("repair comparison", "standard recipe (Gate 1 pick)", "candidate not picked (exploratory)")
+    tables["adapters"]["rows"] = [
+        _axes_row(name, role, verdict or "no verdict", axes)
+        for (name, _, _, verdict, axes, _), role in zip(rows, roles, strict=True)
+    ]
+    # family: (Hindi harmful rate, repair - adapter, harmful rate - stock, hard-benign refusal - stock,
+    # Belebele-hi - stock)
+    level = ((0.035, -0.005, 0.08), (-0.003, -0.02, 0.013))  # the winner: at stock's level on both
+    lower = ((-0.18, -0.24, -0.13), (-0.044, -0.07, -0.016))  # ReSta: fewer refusals, Belebele-hi under stock
+    under = ((-0.08, -0.13, -0.03), (-0.04, -0.07, -0.01))  # CAST: the same, with the adapter's own accuracy
+    comparison = {
+        "wiseft": (0.07, (-0.37, -0.42, -0.32), (-0.07, -0.11, -0.04), *level),
+        "resta": (0.35, (-0.09, -0.13, -0.05), (0.21, 0.16, 0.26), *lower),
+        "cast": (0.26, (-0.18, -0.22, -0.14), (0.12, 0.07, 0.16), *under),
+    }
+    winner = sel["overall"]["winner"]
+    tables["repair_comparison"] = table(
+        [
+            ("family", "Family", "text"),
+            ("variant", "Frozen setting (seed 1)", "text"),
+            ("role", "Role", "text"),
+            ("harmful_hi", "Harmful rate", "pct"),
+            ("effect", "Repair - adapter", "pp_ci"),
+            ("p", "p (bootstrap)", "p"),
+            ("vs_stock", "Harmful rate - stock", "pp_ci"),
+            ("gain_kept", "Utility gain kept", "text"),
+            ("overrefusal_change", "Hard-benign refusal - stock", "pp_ci"),
+            ("belebele_change", "Belebele-hi - stock", "pp_ci"),
+            ("seeds", "Seeds", "text"),
+        ],
+        [
+            {
+                "family": family,
+                "variant": sel["frozen"][family],
+                "role": "winner" if sel["frozen"][family] == winner else "family",
+                "harmful_hi": rate,
+                "effect": interval(*change),
+                "p": 0.0001,
+                "vs_stock": interval(*vs_stock),
+                "gain_kept": UNDEFINED_GAIN,
+                "overrefusal_change": interval(*refusals),
+                "belebele_change": interval(*belebele),
+                "seeds": "1",
+            }
+            for family, (rate, change, vs_stock, refusals, belebele) in comparison.items()
+            if family in sel["frozen"]
+        ],
+        "Every frozen repair family on the final split (Hindi, pooled over the seeds named)",
+        "WiSE-FT attenuation is the baseline every repair is measured against.",
+    )
+    second = {
+        ("drift", "Hindi"): (0.10, 0.06, 0.14),
+        ("drift", "English"): (0.07, 0.04, 0.11),
+        ("repair", "Hindi"): (-0.15, -0.19, -0.11),
+        ("repair", "English"): (-0.10, -0.14, -0.07),
+    }
+    tables["sensitivity_effects"]["rows"] = [
+        {"reading": f"{SECOND_JUDGE}{lang}", "kind": kind, "effect": interval(*x), "p": 0.0001, "seeds": "1"}
+        for (kind, lang), x in second.items()
+    ]
+    tables["cells"]["rows"] += [
+        cell(STRESS, "hard_benign", 200, 0.79, 0.59),
+        cell(STRESS, "easy_benign", 300, 0.03, 0.03),
+    ]
+    return doc
+
+
 def frozen_variants(doc: dict) -> list[str]:
     """Every frozen variant of a decided selection: each family's setting on seeds 1-3."""
     stem = doc["adapter"][: -len("1")]
@@ -1098,10 +1302,13 @@ class FakeApi:
 
 class FakeGit:
     """The git repo ``lift.publish.inputs`` asks for the ``recipe-frozen-*`` tags and the recipe each one
-    froze (``git show <tag>:configs/frozen_recipe.json``); nothing runs git."""
+    froze (``git show <tag>:configs/frozen_recipe.json``), and the article for the pre-registration in a
+    tag's commit (``git show <tag>:PREREGISTRATION.md``, which it links there); nothing runs git."""
 
     def __init__(self):
         self.tags: dict[str, str | None] = {}  # tag -> the recipe in its commit (None: not there)
+        # What every tagged commit holds beside its recipe (a test takes a file out to say it is not there).
+        self.files: dict[str, str] = {"PREREGISTRATION.md": "# Lost in Fine-Tuning\n"}
 
     def __call__(self, argv):
         argv = list(argv)
@@ -1109,9 +1316,9 @@ class FakeGit:
             return "".join(f"{t}\n" for t in self.tags)
         if argv[0] == "show":
             tag, _, path = argv[1].partition(":")
-            if path == "configs/frozen_recipe.json" and self.tags.get(tag) is not None:
-                return self.tags[tag]
-            return None
+            if path == "configs/frozen_recipe.json":
+                return self.tags.get(tag)
+            return self.files.get(path) if tag in self.tags else None
         raise AssertionError(f"unexpected git call: {argv}")
 
 

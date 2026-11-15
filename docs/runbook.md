@@ -338,10 +338,10 @@ lift publish space
 Each is a dry run that stages under `outputs/publish/` and prints what it would upload; add
 `--yes` only when the dry run is clean. `configs/publish.yaml` holds the namespace
 (`racetracklexsi`), the team, `annotators: []` (nobody is thanked) and the references (Devkar et
-al. 2026 still missing). No AuditKIT issue is filed (decisions item 102); the SafeTune one is
-optional. The model upload needs a short A100 job (`lift publish model --build --device cuda:0`,
-then `--yes`). `lift publish
-preflight` must pass before the GitHub repo goes public.
+al. 2026 is no longer cited: decisions item 130). No AuditKIT issue is filed (decisions item 102);
+the SafeTune one is optional. The model upload needs a short A100 job
+(`lift publish model --build --device cuda:0`, then `--yes`). `lift publish preflight` must pass
+before the GitHub repo goes public.
 
 What changed in publishing on Nov 10: no output text is public, whatever its label. The logs hold
 ids, labels, flags and hashes. Every dry run scans what it staged against every output on the
@@ -414,4 +414,5 @@ not exist yet (held-out loss before step 4) just errors; go on.
   covered its keys.
 - Done Nov 13: the namespace, the team, annotators (nobody thanked) and the references in
   configs/publish.yaml; the AuditKIT issue dropped, as upstream fixed it in 1.1.4 (decisions item
-  102). Still open: the full citation for Devkar et al. (2026).
+  102). Closed Nov 15: the citation for Devkar et al. (2026) was never found, and the article no
+  longer cites it (decisions item 130).

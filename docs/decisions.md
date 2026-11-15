@@ -4,6 +4,629 @@ Every change to a locked decision after Oct 28, with its date and reason. Newest
 
 ## Nov 15, 2026: fixes from the adversarial review of the submission
 
+131. **The figures name the variants as the text does, the heatmaps' numbers read on every cell, and
+     the forest plot draws each effect once.** Drawings and alt texts only. The review found row
+     labels of three styles in the heatmaps ("adapter", "Gate 1 pick", "not picked:
+     adapter-indicalign-std-s1", "wiseft"), the darkest cell's number in black on near-black red,
+     the forest plot's "seed 1" and "pooled" rows showing one estimate twice, tags such as
+     `castalways-m1.0` on the trade-off figures that the text never explained, and an alt text that
+     said "stock, the adapter and each frozen repair" of a heatmap that also shows the two standard
+     adapters.
+     - Names. Every figure names a variant from its id by one rule
+       (`lift.report.figures.plain_name`): "stock", "Aya adapter (standard)", "IndicAlign adapter
+       (standard)", "stress adapter", "WiSE-FT, λ = 0.25", "ReSta, α = 0.10", "CAST, strength 0.5".
+       These are the plain names of the naming key (item 123) in the form a label takes, and a test
+       holds the two rules to the same words. An id outside the naming scheme is written as it is,
+       and two rows the rule would name alike keep their ids.
+     - Heatmaps. The rows are stock, the standard adapters, the adapter the repairs are applied to
+       and its repairs: the repaired adapter stood second, two rows away from its repairs. A line
+       under the plot says which rows are repairs and of which adapter, read from the repairs' own
+       ids. The columns carry the languages' names, Hindi first, as the per-language table has them.
+       Each number is written in white on a dark cell and in near-black on a light one, by the
+       luminance of the cell's colour, and a point larger. The titles say which prompts the rate is
+       on.
+     - Forest plot. An effect with one seed has one row, named by the seed. With one seed the pooled
+       estimate and interval are that seed's own (the same prompts, resampled the same way), so the
+       two rows were one result drawn twice. The pooled row is left out only when it repeats the
+       seed's row; with more seeds, each seed and the pooled row are drawn as before.
+     - Trade-off figures. A point is named by its family and its strength ("WiSE-FT 0.25", "CAST
+       0.5", "CAST always on 1.0") where it had its tag (`wiseft-l0.25`, `castalways-m1.0`), and the
+       legend says what the number is ("WiSE-FT (λ)", "ReSta (α)", "CAST (strength)"). Every point
+       is where it was.
+     - Adapters per language. The legend gives each adapter its plain name and what it is, in the
+       naming key's words ("Aya adapter (standard): the pre-registered pick"), where it gave the id.
+     - Alt texts. Those of the two heatmaps now say "stock, every adapter and each frozen repair",
+       for "Hindi and five other languages". The forest plot's said "per seed and pooled" and now
+       says "per seed, and pooled when more than one seed was run".
+     - How they were drawn. The six PNGs come from the functions `lift report` calls
+       (`lift.report.figures.draw_all`), given the same final_stats.json, selection.json and
+       selection_secondary.json. `lift report` itself was not run, and no file under outputs/metrics
+       changed. Drawn first with the code as it was, in the environment the earlier files were drawn
+       in, the six came out byte for byte as they were, so what differs in each is the drawing code
+       alone. What each figure shows was compared with what it showed: every heatmap cell by its
+       variants and language, every column, every point, every estimate and interval. They are the
+       same; the two forest rows that are gone each repeated a row that stays.
+     - What is recorded. The write-up records a figure by the sha256 of its PNG, so the six recorded
+       hashes change, and nothing else in hf/article.sources.json does on their account. The README
+       shows the new drawings from `figures/`. The logs dataset still carries the earlier ones, and
+       its card the earlier alt texts, until it is uploaded again; hf/article.md links the dataset's
+       copies. The Space draws its own heatmap tables from the report and is unchanged.
+     No number, label or analysis changes.
+
+130. **The related work says what is new and drops a citation no one could find; the cost section,
+     "with more credits" and "not run" say what the numbers and the code support.** Reporting only.
+     - The citation. The related work named "Devkar et al. (2026)", from the build plan's list of
+       references (prompts/P08_publish.md). When the references were checked on Nov 13 (item 102)
+       no such paper was found, and the review found none either, so the section cited a work
+       nobody on the team has seen. It is out of the template, the note that waited for its citation
+       is out of configs/publish.yaml, and docs/runbook.md's two lines that waited for it say it is no
+       longer cited.
+     - Seven references are added, each checked on Nov 15 against arXiv's own record of its title
+       and authors: Safe LoRA (Hsu et al., 2024, arXiv 2405.16833), Antidote (Huang, Bhattacharya et
+       al., 2024, 2408.09600), Safety Arithmetic (Hazra et al., 2024, 2406.11801), the survey of
+       harmful fine-tuning attacks and defences (Huang, Hu et al., 2024, 2409.18169), Multilingual
+       Jailbreak Challenges (Deng et al., 2023, 2310.06474), Low-Resource Languages Jailbreak GPT-4
+       (Yong et al., 2023, 2310.02446) and XSTest (Röttger et al., 2023, 2308.01263). The section
+       cites the survey with the work on drift from fine-tuning, the two on multilingual jailbreaks
+       beside the multilingual safety work, the first three as post-hoc repairs that were not tested
+       here, and XSTest beside OR-Bench for over-refusal. What it says of each is what the title
+       says; "a projection of the LoRA weights", of Safe LoRA, is its abstract's wording.
+     - "What is new here" opens the section: what is known (drift from benign fine-tuning, and the
+       four kinds of repair), then what this project adds. Two of those are the design and are said
+       either way: a pre-registered procedure that reads drift, usefulness and the cost of a repair
+       separately, with repairs chosen on dev prompts and scored once; and a comparison of
+       weight-space and activation-space repairs against scaling the adapter down, under a
+       capability constraint, in six languages with a human-written Hindi check. Two are results and
+       are said only where the numbers show them.
+       - "A negative result with a mechanism: a repair that leaves benign inputs on the adapter's
+         weights cannot undo the adapter's capability loss" needs the selection to have rejected the
+         CAST family, every conditional CAST setting to have the unrepaired adapter's own
+         Belebele-hi accuracy on dev and to have missed that condition (item 88), and both the
+         adapter's and the frozen CAST setting's Belebele-hi accuracy to lie under stock's on the
+         final split. "And here only attenuation could" needs, beside that, every dev setting that
+         met the Belebele-hi condition to be a WiSE-FT one, and the frozen WiSE-FT setting's
+         accuracy not to lie under stock's on the final split.
+       - "Evidence that the usual pre-ship check, held-out loss, improves while safety drifts"
+         needs the adapter of the repair comparison to have a better held-out loss than stock and a
+         rise in the Hindi harmful rate that Gate 2's bar counts.
+       With other results the paragraph names and counts what is left.
+     - Cost and ROI. "Run time of the acceptance-test notebook (default sample): not yet timed" is
+       gone: the article names the notebook's run time only once a run was timed. The paragraph says
+       what a check-up is made of, with the GPU-hours of the dev sweep and of its CAST fit from the
+       report's cost detail (3.08 h and 0.08 h of the 5.21 h), and that neither the repairs nor the
+       check-up take a gradient step. "The final battery took 0.68 h per variant on average"
+       followed the check-up's three variants, while the report's headline is the mean over every
+       variant with a manifest, the eight of the cost table (the three alone give 0.68 h too); the
+       sentence now says "over the variants in the cost table". Reproduce said the study ran the final
+       battery "on every variant of the cost table", which leaves out the IndicAlign adapters, whose
+       finals fill the tables; it now says "on every variant". The cost table is in the appendix (item
+       127's mechanism). Its note gains what the per-token column measures. As
+       `lift.report.cost.latency` and the harness's per-record seconds compute it, it is a batch's
+       whole wall time (the pass over its
+       prompts, then every step until its longest answer ends) divided by the tokens its answers
+       hold. So it moves with the length of the answers as well as with the cost of a step, and
+       WiSE-FT at λ = 0.25 and ReSta at α = 0.10, which change only the weights of stock's
+       architecture, show 1.7 ms and 2.9 ms against stock's 1.2 ms. The note says so, the sentence
+       on the weight edits only where the table shows another time than stock's. The gate share
+       stays, and no cap-hit rate is quoted.
+     - With more credits. The section listed four things to run. Each of its five items now says
+       which claim of the write-up it would firm up, with that claim's number read through `Facts`:
+       more seeds of the stress recipe (the repair's effect, measured on one seed, so its interval
+       is over prompts and not over training runs); the second judge on every final output (the
+       Hindi drift under its labels against the primary judge's, and that it judged whole cells in
+       Hindi and English only); Arabic and Thai readers and a native check of every translation
+       (those two languages' drift, which no reader checked: the languages the readers validated the
+       judge in are read from validation round 1 and said once it is scored, and the Arabic and Thai
+       results are spoken of only when both were run, else only that no reader checked those
+       languages); more adapters and data sets (the
+       ranking of the repairs holds for one stressed adapter of one model); language-aware CAST,
+       cut for time (item 2), against the one global threshold CAST ran with.
+     - Not run. "Every pre-registered arm was run." stood under a subsection that said the
+       exploratory diagnosis was not run, in the name of a build stage ("P06"). The diagnosis (harm
+       probes, the refusal direction and its ablation check) is in the pre-registration's
+       exploratory family, and it was not run: the schedule was compressed from the start (item 1),
+       the diagnosis was planned never to delay CAST, and `src/lift/diagnose` holds its
+       specification only. "Not run" now says that it was not run, for time, and that every arm of
+       the main comparison was, or lists the arms the report gives as not run. The subsection
+       "Exploratory signatures" appears only for a report that carries the diagnosis's table.
+       Section 2 already says the tool planned for it was not used (item 124).
+     No number, label or analysis changes.
+
+129. **The limitations say who labelled the validation sheets, and what the human-written prompts
+     do not confirm.** Reporting only.
+     - The readers. Item 94 recorded, "for the record, not in the article", that the Hindi and
+       English sheets are labelled by a member of the team who had read the dev results by then, and
+       that a limitation saying so "was drafted and taken out the same afternoon at the team's
+       call". This log is public and the write-up links it, so a reader finds a limitation that was
+       written and then removed. It is restored, as the last of the limitations: one reader
+       labelled each language, so there is no agreement between readers; the Hindi and English
+       labels come from a member of the team, who labelled without seeing which model wrote an
+       output or what a judge said, but had read the dev results; and what item 106 recorded of the
+       first Chinese sheet of round 2: how it was first labelled, that those labels were voided,
+       that the reader labelled the same items again, and that no number in this write-up comes from
+       them. The bullet says both are dated in this log, without item numbers.
+     - What each sentence rests on. The first is said only while no scored round holds a second
+       reader's overlap: round1.json and round2.json both record none. The second is item 94's, in
+       its words (the sheets hide the model and the judges' labels). The third is item 106's, and is
+       said only once round 2 is scored with a Chinese sheet. The review's draft had the sheet
+       discarded "before anything was published", and item 106, written while the repository was
+       private, says that no published number comes from those labels. Neither is exact now: the
+       history is public, and its README of Nov 13 (22:42 UTC, "README with validation round 2")
+       shows the scores made with them, replaced by the relabelled sheet's at 23:29. The text says
+       what holds: no number in this write-up comes from them. The bullet differs from the review's R5
+       wording in three respects, each to follow this log: the readers' blindness in item 94's words,
+       the sheet "voided" and "labelled again" as item 106 has it, and this clause; and it names the
+       log, not its item numbers.
+     - The human-written prompts. The Aya Red-teaming Hindi prompts were always the check on the
+       primary endpoint, and the tables held every adapter and the frozen repair on them, but no
+       sentence set the two prompt sets side by side beyond the repair comparison (item 126). One
+       limitation now does, each effect read from its two intervals: the primary effects, P07's
+       table of every adapter per language, and its table of the frozen repair against stock. Here
+       the harmful rates of the IndicAlign adapter and the stress adapter against stock, and of the
+       frozen repair against the adapter, point the same way on both sets. Two do not: the Aya
+       adapter's rate, lower than stock's on the translated prompts (-8.7 pp [-12.2, -5.2]), is
+       higher on the human-written ones (+3.3 pp [+1.2, +5.4]); and the frozen repair's, lower than
+       stock's on the translated prompts (-7.8 pp [-11.2, -4.2]), is not clearly different there
+       (+0.4 pp [-1.5, +2.4]). "The large effects replicate and the smaller ones do not" is written
+       only when every effect that replicates is larger on the translated prompts than every one
+       that does not; otherwise the sentence lists which do and which do not. The verdicts are
+       unchanged: they are read on the translated prompts, as pre-registered.
+     - Two older bullets are shorter. The one on the judge's reading pointed to "the sensitivity
+       tables" and repeated what the second judge's provider declines; it now points to "Judge
+       sensitivity", which says that (item 128). The one on the judge's harmful label on benign
+       prompts names the stress adapter by its plain name and links the table by prompt set, now in
+       the appendix.
+     - Item 127's length pass made one bullet of each two that said the same thing: the translations
+       with the judge's precision by language (both named Arabic and Thai as unchecked), and the few
+       adapters with the stress recipe's one seed. The bullets on usefulness and on how the harmful
+       rate is read say the same in fewer words. The F10 bullet, the one on the judge's harmful label on
+       benign prompts and the one on who labelled stand whole.
+     No number, label or analysis changes.
+
+128. **The judge's part opens with how far to trust the judge, says how the bar was met and keeps
+     one small table; its full tables are in the appendix.** Reporting only. The review found "the
+     bar is met" in bold over an agreement of 78.3% against a bar of 85.0%, one sentence standing
+     four times, and nowhere a statement of what holds under every reading. With "Judge
+     sensitivity" the part ran to some 3,000 words, most of them in six tables.
+     - The summary. "The judge against native readers" opens with one paragraph: the judge every
+       claim is read under; Gate 1's verdict in Hindi; how weak the harmful label is; whether the
+       direction of the effects holds under every reading; the Hindi drift under each reading. Each
+       clause is chosen by the numbers, as in the rest of the article.
+       - The verdict says how the bar was met. The bar is agreement or kappa, and "met" alone hid
+         which: "the pre-registered bar is met on kappa, not on agreement (78.3% agreement on 60
+         items against a bar of 85.0%; kappa 0.67 against 0.60)". The words follow Gate 1's own
+         agreement and kappa (validation/gate1.json): on agreement, on kappa, on both, or not met,
+         and then the pre-registered consequence follows as before (item 94). A verdict that the
+         file's own numbers do not give is refused. The sentence stands once.
+       - "Its harmful label is the weak one" needs the Hindi kappa of harmful against not harmful
+         to be under the four-label kappa (0.37 against 0.67) and the reader to have confirmed fewer
+         harmful labels than the judge gave (4 of 13 on round 1; 7 of 18 on round 2). Otherwise the
+         numbers are given without the phrase.
+       - "The direction of the drift and of the repair is robust" names the comparisons it checked
+         and no others. It needs every reading of each in the sensitivity table to have an interval
+         that excludes zero on the primary reading's side, and on the opposite side for the refusal
+         rate, which falls where the harmful rate rises; a comparison none of whose other readings
+         was run is not named. The review's draft said "every effect below"; the sentence claims no
+         more than its check, since the article shows other effects whose direction does not hold on
+         every reading: the IndicAlign adapter's rise is not clear once flagged outputs are set aside,
+         and two effects do not replicate on the human-written prompts (a limitation says which). "And
+         their size is not" (or "its", or "the
+         size of the drift") needs, for each comparison it names, a Hindi reading whose interval lies
+         apart from the primary one's (the second judge's +10.2 pp [+6.0, +14.5] against +31.5 pp
+         [+26.2, +37.0] for the drift, -15.0 pp [-19.2, -10.8] against -39.2 pp [-44.5, -34.2] for the
+         repair). A reading that does not agree is named with what it shows, and nothing is then called
+         robust.
+       - The human-written prompts are said to give the same direction only when their interval
+         excludes zero on that side.
+     - What the main text keeps after the summary: who labelled what; how the bar was met in each
+       language and pooled; the judge decision; the judge's excess over the readers for the adapters
+       against stock; round 2, its variants by their plain names. It first kept one table of the
+       primary judge per language and pooled (the kappa of harmful against not harmful beside the
+       four-label one, how the bar was met in each row) and a sentence on what the judge's harmful
+       label is to the Hindi reader. Item 127's length pass moved the table to the appendix, whose
+       table of every judge view holds its every cell, and the main text says in one sentence how the
+       bar was met, languages that stand alike said together; the Hindi sentence repeated the
+       summary's count and stands whole with its table in the appendix. The decision and round 2's
+       outputs and excess are folded in place, round 2's sentence on where the bar is missed in view.
+     - The judge's excess is said once per round. Items 98 and 100 gave a sentence for Hindi and one
+       for all languages, each with the same reading, in each round. One sentence now gives both
+       scopes and then what the sign means; when the two scopes point different ways it says each.
+       On round 2, whose differences point the way round 1's do, the numbers end with "the same
+       direction as on round 1" and the meaning is not said a second time; it is said in full where
+       they point another way. The same for the repaired models against the adapters on round 2, where
+       the judge is said to put them "further below" or "less far below" the adapters only in a scope
+       where their harmful rate is under the adapters' for the readers and for the judge alike, as on
+       round 2's items; elsewhere the difference is said as what it is.
+     - The decision's counts. 77.2% and 76.7% stood beside "a difference of +0.6 pp". The decision
+       records how many items each judge got right (139 and 138 of 180), and the text gives them. A
+       file without the counts says that the difference is computed before rounding, when the two
+       shown rates do not give it.
+     - To the appendix, whole, each under its heading and linked from the main text: every judge
+       view against the readers per language and pooled, for each round; the primary judge by model
+       and by prompt set, for each round, under the paragraph on its harmful label in Hindi and over
+       all languages; P07's table of drift and repair under the other readings, with its p-values,
+       seeds and the second judge's failures; P07's table of the second judge against the primary
+       one and of the back-translation check.
+     - "Judge sensitivity" keeps drift and repair under each reading as one table of three columns,
+       a row per reading and a column per comparison: it is the evidence for the summary's sentence,
+       which gives the Hindi drift under each reading, and it is folded in place (item 127). One
+       sentence says how many prompts the second judge's provider declines, a line under the table
+       what its rows do with them, and one folded sentence gives the two agreement checks (the lowest
+       and the highest share by language; the back-translated outputs). The second judge's shares are over the outputs that carry both
+       judges' labels, and where the readings list judgements its provider declined, the sentence says
+       that those count as unclear there: they are among the table's Items (below), so "the outputs both
+       judged" was not exact.
+     - The checks table's last columns. "Not judged" shows 0 for the second judge while the
+       readings list 64 of 400 prompts it failed on, and "Items" exceeds "Sampled". As
+       `lift.report.analysis.sensitivity_block` counts them, Items are the outputs of the final
+       cells that have the second judge's judgement, and Not judged are the sampled outputs that
+       have none. A judgement its provider declined to give is recorded as a judgement labelled
+       unclear (rule 3), so it is among the Items. Items exceed Sampled in Hindi and English, where
+       the second judge also judged every output of the cells behind the readings under its labels
+       (item 98). A note under the appendix's table says so; it gives that reason only for
+       languages that have such a reading.
+     No number, label or analysis changes.
+
+127. **The article ends with an appendix of full tables, section 7 tells each table in a sentence or
+     shows it in part, and supporting detail is folded in place.** Where a table stands and how it is
+     headed, and how long the text above the appendix runs. The review counted 21 tables in the
+     write-up, one of them 15 columns wide, and the same "undefined" cell ten times, and asked for
+     about 4,000 words above the appendix.
+     - A new last extra, "Appendix: full tables", follows the links. A table that left the main text
+       is there whole, with every column, every row and its note, under a heading of its own, and
+       the main text links that heading. Nothing was deleted: every value the write-up recorded is
+       still recorded in hf/article.sources.json, at the same file and pointer and with the same
+       value, and a test checks each moved table's columns, rows and note against the report.
+     - Moved whole: every adapter on every axis (15 columns); each seed of the primary effects; the
+       per-language table with its upper bounds; every adapter against stock, language by language;
+       the repair comparison with its families, p-values and seeds; the held-out loss of every
+       variant; the frozen repair against stock per language and each repair against WiSE-FT, under
+       the titles the report gives them, which were their headings before; the Holm and
+       Benjamini-Hochberg tables; the refusals of benign prompts; the pairwise win rates; Belebele
+       per language. The verdict lines with the report's reason for each are there too, as the logs
+       card has them.
+     - What the main text keeps of them. The per-language table without its three "(upper)" columns,
+       folded in place (below). The repair comparison first kept a table of each frozen setting by its
+       plain name, without the family, role, p-value and seeds columns and without "Utility gain kept",
+       every cell of which says "undefined: the adapter shows no utility gain over parity" (the stress
+       adapter lost to stock in pairwise judging, so there is no gain a share could be of). That table
+       was a subset of the appendix's, and its numbers stand in the bullets above it, so the length
+       pass (below) left it in the appendix only, whole, the undefined column included, and one
+       sentence of the repair comparison links it.
+     - For each other table, one or two sentences read from its intervals, as the sentences on the
+       repair against stock and against WiSE-FT already were (items 78 and 90): in which languages an
+       adapter's harmful rate lies over stock's, under it, or shows no clear difference, and where on
+       the human-written prompts; in how many of the secondary and of the exploratory claims the
+       effect points as the Hindi effect of its kind does, which claims do not, and the largest
+       adjusted p of each family; where the frozen repair's refusals of benign prompts and its
+       Belebele accuracy stand against stock's, by language, and the two final win rates. A direction
+       is said only where the interval excludes no change. "Not pre-registered, descriptive" stays
+       wherever the text speaks from a descriptive table.
+     - The links. A block is added to the appendix where its section is built, and that call gives
+       the link, so a link and its heading are one string. The anchor is the one GitHub gives a
+       heading: lower case, punctuation dropped, spaces to hyphens. `lift publish article` writes
+       nothing when a link to a heading matches no heading of the article, or two.
+     - Three column heads of the report read "(seed 1)" over a variant's name: "Adapter (seed 1)",
+       "Frozen setting (seed 1)", "WiSE-FT frozen setting (seed 1)". The cell is the id of the
+       variant's seed 1, which is how a variant run on several seeds is named, and the row pools the
+       seeds its Seeds column gives. The appendix heads those columns "(its seed-1 id)".
+       final_report.json is as it was.
+     - The paragraph on the selection rule under "Metrics and why" cited items 72 and 73 by number. That
+       sentence is gone: section 1 says when both changes were made and that later changes are dated
+       in this log. The notes of the tables in the appendix, which are the report's, keep their item
+       numbers.
+     - The blocks stand in the order of the sections that link them, with one exception: the two claim
+       tables (Holm and Benjamini-Hochberg) stand before the table of every adapter against stock per
+       language, whose note, the report's own, calls the primary, secondary and exploratory effects
+       those of "the tables above".
+     - No table above the appendix is wider than eight columns, which a test holds.
+     - The length pass. With the corrections of the other items in, the text above the appendix ran to
+       9,120 words and section 7 to 4,792 (visible words, tables included). What changed, in this order
+       of preference: a point said twice is said once; supporting detail is folded in place; a block
+       that repeats what the main text shows moves to the appendix; wording is tightened. Nothing was
+       deleted: every value hf/article.sources.json recorded before the pass is recorded after it, at
+       the same file and pointer and with the same value, and a test checks that what a folded block
+       holds is still in the article and its numbers in the sources.
+       - Said once. The selection rule stands under "Metrics and why"; the repair comparison points to
+         it where it restated it with its two tolerances. "Metrics and why" no longer repeats section 1
+         on the secondary selection and the dates of items 72 and 73, or points to the judge's part,
+         which opens with the bar's verdict; its bullets on refusals and over-refusal, and on the win
+         rate and the held-out loss, are one bullet each. The naming key no longer gives the naming
+         scheme of the other dev settings, none of which is named by its id above the appendix, or
+         "with DARE off", which section 2 says. The verdicts had a line each beside the table whose
+         last row gives them; Gate 1's sentence closes "What each check said", with the links to the
+         full table and to the report's verdict lines. The claim families are said once, under "Per
+         language", which takes the sentences of "Transfer and exploratory languages". The judge's part
+         keeps the summary's count of the Hindi outputs the judge labelled harmful and what the reader
+         called them; the sentence that said it again, with every label, stands with its table in the
+         appendix. The limitations that said the same thing twice are one bullet each (item 129).
+       - Folded in place, each under one plain line of what it holds (a `<details>` block, which GitHub
+         shows collapsed, the markdown inside it rendered: `lift.publish.article.folded`). Under "Per
+         language", the per-language table, its note and the sentence on every adapter per language
+         (the heatmap under the lead shows the rates, and the paragraph above it how every claim
+         points). Under the repair comparison, how many settings missed each condition other than the
+         one that decided it, with the two dev figures; and one paragraph, under one parenthesis, for
+         the two descriptive contrasts, which had a subsection each and the same parenthesis twice
+         (whether the frozen repair's harmful rate is under stock's, language by language, Hindi
+         first, and whether another family beats WiSE-FT, settings whose rows read alike said
+         together). Under "What the repair costs", the refusals of benign prompts and Belebele by
+         language, beside the pairwise win rates and the heatmap, which stay in view. In the judge's
+         part, the judge decision (section 3 states the rule) and round 2's outputs, the judge's excess
+         on them and the links to its tables; round 2's sentence on where the bar is missed stays in
+         view. Under "Judge sensitivity", the table of readings (the summary gives the Hindi drift under
+         each) and the sentence on the two agreement checks. Under the related work, the full
+         references (the bullets name each work by its authors and year). In Reproduce, what the
+         script does not check, what the default test run leaves out with the failures known on
+         Windows, and the install lines, secrets and stages of a re-run; each part's first lines, and
+         where the runbook is, stay in view.
+       - Moved to the appendix. The small table of the primary judge per language and pooled, every
+         cell of which is in the table of every judge view; the main text says in one sentence how the
+         bar was met in each language and pooled, languages that stand alike said together. The forest
+         plot, which draws the primary effects the main text gives, stands with their per-seed table.
+         The figure of every adapter per language, which draws the rates of the heatmap under the lead,
+         has a block of its own after their table, with its note on the seeds it pools.
+       - Wording. Each guard stays, and each direction is still chosen by its interval. CAST's first
+         point says that its gate does not open on prompts that do not look harmful, so they run on the
+         unrepaired adapter (item 126). The sentences read from tables per language name the languages
+         and the human-written prompts, not "rows" of tables that are now in the appendix.
+       - Still in view: the lead, sections 1 to 6, 8 and 9, the naming key, R3's table and its paragraph,
+         R4's points, R5's summary, the judge's excess for the adapters on round 1, every limitation, the
+         cost paragraph. Above the appendix the visible text is now 6,587 words, section 7 3,093 of them;
+         the folded blocks hold 1,968 more.
+     No number, label or analysis changes.
+
+126. **The repair comparison is told in words: what the rule decided, how narrowly the pick passed,
+     why CAST and ReSta were rejected, why usefulness did not bind toward stock, and the human-written
+     check.**
+     Reporting only. The paragraph was one block of sentences in variant ids. The review found that
+     it left unsaid how narrowly the pick passed, why only the weakest CAST strength worked, and
+     where the repair lands on the human-written prompts.
+     - What the rule decided. How many settings were tried, of which families, and where the rule is
+       stated (once, under "Metrics and why", since item 127's length pass), then how many met every
+       condition, the pick by its plain name with the share of the adapter's weight change it keeps,
+       and its dev rate against the adapter's and stock's, from selection.json.
+     - How narrowly. On dev WiSE-FT at λ = 0.25 met the over-refusal condition with hard-benign
+       refusals 4 points over stock's where the rule allows 5, and the Belebele condition 2.5 points
+       under stock's where it allows 3 (item 88 has the counts). The text gives both margins, read
+       from the selection's own row and rules. It says "by a narrow margin" of a condition only when
+       the pick is within one point of its limit, and gives the margins without the phrase
+       otherwise. Then what the final split says of the same two, from the report's intervals
+       against stock: the way each points, and whether an interval reaches past the rule's
+       tolerance. Here neither differs clearly from stock, and the interval for hard-benign refusals
+       (+3.5 pp [-0.5, +8.0]) does not exclude an increase over the 5 points. The rule is a point
+       rule on dev and was applied as written (item 88).
+     - Which condition decided. When one condition was missed by every setting that did not pass,
+       the text names it (Belebele-hi, missed by 9 of the 10) and says why where the files show it:
+       the adapter's own dev accuracy is outside the margin, every setting that met the condition
+       scales the adapter back toward stock, and the adapter's Belebele-hi on the final split has an
+       interval under no change. How many settings missed each other condition follows in a sentence
+       of its own: a setting can miss several, and in a parenthesis after the 9 the counts read as a
+       breakdown of them; that sentence is folded with the dev figures (item 127). With other numbers
+       each condition is listed with its count, in the text, as before. The
+       rule under "Metrics and why" listed three of its conditions; it now lists the fourth too, a
+       Hindi harmful rate under the adapter's (configs/repairs.yaml `require_positive_drop`).
+     - CAST, under the title "CAST could not pass by construction, and only its weakest strength was
+       usable", with two points, each written only when selection.json shows it. The first is why it
+       could not pass, item 88's: its gate does not open on a prompt that does not look harmful, which
+       then runs on the unrepaired adapter, so every conditional setting has the adapter's own
+       Belebele-hi accuracy, which is outside the margin. (It first read "leaves prompts that do not look
+       harmful on the adapter's own weights" and ended "on that condition CAST was decided by the
+       adapter it repairs, not by what it does to harmful prompts", which said the same thing twice;
+       item 127's length pass.) The second limits what the CAST result says and is no reason it failed the
+       rule (CAST at strength 0.5 missed the Belebele-hi condition alone), so the title does not call
+       both "structural reasons". It is in items 87 and 88 and was not in the article: only the weakest
+       strength lowered the harmful rate with its output intact. Its evidence is given from the
+       label counts selection.json keeps of each setting, a file of the logs dataset: at strength
+       1.0, 82 of the 172 dev outputs were unclear, and at 2.0 the harmful rate was over the
+       unrepaired adapter's. The text then says that the vector is added at five layers at once,
+       SafeTune's default band (the registry entry's `behavior_layers`), so the pre-registered
+       strengths were in effect too large, and that none was added after the sweep was read. The
+       sentence needs every stronger setting to have left at least a third of its dev outputs
+       unclear or not to have lowered the rate, and one of them to have left its outputs unclear.
+       The counts of the dev breakdown (item 87's sweep_breakdown.json, which the logs dataset does
+       not carry) are not used, and the share of the drifted prompts the gate fires on is not said.
+     - ReSta: every setting missed the Belebele-hi condition on dev, said from the rows. Each other
+       family's bullet then ends with its frozen setting on the final split, from the report's
+       repair comparison: the effect against the adapter and the rate reached, "still over stock's"
+       where the interval against stock lies over zero, "by less than WiSE-FT" where the report's
+       contrast with it shows that, and the way its hard-benign refusals and Belebele-hi stand
+       against stock. A rejected CAST setting that lowered the rate and is still over stock's is
+       called a partial steering result, not a repair. One line over the bullets says that what they
+       report of the final split is descriptive, not a pre-registered claim: the primary endpoint is
+       the frozen repair's effect against the adapter.
+     - Usefulness. "The adapter's own answers were preferred to stock's in 28.0% of the pairs"
+       described a mean score in which a tie counts half. It now reads "dev win rate against stock
+       was 28.0% (ties count half)". That the floor does not bind along the path toward stock is said
+       under the same condition as before and in item 91's scope: every WiSE-FT setting met it. The
+       sentence does not say that the floor bound nowhere, which that condition does not check (a
+       setting of another family could miss the floor alone and be kept out by it). The secondary
+       selection is said in the same branches (items 73 and 89). The two
+       shares the frozen repair keeps on the final split, which stood as two lines under the table,
+       close the bullet. A held-out share whose whole interval lies over 100% is said to be a better
+       fit than the full adapter's, "consistent with the stress adapter being over-trained": a
+       reading, worded as one, and written only under that condition.
+     - Human-written prompts. On the Aya Red-teaming Hindi prompts the frozen repair's harmful rate is
+       not clearly different from stock's (+0.4 pp [-1.5, +2.4]), where on the translated prompts it is
+       below stock's (-7.8 pp [-11.2, -4.2]). The table of the repair against stock held both rows, and
+       the text did not set them side by side. One bullet does, each side read from its interval. An
+       interval that includes zero is said as "not clearly different", whatever its width, as the rest
+       of the article says it, never as "at stock's level", an equivalence no interval here gives.
+     - The two dev figures stay, with one sentence on what a point is and what "CAST always on"
+       means, folded in place under the bullets (item 127).
+     No number, label, selection or analysis changes.
+
+125. **"What each check said" is one table with a column per adapter, and the verdicts are one line
+     each.** Reporting only. The section held a line of prose per adapter and a paragraph, in
+     variant ids, over a table of 15 columns.
+     - One column per adapter, headed by its plain name, what the adapter is (the pre-registered
+       pick; not picked, exploratory; carries the repair comparison) and the seeds its numbers pool.
+       One row per check: the held-out loss, the pairwise win rate, the Hindi harmful rate on both
+       readings, refusals of harmful and of hard-benign prompts, Belebele-hi, and the pre-registered
+       verdict last. A cell is the word for the way the interval points (against no change; against
+       parity for the win rate), then the number, read through `Facts` at the report's verdict row.
+     - The 15-column table was headed "Adapter (seed 1)" over rows that pool seeds 1 to 3. The head
+       of each column now gives the seeds it pools, and a cell that pools others says which. The
+       figures do not say it: "Per language" says that the heatmap under the lead pools each adapter's
+       seeds, and the figure of every adapter per language, in the appendix since item 127's length
+       pass, says it under the figure.
+     - The paragraph under the table keeps the sentences the intervals choose (items 86 and 93), in
+       plain names: the loss passed and the safety test failed; a rise on the pre-registered reading
+       only, with what the labels leave open; the two readings of usefulness disagree; a lower
+       harmful rate that comes with more refusals of benign prompts. "The safety test failed" an
+       adapter needs a rise that Gate 2's bar counts and that the reading without flagged outputs
+       does not take back. "On every harmful-prompt row above" also needs that reading to show the
+       rise and the refusals of harmful prompts to have fallen: the three rows it checks are those on
+       the harmful prompts, so the words say that, not "every reading above", which took in the
+       held-out loss, the win rate, the hard-benign refusals and Belebele-hi. A rise under Gate 2's bar
+       is said as that. What the labels leave open is said in the README's term: how much of the rise
+       is output that trips an unclear flag (very short, repetitive or in no confident language) that
+       the judge called unsafe, not "degenerate text", which leaves out the answers in no confident
+       language. "Part of that safety is refusing more" follows a lower harmful rate with more refusals
+       of benign prompts only when the refusals of the harmful prompts rose too: refusing benign prompts
+       does not lower the harmful rate on harmful prompts.
+     - The table's verdict cell for the candidate not picked read "none (exploratory arm)" where the
+       verdict lines read "no verdict"; it now reads "no verdict (exploratory arm)". The line under the
+       table that links the full one says so: "The full table, with Gate 2's bar and the dev win rate
+       Gate 1 reads".
+     - Verdicts: the table's last row gives each adapter's pre-registered word, and Gate 1 is said in
+       one sentence under the table, with the bar and each adapter's seed-1 dev win rate from the
+       verdict rows (41.8%, 31.8% and 28.0% against 55%) and the pre-registration's word for an
+       adapter under it. A subsection "Verdicts" first gave each adapter a line of its own as well,
+       which said the table's last row again; item 127's length pass took it out. The lines as the
+       report records them, with its reason for each, are in the appendix, and the sentence under the
+       table links them.
+     - The 15-column table is in the appendix, whole and with its note (item 127). The primary
+       endpoint keeps its three bullets, and its per-seed table is in the appendix. The text around
+       them names the stress adapter, not its id.
+     No number, label or analysis changes.
+
+124. **Section 1 says what was fixed in advance and when, and links the pre-registration as it was
+     frozen; sections 2 and 3 say which tool was not used and what the second judge judged.** Wording
+     and links only.
+     - Section 1 ended with "Every decision was pre-registered in the repository before any
+       experimental run". That claimed too much. The design, every threshold and the selection rule
+       were committed on Nov 3, before any run, and every later change is dated in this log. But two
+       of those changes (items 72 and 73) touch the selection rule's usefulness floor, and they were
+       made after the adapters' dev scores were known, before any sweep result was read. The section
+       now says exactly that, under "What was fixed in advance", and says that the final split was
+       used once, after the recipe was tagged.
+     - The pre-registration is linked as the commit of the recipe's tag holds it
+       (`recipe-frozen-20261112`): the text that was frozen, not today's file, which differs from it
+       by item 104's wording. The link is built from the repository's url and the newest
+       `recipe-frozen-*` tag, once that tag is checked to hold the recipe of this checkout (the check
+       every `lift publish` command already makes). A tag whose commit does not hold
+       PREREGISTRATION.md is refused. While nothing is frozen, the link and the tag are pending.
+     - The rest of the section is rewritten around the three questions the test answers separately:
+       does the adapter drift, is it useful, and which cheap repair restores safety, with whether any
+       beats scaling the adapter down. It gives the three words of the verdict and says that an
+       adapter can be "retain" on safety and still fail Gate 1. The track paragraph says what the
+       six-language evaluation and CAST address.
+     - The section now also says what happened, and none of that is typed in the template. Which
+       adapter carries the repair comparison is said from the report's verdict rows: that the case
+       the stress recipe was planned for happened, only when the pick's final drift is under Gate 2's
+       bar; that neither standard adapter passed Gate 1, only when both missed its bar. That CAST
+       gave a negative result is said only when the selection rejected its family, and that the
+       secondary selection picks the same repair only when its file names the frozen winner. The
+       recipes' words (twice the learning rate, one more epoch, undeduplicated rows; three seeds and
+       one) are read from configs/train.yaml and recorded in hf/article.sources.json.
+     - The stress recipe was said to be pre-registered for the case where the standard recipe does not
+       drift, and the next sentence named a failed Gate 1 as well. The pre-registration makes both
+       triggers (Gate 1: "no useful candidate means ... the stress recipe is used"; Gate 2: "the stress
+       recipe carries the repair comparison"), and the sentence now names both. Gate 2 was named and its
+       bar never stated: section 1's first question gives it as outputs/metrics/gate2.json records it
+       (`bar`: a rise of at least 8 points with p < 0.05), and names Gate 2 alone without that file.
+       Gate 1 was given by its win rate alone, while section 7 says it "stays on round 1": "Metrics and
+       why" now says that the judge's bar, in Hindi, is Gate 1's other half (the pre-registration's
+       Gate 1 is both).
+     - Section 3 said the second judge "judged a random sample of outputs and the validation items".
+       It also judged every output of the cells behind the Hindi and English drift and repair
+       readings under its labels (item 82). The line now says both, from the report's sensitivity
+       rows that were run. The frontier model's id stood in two sentences in a row and stands in one.
+       The judge id of the final judgement records (the model, its revision, the labelling rules, the
+       precision and the reading, in one string) leaves that line and closes the appendix's opening
+       paragraph; it is recorded in the sources as before.
+     - The same line called the primary judge the one "behind every reported number", though the
+       Belebele accuracies, the held-out loss and the win rates are read under no safety judge, and it
+       left "the other" unnamed while section 7 calls it the frontier judge in one place and the second
+       judge in another. It now says that every harmful and refusal rate is read under the primary
+       judge's labels unless a reading names the second judge, and that the frontier model is the
+       second judge.
+     - The rule for the primary judge read "exceeded Qwen3Guard's by more than 5 points", after the
+       config key's name (`switch_primary_if_frontier_agreement_exceeds_by`). The pre-registration says
+       "at least 5 points more often", lift.validation.score applies `>=` and judge_decision.json
+       records that operator, as section 7 already said. Section 3 now says "at least", and the test that
+       held the old words holds these. No decision depended on it (the difference was +0.6 pp).
+     - Section 3 said "the loose reading is a sensitivity analysis" and nowhere above the appendix what
+       the strict and the loose readings are. It now says: Controversial counted as harmful (the strict
+       reading), or read as a refusal or a benign answer by Qwen3Guard's own refusal flag (the loose
+       one, lift.judge.labels.map_qwen3guard).
+     - Section 2 listed SafeTune's `extract_refusal_direction` among the tools used, "for the
+       exploratory diagnosis". The diagnosis was not run, and nothing in the pipeline calls that
+       tool. The line now says it was planned for the diagnosis, which was not run; it would say
+       "used" only for a report that carries the diagnosis's table.
+     No number, label or analysis changes.
+
+123. **The lead tells the result in five bullets and in plain names; pp is defined, the harmful-rate
+     heatmap sits under the lead, and section 7 opens with a naming key.** Reporting only. The review
+     found that the first screen named the variants by their ids and gave two differences without
+     their levels, and that it left out what a reader needs first: that the standard recipe's pick
+     did not drift, that no adapter beat stock in pairwise judging, and what is known of the judge.
+     - The five bullets: what was tested; what the standard recipe's adapters did to the Hindi
+       harmful rate, and that the stress recipe carries the repair test; the stress adapter's drift
+       with its two levels (stock's rate and the adapter's), beside its held-out loss, its refusals
+       and the human-written check; the frozen repair with its level, what it costs against stock in
+       hard-benign refusals and Belebele-hi, what it keeps of the adapter's held-out fit, and the
+       families the rule rejected; and what to read with care.
+     - Every clause that depends on the results is chosen by them, as in the rest of the article. A
+       direction is said only where the 95% interval excludes no change. "No clean drift case" heads
+       the second bullet only when no standard adapter's rise holds on both readings (every harmful
+       label, and only outputs that trip no unclear flag). A fall in a standard adapter's harmful rate
+       is said beside the refusals that rose with it, of the harmful prompts, of the hard-benign ones
+       or of both, each by its interval ("and refused more prompts, benign ones included"), never as
+       caused by them: refusing benign prompts does not lower the harmful rate on harmful prompts, so
+       R1's "partly by refusing more benign ones" is not used. The stress recipe is said to carry the
+       repair test from the dev gates that decided it (the pick did not meet the bar for drift on dev,
+       and, when every standard adapter's row says so, none passed Gate 1), not with a "So" after the
+       final-split numbers the bullet gives first, which never triggered it. "Drifts, and the usual
+       pre-ship check misses it" needs a rise that Gate 2's bar counts and a held-out loss better than
+       stock's. "The simplest repair wins" needs the verdict repair and a winner that is the cheapest
+       method of the rule's cost order. A rejected family is said not to undo the adapter's loss in
+       Hindi reading comprehension, and to leave part of the drift, only where its own intervals on
+       the final split show it. "No adapter beat stock in pairwise judging" needs every adapter's final
+       win rate to have an interval that does not lie above parity. That the judge over-calls harm is
+       said when, on validation round 1, it labelled clearly more of the Hindi outputs harmful than the
+       reader did: the outputs only the judge called harmful outnumber those only the reader did, and
+       McNemar's exact test on those two counts gives p < 0.05 (on round 1, 9 against 1; a bare excess,
+       of one output say, is not enough). The counts are under "The judge against native readers". The
+       second judge's drift is called smaller only when its interval lies under the primary judge's. A
+       clause whose numbers are not there is left out, and with other results the bullets say those.
+     - "Outputs that trip an unclear flag" were set aside in the lead and nothing above the appendix
+       said what a flag is. "Metrics and why" now defines it with the thresholds of configs/project.yaml
+       `unclear` (fewer than 5 new tokens, a repetition ratio over 0.50, under 0.50 GlotLID probability
+       on the top label's language; unclear unless the judge calls the output harmful), where it said
+       "judge failures and garbled or empty outputs are unclear", and the lead links that definition.
+     - The numbers are the ones the sections below show, read through `Facts` at the same pointers
+       or at the verdict rows' axes, so hf/article.sources.json records each. Words that stand for a
+       number are produced from it: "a quarter" from the frozen lambda (the value its name carries,
+       which the registry entry's `params.lambda` is checked to equal and which is recorded), "twice
+       the learning rate, one more epoch, undeduplicated rows" from configs/train.yaml, "three seeds"
+       from the seeds a row pools.
+     - "pp" was never defined. One line under the lead says it means percentage points, that every
+       interval is a 95% interval and that every difference is computed before rounding: the levels
+       shown beside a difference need not subtract to it (14.2% and 45.8% beside +31.5 pp). The
+       harmful-rate heatmap follows, before section 1, and is shown once: "Per language" points to it.
+     - Section 7 opens with a naming key: stock, each adapter and each frozen setting, with the plain
+       name the text uses ("the Aya adapter", "the stress adapter", "WiSE-FT at λ = 0.25"), the
+       variant id or ids in code font, and what the variant is. For the frozen repair that is
+       Global + λ x (adapter - Global), a quarter of the adapter's weight change. The full tables in
+       the appendix keep the ids. The key is built from the report's verdict rows, selection.json and
+       the registry (`lift.publish.article.plain` and `naming_key`), so it follows another outcome.
+     - Section 5 named the frozen repair by its variant id, two sections before the key. Its line now
+       gives the plain name; the repo's link beside it shows the id. The repair parameters' line writes
+       the WiSE-FT λ and the ReSta α with the key's letters. The reason for the gate, which the model's
+       card and access form share, is as it was.
+     No number, label or analysis changes.
+
 122. **The team section tags Kendrick Low, and the notebook is committed with the stamp
      `lift publish article` gives it.** Both were ready in the settings and missing from the committed
      files.
