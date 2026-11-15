@@ -19,10 +19,11 @@ RUBRIC = "configs/rubrics/safety_v1.md"
 HAIKU = "claude-haiku-5-5"
 
 HOLD = textwrap.dedent("""
+    import os
     import sys
     from lift import proclock
     proclock.acquire(sys.argv[1])
-    print("held", flush=True)
+    print("held", os.getpid(), flush=True)
     sys.stdin.read()
 """)
 
@@ -76,14 +77,22 @@ def run(code: str, *args: str) -> str:
     return out.stdout.strip()
 
 
+def holder_pid(proc) -> int:
+    """Wait until ``proc`` (running HOLD) holds its lock; the pid it wrote into the lock's note, its own
+    os.getpid(). That is not always ``proc.pid``: in a virtual environment on Windows, sys.executable is a
+    launcher that runs the interpreter as a child process of its own."""
+    word, _, pid = proc.stdout.readline().strip().partition(" ")
+    assert word == "held"
+    return int(pid)
+
+
 @contextmanager
 def held_elsewhere(path):
-    """Another process holding the lock at ``path`` until the block ends."""
+    """Another process holding the lock at ``path`` until the block ends; yields the pid its note names."""
     proc = subprocess.Popen([sys.executable, "-c", HOLD, str(path)], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, text=True)
     try:
-        assert proc.stdout.readline().strip() == "held"
-        yield proc
+        yield holder_pid(proc)
     finally:
         proc.stdin.close()
         proc.wait(timeout=60)
@@ -107,10 +116,10 @@ def test_a_process_holds_its_lock_again_and_lets_go_at_the_last_release(tmp_path
 
 def test_a_second_process_is_refused_and_told_who_holds_it(tmp_path):
     path = tmp_path / "sub" / "cache.jsonl.lock"
-    with held_elsewhere(path) as proc:
+    with held_elsewhere(path) as pid:
         with pytest.raises(proclock.Busy) as caught:
             proclock.acquire(path)
-        assert f"pid {proc.pid}" in caught.value.holder and str(path) in str(caught.value)
+        assert f"pid {pid}" in caught.value.holder and str(path) in str(caught.value)
         assert not proclock.held(path)
     proclock.acquire(path)                       # the holder ended: the OS let go of its lock
     try:
@@ -124,7 +133,7 @@ def test_a_killed_holder_leaves_no_lock_behind(tmp_path):
     proc = subprocess.Popen([sys.executable, "-c", HOLD, str(path)], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, text=True)
     try:
-        assert proc.stdout.readline().strip() == "held"
+        holder_pid(proc)
         assert run(TRY, path).startswith("busy")
         proc.kill()
         proc.wait(timeout=60)
@@ -153,8 +162,8 @@ def test_a_judge_on_a_real_provider_holds_its_cache_until_it_is_gone(tmp_path):
 
 
 def test_a_second_process_judging_with_the_cache_stops_before_it_reads_or_writes(tmp_path):
-    with held_elsewhere(_lock_of_default_cache()) as proc:
-        with pytest.raises(FrontierBusy, match=f"pid {proc.pid}"):
+    with held_elsewhere(_lock_of_default_cache()) as pid:
+        with pytest.raises(FrontierBusy, match=f"pid {pid}"):
             FrontierJudge("anthropic", HAIKU, RUBRIC, client=Quiet(), config_entry=None)
 
 

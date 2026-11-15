@@ -1148,6 +1148,7 @@ def test_judge_refuses_a_short_cells_record_with_its_remedy_and_exits_3(made, tm
     assert "stock easy_benign_zh_final: no AuditKIT record: easy_benign_zh: " in caplog.text
 
 
+@pytest.mark.torch
 def test_judge_over_generations_short_of_their_split_refuses_the_record_and_exits_3(fake_prompt_files,
                                                                                     monkeypatch, caplog,
                                                                                     tmp_path):
@@ -1156,8 +1157,10 @@ def test_judge_over_generations_short_of_their_split_refuses_the_record_and_exit
     # AuditKIT record and exited 0, so job.py, the Kaggle runner and lift remote reported it done although
     # every reported read refuses the cell. Its record is refused now, listed with the lift generate line
     # that makes the rest, and the line exits 3; a whole cell the same line judged gets its record. The real
-    # Qwen3Guard adapter over StubGuard, the real record_safety and AuditKIT; placeholder texts.
+    # Qwen3Guard adapter over StubGuard, the real record_safety and AuditKIT; placeholder texts. The adapter
+    # records the judge's stack (lift.models.generate.stack: the torch and transformers versions).
     pytest.importorskip("auditkit")
+    pytest.importorskip("torch")
     from fakes import make_prompt
 
     from lift import audit

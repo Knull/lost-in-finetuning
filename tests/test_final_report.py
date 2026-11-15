@@ -984,7 +984,7 @@ def freeze(monkeypatch, selection=SELECTION):
     text = json.dumps(selection, indent=1)
     path = metrics_dir() / "selection.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="\n")           # the bytes the recipe's sha256 pins
     recipe = recipe_text(recipe_doc(selection, text))
     paths.frozen_recipe_path().parent.mkdir(parents=True, exist_ok=True)
     paths.frozen_recipe_path().write_text(recipe, encoding="utf-8")
@@ -1009,7 +1009,7 @@ def test_stats_and_report_read_repaired_results_only_under_the_recipe_the_tag_fr
     # committed or tagged.
     moved = {**SELECTION, "overall": {"winner": RESTA.format(1), "verdict": "repair"}}
     text = json.dumps(moved, indent=1)
-    (metrics_dir() / "selection.json").write_text(text, encoding="utf-8")
+    (metrics_dir() / "selection.json").write_text(text, encoding="utf-8", newline="\n")
     paths.frozen_recipe_path().write_text(recipe_text(recipe_doc(moved, text)), encoding="utf-8")
     assert cli.main(["stats"]) == 2
     err = capsys.readouterr().err

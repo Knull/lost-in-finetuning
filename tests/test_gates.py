@@ -339,7 +339,8 @@ def test_a_gate1_json_that_no_longer_holds_is_stale(gate1_stale, monkeypatch):
     judge = result["checks"]["judge"]
     assert (result["verdict"], judge["status"]) == ("INCOMPLETE", "incomplete")
     assert "still holds for the files here cannot be checked" in judge["reason"]
-    assert "ValidateError: outputs/generations cannot be read" in judge["error"]
+    # The root is written as outputs; the rest of the path keeps its separators (a backslash on Windows).
+    assert "ValidateError: outputs/generations cannot be read" in judge["error"].replace("\\", "/")
     assert_no_machine_paths(result)
 
 

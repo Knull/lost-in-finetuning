@@ -295,6 +295,7 @@ def test_a_tokenizer_that_merges_across_the_letter_boundary_is_refused(tiny_toke
 
 @pytest.mark.torch
 def test_a_forced_answer_wins_with_single_token_letters():
+    pytest.importorskip("torch")                    # Favours returns torch logits, and scoring imports torch
     tok = letter_tokenizer()
     letters = loglik.letter_ids(tok)
     assert letters == {x: [tok.convert_tokens_to_ids("Ġ" + x)] for x in loglik.LETTERS}
@@ -312,6 +313,7 @@ def test_a_forced_answer_wins_with_single_token_letters():
 
 @pytest.mark.torch
 def test_a_forced_answer_wins_with_multi_token_letters(tiny_tokenizer):
+    pytest.importorskip("torch")
     letters = loglik.letter_ids(tiny_tokenizer)
     assert all(len(ids) == 2 for ids in letters.values())                        # byte-level: "Ġ", "C"
     assert loglik.scoring_path(letters) == loglik.SEQUENCE
@@ -324,6 +326,7 @@ def test_a_forced_answer_wins_with_multi_token_letters(tiny_tokenizer):
 
 @pytest.mark.torch
 def test_a_tie_goes_to_the_first_letter_and_is_recorded(tiny_tokenizer):
+    pytest.importorskip("torch")
     model = Favours(len(tiny_tokenizer), 0)          # the pad token: every letter scores the same
     item = loglik.score_belebele(plain(model, tiny_tokenizer), [bel_row(1)])[0]
     assert item["pred"] == "A" and item["tie"]
@@ -525,6 +528,7 @@ def test_a_crash_mid_cell_resumes_without_duplicates(stock, monkeypatch):
 
 @pytest.mark.torch
 def test_an_out_of_memory_error_halves_the_batch_and_skips_nothing(tiny_tokenizer):
+    pytest.importorskip("torch")                    # and the score file's meta records torch's version
     model = Favours(len(tiny_tokenizer), 0, oom_above=4)            # more than one item of four rows: OOM
     path = loglik.belebele_cell(plain(model, tiny_tokenizer), bel_rows(5), lang="en", split="dev",
                                 batch_size=4)
