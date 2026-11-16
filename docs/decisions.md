@@ -2,6 +2,45 @@
 
 Every change to a locked decision after Oct 28, with its date and reason. Newest first.
 
+## Nov 16, 2026: the organisers' write-up checklist
+
+139. **The article follows the organisers' write-up checklist.** Presentation only, at Arnav's request
+     (checkpoint 4). The nine numbered sections stay the kickoff slides' nine (item 119).
+     - A content warning stands above the title. Under the title are a one-line claim, a headline and
+       the base model and method. The claim says only what the lead's guards allow: the adapter passes
+       the usual pre-ship check and still loses safety, and scaling it down repairs it. Without those
+       results it states the design. The headline gives the three Hindi harmful rates of the final
+       split (stock, the stress adapter, the frozen repair) at the lead's pointers.
+     - An "Abstract" section follows: the form abstract, with its design in words and its numbers read
+       through Facts (the final-split size and the seeds from configs/). Its results are the lead's own
+       sentences, so they carry the lead's guards. It adds two things: that the rise holds in every
+       language (only where every per-language interval is above zero), and the judge's Hindi kappas
+       (only where the bar is met on kappa and the harmful-vs-not kappa is under it). Its advice is
+       given only where the adapter drifted and WiSE-FT lowered the rate. The lead, the pp line and the
+       heatmap follow unchanged.
+     - Section 1 gives the tracks as a list: Track 2b, statement 6 (primary); Track 2a, statement 4;
+       Track 2b, statement 8, where CAST was tested and rejected by the selection rule. The CAST clause
+       is still read from the selection. A bold-led paragraph says why the problem matters.
+     - Section 4 says, in Arnav's words with one change, that no automated leak check was run against the
+       safety and over-refusal prompts (his text said no leak check at all, but the build does check one
+       set: training rows near a held-out utility row are dropped, configs/project.yaml), and then where
+       the build checks.
+     - The appendix gains one table per repo: the two training recipes side by side, CuratorKIT's
+       settings, SafeTune's grid and frozen setting per repair, and AuditKIT's run config. Section 2
+       links them. Every number is read from configs/ (train.yaml, repairs.yaml, project.yaml,
+       variants.yaml) and recorded. Settings that live only in code (the CuratorConfig call,
+       lift.audit's RunConfig) are said in words, with no number.
+     - "Metrics and why" says for each metric whether higher or lower is better.
+     - Each item of section 8 ends on a forecast worded as an expectation. A forecast carries no number
+       and contradicts no reported result; the ones that lean on a result are said only where the
+       numbers show it.
+     - Limitations add that no quantized or deployed model was evaluated.
+     - New extras: "Dual-use and ethics" and "Repo layout" before Reproduce; after Links, a
+       "Changelog" of the versions of the write-up (Nov 14 the first submission, then checkpoints 1 to
+       3, the readability pass and this checkpoint) and the "Declaration of work done outside the
+       hackathon" in Arnav's words. There is no author contributions section.
+     No number, label or analysis changes.
+
 ## Nov 15, 2026: fixes from the adversarial review of the submission
 
 138. **The article sets negative numbers with a real minus sign, the lead gives two intervals, and the

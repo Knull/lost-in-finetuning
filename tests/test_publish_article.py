@@ -145,8 +145,10 @@ def _heads(text: str) -> list[str]:
 
 
 def _numbered() -> list[str]:
-    """The headings the nine sections and the extras must give, in order."""
-    return [f"{i}. {name}" for i, name in enumerate(article.SECTIONS, 1)] + list(article.EXTRAS)
+    """The headings the abstract, the nine sections and the extras must give, in order (the abstract opens
+    the article: docs/decisions.md item 139)."""
+    numbered = [f"{i}. {name}" for i, name in enumerate(article.SECTIONS, 1)]
+    return ["Abstract", *numbered, *article.EXTRAS]
 
 
 def test_the_numbered_sections_are_the_organisers_nine():
@@ -159,8 +161,12 @@ def test_the_numbered_sections_are_the_organisers_nine():
     assert article.EXTRAS == (
         "Related work",
         "Run the test on your adapter",
+        "Dual-use and ethics",
+        "Repo layout",
         "Reproduce",
         "Links",
+        "Changelog",
+        "Declaration of work done outside the hackathon",
         "Appendix: full tables",
     )
     assert article.APPENDIX == article.EXTRAS[-1] and article.RUN_IT == article.EXTRAS[1]
@@ -243,7 +249,7 @@ def test_full_inputs_leave_no_placeholder(out, monkeypatch):
     assert "  - user: a-user" in text
     # the lead (decisions item 123): five bullets before section 1, in plain names, each from its numbers.
     # Here a standard adapter carries the repair comparison and every family's frozen setting met the rule.
-    lead = text.split("## 1. Problem statement and approach", 1)[0]
+    lead = _lead(text)  # "In short" to section 1: the abstract above it is tested on its own (item 139)
     assert "**In short.**" in lead and "- **What we tested.** Whether a Hindi LoRA adapter" in lead
     assert (
         "- **The adapters.** The pre-registered pick (Aya Dataset, three seeds) is the adapter the repairs "
@@ -361,7 +367,9 @@ def test_the_readme_is_written_only_when_asked(out):
     text = path.read_text(encoding="utf-8")
     readme = article.readme_path().read_text(encoding="utf-8")
     assert text.startswith("---\n") and readme == article.readme_text(text)
-    assert readme.startswith("# Lost in Fine-Tuning") and "thumbnail:" not in readme  # GitHub shows no table
+    # the content warning stands above the title (docs/decisions.md item 139); GitHub shows no table
+    assert readme.startswith("> **Content warning.**") and "thumbnail:" not in readme
+    assert readme.split("\n\n", 1)[1].startswith("# Lost in Fine-Tuning")
     assert article.readme_path().parent != article.paths.REPO_ROOT
 
 
@@ -860,7 +868,9 @@ def test_the_reproduce_section_names_the_number_check_the_tests_and_the_stages(o
     the extra on the notebook (decisions item 133) and the links."""
     write_inputs()
     text = article.build()[0].read_text(encoding="utf-8")
-    assert _heads(text)[-5:] == ["Related work", article.RUN_IT, "Reproduce", "Links", article.APPENDIX]
+    assert _heads(text)[-9:] == list(article.EXTRAS)
+    before = ["Related work", article.RUN_IT, article.ETHICS, article.LAYOUT, "Reproduce"]
+    assert _heads(text)[-9:-4] == before
     part = _reproduce(text)
     flat = " ".join(part.split())
     assert "```\npython scripts/verify_numbers.py\n```" in part
@@ -2913,8 +2923,11 @@ def _study(change=None, *, numbers=None, validation: str | None = "over-calls", 
 
 
 def _lead(text: str) -> str:
-    """The lead: from the comment under the title to section 1."""
-    return text.split("-->\n", 1)[1].split("## 1. Problem statement and approach", 1)[0]
+    """The lead: from "In short" (or its placeholder) under the abstract to section 1 (the claim, the
+    headline and the abstract stand above it since docs/decisions.md item 139)."""
+    body = text.split("## Abstract\n", 1)[1].split("## 1. Problem statement and approach", 1)[0]
+    starts = [i for i in (body.find("**In short.**"), body.find(f"{PENDING}: the summary")) if i >= 0]
+    return body[min(starts) :]
 
 
 def _bullets(text: str) -> list[str]:
@@ -3025,14 +3038,15 @@ def test_the_lead_tells_the_study_in_five_bullets_each_from_its_numbers(out):
     ):
         assert ("outputs/metrics/final_report.json", pointer) in recorded, pointer
     # the words that stand for a number are recorded with the number they were made from
-    said = {(s["file"], s["pointer"]): (s["shown"], s["value"]) for s in facts.sources}
-    assert said[("outputs/metrics/final_report.json", "/verdicts/1/axes/drift/seeds")] == (
-        "three seeds",
-        [1, 2, 3],
-    )
-    assert said[("configs/train.yaml", "/stress/lr")] == ("twice the learning rate", 4.0e-4)
-    assert said[("configs/train.yaml", "/standard/epochs")] == ("one more epoch", 2)
-    assert said[("configs/train.yaml", "/stress/dedup")] == ("undeduplicated rows", False)
+    # (a value can be recorded once for each wording: the appendix's recipe table shows lr as a number)
+    said: dict = {}
+    for s in facts.sources:
+        said.setdefault((s["file"], s["pointer"]), []).append((s["shown"], s["value"]))
+    seeds = said[("outputs/metrics/final_report.json", "/verdicts/1/axes/drift/seeds")]
+    assert ("three seeds", [1, 2, 3]) in seeds
+    assert ("twice the learning rate", 4.0e-4) in said[("configs/train.yaml", "/stress/lr")]
+    assert ("one more epoch", 2) in said[("configs/train.yaml", "/standard/epochs")]
+    assert ("undeduplicated rows", False) in said[("configs/train.yaml", "/stress/dedup")]
 
 
 def test_every_negative_number_of_the_article_has_a_real_minus_sign(out):
@@ -3288,7 +3302,8 @@ def test_a_family_the_rule_did_not_reject_is_not_called_rejected(out):
     ) in bullet
     assert "conditional activation steering (CAST)" not in bullet and "are rejected" not in bullet
     assert (
-        "We also tested inference-time steering (CAST, statement 8), reported in section 7."
+        "- **Track 2b, statement 8** (inference-time steering): condi"
+        "tional activation steering (CAST), one of the three repairs, tested and reported in section 7."
     ) in _one_line(text, "1. Problem statement and approach")
     assert "negative result" not in text
 
@@ -3442,13 +3457,15 @@ def test_pp_is_defined_and_the_heatmap_follows_the_lead(out):
     write_inputs()
     text = article.build()[0].read_text(encoding="utf-8")
     under = _lead(text).split("`hf/article.sources.json`.\n", 1)[1].strip().split("\n\n")
-    # shown levels need not subtract to a shown difference, computed before rounding (item 123)
-    assert under[0] == (
+    # shown levels need not subtract to a shown difference, computed before rounding (item 123); the line
+    # stands above the abstract, which already uses pp and intervals (item 139)
+    pp_line = (
         "*pp = percentage points. Every interval in this write-up is a 95% interval, and every difference is "
         "computed before rounding.*"
     )
-    assert under[1].startswith("![") and under[1].endswith("/resolve/main/figures/heatmap_harmful.png)")
-    assert len(under) == 2 and text.count("figures/heatmap_harmful.png") == 1
+    assert text.count(pp_line) == 1 and text.index(pp_line) < text.index("## Abstract")
+    assert under[0].startswith("![") and under[0].endswith("/resolve/main/figures/heatmap_harmful.png)")
+    assert len(under) == 1 and text.count("figures/heatmap_harmful.png") == 1
     per_language = " ".join(_section(text, "Per language").split())
     assert (
         "The heatmap at the top shows the harmful rates, each adapter's seeds pooled (a repair is run on its "
@@ -3693,10 +3710,14 @@ def test_section_1_says_what_happened_from_the_results(out):
         "throughout. The candidate not picked is reported as an exploratory arm."
     ) in part
     assert "a sample of IndicAlign, over three seeds. The pre-registered rule picks one of the two" in part
+    # the tracks as a list (docs/decisions.md item 139): statement 8 says what the rule made of CAST
     assert (
-        "We also tested inference-time steering (CAST, statement 8), with a negative result explained in "
-        "section 7."
+        "- **Track 2b, statement 8** (inference-time steering): condi"
+        "tional activation steering (CAST), one of the three repairs, tested and rejected by the selection "
+        "rule (section 7)."
     ) in part
+    assert "**Tracks and problem statements.** - **Track 2b, statement 6** (repairing safety drift" in part
+    assert "- **Track 2a, statement 4**: the evaluation in six languages" in part
     assert "the second reading they add (held-out loss) freezes nothing, and picks the same repair." in part
     # Gate 2 is named; its bar is gate2.json's, said only once that file is there (it is not, here)
     assert (
@@ -3756,20 +3777,24 @@ def test_section_1_follows_a_standard_adapter_that_carries_the_comparison(out):
     assert (
         "That case did not arise: the pick (the Aya adapter) drifted, and it carries the repair comparison."
     ) in part
-    assert "(CAST, statement 8), reported in section 7." in part and "negative result" not in part
+    assert "(CAST), one of the three repairs, tested and reported in section 7." in part
+    assert "rejected" not in part
     assert f"(held-out loss) freezes nothing, and picks ReSta at {ALPHA} = 0.25 instead." in part
     # CAST as the overall winner
     write_inputs(selection_doc=selection(CAST_WINS))
     _secondary_file().unlink()
     part = _one_line(article.build()[0].read_text(encoding="utf-8"), "1. Problem statement and approach")
-    assert "(CAST, statement 8), which the selection rule froze as the repair (section 7)." in part
+    frozen = (
+        "(CAST), one of the three repairs, tested and frozen as the repair by the selection rule (section 7)."
+    )
+    assert frozen in part
 
 
 def test_section_1_is_pending_where_its_inputs_are_not_there(out):
     part = _one_line(article.build()[0].read_text(encoding="utf-8"), "1. Problem statement and approach")
     pending_adapter = f"{PENDING}: which adapter carries the repair comparison from "
     assert f"no standard adapter passes Gate 1. {pending_adapter}" in part
-    assert "(CAST, statement 8), reported in section 7." in part
+    assert "(CAST), one of the three repairs, tested and reported in section 7." in part
     assert f"README; {PENDING}: the pre-registration as frozen at the recipe's tag from " in part
     assert f"after the recipe was tagged ({PENDING}: the recipe's tag from configs/frozen_recipe.json" in part
     assert "/blob/" not in part and "freezes nothing. The final split" in part
@@ -5020,7 +5045,30 @@ def test_the_cost_section_says_the_check_up_and_its_table_is_in_the_appendix(out
     assert dict(appendix.blocks)[COST_HEAD] == slots["cost_table"]
 
 
-CREDITS = "What we would run, and the claim of this write-up each run would firm up:"
+CREDITS = (
+    "What we would run, the claim of this write-up each run would firm up, and what we expect it to show "
+    "(a forecast, not a result):"
+)
+# Each item's forecast (docs/decisions.md item 139): worded as an expectation, with no new number.
+EXPECT_SEEDS = (
+    " We expect the repair to keep lowering the Hindi harmful rate on every seed, with a wider interval, "
+    "since training runs add their own variation."
+)
+EXPECT_SMALLER = (
+    " We expect every effect to keep its direction under the second judge and to be smaller, as the Hindi "
+    "drift is."
+)
+EXPECT_JUDGE = " We expect it to show how far each effect's size depends on the judge."
+EXPECT_READERS = " We expect the readers to show how precise the judge is in those languages"
+EXPECT_POLICY = (
+    " We expect drift to vary with the data and the recipe, and scaling the adapter down to stay the "
+    "baseline every repair has to beat."
+)
+EXPECT_CAST_MECHANISM = (
+    " We expect it to gate the languages more evenly, but not to undo the adapter's loss in Hindi reading "
+    "comprehension: benign inputs would still run on the adapter's weights."
+)
+EXPECT_CAST = " We expect it to gate the languages more evenly."
 READERS = (
     "- **Arabic and Thai readers, and a native check of every translated prompt.** Native readers validated "
     "the judge in Hindi, Chinese, Spanish and English, and checked samples of the Hindi, Chinese and Spanish "
@@ -5047,15 +5095,16 @@ def test_each_item_of_more_credits_names_the_claim_it_would_firm_up(out):
         "",
         "- **More seeds of the stress recipe.** The repair's effect (\u221237.0 pp [\u221242.0, "
         "\u221232.0]) is measured on one seed of one adapter, so its interval is over prompts, not over "
-        "training runs. More seeds would give it over runs.",
+        "training runs. More seeds would give it over runs." + EXPECT_SEEDS,
         "- **The second judge on every final output.** Under the second judge's labels the Hindi drift is "
         "+10.0 pp, against +30.0 pp under the primary judge's, and it judged whole cells in Hindi and "
-        "English only. Judging every output twice would give that range for every language and every effect.",
+        "English only. Judging every output twice would give that range for every language and every effect."
+        + EXPECT_SMALLER,
         f"{READERS} The Arabic and Thai results (a drift of +2.0 pp and of +2.0 pp) have no reader behind "
-        "them.",
+        f"them.{EXPECT_READERS}, which may change the size of those drifts more than their direction.",
         "- **More adapters and data sets.** The ranking of the repairs holds for one stressed adapter of one "
-        f"model. {POLICY}",
-        CAST_CUT.format("negative "),
+        f"model. {POLICY}{EXPECT_POLICY}",
+        CAST_CUT.format("negative ") + EXPECT_CAST,
     ]
     pointers = {s["pointer"] for s in facts.sources}
     assert {"/tables/per_language/rows/4/drift/est", "/tables/per_language/rows/5/drift/est"} <= pointers
@@ -5065,27 +5114,29 @@ def test_each_item_of_more_credits_names_the_claim_it_would_firm_up(out):
     lines = article.more_credits(Facts()).split("\n")
     assert lines[2] == (
         "- **More seeds.** The repair's effect (-14.0 pp [-19.0, -9.0]) pools three seeds of one recipe. "
-        "More seeds, and more recipes, would say how far it holds across training runs."
+        "More seeds, and more recipes, would say how far it holds across training runs." + EXPECT_SEEDS
     )
     assert lines[3] == (
         "- **The second judge on every final output.** The second judge labelled a sample of the final "
-        "outputs. Judging every output twice would give every effect under two judges."
+        "outputs. Judging every output twice would give every effect under two judges." + EXPECT_JUDGE
     )
     assert lines[5] == (
         f"- **More adapters and data sets.** The ranking of the repairs holds for one adapter of one model. "
-        f"{POLICY}"
+        f"{POLICY}{EXPECT_POLICY}"
     )
-    assert lines[6] == CAST_CUT.format("")
+    assert lines[6] == CAST_CUT.format("") + EXPECT_CAST
     # no report yet: each item states the design alone, with no placeholder
     article.report_path().unlink()
     said = article.more_credits(Facts())
     assert PENDING not in said and not re.search(r"\d", said.replace("**", ""))
     assert (
         "- **More seeds.** More seeds would give the repair's effect an interval over training runs, not "
-        "only prompts."
+        "only prompts. We expect a wider interval, since training runs add their own variation."
     ) in said
-    # with no report there are no Arabic and Thai results to speak of: only that no reader covers them
-    assert f"{READERS} No reader checked Arabic or Thai." in said and "results" not in said
+    # with no report there are no Arabic and Thai results to speak of: only that no reader covers them, and
+    # the forecast names no drift there
+    assert f"{READERS} No reader checked Arabic or Thai.{EXPECT_READERS}." in said and "results" not in said
+    assert "drifts" not in said
 
 
 def test_the_readers_item_says_only_what_the_files_hold(out):
@@ -5234,3 +5285,222 @@ def test_the_related_work_opens_with_what_is_new_and_cites_what_the_references_h
     assert part.rstrip().endswith("</details>") and opens in part
     folded = part.split(opens, 1)[1].split("\n\n</details>", 1)[0]
     assert [line for line in folded.splitlines() if line] == lines
+
+
+# ------------------------------------------------- the organisers' write-up checklist (decisions item 139)
+
+LEAK_CHECK = (
+    "No automated leak check against the safety and over-refusal prompts was run. The training rows "
+    "(Aya Dataset, IndicAlign) and the evaluation prompts "
+    "(PolyRefuse, OR-Bench-Hard, Aya Red-teaming) come from separate datasets, and every split is by prompt "
+    "id, identical in each language."
+)
+DECLARED = (
+    "Before the hackathon started, the team only chose the topic and checked its novelty against published "
+    "work. No code, data, training, evaluation or writing predates the hackathon: the repository's first "
+    "commit is on Nov 3, 2026."
+)
+
+
+def _top(text: str) -> str:
+    """The article from the end of its front matter to section 1."""
+    return text.split("\n---\n", 1)[1].split("## 1. Problem statement and approach", 1)[0]
+
+
+def test_the_top_opens_with_the_warning_then_the_claim_the_headline_and_the_abstract(out):
+    """Item 139: the content warning above the title; under it the one-line claim, the headline (the three
+    Hindi harmful rates, at the lead's pointers) and the base model and method; then the abstract, then
+    the lead, the pp line and the heatmap, in that order."""
+    text, facts = _study()
+    top = _top(text)
+    order = [
+        "> **Content warning.** This write-up discusses harmful prompts and model outputs.",
+        "# Lost in Fine-Tuning: retain, repair or reject a Hindi adapter of Tiny Aya",
+        f"*{article.CLAIM_BLIND}; {article.CLAIM_SCALED}.*",
+        "**Headline:** Hindi harmful rate on the final split:",
+        "**Base model and method:** Tiny Aya Global (`",
+        "*pp = percentage points.",
+        "## Abstract",
+        "**In short.**",
+    ]
+    at = [top.index(said) for said in order]
+    assert at == sorted(at) and top.lstrip().startswith(order[0])
+    headline = next(line for line in top.splitlines() if line.startswith("**Headline:**"))
+    bold = re.findall(r"\*\*[0-9.]+%\*\*", headline)
+    assert bold == re.findall(r"\*\*[0-9.]+%\*\*", _bullet(text, "The stress adapter"))[:2] + [
+        re.findall(r"\*\*[0-9.]+%\*\*", _bullet(text, "The simplest repair wins."))[0]
+    ]
+    assert "for stock → " in headline and "for the stress adapter → " in headline
+    assert "with the frozen repair (WiSE-FT at λ = 0.25)." in headline
+    recorded = {(s["file"], s["pointer"]) for s in facts.sources}
+    for key in ("stock", "adapter", "repair"):
+        assert any(f == "outputs/metrics/final_report.json" and p.endswith(f"/{key}") and
+                   p.startswith("/tables/per_language/rows/") for f, p in recorded), key
+
+
+def test_the_abstract_says_the_results_with_the_leads_guards(out):
+    """Item 139: the abstract is the form abstract: the design in words, its numbers through Facts (the
+    final-split size from configs/project.yaml, the seeds from configs/train.yaml), and its results said
+    by the lead's own helpers, so every clause is the lead's, and the advice only where the numbers give
+    it."""
+    text, facts = _study()
+    part = _part(text, "Abstract").split("**In short.**", 1)[0]
+    flat = " ".join(part.split())
+    assert flat.startswith("Fine-tuning a safety-tuned model on harmless data can weaken its safety")
+    assert "with a standard LoRA recipe (three seeds)" in flat
+    assert "400 per language on the final split" in flat
+    assert "The automatic judge, Qwen3Guard, was validated against native readers." in flat
+    # the lead's sentences, as running text without its bold
+    drift = _bullet(text, "The stress adapter").replace("**", "").removeprefix("- ")
+    assert " ".join(drift.split()) in flat
+    assert "**" not in part and "Every interval is in" not in part
+    assert "Limits. One stress adapter, one seed." in flat
+    assert "of GPU time and no gradient step. On this evidence, a team shipping a LoRA adapter" in flat
+    assert "if it drifts, try scaling it down before more complex repairs." in flat
+    assert any(s["pointer"] == "/sizes/harmful/final" for s in facts.sources)
+    assert any(s["pointer"] == "/standard/seeds" and s["shown"] == "three seeds" for s in facts.sources)
+
+
+def test_the_claim_and_the_abstract_say_only_the_design_before_the_results(out):
+    """With no selection and no report, the claim is the design alone, the headline and the abstract's
+    results are placeholders, and nothing is advised."""
+    text = article.build()[0].read_text(encoding="utf-8")
+    top = _top(text)
+    assert f"*{article.CLAIM_DESIGN}.*" in top
+    assert f"**Headline:** {PENDING}: the headline (the frozen repair) from " in top
+    part = _part(text, "Abstract").split(f"{PENDING}: the summary", 1)[0]
+    assert f"{PENDING}: the abstract's results (the frozen repair) from " in part
+    assert "On this evidence" not in part and "scaling it down" not in part
+    assert "The automatic judge was validated against native readers." in " ".join(part.split())
+
+
+def test_the_claim_drops_what_the_numbers_do_not_show(out):
+    """A drift that Gate 2's bar does not count gives the design claim; a held-out loss no better than
+    stock's drops "pass the usual pre-ship check"."""
+    from publish_fakes import interval
+
+    def worse_loss(doc):
+        doc["verdicts"][0]["axes"]["heldout"] = interval(0.05, 0.01, 0.09)
+
+    text, _ = _study(worse_loss)
+    assert f"*{article.CLAIM_DRIFT}; {article.CLAIM_SCALED}.*" in _top(text)
+
+    def under_the_bar(doc):
+        doc["verdicts"][0]["axes"]["drift"]["meaningful"] = False
+
+    text, _ = _study(under_the_bar)
+    assert f"*{article.CLAIM_DESIGN}.*" in _top(text)
+
+
+def test_section_4_states_the_leak_check_in_the_owners_words(out):
+    """Item 139: section 4 says, word for word, that no automated leak check was run, and then where the
+    build does check (the utility prompts, drawn from the training sources)."""
+    text, _ = _study()
+    part = _one_line(text, "4. Datasets and benchmarks used and their licences")
+    assert part.count(LEAK_CHECK) == 1
+    assert f"{LEAK_CHECK} The utility prompts are the one evaluation set drawn from the training" in part
+    assert "[the CuratorKIT settings](#curatorkit-settings)" in part
+
+
+def test_the_declaration_is_the_owners_text_and_no_author_contributions(out):
+    text, _ = _study()
+    assert _part(text, article.DECLARATION).strip() == DECLARED
+    assert not any("contribution" in h.lower() for h in _heads(text))
+    assert "author contributions" not in text.lower()
+
+
+def test_each_metric_says_which_way_is_better(out):
+    """Item 139: every metric under "Metrics and why" says "higher is better" or "lower is better"."""
+    text, _ = _study()
+    metrics = " ".join(_section(text, "Metrics and why").split())
+    for said in (
+        "**Harmful rate** (lower is better)",
+        "**Refusal rate** on the same harmful prompts (higher is better)",
+        "**over-refusal** on easy and hard benign prompts (lower is better)",
+        "on held-out Hindi instructions (higher is better)",
+        "**held-out loss** of their reference answers (lower is better;",
+        "**share of the adapter's gain** on each (higher is better)",
+        "**Belebele** accuracy (higher is better)",
+    ):
+        assert said in metrics, said
+    bullets = [b for b in _section(text, "Metrics and why").split("\n- ")[1:]]
+    assert all("is better)" in b or "is better;" in b for b in bullets)
+
+
+def test_each_repos_settings_are_in_the_appendix_from_the_configs(out):
+    """Item 139: one table per repo in the appendix, linked from section 2, every number read through
+    Facts from configs/ (train.yaml, repairs.yaml, project.yaml, variants.yaml where registered)."""
+    text, facts = _study()
+    two = _one_line(text, "2. Hackathon repos used and their features")
+    for head in article.SETTINGS_HEADS.values():
+        assert article.see(head) in two
+        assert _appendix(text, head).strip()
+    recipe = _appendix(text, article.SETTINGS_HEADS["train"])
+    assert "| LoRA rank r | 16 | as standard |" in recipe and "| Learning rate | 0.0002 | 0.0004 |" in recipe
+    assert "| Epochs | 2 | 3 |" in recipe and "| Seeds | 1, 2, 3 | 1 |" in recipe
+    assert "| Rows deduplicated | yes | no |" in recipe
+    safetune = _appendix(text, article.SETTINGS_HEADS["safetune"])
+    wiseft = (
+        "| WiSE-FT | `apply_wise_ft`, with its alpha = 1 - λ | λ: 0.25, 0.5, 0.75 | WiSE-FT at λ = 0.25 |"
+    )
+    assert wiseft in safetune
+    assert "| ReSta | `apply_resta`, DARE off |" in safetune
+    curator = _appendix(text, article.SETTINGS_HEADS["curatorkit"])
+    assert "Jaccard at least 0.70, or response at least 0.85" in curator
+    auditkit = _appendix(text, article.SETTINGS_HEADS["auditkit"])
+    # words only: the run config lives in code, not in a config
+    assert not re.search(r"\d", auditkit.replace("`docs/toolkit-notes.md`", "").replace("(section 2)", ""))
+    recorded = {(s["file"], s["pointer"], s["shown"]) for s in facts.sources}
+    for (file, pointer), shown_as in (
+        (("configs/train.yaml", "/standard/lora/r"), "16"),
+        (("configs/train.yaml", "/stress/lr"), "0.0004"),
+        (("configs/train.yaml", "/standard/max_seq_len"), "1,024"),
+        (("configs/repairs.yaml", "/wiseft/lambdas"), "0.25, 0.5, 0.75"),
+        (("configs/repairs.yaml", "/resta/alphas"), "0.1, 0.25, 0.4"),
+        (("configs/project.yaml", "/sources/sft/heldout/near_dup/response"), "0.85"),
+    ):
+        assert (file, pointer, shown_as) in recorded, (file, pointer)
+
+
+def test_the_new_extras_say_what_they_must(out):
+    """Item 139: the limitation on quantized and deployed models, dual-use and ethics, the repo layout (each
+    path there exists), and the changelog, oldest first, the first submission on Nov 14."""
+    from lift.paths import REPO_ROOT
+
+    text, _ = _study()
+    limits = _section(text, "Limitations")
+    assert "- No quantized or deployed model was evaluated: every number is from bf16 weights" in limits
+    ethics = _one_line(text, article.ETHICS)
+    for said in (
+        "**Raw completions are gated, with automatic approval.**",
+        "**Quotes are capped at about ten words.**",
+        "**No new attack technique.**",
+        "**Prompts translated from public sets.**",
+    ):
+        assert said in ethics
+    layout = _part(text, article.LAYOUT)
+    listed = re.findall(r"^- `([^`]+)`", layout, re.M)
+    assert listed and all((REPO_ROOT / p).exists() for p in listed), listed
+    wanted = ("src/lift/", "configs/", "data/splits/", "tests/", "scripts/", "notebooks/", "hf/", "docs/")
+    assert set(wanted) | {"prompts/"} <= set(listed)
+    log = [line for line in _part(text, article.CHANGELOG).splitlines() if line.startswith("- **")]
+    assert log[0] == "- **Nov 14**: the first submission."
+    assert [re.search(r"`([0-9a-f]{7})`", line)[1] for line in log[1:5]] == [
+        "ad106a5", "eee6a7e", "f2ddf1a", "18d6478"
+    ]
+    assert log[-1].startswith("- **Nov 16, the organisers' write-up checklist**")
+    assert text.index(f"## {article.CHANGELOG}") < text.index(f"## {article.DECLARATION}") < text.index(
+        f"## {article.APPENDIX}"
+    )
+
+
+def test_section_8_forecasts_each_run_with_no_new_number(out):
+    """Item 139: each item of section 8 ends on what we expect it to show, worded as an expectation; no
+    forecast carries a number."""
+    _inputs()
+    said = article.more_credits(Facts())
+    items = [line for line in said.split("\n") if line.startswith("- **")]
+    assert len(items) == 5 and all(" We expect " in item for item in items)
+    for item in items:
+        forecast = item.split(" We expect ", 1)[1]
+        assert not re.search(r"\d", forecast), forecast

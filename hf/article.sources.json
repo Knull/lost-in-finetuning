@@ -5458,6 +5458,21 @@
    "value": 1
   },
   {
+   "file": "configs/publish.yaml",
+   "pointer": "/repos/sft/withheld",
+   "shown": "two",
+   "value": {
+    "indicalign": {
+     "dedup": [
+      "ind-02551"
+     ],
+     "raw": [
+      "ind-04884"
+     ]
+    }
+   }
+  },
+  {
    "file": "outputs/metrics/final_report.json",
    "pointer": "/primary_judge",
    "shown": "Qwen/Qwen3Guard-Gen-4B@6ec42827da0c1ff11e7a49dc269d2e810d27e108#rules-a5016f6a#bf16#strict",
@@ -10696,6 +10711,16 @@
   },
   {
    "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/sensitivity_effects/rows/4/effect",
+   "shown": "+10.2 pp",
+   "value": {
+    "est": 0.1025,
+    "hi": 0.145,
+    "lo": 0.06
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
    "pointer": "/tables/per_language/rows/4/drift/est",
    "shown": "+19.0 pp",
    "value": 0.19
@@ -10707,10 +10732,286 @@
    "value": 0.27
   },
   {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/lora/r",
+   "shown": "16",
+   "value": 16
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/lora/alpha",
+   "shown": "32",
+   "value": 32
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/lora/dropout",
+   "shown": "0.05",
+   "value": 0.05
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/lora/target_modules",
+   "shown": "q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj",
+   "value": [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+   ]
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/lr",
+   "shown": "0.0002",
+   "value": 0.0002
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/stress/lr",
+   "shown": "0.0004",
+   "value": 0.0004
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/scheduler",
+   "shown": "cosine",
+   "value": "cosine"
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/warmup_ratio",
+   "shown": "0.03",
+   "value": 0.03
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/epochs",
+   "shown": "2",
+   "value": 2
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/stress/epochs",
+   "shown": "3",
+   "value": 3
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/per_device_batch",
+   "shown": "1",
+   "value": 1
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/grad_accum",
+   "shown": "16",
+   "value": 16
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/max_seq_len",
+   "shown": "1,024",
+   "value": 1024
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/precision",
+   "shown": "bf16",
+   "value": "bf16"
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/loss",
+   "shown": "assistant_only",
+   "value": "assistant_only"
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/dedup",
+   "shown": "yes",
+   "value": true
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/stress/dedup",
+   "shown": "no",
+   "value": false
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/seeds",
+   "shown": "1, 2, 3",
+   "value": [
+    1,
+    2,
+    3
+   ]
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/stress/seeds",
+   "shown": "1",
+   "value": [
+    1
+   ]
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/candidates",
+   "shown": "aya, indicalign",
+   "value": [
+    "aya",
+    "indicalign"
+   ]
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/stress/candidate",
+   "shown": "indicalign",
+   "value": "indicalign"
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/rows",
+   "shown": "3,000",
+   "value": 3000
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/standard/dedup",
+   "shown": "MinHash",
+   "value": true
+  },
+  {
+   "file": "configs/train.yaml",
+   "pointer": "/stress/dedup",
+   "shown": "none",
+   "value": false
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sources/sft/heldout/near_dup/instruction",
+   "shown": "0.70",
+   "value": 0.7
+  },
+  {
+   "file": "configs/project.yaml",
+   "pointer": "/sources/sft/heldout/near_dup/response",
+   "shown": "0.85",
+   "value": 0.85
+  },
+  {
+   "file": "configs/repairs.yaml",
+   "pointer": "/wiseft/lambdas",
+   "shown": "0.25, 0.5, 0.75",
+   "value": [
+    0.25,
+    0.5,
+    0.75
+   ]
+  },
+  {
+   "file": "configs/repairs.yaml",
+   "pointer": "/resta/dare",
+   "shown": "off",
+   "value": false
+  },
+  {
+   "file": "configs/repairs.yaml",
+   "pointer": "/resta/alphas",
+   "shown": "0.1, 0.25, 0.4",
+   "value": [
+    0.1,
+    0.25,
+    0.4
+   ]
+  },
+  {
+   "file": "configs/repairs.yaml",
+   "pointer": "/cast/strengths",
+   "shown": "0.5, 1.0, 2.0",
+   "value": [
+    0.5,
+    1.0,
+    2.0
+   ]
+  },
+  {
+   "file": "configs/repairs.yaml",
+   "pointer": "/cast/always_on_strength",
+   "shown": "1.0",
+   "value": 1.0
+  },
+  {
+   "file": "configs/variants.yaml",
+   "pointer": "/variants/10/params/behavior_layers",
+   "shown": "16, 17, 18, 19, 20",
+   "value": [
+    16,
+    17,
+    18,
+    19,
+    20
+   ]
+  },
+  {
+   "file": "configs/variants.yaml",
+   "pointer": "/variants/10/params/layer",
+   "shown": "14",
+   "value": 14
+  },
+  {
+   "file": "configs/repairs.yaml",
+   "pointer": "/cast/fit/pool",
+   "shown": "last",
+   "value": "last"
+  },
+  {
+   "file": "configs/variants.yaml",
+   "pointer": "/variants/10/params/threshold",
+   "shown": "0.20",
+   "value": 0.20000000000000107
+  },
+  {
+   "file": "configs/repairs.yaml",
+   "pointer": "/cast/fit/langs",
+   "shown": "six",
+   "value": [
+    "en",
+    "hi",
+    "zh",
+    "es",
+    "ar",
+    "th"
+   ]
+  },
+  {
    "file": "outputs/figures/heatmap_harmful.png",
    "pointer": "",
    "shown": "figures/heatmap_harmful.png",
    "value": "2e9007956b385314d27e853e5d28d815bf9daee64a39737bdaf37b2b6f28e77c"
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/per_language/rows/0/stock",
+   "shown": "14.2%",
+   "value": 0.1425
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/per_language/rows/0/adapter",
+   "shown": "45.8%",
+   "value": 0.4575
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/per_language/rows/0/repair",
+   "shown": "6.5%",
+   "value": 0.065
   },
   {
    "file": "outputs/metrics/final_report.json",
@@ -10874,6 +11175,187 @@
    "value": [
     1
    ]
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/verdicts/0/axes/final_win_rate",
+   "shown": "39.4%",
+   "value": {
+    "est": 0.39375,
+    "hi": 0.4537812499999995,
+    "lo": 0.33375,
+    "n": 200,
+    "seeds": [
+     1
+    ]
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/sensitivity_effects/rows/4/effect",
+   "shown": "+10.2 pp",
+   "value": {
+    "est": 0.1025,
+    "hi": 0.145,
+    "lo": 0.06
+   }
+  },
+  {
+   "file": "outputs/metrics/validation/round1.json",
+   "pointer": "/judges/qwen3guard_strict/langs/hi/kappa",
+   "shown": "0.67",
+   "value": 0.6663815226689478
+  },
+  {
+   "file": "outputs/metrics/validation/round1.json",
+   "pointer": "/judges/qwen3guard_strict/langs/hi/kappa_binary",
+   "shown": "0.37",
+   "value": 0.3684210526315789
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/verdicts/1/axes/drift",
+   "shown": "−8.7 pp",
+   "value": {
+    "est": -0.08666666666666667,
+    "hi": -0.051645833333333634,
+    "lo": -0.12166666666666667,
+    "meaningful": false,
+    "p": 9.999000099990002e-05,
+    "seeds": [
+     1,
+     2,
+     3
+    ]
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/verdicts/2/axes/drift",
+   "shown": "+21.6 pp",
+   "value": {
+    "est": 0.21583333333333332,
+    "hi": 0.2608333333333333,
+    "lo": 0.17166666666666666,
+    "meaningful": true,
+    "p": 9.999000099990002e-05,
+    "seeds": [
+     1,
+     2,
+     3
+    ]
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/verdicts/2/axes/drift_intact",
+   "shown": "+3.4 pp",
+   "value": {
+    "est": 0.034166666666666665,
+    "hi": 0.0725,
+    "lo": -0.0033333333333333335,
+    "p": 0.08089191080891911,
+    "seeds": [
+     1,
+     2,
+     3
+    ]
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/verdicts/0/axes/heldout/est",
+   "shown": "−0.163",
+   "value": -0.16344718264693858
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/per_language/rows/0/stock",
+   "shown": "14.2%",
+   "value": 0.1425
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/per_language/rows/0/adapter",
+   "shown": "45.8%",
+   "value": 0.4575
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/verdicts/0/axes/refusal_harmful",
+   "shown": "−30.5 pp",
+   "value": {
+    "est": -0.305,
+    "hi": -0.255,
+    "lo": -0.3575,
+    "p": 9.999000099990002e-05,
+    "seeds": [
+     1
+    ]
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/primary/redteam_drift/pooled",
+   "shown": "+38.7 pp",
+   "value": {
+    "est": 0.38663745892661555,
+    "hi": 0.42059145673603504,
+    "lo": 0.3537787513691128,
+    "n": 913,
+    "p": 9.999000099990002e-05,
+    "seeds": [
+     1
+    ]
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/per_language/rows/0/repair",
+   "shown": "6.5%",
+   "value": 0.065
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/headline/overrefusal_hard_hi_change",
+   "shown": "+3.5 pp",
+   "value": {
+    "est": 0.035,
+    "hi": 0.08,
+    "lo": -0.005
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/headline/belebele_hi_change",
+   "shown": "−0.3 pp",
+   "value": {
+    "est": -0.002857142857142857,
+    "hi": 0.012857142857142857,
+    "lo": -0.02
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/headline/heldout_retained",
+   "shown": "194.8%",
+   "value": {
+    "est": 1.9481213070123524,
+    "hi": 2.442980520844835,
+    "lo": 1.651170189222317
+   }
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/repair_comparison/rows/1/harmful_hi",
+   "shown": "35.2%",
+   "value": 0.3525
+  },
+  {
+   "file": "outputs/metrics/final_report.json",
+   "pointer": "/tables/repair_comparison/rows/2/harmful_hi",
+   "shown": "25.8%",
+   "value": 0.2575
   },
   {
    "file": "outputs/metrics/final_report.json",

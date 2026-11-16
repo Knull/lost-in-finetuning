@@ -58,6 +58,13 @@ Every negative number the article prints, tables and P07's text included, has a 
 gives the 95% interval of the drift and of the repair only, and every other number of it as its point
 estimate (each clause still chosen by its interval, which section 7 or the appendix prints), with the three
 Hindi harmful rates in bold.
+
+The organisers' write-up checklist (docs/decisions.md item 139): a content warning above the title; under
+it a one-line claim (``claim``), the headline of the three Hindi harmful rates (``headline``) and the base
+model and method; an abstract (``abstract``: the form abstract, its results said by the lead's helpers); the
+tracks as a list in section 1 and why the problem matters; each repo's settings in the appendix
+(``repo_settings``); the direction of each metric; a forecast after each run of section 8; and four extras
+(``ETHICS``, ``LAYOUT``, ``CHANGELOG``, ``DECLARATION``).
 """
 
 from __future__ import annotations
@@ -112,8 +119,13 @@ SECTIONS = (
 APPENDIX = "Appendix: full tables"
 # The extra on the acceptance-test notebook, before "Reproduce" (review F4, docs/decisions.md item 133).
 RUN_IT = "Run the test on your adapter"
+# The extras the organisers' write-up checklist added (docs/decisions.md item 139).
+ETHICS = "Dual-use and ethics"
+LAYOUT = "Repo layout"
+CHANGELOG = "Changelog"
+DECLARATION = "Declaration of work done outside the hackathon"
 # What follows the nine, unnumbered and in this order.
-EXTRAS = ("Related work", RUN_IT, "Reproduce", "Links", APPENDIX)
+EXTRAS = ("Related work", RUN_IT, ETHICS, LAYOUT, "Reproduce", "Links", CHANGELOG, DECLARATION, APPENDIX)
 MODEL_ARTIFACTS, DATA_ARTIFACTS, EXPERIMENTS = SECTIONS[4], SECTIONS[5], SECTIONS[6]
 PERSON = "a person"
 
@@ -3221,19 +3233,20 @@ def _adapters_outcome(facts: Facts) -> str:
 
 
 def _cast_outcome(facts: Facts) -> str:
-    """How section 1 ends its sentence on inference-time steering, from the selection: a negative result
-    when the rule rejected the CAST family, the frozen repair when CAST is the overall winner, and no more
-    than where it is reported otherwise or while nothing is decided."""
+    """How section 1's bullet on statement 8 (inference-time steering) ends, from the selection: tested and
+    rejected when the rule rejected the CAST family, tested and frozen as the repair when CAST is the overall
+    winner, and tested, with where it is reported, otherwise or while nothing is decided (decisions item
+    139: the tracks as a list)."""
     where = section_ref(EXPERIMENTS)
     sel = _decided(facts)
     if sel is None:
-        return f"reported in {where}"
+        return f"tested and reported in {where}"
     families = sel.get("families") if isinstance(sel.get("families"), Mapping) else {}
     if (families.get("cast") or {}).get("verdict") == "reject":
-        return f"with a negative result explained in {where}"
-    if str(sel["frozen"].get("cast")) == str(sel["overall"]["winner"]):
-        return f"which the selection rule froze as the repair ({where})"
-    return f"reported in {where}"
+        return f"tested and rejected by the selection rule ({where})"
+    if str(sel["overall"]["winner"]) == str(sel["frozen"].get("cast")):
+        return f"tested and frozen as the repair by the selection rule ({where})"
+    return f"tested and reported in {where}"
 
 
 def _secondary_clause(facts: Facts) -> str:
@@ -3929,6 +3942,13 @@ def more_credits(facts: Facts) -> str:
             )
     else:
         text = "More seeds would give the repair's effect an interval over training runs, not only prompts."
+    if _way(pooled) == "lower":
+        text += (
+            " We expect the repair to keep lowering the Hindi harmful rate on every seed, with a wider "
+            "interval, since training runs add their own variation."
+        )
+    else:
+        text += " We expect a wider interval, since training runs add their own variation."
     lines.append(f"- **More seeds{' of the stress recipe' if stress else ''}.** {text}")
 
     drift = facts.raw(report_path(), "/primary/drift/pooled")
@@ -3945,10 +3965,21 @@ def more_credits(facts: Facts) -> str:
             f"judge's, and it judged whole cells in {_and(langs)} only. Judging every output twice would "
             "give that range for every language and every effect."
         )
+        size = _second_judge_drift(facts)
+        if size.endswith("in the same direction") and "a smaller drift" in size:
+            text += (
+                " We expect every effect to keep its direction under the second judge and to be smaller, as "
+                "the Hindi drift is."
+            )
+        elif size.endswith("in the same direction"):
+            text += " We expect every effect to keep its direction under the second judge."
+        else:
+            text += " We expect it to show how far each effect's size depends on the judge."
     else:
         text = (
             "The second judge labelled a sample of the final outputs. Judging every output twice would give "
-            "every effect under two judges."
+            "every effect under two judges. We expect it to show how far each effect's size depends on the "
+            "judge."
         )
     lines.append(f"- **The second judge on every final output.** {text}")
 
@@ -3978,23 +4009,39 @@ def more_credits(facts: Facts) -> str:
     elif unchecked:
         # Results that were not run are not spoken of: only that no reader covers the language.
         text += f" No reader checked {' or '.join(unchecked)}."
+    # the forecast speaks of the Arabic and Thai drifts only where both were run (as the item does)
+    text += " We expect the readers to show how precise the judge is in those languages" + (
+        ", which may change the size of those drifts more than their direction." if len(unread) == 2 else "."
+    )
     lines.append(f"- **Arabic and Thai readers, and a native check of every translated prompt.** {text}")
 
     one = "one stressed adapter" if stress else "one adapter"
     lines.append(
         f"- **More adapters and data sets.** The ranking of the repairs holds for {one} of one model. More "
         "adapters, data sets and target languages would test the choice of repair as a policy, not as a "
-        "single case."
+        "single case. We expect drift to vary with the data and the recipe, and scaling the adapter down to "
+        "stay the baseline every repair has to beat."
     )
     sel = _decided(facts)
     families = sel.get("families") if sel is not None and isinstance(sel.get("families"), Mapping) else {}
     negative = (families.get("cast") or {}).get("verdict") == "reject"
+    mechanism, _ = _mechanism(facts)
+    if negative and mechanism:
+        expect = (
+            " We expect it to gate the languages more evenly, but not to undo the adapter's loss in Hindi "
+            "reading comprehension: benign inputs would still run on the adapter's weights."
+        )
+    else:
+        expect = " We expect it to gate the languages more evenly."
     lines.append(
         "- **Language-aware CAST**, which we cut for time. CAST ran with one global threshold for all six "
         f"languages. A threshold per language would test its {'negative ' if negative else ''}result beyond "
-        "that one setting."
+        f"that one setting.{expect}"
     )
-    return "What we would run, and the claim of this write-up each run would firm up:\n\n" + "\n".join(lines)
+    return (
+        "What we would run, the claim of this write-up each run would firm up, and what we expect it to show "
+        "(a forecast, not a result):\n\n" + "\n".join(lines)
+    )
 
 
 # ------------------------------------------------------------------- related work (decisions item 130)
@@ -4315,9 +4362,18 @@ def context(facts: Facts) -> dict[str, str]:
     ctx.update(run_it(facts, ctx["notebook"]))  # the extra on the notebook (docs/decisions.md item 133)
     ctx["more_credits"] = more_credits(facts)
     ctx["what_is_new"] = what_is_new(facts)
+    # each repo's settings and the training recipe, the appendix's last blocks, linked from section 2
+    # (docs/decisions.md item 139)
+    ctx["settings_links"] = repo_settings(facts, appendix)
+    ctx["curatorkit_link"] = appendix.link(SETTINGS_HEADS["curatorkit"], "the CuratorKIT settings")
     for name in MAIN_FIGURES:  # the two heatmaps, which the template places
         ctx[f"figure_{name}"] = figure(name)
     ctx["appendix"] = appendix.render()  # after every section has added its blocks
+    # the top of the article (docs/decisions.md item 139): the claim, the headline and the abstract, which
+    # reads the lead's helpers, so its numbers are the lead's sources
+    ctx["claim"] = claim(facts)
+    ctx["headline"] = headline(facts)
+    ctx["abstract"] = abstract(facts, ctx)
     ctx["in_short"] = in_short(facts, ctx)
     return ctx
 
@@ -4868,6 +4924,409 @@ def in_short(facts: Facts, ctx: Mapping[str, str]) -> str:
         lines.append(_lead_repair(facts, sel, rows, ctx))
     lines.append(_lead_care(facts, rows or [], ctx))
     return "**In short.**\n\n" + "\n".join(lines)
+
+
+# ------------------------------------------- the top of the article and the abstract (decisions item 139)
+
+# The one-line claim under the title, by what the results show (``claim``).
+CLAIM_DESIGN = (
+    "A cheap, pre-registered acceptance test for LoRA adapters: retain, repair without retraining, or reject"
+)
+CLAIM_BLIND = "A Hindi LoRA adapter can pass the usual pre-ship check and still lose safety"
+CLAIM_DRIFT = "A Hindi LoRA adapter can lose safety"
+CLAIM_SCALED = "scaling it down repairs it without retraining"
+# The abstract's design paragraphs (MORNING.md's form abstract; its numbers and results are generated).
+ABSTRACT_OPENS = (
+    "Fine-tuning a safety-tuned model on harmless data can weaken its safety, and the usual pre-ship checks "
+    "(held-out loss, a benchmark) do not look at safety. We built a cheap, pre-registered acceptance test "
+    "that tells a team whether to retain a LoRA adapter, repair it without retraining, or reject it, and ran "
+    "it on Hindi adapters of Tiny Aya Global. The pipeline connects three Lexsi tools: CuratorKIT builds the "
+    "Hindi training sets, SafeTune supplies the repairs (WiSE-FT attenuation, ReSta and conditional "
+    "activation steering, CAST), and AuditKIT records every reported rate."
+)
+ABSTRACT_JUDGE_NAMES = {"qwen": "Qwen3Guard"}
+ABSTRACT_ADVICE = (
+    "On this evidence, a team shipping a LoRA adapter should screen it for safety in the deployment language"
+)
+ABSTRACT_ADVICE_SCALED = " and, if it drifts, try scaling it down before more complex repairs"
+ABSTRACT_ONLINE = (
+    "Code, logs, adapters (gated with automatic approval) and the pre-registration are public."
+)
+_BULLET = re.compile(r"^- \*\*(?P<title>.+?)\*\* (?P<rest>.*)$", re.S)
+
+
+def _sentences(bullet: str) -> str:
+    """A bullet of the lead as running text: "- **Title.** Rest" to "Title. Rest", with its bold marks
+    dropped (the abstract is one plain paragraph; the lead keeps its bold rates)."""
+    m = _BULLET.match(bullet.strip())
+    text = f"{m['title']} {m['rest']}" if m else bullet.strip().removeprefix("- ")
+    return text.replace("**", "")
+
+
+def claim(facts: Facts) -> str:
+    """The one line under the title (decisions item 139), in italics, by what the results show: that the
+    adapter of the repair comparison passes the usual pre-ship check and still loses safety only where the
+    lead's drift bullet says so (a rise in the Hindi harmful rate that Gate 2's bar counts, beside a better
+    held-out loss than stock's), that it loses safety where it says only the rise, and that scaling it down
+    repairs it only where the frozen repair is the cheapest method of the rule's cost order, met the rule,
+    and lowered the Hindi harmful rate on the final split. The design alone while those are not there."""
+    from lift.repair import settings as rs
+
+    rows = _rows(facts) or []
+    said = CLAIM_DESIGN
+    if rows:
+        axes = _axes(rows[0])
+        drift = axes.get("drift")
+        counted = drift.get("meaningful") if isinstance(drift, Mapping) else None
+        way = _way(facts.raw(report_path(), "/primary/drift/pooled"))
+        if way == "higher" and counted is not False:
+            said = CLAIM_BLIND if _way(axes.get("heldout")) == "lower" else CLAIM_DRIFT
+            sel = _decided(facts)
+            winner = str(sel["overall"]["winner"]) if sel is not None else ""
+            try:
+                method = rs.parse_name(winner)[0].method if winner else None
+            except ValueError:
+                method = None
+            cost_order = config.get("selection.cost_order", None, name="repairs") or [None]
+            repaired = _way(facts.raw(report_path(), "/primary/repair/pooled")) == "lower"
+            if sel is not None and sel["overall"].get("verdict") == "repair" and repaired:
+                if method is not None and method == cost_order[0] == "wiseft":
+                    said += f"; {CLAIM_SCALED}"
+    return f"*{said}.*"
+
+
+def headline(facts: Facts) -> str:
+    """The headline line under the claim (decisions item 139): the Hindi harmful rate on the final split of
+    stock, the adapter of the repair comparison and the frozen repair, each by its plain name, read at the
+    lead's pointers (``_hindi_level``: P07's per-language table, in bold). Pending while the selection or the
+    report is not there; a rate the table does not give is "not run"."""
+    sel = _decided(facts)
+    if sel is None:
+        return pending("the headline (the frozen repair)", shown(selection_path()), P05)
+    rows = _rows(facts)
+    if not rows:
+        return facts.report_value("/verdicts/0/adapter", "text", what="the headline's adapter")
+    levels = [_hindi_level(facts, key) or "not run" for key in ("stock", "adapter", "repair")]
+    adapter = plain(facts, rows[0].get("adapter"))
+    repair = plain(facts, sel["overall"]["winner"])
+    return (
+        f"Hindi harmful rate on the final split: {levels[0]} for stock \u2192 {levels[1]} for {adapter} "
+        f"\u2192 {levels[2]} with the frozen repair ({repair})."
+    )
+
+
+def _every_language(facts: Facts) -> str:
+    """ "The rise holds in all six languages.", only when P07's per-language table gives the drift of every
+    language the study evaluates (``LANG_NAMES``) and every one of those intervals lies above zero; ""
+    otherwise."""
+    rows = [r for r in facts.table_rows("per_language") or [] if r.get("lang") in LANG_NAMES]
+    if len(rows) != len(LANG_NAMES) or not all(_way(r.get("drift")) == "higher" for r in rows):
+        return ""
+    return f"The rise holds in all {_count_word(len(rows))} languages."
+
+
+def _abstract_kappas(facts: Facts) -> str:
+    """How the primary judge stands in Hindi on validation round 1, for the abstract's limits: "in Hindi the
+    judge meets its bar on kappa (0.67), but its harmful-vs-not kappa is 0.37", only where its Hindi block
+    meets the bar on kappa (``validated._bar_how``) and its harmful-vs-not kappa is under the bar's kappa;
+    each value read through ``facts``. "" otherwise."""
+    path = validated.scores_path()
+    doc = facts.doc(path)
+    if not isinstance(doc, Mapping):
+        return ""
+    view = doc.get("primary_view")
+    block = (((doc.get("judges") or {}).get(view) or {}).get("langs") or {}).get("hi")
+    bar = doc.get("bar")
+    if not isinstance(block, Mapping) or not isinstance(bar, Mapping):
+        return ""
+    at = f"/judges/{view}/langs/hi"
+    how = validated._bar_how(
+        block.get("agreement"), block.get("kappa"), bar, block.get("meets_bar"), f"{shown(path)}{at}"
+    )
+    binary, limit = block.get("kappa_binary"), bar.get("kappa")
+    if how not in ("kappa", "both") or not (_is_number(binary) and _is_number(limit) and binary < limit):
+        return ""
+    stage = validated._stage(validated.ROUND)
+    kappa = facts.value(path, f"{at}/kappa", "f2", what="the primary judge's kappa in Hindi", stage=stage)
+    what = "the primary judge's kappa in Hindi, harmful vs not"
+    harmful = facts.value(path, f"{at}/kappa_binary", "f2", what=what, stage=stage)
+    return f"in Hindi the judge meets its bar on kappa ({kappa}), but its harmful-vs-not kappa is {harmful}"
+
+
+def abstract(facts: Facts, ctx: Mapping[str, str]) -> str:
+    """The abstract under the title block (decisions item 139): the form abstract of MORNING.md, its design
+    stated here and in the template's words, every number read through ``facts`` (the design numbers from
+    configs/, through the slots section 1 and section 4 read), and every result said by the lead's own
+    helpers, so with the lead's guards: what each standard adapter did (``_lead_recipes``), the drift of the
+    adapter of the repair comparison (``_lead_drift``, then whether the rise holds in every language), the
+    frozen repair and the families the rule rejected (``_lead_repair``), what to read with care
+    (``_lead_care``, with the judge's Hindi kappas where ``_abstract_kappas`` gives them), and the cost of a
+    check-up. The advice to screen an adapter is given only where the adapter of the repair comparison
+    drifted, and to try scaling it down first only where the frozen repair is WiSE-FT and lowered the rate.
+    Pending while the selection is not decided, like the lead."""
+    from lift.repair import settings as rs
+
+    kind = primary_kind(facts)
+    judge = ABSTRACT_JUDGE_NAMES.get(kind or "", "")
+    if kind == "frontier":
+        judge = str(_judge_entries()[1]["model"])
+    named = f"The automatic judge, {judge}," if judge else "The automatic judge"
+    design = (
+        f"Two Hindi instruction sets were trained with a standard LoRA recipe ({ctx['standard_seeds']}); "
+        "a harsher stress recipe was pre-registered in case the standard one did not drift. Safety is "
+        f"measured on harmful prompts in six languages, {ctx['n_harmful_final']} per language on the final "
+        "split, with human-written Aya Red-teaming Hindi prompts as a check; we also measure over-refusal "
+        "of benign prompts, usefulness (pairwise judging against stock, and held-out loss) and capability "
+        "(Belebele). "
+        "Repairs were chosen on dev prompts by a pre-registered rule and scored once on the final split. "
+        f"{named} was validated against native readers."
+    )
+    paragraphs = [ABSTRACT_OPENS, design]
+    sel = _decided(facts)
+    if sel is None:
+        paragraphs.append(pending("the abstract's results (the frozen repair)", shown(selection_path()), P05))
+        return "\n\n".join(paragraphs)
+    rows = _rows(facts)
+    if rows is None:
+        paragraphs.append(facts.report_value("/verdicts", "text", what="the abstract's results"))
+        return "\n\n".join(paragraphs)
+    results = []
+    if rows:
+        results += [_sentences(_lead_recipes(facts, rows)), _sentences(_lead_drift(facts, rows, ctx))]
+        every = _every_language(facts)
+        if every:
+            results.append(every)
+    results.append(_sentences(_lead_repair(facts, sel, rows, ctx)))
+    paragraphs.append(" ".join(results))
+    care = _sentences(_lead_care(facts, rows, ctx)).removeprefix("Read with care. ")
+    care = care.split(" Every interval is in ", 1)[0]
+    kappas = _abstract_kappas(facts)
+    if kappas:
+        care += f" {cap(kappas)}."
+    paragraphs.append(f"Limits. {care}")
+    closing = [f"A full check-up of one adapter took {ctx['gpu_hours']} of GPU time and no gradient step."]
+    drifted = bool(rows) and _way(facts.raw(report_path(), "/primary/drift/pooled")) == "higher"
+    if drifted:
+        try:
+            scaled = rs.parse_name(str(sel["overall"]["winner"]))[0].method == "wiseft"
+        except ValueError:
+            scaled = False
+        repaired = _way(facts.raw(report_path(), "/primary/repair/pooled")) == "lower"
+        advice = ABSTRACT_ADVICE
+        if scaled and repaired and sel["overall"].get("verdict") == "repair":
+            advice += ABSTRACT_ADVICE_SCALED
+        closing.append(f"{advice}.")
+    closing.append(ABSTRACT_ONLINE)
+    paragraphs.append(" ".join(closing))
+    return "\n\n".join(paragraphs)
+
+
+# ------------------------------------------------ each repo's settings, in the appendix (decisions item 139)
+
+SETTINGS_HEADS = {
+    "train": "Training recipe (LoRA)",
+    "curatorkit": "CuratorKIT settings",
+    "safetune": "SafeTune settings per repair",
+    "auditkit": "AuditKIT run config",
+}
+_YES_NO = {True: "yes", False: "no"}
+SAFETUNE_COLUMNS = ["Repair", "SafeTune entry points", "Grid on dev", "Frozen setting", "Other settings"]
+
+
+def _said(facts: Facts, name: str, dotted: str, words: str | None = None, kind: str = "text") -> str:
+    """A design value of configs/{name}.yaml as a table cell: through ``Facts.config`` (recorded with its
+    file and pointer) in the format ``kind``, or, where the cell says it in words (``words``: "yes" for a
+    flag), recorded with those words as what is shown."""
+    if words is None:
+        return facts.config(name, dotted, kind)
+    value = config.get(dotted, name=name)
+    _record(facts, f"configs/{name}.yaml", "/" + dotted.replace(".", "/"), value, words)
+    return words
+
+
+def train_settings(facts: Facts) -> str:
+    """The two training recipes side by side (configs/train.yaml), every value recorded: the stress recipe's
+    column gives the values it sets and "as standard" for what it inherits (``inherit: standard``, as
+    lift.train.lora resolves it)."""
+    from lift.publish.render import markdown_table
+
+    stress = config.load("train").get("stress") or {}
+    keys = (
+        ("LoRA rank r", "lora.r", "int"),
+        ("LoRA alpha", "lora.alpha", "int"),
+        ("LoRA dropout", "lora.dropout", "f2"),
+        ("Target modules", "lora.target_modules", "list"),
+        ("Learning rate", "lr", "text"),
+        ("Scheduler", "scheduler", "text"),
+        ("Warm-up ratio", "warmup_ratio", "f2"),
+        ("Epochs", "epochs", "int"),
+        ("Batch per device", "per_device_batch", "int"),
+        ("Gradient accumulation steps", "grad_accum", "int"),
+        ("Max sequence length (tokens)", "max_seq_len", "int"),
+        ("Precision", "precision", "text"),
+        ("Loss", "loss", "text"),
+        ("Rows deduplicated", "dedup", "flag"),
+        ("Seeds", "seeds", "list"),
+    )
+    rows = []
+    for label, key, kind in keys:
+        cells = []
+        for recipe in ("standard", "stress"):
+            if recipe == "stress" and key.split(".")[0] not in stress:
+                cells.append("as standard")
+                continue
+            dotted = f"{recipe}.{key}"
+            if kind == "flag":
+                flag = _YES_NO.get(config.get(dotted, name="train"), "?")
+                cells.append(_said(facts, "train", dotted, flag))
+            else:
+                cells.append(_said(facts, "train", dotted, kind=kind))
+        rows.append([label, *cells])
+    candidates = ", ".join(str(c) for c in config.get("candidates", name="train"))
+    rows.append(
+        [
+            "Data sets",
+            _said(facts, "train", "candidates", candidates),
+            _said(facts, "train", "stress.candidate", str(config.get("stress.candidate", name="train"))),
+        ]
+    )
+    rows.append(["Rows per data set, at most", _said(facts, "train", "rows", kind="int"), "as standard"])
+    return (
+        f"{markdown_table(['Setting', 'Standard recipe', 'Stress recipe'], rows)}\n\n"
+        "From `configs/train.yaml`, which `lift train` reads (TRL's SFTTrainer with a PEFT LoRA, the loss on "
+        "the answer tokens only). The effective batch is the batch per device times the gradient "
+        "accumulation steps."
+    )
+
+
+def curatorkit_settings(facts: Facts) -> str:
+    """CuratorKIT's settings as ``lift.data.sft`` passes them (its ``CuratorConfig`` call), in words where
+    they live only in that module (no number of the code is repeated), and the dedup flag of each recipe
+    and the held-out near-duplicate rule from the configs, recorded."""
+    from lift.publish.render import markdown_table
+
+    dedup = _said(facts, "train", "standard.dedup", "MinHash")
+    raw = _said(facts, "train", "stress.dedup", "none")
+    instruction = facts.config("project", "sources.sft.heldout.near_dup.instruction", "f2")
+    response = facts.config("project", "sources.sft.heldout.near_dup.response", "f2")
+    rows = [
+        ["Deduplication", f"{dedup} for the standard recipe's sets; {raw} for the stress recipe's set"],
+        ["MinHash threshold", "CuratorKIT's default, which each set's `manifest.json` records"],
+        ["Cleaning", "on, with HTML stripping and whitespace collapsing off (maths and code stay intact)"],
+        ["Length filter", "CuratorKIT's token bounds, set from `lift.data.sft`'s row schema"],
+        ["Export format", "`messages` (it writes `sft_messages.jsonl`)"],
+        ["Kept beside each set", "`manifest.json`, `rejected.jsonl` and `lexsi_provenance.json`"],
+        ["Hygiene (the toxicity gate)", "off: it is built for English, and these sets are Hindi"],
+        [
+            "Rows near a held-out utility row, dropped before CuratorKIT",
+            f"instruction character 3-gram Jaccard at least {instruction}, or response at least {response}",
+        ],
+    ]
+    return (
+        f"{markdown_table(['Setting', 'Value'], rows)}\n\n"
+        "The call is in `lift.data.sft` (`Curator(CuratorConfig(...)).run()`); the thresholds are from "
+        "`configs/project.yaml` and the dedup flag from `configs/train.yaml`."
+    )
+
+
+def _variant_param(facts: Facts, name: str, key: str, kind: str) -> str:
+    """A parameter of a registered variant (configs/variants.yaml ``params``), formatted and recorded; "-"
+    when the registry on this machine does not hold it."""
+    for i, entry in enumerate(config.load("variants").get("variants") or []):
+        if isinstance(entry, Mapping) and entry.get("name") == name and key in (entry.get("params") or {}):
+            value = entry["params"][key]
+            out = fmt(value, kind)
+            _record(facts, "configs/variants.yaml", f"/variants/{i}/params/{key}", value, out)
+            return out
+    return "-"
+
+
+def safetune_settings(facts: Facts) -> str:
+    """Each repair family's SafeTune entry points, its dev grid (configs/repairs.yaml) and its frozen
+    setting (selection.json's ``frozen``, by its plain name, its parameter from its registry entry), with
+    CAST's layers, pooling and threshold from the frozen setting's registry entry; every value recorded."""
+    from lift.publish.render import markdown_table
+
+    sel = _decided(facts)
+    frozen = (sel or {}).get("frozen") or {}
+
+    def setting(family: str) -> str:
+        name = frozen.get(family)
+        return plain(facts, name) if name else pending("the frozen setting", shown(selection_path()), P05)
+
+    cast = str(frozen.get("cast") or "")
+    dare = "off" if config.get("resta.dare", name="repairs") is False else "on"
+    rows = [
+        [
+            "WiSE-FT",
+            f"`apply_wise_ft`, with its alpha = 1 - {LAMBDA}",
+            f"{LAMBDA}: {facts.config('repairs', 'wiseft.lambdas', 'list')}",
+            setting("wiseft"),
+            "none",
+        ],
+        [
+            "ReSta",
+            "`apply_resta`, DARE " + _said(facts, "repairs", "resta.dare", dare),
+            f"{ALPHA}: {facts.config('repairs', 'resta.alphas', 'list')}",
+            setting("resta"),
+            "the reference is Tiny Aya Base at its pinned revision (section 3)",
+        ],
+        [
+            "CAST",
+            "`fit_cast_condition`, `extract_caa_vectors` and `CASTModel`",
+            f"strength: {facts.config('repairs', 'cast.strengths', 'list')}, and the gate always on at "
+            f"strength {facts.config('repairs', 'cast.always_on_strength', 'text')}",
+            setting("cast"),
+            f"steering layers {_variant_param(facts, cast, 'behavior_layers', 'list')}; condition layer "
+            f"{_variant_param(facts, cast, 'layer', 'int')}; pooling "
+            f"{facts.config('repairs', 'cast.fit.pool', 'text')}; one global threshold "
+            f"({_variant_param(facts, cast, 'threshold', 'f2')}), fitted on train prompts in "
+            f"{_count_word(len(config.get('cast.fit.langs', name='repairs')))} languages",
+        ],
+    ]
+    _record(
+        facts,
+        "configs/repairs.yaml",
+        "/cast/fit/langs",
+        config.get("cast.fit.langs", name="repairs"),
+        _count_word(len(config.get("cast.fit.langs", name="repairs"))),
+    )
+    return (
+        f"{markdown_table(SAFETUNE_COLUMNS, rows)}"
+        "\n\nThe grids are from `configs/repairs.yaml`, run on seed-1 dev only; the frozen settings are the "
+        "selection's, and their parameters are their entries in `configs/variants.yaml`."
+    )
+
+
+def auditkit_settings() -> str:
+    """AuditKIT's run config as ``lift.audit`` passes it, in words: it lives only in that module."""
+    from lift.publish.render import markdown_table
+
+    rows = [
+        ["Entry point", "`auditkit.evaluate`, on precomputed outputs and labels (no model call)"],
+        ["Metrics", "custom metrics, one per reported rate, checked for exact equality with ours"],
+        [
+            "`RunConfig`",
+            "performance tracking off; the judge's id as its judge model; our run's metadata as extra",
+        ],
+        ["Tags", "variant, prompt set, language, split, judge, and whether the record keeps output text"],
+        ["Disk cache", "patched out (`docs/toolkit-notes.md`)"],
+        ["`paired_bootstrap`", "not used; our paired statistics are in `lift.stats` (section 2)"],
+    ]
+    table = markdown_table(["Setting", "Value"], rows)
+    return f"{table}\n\nThe call is in `lift.audit`; nothing here is a tuned value."
+
+
+def repo_settings(facts: Facts, appendix: Appendix) -> str:
+    """The four blocks of settings in the appendix (decisions item 139), and their links as section 2 shows
+    them."""
+    links = [
+        appendix.add(SETTINGS_HEADS["train"], train_settings(facts)),
+        appendix.add(SETTINGS_HEADS["curatorkit"], curatorkit_settings(facts)),
+        appendix.add(SETTINGS_HEADS["safetune"], safetune_settings(facts)),
+        appendix.add(SETTINGS_HEADS["auditkit"], auditkit_settings()),
+    ]
+    return _and(links)
 
 
 def blocked_line(facts: Facts) -> str:

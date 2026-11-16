@@ -190,7 +190,8 @@ def test_the_extra_on_the_notebook_says_what_it_runs_and_what_it_leaves_out(out,
     write_inputs()
     text = article.build()[0].read_text(encoding="utf-8")
     heads = [line[3:] for line in text.splitlines() if line.startswith("## ")]
-    assert heads[-5:] == ["Related work", article.RUN_IT, "Reproduce", "Links", article.APPENDIX]
+    assert heads[-9:] == list(article.EXTRAS)
+    assert heads[-9:-4] == ["Related work", article.RUN_IT, article.ETHICS, article.LAYOUT, "Reproduce"]
     part = _run_it(text)
     assert part.startswith(
         f"[`notebooks/acceptance_test.ipynb`]({NOTEBOOK}) runs a screening version of this test on any LoRA "
